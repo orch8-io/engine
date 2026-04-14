@@ -1,0 +1,295 @@
+syntax = "proto3";
+
+package orch8;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// --- Common ---
+
+message Pagination {
+  uint32 limit = 1;
+  uint32 offset = 2;
+}
+
+// --- Sequences ---
+
+message CreateSequenceRequest {
+  string definition_json = 1;
+}
+
+message GetSequenceRequest {
+  string id = 1;
+}
+
+message GetSequenceByNameRequest {
+  string tenant_id = 1;
+  string namespace = 2;
+  string name = 3;
+  optional int32 version = 4;
+}
+
+message SequenceResponse {
+  string definition_json = 1;
+}
+
+// --- Instances ---
+
+message CreateInstanceRequest {
+  string instance_json = 1;
+}
+
+message CreateInstancesBatchRequest {
+  repeated string instances_json = 1;
+}
+
+message CreateInstancesBatchResponse {
+  uint64 created = 1;
+}
+
+message GetInstanceRequest {
+  string id = 1;
+}
+
+message InstanceResponse {
+  string instance_json = 1;
+}
+
+message ListInstancesRequest {
+  string filter_json = 1;
+  Pagination pagination = 2;
+}
+
+message ListInstancesResponse {
+  repeated string instances_json = 1;
+}
+
+message UpdateStateRequest {
+  string id = 1;
+  string new_state = 2;
+}
+
+message UpdateContextRequest {
+  string id = 1;
+  string context_json = 2;
+}
+
+message SendSignalRequest {
+  string instance_id = 1;
+  string signal_json = 2;
+}
+
+message GetOutputsRequest {
+  string instance_id = 1;
+}
+
+message GetOutputsResponse {
+  repeated string outputs_json = 1;
+}
+
+message GetExecutionTreeRequest {
+  string instance_id = 1;
+}
+
+message GetExecutionTreeResponse {
+  repeated string nodes_json = 1;
+}
+
+message RetryInstanceRequest {
+  string id = 1;
+}
+
+message BulkUpdateStateRequest {
+  string filter_json = 1;
+  string new_state = 2;
+}
+
+message BulkUpdateStateResponse {
+  uint64 updated = 1;
+}
+
+message BulkRescheduleRequest {
+  string filter_json = 1;
+  int64 offset_secs = 2;
+}
+
+message BulkRescheduleResponse {
+  uint64 updated = 1;
+}
+
+// --- Cron ---
+
+message CreateCronRequest {
+  string schedule_json = 1;
+}
+
+message GetCronRequest {
+  string id = 1;
+}
+
+message CronResponse {
+  string schedule_json = 1;
+}
+
+message ListCronRequest {
+  optional string tenant_id = 1;
+}
+
+message ListCronResponse {
+  repeated string schedules_json = 1;
+}
+
+message UpdateCronRequest {
+  string schedule_json = 1;
+}
+
+message DeleteCronRequest {
+  string id = 1;
+}
+
+// --- Workers ---
+
+message PollTasksRequest {
+  string handler_name = 1;
+  string worker_id = 2;
+  uint32 limit = 3;
+}
+
+message PollTasksResponse {
+  repeated string tasks_json = 1;
+}
+
+message CompleteTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  string output_json = 3;
+}
+
+message FailTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  string message = 3;
+  bool retryable = 4;
+}
+
+message HeartbeatTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+}
+
+// --- Pools ---
+
+message CreatePoolRequest {
+  string tenant_id = 1;
+  string name = 2;
+  string strategy = 3;
+}
+
+message GetPoolRequest {
+  string id = 1;
+}
+
+message PoolResponse {
+  string pool_json = 1;
+}
+
+message ListPoolsRequest {
+  string tenant_id = 1;
+}
+
+message ListPoolsResponse {
+  repeated string pools_json = 1;
+}
+
+message DeletePoolRequest {
+  string id = 1;
+}
+
+message AddResourceRequest {
+  string pool_id = 1;
+  string resource_json = 2;
+}
+
+message ResourceResponse {
+  string resource_json = 1;
+}
+
+message ListResourcesRequest {
+  string pool_id = 1;
+}
+
+message ListResourcesResponse {
+  repeated string resources_json = 1;
+}
+
+message UpdateResourceRequest {
+  string pool_id = 1;
+  string resource_id = 2;
+  string update_json = 3;
+}
+
+message DeleteResourceRequest {
+  string pool_id = 1;
+  string resource_id = 2;
+}
+
+// --- Health ---
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+}
+
+// --- Common responses ---
+
+message Empty {}
+
+// --- Services ---
+
+service Orch8Service {
+  // Health
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Sequences
+  rpc CreateSequence(CreateSequenceRequest) returns (SequenceResponse);
+  rpc GetSequence(GetSequenceRequest) returns (SequenceResponse);
+  rpc GetSequenceByName(GetSequenceByNameRequest) returns (SequenceResponse);
+
+  // Instances
+  rpc CreateInstance(CreateInstanceRequest) returns (InstanceResponse);
+  rpc CreateInstancesBatch(CreateInstancesBatchRequest) returns (CreateInstancesBatchResponse);
+  rpc GetInstance(GetInstanceRequest) returns (InstanceResponse);
+  rpc ListInstances(ListInstancesRequest) returns (ListInstancesResponse);
+  rpc UpdateState(UpdateStateRequest) returns (Empty);
+  rpc UpdateContext(UpdateContextRequest) returns (Empty);
+  rpc SendSignal(SendSignalRequest) returns (Empty);
+  rpc GetOutputs(GetOutputsRequest) returns (GetOutputsResponse);
+  rpc GetExecutionTree(GetExecutionTreeRequest) returns (GetExecutionTreeResponse);
+  rpc RetryInstance(RetryInstanceRequest) returns (InstanceResponse);
+  rpc BulkUpdateState(BulkUpdateStateRequest) returns (BulkUpdateStateResponse);
+  rpc BulkReschedule(BulkRescheduleRequest) returns (BulkRescheduleResponse);
+
+  // Cron
+  rpc CreateCron(CreateCronRequest) returns (CronResponse);
+  rpc GetCron(GetCronRequest) returns (CronResponse);
+  rpc ListCron(ListCronRequest) returns (ListCronResponse);
+  rpc UpdateCron(UpdateCronRequest) returns (Empty);
+  rpc DeleteCron(DeleteCronRequest) returns (Empty);
+
+  // Workers
+  rpc PollTasks(PollTasksRequest) returns (PollTasksResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (Empty);
+  rpc FailTask(FailTaskRequest) returns (Empty);
+  rpc HeartbeatTask(HeartbeatTaskRequest) returns (Empty);
+
+  // Pools
+  rpc CreatePool(CreatePoolRequest) returns (PoolResponse);
+  rpc GetPool(GetPoolRequest) returns (PoolResponse);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+  rpc DeletePool(DeletePoolRequest) returns (Empty);
+  rpc AddResource(AddResourceRequest) returns (ResourceResponse);
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc UpdateResource(UpdateResourceRequest) returns (ResourceResponse);
+  rpc DeleteResource(DeleteResourceRequest) returns (Empty);
+}

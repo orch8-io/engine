@@ -1,0 +1,33 @@
+[package]
+name = "orch8-api"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+orch8-engine = { path = "../orch8-engine" }
+orch8-storage = { path = "../orch8-storage" }
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+metrics-exporter-prometheus.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+subtle.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

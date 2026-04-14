@@ -1,0 +1,72 @@
+{
+  "name": "Multi-Agent Delegation",
+  "description": "Orchestrator agent breaks a task into sub-tasks and delegates each to a specialized child agent instance. Results are collected and synthesized.",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "decompose",
+      "handler": "llm_call",
+      "params": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-20250514",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Break this task into independent sub-tasks that can be delegated to specialist agents. Return JSON: {\"sub_tasks\": [{\"agent\": \"researcher|coder|analyst\", \"task\": \"...\", \"context\": {...}}, ...]}\n\nTask: {{context.task}}"
+          }
+        ],
+        "system": "You are an orchestrator agent. Decompose complex tasks into sub-tasks for specialist agents: researcher (web search, data gathering), coder (code generation, debugging), analyst (data analysis, summarization)."
+      }
+    },
+    {
+      "type": "parallel",
+      "id": "delegate",
+      "blocks": [
+        {
+          "type": "sub_sequence",
+          "id": "agent_1",
+          "sequence_name": "{{outputs.decompose.message.content.sub_tasks[0].agent}}_agent",
+          "input": {
+            "task": "{{outputs.decompose.message.content.sub_tasks[0].task}}",
+            "context": "{{outputs.decompose.message.content.sub_tasks[0].context}}"
+          }
+        },
+        {
+          "type": "sub_sequence",
+          "id": "agent_2",
+          "sequence_name": "{{outputs.decompose.message.content.sub_tasks[1].agent}}_agent",
+          "input": {
+            "task": "{{outputs.decompose.message.content.sub_tasks[1].task}}",
+            "context": "{{outputs.decompose.message.content.sub_tasks[1].context}}"
+          }
+        },
+        {
+          "type": "sub_sequence",
+          "id": "agent_3",
+          "sequence_name": "{{outputs.decompose.message.content.sub_tasks[2].agent}}_agent",
+          "input": {
+            "task": "{{outputs.decompose.message.content.sub_tasks[2].task}}",
+            "context": "{{outputs.decompose.message.content.sub_tasks[2].context}}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "step",
+      "id": "synthesize",
+      "handler": "llm_call",
+      "params": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-20250514",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Combine these agent results into a final response.\n\nOriginal task: {{context.task}}\n\nAgent 1 result: {{outputs.agent_1}}\nAgent 2 result: {{outputs.agent_2}}\nAgent 3 result: {{outputs.agent_3}}"
+          }
+        ],
+        "system": "You are an orchestrator agent. Synthesize results from specialist agents into a coherent final answer."
+      }
+    }
+  ],
+  "notes": "In practice, use for_each + sub_sequence to dynamically delegate to N agents based on the decomposition output. The parallel block shown here is a simplified illustration for 3 sub-tasks."
+}

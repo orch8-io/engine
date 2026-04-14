@@ -1,0 +1,25 @@
+[package]
+name = "orch8-grpc"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+orch8-storage = { path = "../orch8-storage" }
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+subtle.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints]
+workspace = true

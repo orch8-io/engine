@@ -1,0 +1,198 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Check
+        run: cargo check --workspace
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Format
+        run: cargo fmt --check
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: orch8_test
+          POSTGRES_USER: orch8
+          POSTGRES_PASSWORD: orch8
+        ports:
+          - 5432:5432
+        # Pass -U/-d explicitly so the healthcheck doesn't attempt auth as
+        # the container's default user (root) — otherwise the Postgres log
+        # fills with `FATAL: role "root" does not exist`.
+        options: >-
+          --health-cmd "pg_isready -U orch8 -d orch8_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
+      DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Test
+        run: cargo test --workspace
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [check]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: orch8
+          POSTGRES_USER: orch8
+          POSTGRES_PASSWORD: orch8
+        ports:
+          - 5434:5432
+        # Pass -U/-d explicitly — otherwise pg_isready runs as root and
+        # spams `FATAL: role "root" does not exist` into the Postgres log.
+        options: >-
+          --health-cmd "pg_isready -U orch8 -d orch8"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5434/orch8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      - name: Install protoc & psql
+        # psql is used by tests/e2e/harness.ts to clean stale rows between
+        # runs; without it the harness logs a warning and stale data can
+        # leak across suites.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+      - name: Install E2E deps
+        # Tests are authored in TypeScript and executed via `tsx` — this
+        # is the only npm install in the E2E job. Kept separate so cache
+        # hits are visible in the step log.
+        working-directory: tests/e2e
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck E2E tests
+        working-directory: tests/e2e
+        run: npm run typecheck
+      - name: Build server
+        run: cargo build --bin orch8-server
+      - name: Run E2E tests (shared server)
+        working-directory: tests/e2e
+        # `npm test` boots orch8-server ONCE and runs every *.test.ts
+        # serially against it. Replaces the prior per-file loop which paid
+        # ~15s of spawn+cleanup per suite.
+        run: npm test
+      - name: Run self-managed E2E suites
+        working-directory: tests/e2e
+        # Suites that can't share a server: persistence_recovery restarts
+        # mid-test; triggers/wait-signal/worker-dashboard/workers exercise
+        # globally-scoped state (trigger defs, signal inbox, worker queue)
+        # that leaks across suites. Each boots its own server via the
+        # harness in spawn mode.
+        run: npm run test:standalone
+
+  node-sdks:
+    name: Node SDKs (build & test)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install & build worker-sdk
+        working-directory: worker-sdk-node
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Install, build & test workflow-sdk
+        working-directory: workflow-sdk-node
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm test
+
+  docker-smoke:
+    name: Docker Smoke Test
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (load into local docker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: orch8-engine:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container (SQLite, --insecure for smoke test)
+        run: |
+          docker run -d --name orch8-ci \
+            -p 8080:8080 \
+            -e ORCH8_LOG_JSON=true \
+            --entrypoint /usr/local/bin/orch8-server \
+            orch8-engine:ci --insecure
+          # Wait for /health/ready (up to 30s).
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "engine ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "engine never became ready — container logs follow:"
+          docker logs orch8-ci
+          exit 1
+
+      - name: Verify liveness & metrics endpoints
+        run: |
+          curl -fsS http://localhost:8080/health/live > /dev/null
+          curl -fsS http://localhost:8080/metrics | head -20
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f orch8-ci || true

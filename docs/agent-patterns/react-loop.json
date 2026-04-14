@@ -1,0 +1,78 @@
+{
+  "name": "ReAct Loop Agent",
+  "description": "Observe-Think-Act loop with tool calling. The agent reasons about the task, selects tools, observes results, and iterates until done or max iterations reached.",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "observe",
+      "handler": "llm_call",
+      "params": {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a ReAct agent. Given the task and previous observations, decide the next action. Respond with JSON: {\"thought\": \"...\", \"action\": \"tool_name\", \"action_input\": {...}} or {\"thought\": \"...\", \"action\": \"finish\", \"final_answer\": \"...\"}"
+          },
+          {
+            "role": "user",
+            "content": "{{context.task}}"
+          }
+        ],
+        "tools": "{{context.available_tools}}"
+      }
+    },
+    {
+      "type": "router",
+      "id": "decide",
+      "input_expr": "outputs.observe.message.content",
+      "routes": [
+        {
+          "condition": { "contains": "\"action\": \"finish\"" },
+          "blocks": [
+            {
+              "type": "step",
+              "id": "finalize",
+              "handler": "noop",
+              "params": {
+                "result": "{{outputs.observe.message.content}}"
+              }
+            }
+          ]
+        }
+      ],
+      "default": [
+        {
+          "type": "step",
+          "id": "act",
+          "handler": "tool_call",
+          "params": {
+            "tool_name": "{{outputs.observe.message.content.action}}",
+            "arguments": "{{outputs.observe.message.content.action_input}}",
+            "url": "{{context.tool_dispatch_url}}"
+          }
+        },
+        {
+          "type": "step",
+          "id": "loop_back",
+          "handler": "llm_call",
+          "params": {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are a ReAct agent. Review the tool result and decide the next action."
+              },
+              {
+                "role": "user",
+                "content": "Task: {{context.task}}\n\nPrevious observation: {{outputs.act}}\n\nDecide next action."
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "notes": "In practice, wrap the observe->decide->act cycle in a Loop block with max_iterations. The agent self-terminates by choosing action='finish'."
+}

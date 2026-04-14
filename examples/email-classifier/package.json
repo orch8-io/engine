@@ -1,0 +1,19 @@
+{
+  "name": "@orch8/example-email-classifier",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "tsx --env-file=.env deploy.ts",
+    "worker": "tsx --env-file=.env worker.ts",
+    "trigger": "tsx --env-file=.env trigger.ts",
+    "webhook": "tsx --env-file=.env webhook.ts"
+  },
+  "dependencies": {
+    "@orch8/worker-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

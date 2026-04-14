@@ -1,0 +1,23 @@
+[package]
+name = "orch8-cli"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orch8"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", features = ["json"] }
+anyhow.workspace = true
+tabled = "0.17"
+
+[lints]
+workspace = true

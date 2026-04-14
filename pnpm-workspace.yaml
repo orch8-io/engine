@@ -1,0 +1,8 @@
+packages:
+  - worker-sdk-node
+  - workflow-sdk-node
+  - examples/*
+  - activepieces
+  - tests/e2e
+  - loadgen
+  - dashboard

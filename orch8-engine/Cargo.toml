@@ -1,0 +1,52 @@
+[package]
+name = "orch8-engine"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+orch8-storage = { path = "../orch8-storage" }
+tokio.workspace = true
+tokio-util.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+rand.workspace = true
+metrics.workspace = true
+cron.workspace = true
+moka.workspace = true
+dashmap.workspace = true
+reqwest.workspace = true
+url.workspace = true
+tokio-stream.workspace = true
+async-nats = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+
+[features]
+default = ["nats", "file-watch", "wasm"]
+nats = ["dep:async-nats"]
+file-watch = ["dep:notify"]
+wasm = ["dep:wasmtime"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+# Build tiny wasm modules from WAT text for wasm_plugin.rs execution-path tests.
+# wat is already in the dep tree via wasmtime (with default features); declaring
+# it explicitly here lets the tests use it without enabling extra features.
+wat = "1"
+tempfile = "3"
+
+[[bench]]
+name = "engine_bench"
+harness = false
+
+[lints]
+workspace = true

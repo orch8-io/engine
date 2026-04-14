@@ -1,0 +1,44 @@
+{
+  "name": "@orch8/activepieces-worker",
+  "version": "0.1.0",
+  "description": "HTTP sidecar that executes ActivePieces community pieces for the Orch8 engine via the ap:// handler prefix",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "orch8-activepieces-worker": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "keywords": [
+    "orch8",
+    "activepieces",
+    "workflow",
+    "integration",
+    "automation"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@activepieces/piece-http": "^0.11.8",
+    "@activepieces/piece-slack": "^0.16.4",
+    "@activepieces/pieces-common": "^0.4.0",
+    "@activepieces/pieces-framework": "^0.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install protoc
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          else
+            brew install protobuf
+          fi
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin orch8-server --bin orch8
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="orch8-${TAG}-${TARGET}"
+          mkdir "$DIR"
+          cp "target/${TARGET}/release/orch8-server" "$DIR/"
+          cp "target/${TARGET}/release/orch8" "$DIR/"
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            orch8-*.tar.gz
+            orch8-*.tar.gz.sha256
+
+  docker:
+    name: Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract version
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/orch8-io/engine:${{ steps.version.outputs.tag }}
+            ghcr.io/orch8-io/engine:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  npm-publish:
+    name: Publish Node SDKs to npm
+    runs-on: ubuntu-latest
+    # Opt-in: set the NPM_PUBLISH_ENABLED repo variable to "true" (Settings →
+    # Variables) once NPM_TOKEN is configured. Until then this job is skipped,
+    # so release.yml stays green for the first engine-only releases.
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Extract version (strip leading v)
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish @orch8/worker-sdk
+        working-directory: worker-sdk-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
+      - name: Publish @orch8/workflow-sdk
+        working-directory: workflow-sdk-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, docker]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/orch8-*.tar.gz
+            artifacts/orch8-*.tar.gz.sha256
+
+  install-sh-smoke:
+    name: install.sh Smoke Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install.sh to a temp dir
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/orch8-bin
+        run: |
+          mkdir -p "$INSTALL_DIR"
+          # The release was just created — give GitHub's API a moment to surface it.
+          for i in 1 2 3 4 5; do
+            if curl -fsSL https://api.github.com/repos/orch8-io/engine/releases/latest \
+              | grep -q '"tag_name"'; then
+              break
+            fi
+            sleep 5
+          done
+          sh ./install.sh --dir "$INSTALL_DIR"
+
+      - name: Verify installed binaries
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/orch8-bin
+        run: |
+          "$INSTALL_DIR/orch8" --version
+          "$INSTALL_DIR/orch8-server" --help | head -5

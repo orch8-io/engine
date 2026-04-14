@@ -1,0 +1,28 @@
+[package]
+name = "orch8-storage"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+sqlx.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+zstd = "0.13"
+
+[dev-dependencies]
+tokio = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[lints]
+workspace = true

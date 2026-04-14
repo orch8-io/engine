@@ -1,0 +1,44 @@
+[package]
+name = "orch8-server"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "orch8-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "orch8-bench"
+path = "src/bench.rs"
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+orch8-storage = { path = "../orch8-storage" }
+orch8-engine = { path = "../orch8-engine" }
+orch8-api = { path = "../orch8-api" }
+orch8-grpc = { path = "../orch8-grpc" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
+clap.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+utoipa.workspace = true
+utoipa-swagger-ui.workspace = true
+tonic.workspace = true
+http = "1"
+tikv-jemallocator.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,349 @@
+//! Externalization helpers for the storage layer.
+//!
+//! The scheduler fast path keeps contexts inlined in `task_instances.context`.
+//! When a context field (or a block output) exceeds the configured threshold
+//! we replace the inline value with an externalization marker
+//! (`{"_externalized": true, "_ref": "<key>"}`) and stash the original payload
+//! in `externalized_state`. Readers recognize the marker and re-hydrate.
+//!
+//! These constants MUST match `orch8_engine::externalized::*`. A mismatch
+//! would silently break marker recognition; the `marker_shape_matches_engine`
+//! test in the storage integration suite guards against drift.
+//!
+//! See `docs/CONTEXT_MANAGEMENT.md` §8.5 for the envelope contract.
+use serde_json::{Map, Value};
+use std::io;
+
+/// `io::Write` sink that just tallies bytes written and discards them —
+/// used by `externalize_fields` to compute JSON-serialized length without
+/// allocating a `Vec<u8>` for the full encoded payload.
+#[derive(Default)]
+struct CountingWriter {
+    count: usize,
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub const EXTERNALIZED_FLAG: &str = "_externalized";
+pub const REF_KEY: &str = "_ref";
+
+/// Shape of a (`ref_key`, payload) pair produced by [`externalize_fields`].
+/// The caller persists each payload at `ref_key` in `externalized_state`
+/// before committing the caller's transaction.
+pub type ExternalizedRef = (String, Value);
+
+/// Build the two-key externalization envelope for `ref_key`.
+#[must_use]
+pub fn marker(ref_key: &str) -> Value {
+    let mut obj = Map::with_capacity(2);
+    obj.insert(EXTERNALIZED_FLAG.to_string(), Value::Bool(true));
+    obj.insert(REF_KEY.to_string(), Value::String(ref_key.to_string()));
+    Value::Object(obj)
+}
+
+/// Return `true` iff `v` is already a marker envelope (exactly two keys,
+/// `_externalized: true`, `_ref: <string>`).
+#[must_use]
+pub fn is_marker(v: &Value) -> bool {
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
+    if obj.len() != 2 {
+        return false;
+    }
+    matches!(obj.get(EXTERNALIZED_FLAG), Some(Value::Bool(true)))
+        && matches!(obj.get(REF_KEY), Some(Value::String(_)))
+}
+
+/// Build the ref-key for a context.data top-level field.
+#[must_use]
+pub fn context_data_ref_key(instance_id_str: &str, field: &str) -> String {
+    format!("{instance_id_str}:ctx:data:{field}")
+}
+
+/// Walk top-level keys of a context `data` object and externalize any value
+/// whose serialized size meets or exceeds `threshold_bytes`.
+///
+/// For each externalized key:
+/// - The value is replaced in-place by a marker referencing
+///   `{instance_id}:ctx:data:{field}`.
+/// - The original value is returned in the result vector so the caller can
+///   persist it to `externalized_state` inside the same transaction.
+///
+/// No-ops in every other case: `data` is not an object, `threshold_bytes == 0`,
+/// the value is already a marker, or the value is below the threshold.
+///
+/// The in-place mutation keeps allocation minimal on the hot write path;
+/// callers that need an immutable input should clone before calling.
+pub fn externalize_fields(
+    data: &mut Value,
+    instance_id_str: &str,
+    threshold_bytes: u32,
+) -> Vec<ExternalizedRef> {
+    // Threshold of 0 disables externalization (treated as "never" regardless
+    // of `ExternalizationMode`). The scheduler never calls with 0 — guard is
+    // here so fuzz/property tests can't trip it.
+    if threshold_bytes == 0 {
+        return Vec::new();
+    }
+    let Some(obj) = data.as_object_mut() else {
+        return Vec::new();
+    };
+
+    let mut refs = Vec::new();
+    let threshold = threshold_bytes as usize;
+
+    // Collect field names first so we can mutate without borrow conflicts.
+    // Cloning the names is cheap versus cloning the payloads.
+    let field_names: Vec<String> = obj.keys().cloned().collect();
+
+    for field in field_names {
+        // Safe: we just iterated obj.keys().
+        let Some(value) = obj.get(&field) else {
+            continue;
+        };
+        if is_marker(value) {
+            // Already externalized — don't double-wrap.
+            continue;
+        }
+        // Size check streams the serialized bytes into a CountingWriter and
+        // discards them — we only need the length, not the payload. Avoids
+        // the `serde_json::to_vec` allocation on the hot write path. If
+        // serialization fails the value definitely can't be stored; leave
+        // it in place and let the caller's persist step surface the error
+        // with full context.
+        let mut counter = CountingWriter::default();
+        if serde_json::to_writer(&mut counter, value).is_err() {
+            continue;
+        }
+        if counter.count < threshold {
+            continue;
+        }
+        let ref_key = context_data_ref_key(instance_id_str, &field);
+        // Swap the payload out so we can return ownership without cloning.
+        if let Some(original) = obj.insert(field.clone(), marker(&ref_key)) {
+            refs.push((ref_key, original));
+        }
+    }
+
+    refs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn marker_shape_is_exactly_two_keys() {
+        let m = marker("inst1:ctx:data:blob");
+        assert!(is_marker(&m));
+        assert_eq!(m["_externalized"], json!(true));
+        assert_eq!(m["_ref"], json!("inst1:ctx:data:blob"));
+    }
+
+    #[test]
+    fn externalize_fields_no_op_for_non_object() {
+        let mut v = json!("scalar");
+        let refs = externalize_fields(&mut v, "inst1", 16);
+        assert!(refs.is_empty());
+        assert_eq!(v, json!("scalar"));
+
+        let mut v = json!([1, 2, 3]);
+        let refs = externalize_fields(&mut v, "inst1", 16);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn externalize_fields_no_op_for_zero_threshold() {
+        let mut v = json!({ "k": "x".repeat(100) });
+        let refs = externalize_fields(&mut v, "inst1", 0);
+        assert!(refs.is_empty());
+        assert_eq!(v["k"], json!("x".repeat(100)));
+    }
+
+    #[test]
+    fn externalize_fields_replaces_large_values() {
+        let big = "x".repeat(2048);
+        let mut v = json!({
+            "small": "tiny",
+            "big": big.clone(),
+        });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "inst1:ctx:data:big");
+        assert_eq!(refs[0].1, json!(big));
+
+        // Small value stayed inline.
+        assert_eq!(v["small"], json!("tiny"));
+        // Big value replaced with marker.
+        assert!(is_marker(&v["big"]));
+        assert_eq!(v["big"]["_ref"], json!("inst1:ctx:data:big"));
+    }
+
+    #[test]
+    fn externalize_fields_skips_existing_marker() {
+        // Already-externalized values should not be double-wrapped. The marker
+        // itself is only ~60 bytes so we need an artificially low threshold
+        // to prove we're gating on shape, not size.
+        let existing = marker("inst0:ctx:data:earlier");
+        let mut v = json!({ "already": existing.clone() });
+        let refs = externalize_fields(&mut v, "inst1", 1);
+        assert!(refs.is_empty(), "markers must not be re-externalized");
+        assert_eq!(v["already"], existing);
+    }
+
+    #[test]
+    fn externalize_fields_below_threshold_left_inline() {
+        let mut v = json!({ "k": "short" });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+        assert!(refs.is_empty());
+        assert_eq!(v["k"], json!("short"));
+    }
+
+    #[test]
+    fn externalize_fields_multiple_over_threshold() {
+        let big1 = "a".repeat(2048);
+        let big2 = "b".repeat(4096);
+        let mut v = json!({
+            "a": big1.clone(),
+            "b": big2.clone(),
+            "c": "tiny",
+        });
+        let mut refs = externalize_fields(&mut v, "inst42", 1024);
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].0, "inst42:ctx:data:a");
+        assert_eq!(refs[0].1, json!(big1));
+        assert_eq!(refs[1].0, "inst42:ctx:data:b");
+        assert_eq!(refs[1].1, json!(big2));
+
+        assert!(is_marker(&v["a"]));
+        assert!(is_marker(&v["b"]));
+        assert_eq!(v["c"], json!("tiny"));
+    }
+
+    #[test]
+    fn marker_recognized_by_is_marker() {
+        // Drift guard: if the canonical shape changes here it MUST also change
+        // in orch8-engine::externalized and in docs/CONTEXT_MANAGEMENT.md §8.5.
+        assert!(is_marker(&json!({"_externalized": true, "_ref": "k"})));
+        assert!(!is_marker(
+            &json!({"_externalized": true, "_ref": "k", "x": 1})
+        ));
+        assert!(!is_marker(&json!({"_externalized": false, "_ref": "k"})));
+        assert!(!is_marker(&json!({"_ref": "k"})));
+        assert!(!is_marker(&json!("scalar")));
+    }
+
+    #[test]
+    fn externalize_fields_at_exact_threshold_boundary() {
+        // `encoded.len() < threshold` is the skip condition, so a value whose
+        // serialized size exactly equals the threshold MUST be externalized.
+        // This pins the boundary so a refactor to `<=` would immediately fail.
+        let payload = "x".repeat(10);
+        // serialized form is `"xxxxxxxxxx"` (12 bytes including quotes).
+        let encoded_len = serde_json::to_vec(&json!(payload)).unwrap().len();
+        let mut v = json!({ "k": payload.clone() });
+        #[allow(clippy::cast_possible_truncation)]
+        let refs = externalize_fields(&mut v, "inst1", encoded_len as u32);
+        assert_eq!(
+            refs.len(),
+            1,
+            "value at exact threshold must be externalized"
+        );
+        assert!(is_marker(&v["k"]));
+
+        // One byte above threshold — still not externalized.
+        let mut v = json!({ "k": payload });
+        #[allow(clippy::cast_possible_truncation)]
+        let refs = externalize_fields(&mut v, "inst1", (encoded_len + 1) as u32);
+        assert!(
+            refs.is_empty(),
+            "value one byte under threshold stays inline"
+        );
+    }
+
+    #[test]
+    fn externalize_fields_empty_object_is_no_op() {
+        // Empty input must not panic and must return no refs — belt-and-suspenders
+        // for the fast write path where zero-field contexts are common.
+        let mut v = json!({});
+        let refs = externalize_fields(&mut v, "inst1", 1);
+        assert!(refs.is_empty());
+        assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn externalize_fields_handles_field_name_with_colon() {
+        // The ref-key format is `{instance}:ctx:data:{field}`. A field name
+        // containing a colon produces a ref-key that is still unique (the
+        // colon isn't a structural delimiter — we just format it in), but
+        // operators reading raw keys may be surprised. Pin the behavior so
+        // nobody "fixes" it by rejecting colons silently.
+        let big = "x".repeat(2048);
+        let mut v = json!({ "weird:field": big.clone() });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "inst1:ctx:data:weird:field");
+        assert_eq!(
+            v["weird:field"]["_ref"],
+            json!("inst1:ctx:data:weird:field")
+        );
+    }
+
+    #[test]
+    fn externalize_fields_handles_null_and_number_payloads() {
+        // Scalars below threshold stay inline regardless of type. This guards
+        // against any accidental special-casing of non-string values.
+        let mut v = json!({ "n": 42, "null": null, "bool": true });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+        assert!(refs.is_empty());
+        assert_eq!(v["n"], json!(42));
+        assert_eq!(v["null"], json!(null));
+        assert_eq!(v["bool"], json!(true));
+    }
+
+    #[test]
+    fn context_data_ref_key_format_is_stable() {
+        // The key format is a storage-layer contract — GC sweepers, debug
+        // tooling, and FK cascade all rely on it. Any format change is a
+        // breaking migration.
+        assert_eq!(
+            context_data_ref_key("01HXYZ", "user_payload"),
+            "01HXYZ:ctx:data:user_payload"
+        );
+        // Empty instance / field are not valid in practice but must not
+        // produce malformed keys that break parsers downstream.
+        assert_eq!(context_data_ref_key("", "field"), ":ctx:data:field");
+        assert_eq!(context_data_ref_key("inst", ""), "inst:ctx:data:");
+    }
+
+    #[test]
+    fn marker_roundtrips_through_is_marker_with_various_keys() {
+        // Ref-key content should not matter for marker recognition — only
+        // the two-key shape and value types do.
+        for key in [
+            "",
+            "simple",
+            "with:colons",
+            "with spaces",
+            "日本語",
+            "a".repeat(1024).as_str(),
+        ] {
+            let m = marker(key);
+            assert!(is_marker(&m), "marker('{key}') not recognized as marker");
+            assert_eq!(m[REF_KEY], json!(key));
+        }
+    }
+}
