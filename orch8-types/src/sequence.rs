@@ -43,6 +43,9 @@ pub struct StepDef {
         with = "crate::serde_duration_opt"
     )]
     pub timeout: Option<Duration>,
+    /// If set, this step consumes a rate limit token for the given resource key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

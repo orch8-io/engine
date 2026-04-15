@@ -5,7 +5,6 @@ use orch8_engine::error::EngineError;
 use orch8_types::error::StorageError;
 
 /// API-level errors mapped to HTTP status codes.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("not found: {0}")]
@@ -22,6 +21,18 @@ pub enum ApiError {
 
     #[error("unavailable: {0}")]
     Unavailable(String),
+}
+
+impl ApiError {
+    pub fn from_storage(err: StorageError, entity: &str) -> Self {
+        match err {
+            StorageError::NotFound { entity: e, id } => Self::NotFound(format!("{e} {id}")),
+            StorageError::Conflict(msg) => Self::AlreadyExists(msg),
+            StorageError::Connection(msg) => Self::Unavailable(msg),
+            StorageError::PoolExhausted => Self::Unavailable("pool exhausted".into()),
+            other => Self::Internal(format!("{entity}: {other}")),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
