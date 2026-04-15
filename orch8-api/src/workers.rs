@@ -1,14 +1,17 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use orch8_types::filter::Pagination;
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
+use orch8_types::worker::WorkerTaskState;
+use orch8_types::worker_filter::WorkerTaskFilter;
 
 use orch8_types::execution::NodeState;
 
@@ -17,6 +20,8 @@ use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/workers/tasks", get(list_tasks))
+        .route("/workers/tasks/stats", get(task_stats))
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
@@ -279,4 +284,73 @@ pub(crate) async fn heartbeat_task(
     }
 
     Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ListTasksQuery {
+    state: Option<String>,
+    handler_name: Option<String>,
+    worker_id: Option<String>,
+    queue_name: Option<String>,
+    #[serde(default = "default_list_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u64,
+}
+
+fn default_list_limit() -> u32 {
+    50
+}
+
+fn parse_states(raw: &str) -> Result<Vec<WorkerTaskState>, ApiError> {
+    raw.split(',')
+        .map(|s| match s.trim() {
+            "pending" => Ok(WorkerTaskState::Pending),
+            "claimed" => Ok(WorkerTaskState::Claimed),
+            "completed" => Ok(WorkerTaskState::Completed),
+            "failed" => Ok(WorkerTaskState::Failed),
+            other => Err(ApiError::InvalidArgument(format!(
+                "unknown worker task state: {other}"
+            ))),
+        })
+        .collect()
+}
+
+pub(crate) async fn list_tasks(
+    State(state): State<AppState>,
+    Query(query): Query<ListTasksQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let states = query.state.as_deref().map(parse_states).transpose()?;
+
+    let filter = WorkerTaskFilter {
+        states,
+        handler_name: query.handler_name,
+        worker_id: query.worker_id,
+        queue_name: query.queue_name,
+    };
+
+    let pagination = Pagination {
+        limit: query.limit,
+        offset: query.offset,
+    };
+
+    let tasks = state
+        .storage
+        .list_worker_tasks(&filter, &pagination)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+
+    Ok(Json(tasks))
+}
+
+pub(crate) async fn task_stats(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let result = state
+        .storage
+        .worker_task_stats()
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+
+    Ok(Json(result))
 }
