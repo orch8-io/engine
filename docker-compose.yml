@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: orch8
       POSTGRES_PASSWORD: orch8
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

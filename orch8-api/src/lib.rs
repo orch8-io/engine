@@ -1,6 +1,7 @@
 pub mod error;
 pub mod health;
 pub mod instances;
+pub mod metrics;
 pub mod sequences;
 
 use std::sync::Arc;

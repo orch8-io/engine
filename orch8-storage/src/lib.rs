@@ -148,6 +148,32 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
 
+    // === Idempotency ===
+
+    /// Find an instance by tenant + idempotency key.
+    async fn find_by_idempotency_key(
+        &self,
+        tenant_id: &TenantId,
+        idempotency_key: &str,
+    ) -> Result<Option<TaskInstance>, StorageError>;
+
+    // === Concurrency ===
+
+    /// Count running instances with the given concurrency key.
+    async fn count_running_by_concurrency_key(
+        &self,
+        concurrency_key: &str,
+    ) -> Result<i64, StorageError>;
+
+    /// Returns the 1-based position of an instance among running instances
+    /// with the same concurrency key, ordered by ID.
+    /// Used to deterministically pick which instances proceed vs. defer.
+    async fn concurrency_position(
+        &self,
+        instance_id: InstanceId,
+        concurrency_key: &str,
+    ) -> Result<i64, StorageError>;
+
     // === Recovery ===
 
     /// Find all instances that were `Running` when the engine crashed

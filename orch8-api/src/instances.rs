@@ -25,7 +25,9 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/context", patch(update_context))
         .route("/instances/{id}/signals", post(send_signal))
         .route("/instances/{id}/outputs", get(get_outputs))
+        .route("/instances/{id}/retry", post(retry_instance))
         .route("/instances/bulk/state", patch(bulk_update_state))
+        .route("/instances/dlq", get(list_dlq))
 }
 
 // === Request/Response types ===
@@ -44,6 +46,9 @@ struct CreateInstanceRequest {
     #[serde(default)]
     context: ExecutionContext,
     next_fire_at: Option<DateTime<Utc>>,
+    concurrency_key: Option<String>,
+    max_concurrency: Option<i32>,
+    idempotency_key: Option<String>,
 }
 
 fn default_timezone() -> String {
@@ -115,6 +120,24 @@ async fn create_instance(
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = Utc::now();
+
+    // Idempotency check: if key exists, return existing instance id.
+    if let Some(ref idem_key) = req.idempotency_key {
+        if !idem_key.is_empty() {
+            if let Some(existing) = state
+                .storage
+                .find_by_idempotency_key(&req.tenant_id, idem_key)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "instance"))?
+            {
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "id": existing.id, "deduplicated": true })),
+                ));
+            }
+        }
+    }
+
     let instance = TaskInstance {
         id: InstanceId::new(),
         sequence_id: req.sequence_id,
@@ -126,6 +149,9 @@ async fn create_instance(
         timezone: req.timezone,
         metadata: req.metadata,
         context: req.context,
+        concurrency_key: req.concurrency_key,
+        max_concurrency: req.max_concurrency,
+        idempotency_key: req.idempotency_key,
         created_at: now,
         updated_at: now,
     };
@@ -167,6 +193,9 @@ async fn create_instances_batch(
             timezone: r.timezone,
             metadata: r.metadata,
             context: r.context,
+            concurrency_key: r.concurrency_key,
+            max_concurrency: r.max_concurrency,
+            idempotency_key: r.idempotency_key,
             created_at: now,
             updated_at: now,
         })
@@ -355,6 +384,68 @@ async fn bulk_update_state(
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 
     Ok(Json(CountResponse { count }))
+}
+
+/// DLQ: list failed instances.
+async fn list_dlq(
+    State(state): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let filter = InstanceFilter {
+        tenant_id: q.tenant_id.map(TenantId),
+        namespace: q.namespace.map(Namespace),
+        sequence_id: q.sequence_id.map(SequenceId),
+        states: Some(vec![InstanceState::Failed]),
+        metadata_filter: None,
+        priority: None,
+    };
+
+    let pagination = Pagination {
+        offset: q.offset,
+        limit: q.limit,
+    }
+    .capped();
+
+    let instances = state
+        .storage
+        .list_instances(&filter, &pagination)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+
+    Ok(Json(instances))
+}
+
+/// Retry a failed instance: reset to scheduled with immediate fire time.
+async fn retry_instance(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_id = InstanceId(id);
+
+    let instance = state
+        .storage
+        .get_instance(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    if instance.state != InstanceState::Failed {
+        return Err(ApiError::InvalidArgument(format!(
+            "can only retry failed instances, current state: {}",
+            instance.state
+        )));
+    }
+
+    state
+        .storage
+        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "id": instance_id, "state": "scheduled" })),
+    ))
 }
 
 /// Parse comma-separated state values.

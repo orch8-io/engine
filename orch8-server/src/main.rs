@@ -6,6 +6,7 @@ use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+use orch8_api::metrics::MetricsState;
 use orch8_api::{build_router, AppState};
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::Engine;
@@ -54,11 +55,17 @@ async fn main() -> anyhow::Result<()> {
 
     let storage = Arc::new(storage);
 
+    // Install Prometheus metrics recorder.
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = prometheus_handle.handle();
+    metrics::set_global_recorder(prometheus_handle).expect("failed to install Prometheus recorder");
+
     // Build HTTP router.
     let app_state = AppState {
         storage: storage.clone(),
     };
-    let app = build_router(app_state);
+    let metrics_state = MetricsState { handle };
+    let app = build_router(app_state).merge(orch8_api::metrics::routes().with_state(metrics_state));
 
     // Start HTTP server.
     let http_addr: std::net::SocketAddr = config
@@ -92,7 +99,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Build and start the scheduling engine.
-    let handlers = HandlerRegistry::new();
+    let mut handlers = HandlerRegistry::new();
+    orch8_engine::handlers::builtin::register_builtins(&mut handlers);
     let engine = Engine::new(
         storage.clone(),
         config.engine.clone(),
@@ -164,6 +172,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
         if let Ok(n) = val.parse() {
             config.engine.batch_size = n;
         }
+    }
+    if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
+        config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
     }
 }
 

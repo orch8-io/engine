@@ -29,7 +29,7 @@ impl InstanceState {
                 Self::Running | Self::Paused | Self::Cancelled
             ) | (
                 Self::Running,
-                Self::Scheduled | Self::Waiting | Self::Completed | Self::Failed | Self::Paused
+                Self::Scheduled | Self::Waiting | Self::Completed | Self::Failed | Self::Paused | Self::Cancelled
             ) | (Self::Waiting, Self::Running | Self::Cancelled)
                 | (Self::Paused, Self::Scheduled | Self::Cancelled)
                 | (Self::Failed, Self::Scheduled) // retry from DLQ
@@ -91,6 +91,15 @@ pub struct TaskInstance {
     pub timezone: String,
     pub metadata: serde_json::Value,
     pub context: ExecutionContext,
+    /// Optional concurrency key for limiting parallel executions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_key: Option<String>,
+    /// Max concurrent running instances with the same concurrency key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrency: Option<i32>,
+    /// Optional idempotency key for deduplication at creation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

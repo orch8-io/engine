@@ -2,11 +2,13 @@ pub mod error;
 pub mod evaluator;
 pub mod handlers;
 pub mod lifecycle;
+pub mod metrics;
 pub mod recovery;
 pub mod scheduler;
 pub mod scheduling;
 pub mod signals;
 pub mod template;
+pub mod webhooks;
 
 use std::sync::Arc;
 

@@ -1315,6 +1315,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "metrics-exporter-prometheus",
  "orch8-engine",
  "orch8-storage",
  "orch8-types",
@@ -1339,6 +1340,7 @@ dependencies = [
  "orch8-storage",
  "orch8-types",
  "rand 0.8.5",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1354,6 +1356,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "metrics",
  "metrics-exporter-prometheus",
  "orch8-api",
  "orch8-engine",

@@ -126,8 +126,10 @@ impl StorageBackend for PostgresStorage {
             r"
             INSERT INTO task_instances
                 (id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                 priority, timezone, metadata, context, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                 priority, timezone, metadata, context,
+                 concurrency_key, max_concurrency, idempotency_key,
+                 created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             ",
         )
         .bind(inst.id.0)
@@ -140,6 +142,9 @@ impl StorageBackend for PostgresStorage {
         .bind(&inst.timezone)
         .bind(&inst.metadata)
         .bind(&context)
+        .bind(&inst.concurrency_key)
+        .bind(inst.max_concurrency)
+        .bind(&inst.idempotency_key)
         .bind(inst.created_at)
         .bind(inst.updated_at)
         .execute(&self.pool)
@@ -162,7 +167,9 @@ impl StorageBackend for PostgresStorage {
             let mut qb = sqlx::QueryBuilder::new(
                 r"INSERT INTO task_instances
                     (id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                     priority, timezone, metadata, context, created_at, updated_at) ",
+                     priority, timezone, metadata, context,
+                     concurrency_key, max_concurrency, idempotency_key,
+                     created_at, updated_at) ",
             );
             qb.push_values(chunk, |mut b, inst| {
                 let context = serde_json::to_value(&inst.context).unwrap_or_default();
@@ -176,6 +183,9 @@ impl StorageBackend for PostgresStorage {
                     .push_bind(&inst.timezone)
                     .push_bind(&inst.metadata)
                     .push_bind(context)
+                    .push_bind(&inst.concurrency_key)
+                    .push_bind(inst.max_concurrency)
+                    .push_bind(&inst.idempotency_key)
                     .push_bind(inst.created_at)
                     .push_bind(inst.updated_at);
             });
@@ -190,7 +200,9 @@ impl StorageBackend for PostgresStorage {
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         let row = sqlx::query_as::<_, InstanceRow>(
             r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                      priority, timezone, metadata, context, created_at, updated_at
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      created_at, updated_at
                FROM task_instances WHERE id = $1",
         )
         .bind(id.0)
@@ -216,7 +228,9 @@ impl StorageBackend for PostgresStorage {
                 FOR UPDATE SKIP LOCKED
             )
             RETURNING id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                      priority, timezone, metadata, context, created_at, updated_at
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      created_at, updated_at
             ",
         )
         .bind(now)
@@ -271,7 +285,9 @@ impl StorageBackend for PostgresStorage {
     ) -> Result<Vec<TaskInstance>, StorageError> {
         let mut qb = sqlx::QueryBuilder::new(
             r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                      priority, timezone, metadata, context, created_at, updated_at
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      created_at, updated_at
                FROM task_instances WHERE 1=1",
         );
         apply_instance_filter(&mut qb, filter);
@@ -587,6 +603,59 @@ impl StorageBackend for PostgresStorage {
         Ok(())
     }
 
+    // === Idempotency ===
+
+    async fn find_by_idempotency_key(
+        &self,
+        tenant_id: &TenantId,
+        idempotency_key: &str,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        let row = sqlx::query_as::<_, InstanceRow>(
+            r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      created_at, updated_at
+               FROM task_instances
+               WHERE tenant_id = $1 AND idempotency_key = $2",
+        )
+        .bind(&tenant_id.0)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(InstanceRow::into_instance).transpose()
+    }
+
+    // === Concurrency ===
+
+    async fn count_running_by_concurrency_key(
+        &self,
+        concurrency_key: &str,
+    ) -> Result<i64, StorageError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM task_instances WHERE concurrency_key = $1 AND state = 'running'",
+        )
+        .bind(concurrency_key)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    async fn concurrency_position(
+        &self,
+        instance_id: InstanceId,
+        concurrency_key: &str,
+    ) -> Result<i64, StorageError> {
+        let row: (i64,) = sqlx::query_as(
+            r"SELECT COUNT(*) FROM task_instances
+              WHERE concurrency_key = $1 AND state = 'running' AND id <= $2",
+        )
+        .bind(concurrency_key)
+        .bind(instance_id.0)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
     // === Recovery ===
 
     async fn recover_stale_instances(
@@ -659,6 +728,9 @@ struct InstanceRow {
     timezone: String,
     metadata: serde_json::Value,
     context: serde_json::Value,
+    concurrency_key: Option<String>,
+    max_concurrency: Option<i32>,
+    idempotency_key: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -698,6 +770,9 @@ impl InstanceRow {
             timezone: self.timezone,
             metadata: self.metadata,
             context,
+            concurrency_key: self.concurrency_key,
+            max_concurrency: self.max_concurrency,
+            idempotency_key: self.idempotency_key,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })

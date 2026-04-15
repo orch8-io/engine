@@ -1,3 +1,4 @@
+pub mod builtin;
 pub mod for_each;
 pub mod loop_block;
 pub mod parallel;

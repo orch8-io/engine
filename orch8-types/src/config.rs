@@ -57,6 +57,8 @@ pub struct SchedulerConfig {
     pub shutdown_grace_period_secs: u64,
     #[serde(default = "default_stale_threshold")]
     pub stale_instance_threshold_secs: u64,
+    #[serde(default)]
+    pub webhooks: WebhookConfig,
 }
 
 impl Default for SchedulerConfig {
@@ -67,8 +69,37 @@ impl Default for SchedulerConfig {
             max_concurrent_steps: default_max_concurrent(),
             shutdown_grace_period_secs: default_grace_period(),
             stale_instance_threshold_secs: default_stale_threshold(),
+            webhooks: WebhookConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub urls: Vec<String>,
+    #[serde(default = "default_webhook_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            timeout_secs: default_webhook_timeout_secs(),
+            max_retries: default_webhook_max_retries(),
+        }
+    }
+}
+
+fn default_webhook_timeout_secs() -> u64 {
+    10
+}
+
+fn default_webhook_max_retries() -> u32 {
+    3
 }
 
 fn default_tick_interval_ms() -> u64 {
