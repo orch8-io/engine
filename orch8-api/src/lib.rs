@@ -1,4 +1,5 @@
 pub mod circuit_breakers;
+pub mod cluster;
 pub mod cron;
 pub mod error;
 pub mod health;
@@ -32,5 +33,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(workers::routes())
         .merge(pools::routes())
         .merge(sessions::routes())
+        .merge(cluster::routes())
         .with_state(state)
 }

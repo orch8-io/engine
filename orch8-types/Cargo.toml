@@ -12,6 +12,9 @@ chrono-tz.workspace = true
 thiserror.workspace = true
 sqlx.workspace = true
 utoipa.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+rand.workspace = true
 
 [lints]
 workspace = true

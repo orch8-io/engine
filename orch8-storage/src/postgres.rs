@@ -1729,6 +1729,90 @@ impl StorageBackend for PostgresStorage {
         Ok(row.and_then(|(v,)| if v.is_null() { None } else { Some(v) }))
     }
 
+    // === Cluster ===
+
+    async fn register_node(
+        &self,
+        node: &orch8_types::cluster::ClusterNode,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO cluster_nodes (id, name, status, registered_at, last_heartbeat_at, drain)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET status = $3, last_heartbeat_at = $5, drain = $6",
+        )
+        .bind(node.id)
+        .bind(&node.name)
+        .bind(node.status.to_string())
+        .bind(node.registered_at)
+        .bind(node.last_heartbeat_at)
+        .bind(node.drain)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn heartbeat_node(&self, node_id: uuid::Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE cluster_nodes SET last_heartbeat_at = NOW() WHERE id = $1")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn drain_node(&self, node_id: uuid::Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE cluster_nodes SET drain = TRUE, status = 'draining' WHERE id = $1",
+        )
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn deregister_node(&self, node_id: uuid::Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE cluster_nodes SET status = 'stopped' WHERE id = $1")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError> {
+        let rows = sqlx::query_as::<_, ClusterNodeRow>(
+            "SELECT id, name, status, registered_at, last_heartbeat_at, drain
+             FROM cluster_nodes ORDER BY registered_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(ClusterNodeRow::into_node).collect())
+    }
+
+    async fn should_drain(&self, node_id: uuid::Uuid) -> Result<bool, StorageError> {
+        let row: (bool,) =
+            sqlx::query_as("SELECT drain FROM cluster_nodes WHERE id = $1")
+                .bind(node_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .unwrap_or((false,));
+        Ok(row.0)
+    }
+
+    async fn reap_stale_nodes(
+        &self,
+        stale_threshold: std::time::Duration,
+    ) -> Result<u64, StorageError> {
+        let threshold_secs = stale_threshold.as_secs() as i64;
+        let result = sqlx::query(
+            "UPDATE cluster_nodes SET status = 'stopped'
+             WHERE status = 'active'
+               AND last_heartbeat_at < NOW() - make_interval(secs => $1)",
+        )
+        .bind(threshold_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -1871,6 +1955,8 @@ impl ExecutionNodeRow {
             "for_each" => BlockType::ForEach,
             "router" => BlockType::Router,
             "try_catch" => BlockType::TryCatch,
+            "sub_sequence" => BlockType::SubSequence,
+            "ab_split" => BlockType::ABSplit,
             _ => BlockType::Step, // "step" and unknown
         };
         let state = match self.state.as_str() {
@@ -2179,6 +2265,35 @@ impl SessionRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             expires_at: self.expires_at,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ClusterNodeRow {
+    id: Uuid,
+    name: String,
+    status: String,
+    registered_at: DateTime<Utc>,
+    last_heartbeat_at: DateTime<Utc>,
+    drain: bool,
+}
+
+impl ClusterNodeRow {
+    fn into_node(self) -> orch8_types::cluster::ClusterNode {
+        use orch8_types::cluster::NodeStatus;
+        let status = match self.status.as_str() {
+            "draining" => NodeStatus::Draining,
+            "stopped" => NodeStatus::Stopped,
+            _ => NodeStatus::Active,
+        };
+        orch8_types::cluster::ClusterNode {
+            id: self.id,
+            name: self.name,
+            status,
+            registered_at: self.registered_at,
+            last_heartbeat_at: self.last_heartbeat_at,
+            drain: self.drain,
         }
     }
 }

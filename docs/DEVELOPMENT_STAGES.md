@@ -355,10 +355,10 @@ Make the engine production-ready with reliability features and observability.
 - [x] Noisy-neighbor protection
 
 #### 10. Embedded Test Mode
-- [ ] `engine.test_mode()` with SQLite
-- [ ] Side-effect steps return mocks
-- [ ] Signals, queries work identically
-- [ ] Same engine binary
+- [x] `engine.test_mode()` with SQLite (in-memory `SqliteStorage`)
+- [x] Side-effect steps return mocks (`HandlerRegistry` mock overrides)
+- [x] Signals, queries work identically (full `StorageBackend` impl)
+- [x] Same engine binary
 
 #### 11. Cron-Triggered Sequences
 - [x] Recurring sequence instantiation
@@ -369,7 +369,7 @@ Make the engine production-ready with reliability features and observability.
 - [x] 100K instances created in < 3 seconds
 - [x] Prometheus metrics scraping
 - [x] Webhooks firing reliably
-- [ ] Test mode runs in CI without external deps
+- [x] Test mode runs in CI without external deps (SQLite in-memory)
 
 ---
 
@@ -480,13 +480,13 @@ Enterprise features, ecosystem expansion, and multi-node support.
 - [ ] Export as code/YAML
 
 #### 4. Clustering / Multi-Node
-- [ ] Multiple workers sharing Postgres
+- [x] Multiple workers sharing Postgres
 - [x] SKIP LOCKED for instance claiming (already in scheduler)
-- [ ] Coordinated shutdown across nodes
+- [x] Coordinated shutdown across nodes (DB-based node registration, heartbeat, drain signaling)
 
 #### 5. A/B Split Primitive
-- [ ] Route N% to variant A, M% to variant B
-- [ ] Subject line testing support
+- [x] Route N% to variant A, M% to variant B (deterministic hash-based variant selection)
+- [x] Subject line testing support
 
 #### 6. Sequence Versioning + Hot Migration
 - [x] Deploy new definition without killing running instances
@@ -529,11 +529,11 @@ Enterprise features, ecosystem expansion, and multi-node support.
 - [x] 5 unit tests for state transitions
 
 #### 13. SLA Timers / Deadlines
-- [ ] Per-step deadline
-- [ ] Escalation handler on breach
+- [x] Per-step deadline (`deadline` field on `StepDef`, wall-clock enforcement)
+- [x] Escalation handler on breach (`on_deadline_breach` with `EscalationDef`)
 
 #### 14. Encryption at Rest
-- [ ] Encrypt instance metadata/state in storage
+- [x] Encrypt instance metadata/state in storage (`FieldEncryptor` with AES-256-GCM, configurable via `encryption_key`)
 
 #### 15. SOC 2 Preparation
 - [ ] Audit trail compliance

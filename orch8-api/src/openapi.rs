@@ -51,6 +51,9 @@ use utoipa::OpenApi;
         crate::workers::complete_task,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
+        // Cluster
+        crate::cluster::list_nodes,
+        crate::cluster::drain_node,
         // Sessions
         crate::sessions::create_session,
         crate::sessions::get_session,
@@ -111,6 +114,9 @@ use utoipa::OpenApi;
         orch8_types::sequence::ForEachDef,
         orch8_types::sequence::RouterDef,
         orch8_types::sequence::Route,
+        orch8_types::sequence::ABSplitDef,
+        orch8_types::sequence::ABVariant,
+        orch8_types::sequence::EscalationDef,
         // Signal
         orch8_types::signal::Signal,
         orch8_types::signal::SignalType,
@@ -136,6 +142,9 @@ use utoipa::OpenApi;
         orch8_types::pool::ResourcePool,
         orch8_types::pool::PoolResource,
         orch8_types::pool::RotationStrategy,
+        // Cluster
+        orch8_types::cluster::ClusterNode,
+        orch8_types::cluster::NodeStatus,
         orch8_types::checkpoint::Checkpoint,
         crate::instances::SaveCheckpointRequest,
         crate::instances::PruneCheckpointsRequest,
@@ -158,6 +167,7 @@ use utoipa::OpenApi;
         (name = "sessions", description = "Cross-instance session management"),
         (name = "circuit_breakers", description = "Circuit breaker inspection and reset"),
         (name = "pools", description = "Resource pool management"),
+        (name = "cluster", description = "Multi-node cluster management"),
     )
 )]
 pub struct ApiDoc;

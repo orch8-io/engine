@@ -38,6 +38,8 @@ pub enum BlockDefinition {
     TryCatch(TryCatchDef),
     /// Invoke another sequence as a sub-workflow.
     SubSequence(SubSequenceDef),
+    /// A/B split: route traffic to one of several variants by weight.
+    ABSplit(ABSplitDef),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -76,6 +78,19 @@ pub struct StepDef {
     /// If omitted, uses the default queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
+    /// SLA deadline: maximum wall-clock time from when this step starts running.
+    /// If breached, the escalation handler is invoked and the step is failed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serde_duration_opt"
+    )]
+    #[schema(value_type = Option<u64>)]
+    pub deadline: Option<Duration>,
+    /// Handler to invoke when the SLA deadline is breached.
+    /// If omitted but deadline is set, the step simply fails on breach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_deadline_breach: Option<EscalationDef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -163,6 +178,16 @@ pub struct HumanInputDef {
     /// instead of failing the step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation_handler: Option<String>,
+}
+
+/// Action to take when an SLA deadline is breached.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EscalationDef {
+    /// Handler name to invoke on breach (e.g. `"notify_slack"`, `"send_alert"`).
+    pub handler: String,
+    /// Parameters passed to the escalation handler.
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -268,4 +293,25 @@ pub struct SubSequenceDef {
     /// Input data to pass as the child instance's initial context data.
     #[serde(default)]
     pub input: serde_json::Value,
+}
+
+/// A/B split: deterministically route each instance to one of several
+/// weighted variants. The chosen variant is persisted in the block output
+/// so re-executions always follow the same path.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ABSplitDef {
+    pub id: BlockId,
+    /// Weighted variants. Weights are relative (e.g. 70 + 30 = 100%).
+    pub variants: Vec<ABVariant>,
+}
+
+/// One arm of an A/B split.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ABVariant {
+    /// Human-readable label (e.g. "control", `"variant_a"`).
+    pub name: String,
+    /// Relative weight. Higher = more traffic.
+    pub weight: u32,
+    /// Blocks to execute when this variant is chosen.
+    pub blocks: Vec<BlockDefinition>,
 }

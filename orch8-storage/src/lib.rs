@@ -1,4 +1,5 @@
 pub mod postgres;
+pub mod sqlite;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -514,6 +515,35 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         instance_id: InstanceId,
     ) -> Result<Option<serde_json::Value>, StorageError>;
+
+    // === Cluster ===
+
+    /// Register a new cluster node.
+    async fn register_node(
+        &self,
+        node: &orch8_types::cluster::ClusterNode,
+    ) -> Result<(), StorageError>;
+
+    /// Update heartbeat timestamp for a node.
+    async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+
+    /// Set the drain flag on a node, triggering coordinated shutdown.
+    async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+
+    /// Mark a node as stopped.
+    async fn deregister_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+
+    /// List all nodes (for admin dashboard / health check).
+    async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError>;
+
+    /// Check if this node should drain (returns true if `drain = true` in DB).
+    async fn should_drain(&self, node_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Remove stale nodes that haven't heartbeated within the threshold.
+    async fn reap_stale_nodes(
+        &self,
+        stale_threshold: std::time::Duration,
+    ) -> Result<u64, StorageError>;
 
     // === Health ===
 

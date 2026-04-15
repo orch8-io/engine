@@ -1,6 +1,8 @@
 pub mod audit;
 pub mod checkpoint;
 pub mod circuit_breaker;
+pub mod cluster;
+pub mod encryption;
 pub mod config;
 pub mod context;
 pub mod cron;

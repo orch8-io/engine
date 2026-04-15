@@ -47,6 +47,8 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
                 cancellable: true,
                 wait_for_input: None,
                 queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
             })
         })
         .collect();

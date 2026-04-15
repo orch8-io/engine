@@ -94,6 +94,11 @@ fn build_nodes(
                     build_branch_nodes(instance_id, node_id, 2, finally, out);
                 }
             }
+            BlockDefinition::ABSplit(ab) => {
+                for (i, variant) in ab.variants.iter().enumerate() {
+                    build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
+                }
+            }
         }
     }
 }
@@ -155,6 +160,11 @@ fn build_branch_nodes(
                     build_branch_nodes(instance_id, node_id, 2, finally, out);
                 }
             }
+            BlockDefinition::ABSplit(ab) => {
+                for (i, variant) in ab.variants.iter().enumerate() {
+                    build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
+                }
+            }
         }
     }
 }
@@ -169,6 +179,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
         BlockDefinition::Router(r) => (&r.id, BlockType::Router),
         BlockDefinition::TryCatch(tc) => (&tc.id, BlockType::TryCatch),
         BlockDefinition::SubSequence(ss) => (&ss.id, BlockType::SubSequence),
+        BlockDefinition::ABSplit(ab) => (&ab.id, BlockType::ABSplit),
     }
 }
 
@@ -190,6 +201,11 @@ pub async fn evaluate(
     let max_iterations = 200;
     for _ in 0..max_iterations {
         // Re-fetch tree to see latest state after each dispatch.
+        let tree = storage.get_execution_tree(instance.id).await?;
+
+        // SLA deadline check: fail any step nodes that have breached their deadline.
+        check_sla_deadlines(storage, handlers, instance, &sequence.blocks, &tree).await?;
+        // Re-fetch tree if any deadlines were breached (state may have changed).
         let tree = storage.get_execution_tree(instance.id).await?;
         let root_nodes: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
 
@@ -316,6 +332,7 @@ pub fn find_block<'a>(
             BlockDefinition::Router(r) => &r.id,
             BlockDefinition::TryCatch(tc) => &tc.id,
             BlockDefinition::SubSequence(ss) => &ss.id,
+            BlockDefinition::ABSplit(ab) => &ab.id,
         };
         if id == target_id {
             return Some(block);
@@ -358,6 +375,14 @@ pub fn find_block<'a>(
                 }
                 tc.finally_block.as_ref()
             }
+            BlockDefinition::ABSplit(ab) => {
+                for variant in &ab.variants {
+                    if let Some(found) = find_block(&variant.blocks, target_id) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
         };
         if let Some(children) = children {
             if let Some(found) = find_block(children, target_id) {
@@ -366,6 +391,101 @@ pub fn find_block<'a>(
         }
     }
     None
+}
+
+/// Check all Running/Waiting step nodes for SLA deadline breaches.
+/// On breach: invoke escalation handler (if configured), then fail the node.
+async fn check_sla_deadlines(
+    storage: &dyn StorageBackend,
+    handlers: &HandlerRegistry,
+    instance: &TaskInstance,
+    blocks: &[BlockDefinition],
+    tree: &[ExecutionNode],
+) -> Result<(), EngineError> {
+    let now = chrono::Utc::now();
+    for node in tree {
+        if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
+            continue;
+        }
+        let Some(started_at) = node.started_at else {
+            continue;
+        };
+        let Some(BlockDefinition::Step(step_def)) = find_block(blocks, &node.block_id) else {
+            continue;
+        };
+        let Some(deadline) = step_def.deadline else {
+            continue;
+        };
+        let elapsed = now - started_at;
+        if elapsed < chrono::Duration::from_std(deadline).unwrap_or(chrono::TimeDelta::MAX) {
+            continue;
+        }
+        // Deadline breached!
+        warn!(
+            instance_id = %instance.id,
+            block_id = %node.block_id,
+            deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+            elapsed_ms = elapsed.num_milliseconds(),
+            "SLA deadline breached"
+        );
+
+        // Invoke escalation handler if configured.
+        if let Some(ref escalation) = step_def.on_deadline_breach {
+            if let Some(handler) = handlers.get(&escalation.handler) {
+                let mut params = escalation.params.clone();
+                // Inject breach metadata into escalation params.
+                if let serde_json::Value::Object(ref mut map) = params {
+                    map.insert("_breach_block_id".into(), serde_json::json!(node.block_id.0));
+                    map.insert("_breach_instance_id".into(), serde_json::json!(instance.id.0));
+                    map.insert("_breach_elapsed_ms".into(), serde_json::json!(elapsed.num_milliseconds()));
+                    map.insert("_breach_deadline_ms".into(), serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)));
+                }
+                let step_ctx = crate::handlers::StepContext {
+                    instance_id: instance.id,
+                    block_id: node.block_id.clone(),
+                    params,
+                    context: instance.context.clone(),
+                    attempt: 0,
+                };
+                // Fire-and-forget: escalation handler failure doesn't block the deadline fail.
+                if let Err(e) = handler(step_ctx).await {
+                    warn!(
+                        instance_id = %instance.id,
+                        block_id = %node.block_id,
+                        error = %e,
+                        "SLA escalation handler failed"
+                    );
+                }
+            } else {
+                warn!(
+                    instance_id = %instance.id,
+                    handler = %escalation.handler,
+                    "SLA escalation handler not found"
+                );
+            }
+        }
+
+        // Fail the node.
+        fail_node(storage, node.id).await?;
+
+        // Record as block output for diagnostics.
+        let output = orch8_types::output::BlockOutput {
+            id: uuid::Uuid::new_v4(),
+            instance_id: instance.id,
+            block_id: node.block_id.clone(),
+            output: serde_json::json!({
+                "_error": "sla_deadline_breached",
+                "_deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+                "_elapsed_ms": elapsed.num_milliseconds(),
+            }),
+            output_ref: None,
+            output_size: 0,
+            attempt: 0,
+            created_at: now,
+        };
+        storage.save_block_output(&output).await?;
+    }
+    Ok(())
 }
 
 /// Dispatch a single execution node to the appropriate block handler.
@@ -424,6 +544,12 @@ async fn dispatch_block(
         BlockDefinition::TryCatch(tc_def) => {
             crate::handlers::try_catch::execute_try_catch(
                 storage, handlers, instance, node, tc_def, tree,
+            )
+            .await
+        }
+        BlockDefinition::ABSplit(ab_def) => {
+            crate::handlers::ab_split::execute_ab_split(
+                storage, handlers, instance, node, ab_def, tree,
             )
             .await
         }
@@ -600,6 +726,8 @@ mod tests {
             cancellable: true,
             wait_for_input: None,
             queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
         })];
 
         let found = find_block(&blocks, &BlockId("step_1".into()));
@@ -623,10 +751,12 @@ mod tests {
                     timeout: None,
                     rate_limit_key: None,
                     send_window: None,
-            context_access: None,
-            cancellable: true,
-            wait_for_input: None,
-            queue_name: None,
+                    context_access: None,
+                    cancellable: true,
+                    wait_for_input: None,
+                    queue_name: None,
+                    deadline: None,
+                    on_deadline_breach: None,
                 })]],
             },
         )];
@@ -650,6 +780,8 @@ mod tests {
             cancellable: true,
             wait_for_input: None,
             queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
         });
         let (id, bt) = block_meta(&step);
         assert_eq!(id.0, "s");

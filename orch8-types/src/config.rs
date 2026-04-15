@@ -68,6 +68,11 @@ pub struct SchedulerConfig {
     /// 0 means no externalization (default).
     #[serde(default)]
     pub externalize_output_threshold: u32,
+    /// AES-256-GCM encryption key (64 hex chars) for encrypting sensitive context
+    /// fields at rest. If empty, no encryption is applied.
+    /// Can also be set via `ORCH8_ENCRYPTION_KEY` env var.
+    #[serde(default)]
+    pub encryption_key: String,
 }
 
 impl Default for SchedulerConfig {
@@ -81,6 +86,7 @@ impl Default for SchedulerConfig {
             max_instances_per_tenant: 0,
             webhooks: WebhookConfig::default(),
             externalize_output_threshold: 0,
+            encryption_key: String::new(),
         }
     }
 }

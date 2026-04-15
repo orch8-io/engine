@@ -45,6 +45,7 @@ pub enum BlockType {
     Router,
     TryCatch,
     SubSequence,
+    ABSplit,
 }
 
 impl std::fmt::Display for BlockType {
@@ -58,6 +59,7 @@ impl std::fmt::Display for BlockType {
             Self::Router => "router",
             Self::TryCatch => "try_catch",
             Self::SubSequence => "sub_sequence",
+            Self::ABSplit => "ab_split",
         };
         f.write_str(s)
     }
