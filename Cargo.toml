@@ -58,6 +58,7 @@ async-trait = "0.1"
 # Misc
 rand = "0.8"
 cron = "0.15"
+moka = { version = "0.12", features = ["future"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

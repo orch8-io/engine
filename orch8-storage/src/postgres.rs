@@ -487,6 +487,19 @@ impl StorageBackend for PostgresStorage {
         Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
     }
 
+    async fn get_completed_block_ids(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockId>, StorageError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT block_id FROM block_outputs WHERE instance_id = $1",
+        )
+        .bind(instance_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| BlockId(id)).collect())
+    }
+
     // === Rate Limits ===
 
     async fn check_rate_limit(

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use moka::future::Cache;
 use tokio::sync::Semaphore;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
@@ -9,7 +10,9 @@ use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::config::{SchedulerConfig, WebhookConfig};
+use orch8_types::ids::SequenceId;
 use orch8_types::instance::InstanceState;
+use orch8_types::sequence::SequenceDefinition;
 
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
@@ -30,6 +33,17 @@ pub async fn run_tick_loop(
     let batch_size = config.batch_size;
     let max_concurrent = config.max_concurrent_steps as usize;
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
+
+    // In-memory LRU cache for sequence definitions (avoids 1 DB query per instance).
+    let sequence_cache: Arc<Cache<SequenceId, Arc<SequenceDefinition>>> = Arc::new(
+        Cache::builder()
+            .max_capacity(1_000)
+            .time_to_live(Duration::from_secs(300))
+            .build(),
+    );
+
+    // Share WebhookConfig via Arc to avoid cloning per instance.
+    let webhook_config = Arc::new(config.webhooks.clone());
 
     let mut ticker = interval(tick_duration);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -58,7 +72,8 @@ pub async fn run_tick_loop(
                     &handlers,
                     &semaphore,
                     batch_size,
-                    &config.webhooks,
+                    &webhook_config,
+                    &sequence_cache,
                 ).await {
                     error!(error = %e, "tick processing failed");
                 }
@@ -83,7 +98,8 @@ async fn process_tick(
     handlers: &Arc<HandlerRegistry>,
     semaphore: &Arc<Semaphore>,
     batch_size: u32,
-    webhook_config: &WebhookConfig,
+    webhook_config: &Arc<WebhookConfig>,
+    sequence_cache: &Arc<Cache<SequenceId, Arc<SequenceDefinition>>>,
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
@@ -103,7 +119,8 @@ async fn process_tick(
         let storage = Arc::clone(storage);
         let handlers = Arc::clone(handlers);
         let semaphore = Arc::clone(semaphore);
-        let webhooks = webhook_config.clone();
+        let webhooks = Arc::clone(webhook_config);
+        let seq_cache = Arc::clone(sequence_cache);
 
         crate::metrics::inc(crate::metrics::INSTANCES_CLAIMED);
 
@@ -117,7 +134,9 @@ async fn process_tick(
             let _instance_timer = crate::metrics::Timer::start(crate::metrics::INSTANCE_DURATION);
             let instance_id = instance.id;
 
-            match process_instance(storage.as_ref(), &handlers, &webhooks, instance).await {
+            match process_instance(storage.as_ref(), &handlers, &webhooks, &seq_cache, instance)
+                .await
+            {
                 Ok(()) => {}
                 Err(e) => {
                     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
@@ -135,11 +154,11 @@ async fn process_tick(
 }
 
 /// Process a single claimed instance: execute the first pending step.
-/// Composite blocks (Parallel, Race, etc.) are deferred to Stage 3.
 async fn process_instance(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
     webhook_config: &WebhookConfig,
+    sequence_cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
     instance: orch8_types::instance::TaskInstance,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
@@ -173,21 +192,13 @@ async fn process_instance(
         }
     }
 
-    let sequence = storage
-        .get_sequence(instance.sequence_id)
-        .await?
-        .ok_or_else(|| EngineError::StepFailed {
-            instance_id,
-            block_id: orch8_types::ids::BlockId("_root".into()),
-            message: format!("sequence {} not found", instance.sequence_id),
-            retryable: false,
-        })?;
+    // Fetch sequence definition — cached to avoid repeated DB lookups.
+    let sequence = get_sequence_cached(storage, sequence_cache, instance.sequence_id).await?;
 
-    let existing_outputs = storage.get_all_outputs(instance_id).await?;
-    let completed_blocks: std::collections::HashSet<&str> = existing_outputs
-        .iter()
-        .map(|o| o.block_id.0.as_str())
-        .collect();
+    // Fetch only block IDs that have outputs (lightweight: no JSON deserialization).
+    let completed_ids = storage.get_completed_block_ids(instance_id).await?;
+    let completed_blocks: std::collections::HashSet<&str> =
+        completed_ids.iter().map(|id| id.0.as_str()).collect();
 
     for block in &sequence.blocks {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
@@ -219,6 +230,31 @@ async fn process_instance(
 
     info!(instance_id = %instance_id, "instance completed all blocks");
     Ok(())
+}
+
+/// Fetch a sequence definition, using the in-memory cache when available.
+async fn get_sequence_cached(
+    storage: &dyn StorageBackend,
+    cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
+    sequence_id: SequenceId,
+) -> Result<Arc<SequenceDefinition>, EngineError> {
+    if let Some(seq) = cache.get(&sequence_id).await {
+        return Ok(seq);
+    }
+
+    let seq = storage
+        .get_sequence(sequence_id)
+        .await?
+        .ok_or_else(|| EngineError::StepFailed {
+            instance_id: orch8_types::ids::InstanceId(uuid::Uuid::nil()),
+            block_id: orch8_types::ids::BlockId("_root".into()),
+            message: format!("sequence {sequence_id} not found"),
+            retryable: false,
+        })?;
+
+    let seq = Arc::new(seq);
+    cache.insert(sequence_id, Arc::clone(&seq)).await;
+    Ok(seq)
 }
 
 /// Check if the step has a delay and defer if so. Returns `true` if deferred.
@@ -309,10 +345,12 @@ async fn execute_step_block(
         return Ok(());
     }
 
-    // Determine attempt number from previous outputs for this block.
-    let attempt = match storage.get_block_output(instance_id, &step_def.id).await? {
-        Some(prev) => u32::from(prev.attempt.unsigned_abs()) + 1,
-        None => 0,
+    // Determine attempt number from previous output for this block.
+    // Skip the DB lookup on the first attempt (attempt=0, no prior output exists).
+    let attempt = if let Some(prev) = storage.get_block_output(instance_id, &step_def.id).await? {
+        u32::from(prev.attempt.unsigned_abs()) + 1
+    } else {
+        0
     };
 
     crate::metrics::inc(crate::metrics::STEPS_EXECUTED);

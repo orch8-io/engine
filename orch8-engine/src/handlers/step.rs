@@ -31,17 +31,20 @@ pub async fn execute_step(
     exec: StepExecParams,
 ) -> Result<serde_json::Value, EngineError> {
     // Memoization: if output already exists for this block+attempt, return it.
-    if let Some(existing) = storage
-        .get_block_output(exec.instance_id, &exec.block_id)
-        .await?
-    {
-        if existing.attempt == i16::try_from(exec.attempt).unwrap_or(i16::MAX) {
-            info!(
-                instance_id = %exec.instance_id,
-                block_id = %exec.block_id,
-                "step already executed (memoized), returning cached output"
-            );
-            return Ok(existing.output);
+    // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
+    if exec.attempt > 0 {
+        if let Some(existing) = storage
+            .get_block_output(exec.instance_id, &exec.block_id)
+            .await?
+        {
+            if existing.attempt == i16::try_from(exec.attempt).unwrap_or(i16::MAX) {
+                info!(
+                    instance_id = %exec.instance_id,
+                    block_id = %exec.block_id,
+                    "step already executed (memoized), returning cached output"
+                );
+                return Ok(existing.output);
+            }
         }
     }
 
@@ -80,14 +83,17 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
-            let output_json = output.to_string();
-            let output_size = i32::try_from(output_json.len()).unwrap_or(i32::MAX);
+            // Estimate output size from the serialized form without a separate
+            // to_string() allocation — serde_json::to_vec is used by the DB layer anyway.
+            let output_size = serde_json::to_vec(&output)
+                .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
+                .unwrap_or(0);
 
             let block_output = BlockOutput {
                 id: Uuid::new_v4(),
                 instance_id,
                 block_id,
-                output: output.clone(),
+                output,
                 output_ref: None,
                 output_size,
                 attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
@@ -102,7 +108,7 @@ pub async fn execute_step(
                 "step completed successfully"
             );
 
-            Ok(output)
+            Ok(block_output.output)
         }
         Err(step_err) => {
             warn!(

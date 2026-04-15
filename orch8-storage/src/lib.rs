@@ -126,6 +126,13 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<BlockOutput>, StorageError>;
 
+    /// Return just the block IDs that have outputs for this instance.
+    /// Lighter than `get_all_outputs` — avoids deserializing full output JSON.
+    async fn get_completed_block_ids(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockId>, StorageError>;
+
     // === Rate Limits ===
 
     /// Atomic check-and-increment. Single DB round-trip.

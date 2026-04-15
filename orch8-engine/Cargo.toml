@@ -19,6 +19,7 @@ async-trait.workspace = true
 rand.workspace = true
 metrics.workspace = true
 cron.workspace = true
+moka.workspace = true
 
 [lints]
 workspace = true
