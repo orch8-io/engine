@@ -7,6 +7,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use orch8_api::{build_router, AppState};
+use orch8_engine::handlers::HandlerRegistry;
+use orch8_engine::Engine;
 use orch8_storage::postgres::PostgresStorage;
 use orch8_types::config::EngineConfig;
 
@@ -89,6 +91,21 @@ async fn main() -> anyhow::Result<()> {
         token.cancel();
     });
 
+    // Build and start the scheduling engine.
+    let handlers = HandlerRegistry::new();
+    let engine = Engine::new(
+        storage.clone(),
+        config.engine.clone(),
+        handlers,
+        shutdown_token.clone(),
+    );
+
+    let engine_handle = tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            tracing::error!(error = %e, "Engine tick loop exited with error");
+        }
+    });
+
     tracing::info!("Engine ready");
 
     axum::serve(listener, app)
@@ -98,6 +115,9 @@ async fn main() -> anyhow::Result<()> {
         })
         .await
         .context("HTTP server error")?;
+
+    // Wait for engine to finish draining.
+    let _ = engine_handle.await;
 
     tracing::info!("Shutdown complete");
     Ok(())
