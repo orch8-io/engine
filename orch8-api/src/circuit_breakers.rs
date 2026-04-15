@@ -27,9 +27,7 @@ pub fn routes() -> Router<CircuitBreakerState> {
     path = "/circuit-breakers",
     responses((status = 200, body = Vec<orch8_types::circuit_breaker::CircuitBreakerState>))
 )]
-async fn list_breakers(
-    State(state): State<CircuitBreakerState>,
-) -> impl IntoResponse {
+async fn list_breakers(State(state): State<CircuitBreakerState>) -> impl IntoResponse {
     Json(state.registry.list_all())
 }
 

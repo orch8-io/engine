@@ -118,11 +118,7 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or("GET");
 
-    let body = ctx
-        .params
-        .get("body")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let body = ctx.params.get("body").and_then(Value::as_str).unwrap_or("");
 
     let timeout_ms = ctx
         .params
@@ -251,7 +247,9 @@ mod tests {
 
     #[tokio::test]
     async fn log_returns_message() {
-        let result = handle_log(test_ctx(json!({"message": "hello"}))).await.unwrap();
+        let result = handle_log(test_ctx(json!({"message": "hello"})))
+            .await
+            .unwrap();
         assert_eq!(result, json!({"message": "hello"}));
     }
 
@@ -263,7 +261,9 @@ mod tests {
 
     #[tokio::test]
     async fn sleep_returns_duration() {
-        let result = handle_sleep(test_ctx(json!({"duration_ms": 10}))).await.unwrap();
+        let result = handle_sleep(test_ctx(json!({"duration_ms": 10})))
+            .await
+            .unwrap();
         assert_eq!(result, json!({"slept_ms": 10}));
     }
 

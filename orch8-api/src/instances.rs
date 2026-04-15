@@ -36,15 +36,9 @@ pub fn routes() -> Router<AppState> {
             "/instances/{id}/checkpoints/latest",
             get(get_latest_checkpoint),
         )
-        .route(
-            "/instances/{id}/checkpoints/prune",
-            post(prune_checkpoints),
-        )
+        .route("/instances/{id}/checkpoints/prune", post(prune_checkpoints))
         .route("/instances/{id}/audit", get(list_audit_log))
-        .route(
-            "/instances/{id}/inject-blocks",
-            post(inject_blocks),
-        )
+        .route("/instances/{id}/inject-blocks", post(inject_blocks))
         .route("/instances/bulk/state", patch(bulk_update_state))
         .route("/instances/bulk/reschedule", patch(bulk_reschedule))
         .route("/instances/dlq", get(list_dlq))

@@ -101,8 +101,7 @@ async fn process_signals_inner(
                 // Scoped cancellation: if we have the sequence definition, cancel only
                 // cancellable nodes and let non-cancellable ones finish.
                 if let Some(seq) = sequence_def {
-                    let has_non_cancellable =
-                        cancel_scoped(storage, instance_id, seq).await?;
+                    let has_non_cancellable = cancel_scoped(storage, instance_id, seq).await?;
                     if has_non_cancellable {
                         debug!(
                             instance_id = %instance_id,

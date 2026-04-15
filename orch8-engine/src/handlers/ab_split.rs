@@ -181,7 +181,10 @@ mod tests {
 
         let v1 = select_variant(&instance, &block_id, &variants);
         let v2 = select_variant(&instance, &block_id, &variants);
-        assert_eq!(v1, v2, "same instance+block must always select same variant");
+        assert_eq!(
+            v1, v2,
+            "same instance+block must always select same variant"
+        );
     }
 
     #[test]
@@ -209,8 +212,16 @@ mod tests {
 
         // With 70/30 weights over 1000 samples, variant A should get ~700.
         // Allow wide margin for hash distribution.
-        assert!(counts[0] > 500, "variant A should get majority: {}", counts[0]);
-        assert!(counts[1] > 100, "variant B should get some traffic: {}", counts[1]);
+        assert!(
+            counts[0] > 500,
+            "variant A should get majority: {}",
+            counts[0]
+        );
+        assert!(
+            counts[1] > 100,
+            "variant B should get some traffic: {}",
+            counts[1]
+        );
     }
 
     #[test]

@@ -119,7 +119,9 @@ async fn process_tick(
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
     let now = Utc::now();
-    let instances = storage.claim_due_instances(now, batch_size, max_per_tenant).await?;
+    let instances = storage
+        .claim_due_instances(now, batch_size, max_per_tenant)
+        .await?;
 
     if instances.is_empty() {
         return Ok(());
@@ -171,12 +173,13 @@ async fn process_tick(
             let instance_id = instance.id;
 
             // Extract pre-fetched data for this instance (or use empty defaults).
-            let data = prefetched.get(&instance_id).cloned().unwrap_or_else(|| {
-                PrefetchedData {
+            let data = prefetched
+                .get(&instance_id)
+                .cloned()
+                .unwrap_or_else(|| PrefetchedData {
                     signals: Vec::new(),
                     completed_block_ids: Vec::new(),
-                }
-            });
+                });
 
             match process_instance(
                 storage.as_ref(),
@@ -290,7 +293,6 @@ async fn process_instance(
         }
     }
 
-
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
     let has_composite = sequence
@@ -319,7 +321,16 @@ async fn process_instance(
             continue;
         }
 
-        match execute_step_block(storage, handlers, webhook_config, externalize_threshold, &instance, step_def).await? {
+        match execute_step_block(
+            storage,
+            handlers,
+            webhook_config,
+            externalize_threshold,
+            &instance,
+            step_def,
+        )
+        .await?
+        {
             StepOutcome::Completed => {
                 completed_blocks.insert(step_def.id.0.clone());
             }
@@ -380,27 +391,20 @@ async fn process_instance_tree(
                 .await?;
             } else {
                 storage
-                    .update_instance_state(
-                        instance_id,
-                        InstanceState::Scheduled,
-                        Some(Utc::now()),
-                    )
+                    .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
                     .await?;
             }
         }
         Ok(false) => {
             // Evaluator says done. Check if any root node failed.
             let tree = storage.get_execution_tree(instance_id).await?;
-            let root_failed = tree
-                .iter()
-                .filter(|n| n.parent_id.is_none())
-                .any(|n| {
-                    matches!(
-                        n.state,
-                        orch8_types::execution::NodeState::Failed
-                            | orch8_types::execution::NodeState::Cancelled
-                    )
-                });
+            let root_failed = tree.iter().filter(|n| n.parent_id.is_none()).any(|n| {
+                matches!(
+                    n.state,
+                    orch8_types::execution::NodeState::Failed
+                        | orch8_types::execution::NodeState::Cancelled
+                )
+            });
 
             // Read current instance state — may differ from Running if an external
             // worker dispatch changed it to Waiting within this tick.
@@ -948,7 +952,9 @@ async fn dispatch_to_external_worker(
         params: step_def.params.clone(),
         context: serde_json::to_value(&instance.context).unwrap_or_default(),
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-        timeout_ms: step_def.timeout.map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        timeout_ms: step_def
+            .timeout
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
         state: WorkerTaskState::Pending,
         worker_id: None,
         claimed_at: None,

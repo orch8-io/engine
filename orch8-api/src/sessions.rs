@@ -17,7 +17,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", get(get_session))
-        .route("/sessions/by-key/{tenant_id}/{key}", get(get_session_by_key))
+        .route(
+            "/sessions/by-key/{tenant_id}/{key}",
+            get(get_session_by_key),
+        )
         .route("/sessions/{id}/data", patch(update_session_data))
         .route("/sessions/{id}/state", patch(update_session_state))
         .route("/sessions/{id}/instances", get(list_session_instances))

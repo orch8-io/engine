@@ -207,24 +207,21 @@ pub async fn evaluate(
         check_sla_deadlines(storage, handlers, instance, &sequence.blocks, &tree).await?;
         // Re-fetch tree if any deadlines were breached (state may have changed).
         let tree = storage.get_execution_tree(instance.id).await?;
-        let root_nodes: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
+        let root_nodes: Vec<&ExecutionNode> =
+            tree.iter().filter(|n| n.parent_id.is_none()).collect();
 
         // Termination: all root nodes done.
-        if root_nodes.iter().all(|n| {
-            matches!(
-                n.state,
-                NodeState::Completed | NodeState::Skipped
-            )
-        }) {
+        if root_nodes
+            .iter()
+            .all(|n| matches!(n.state, NodeState::Completed | NodeState::Skipped))
+        {
             return Ok(false);
         }
         // Termination: any root node failed/cancelled.
-        if root_nodes.iter().any(|n| {
-            matches!(
-                n.state,
-                NodeState::Failed | NodeState::Cancelled
-            )
-        }) {
+        if root_nodes
+            .iter()
+            .any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled))
+        {
             return Ok(false);
         }
 
@@ -282,9 +279,7 @@ fn find_running_composite<'a>(
         })
         .collect();
     // Sort by tree depth (deeper = more ancestors = processed first).
-    composites.sort_by_key(|(n, _)| {
-        std::cmp::Reverse(count_ancestors(tree, n.id))
-    });
+    composites.sort_by_key(|(n, _)| std::cmp::Reverse(count_ancestors(tree, n.id)));
     composites.into_iter().next()
 }
 
@@ -309,7 +304,11 @@ fn find_running_step<'a>(
 /// Count ancestors to determine tree depth.
 fn count_ancestors(tree: &[ExecutionNode], mut node_id: ExecutionNodeId) -> usize {
     let mut depth = 0;
-    while let Some(parent_id) = tree.iter().find(|n| n.id == node_id).and_then(|n| n.parent_id) {
+    while let Some(parent_id) = tree
+        .iter()
+        .find(|n| n.id == node_id)
+        .and_then(|n| n.parent_id)
+    {
         depth += 1;
         node_id = parent_id;
     }
@@ -435,10 +434,22 @@ async fn check_sla_deadlines(
                 let mut params = escalation.params.clone();
                 // Inject breach metadata into escalation params.
                 if let serde_json::Value::Object(ref mut map) = params {
-                    map.insert("_breach_block_id".into(), serde_json::json!(node.block_id.0));
-                    map.insert("_breach_instance_id".into(), serde_json::json!(instance.id.0));
-                    map.insert("_breach_elapsed_ms".into(), serde_json::json!(elapsed.num_milliseconds()));
-                    map.insert("_breach_deadline_ms".into(), serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)));
+                    map.insert(
+                        "_breach_block_id".into(),
+                        serde_json::json!(node.block_id.0),
+                    );
+                    map.insert(
+                        "_breach_instance_id".into(),
+                        serde_json::json!(instance.id.0),
+                    );
+                    map.insert(
+                        "_breach_elapsed_ms".into(),
+                        serde_json::json!(elapsed.num_milliseconds()),
+                    );
+                    map.insert(
+                        "_breach_deadline_ms".into(),
+                        serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+                    );
                 }
                 let step_ctx = crate::handlers::StepContext {
                     instance_id: instance.id,
@@ -557,9 +568,9 @@ async fn dispatch_block(
             // Sub-sequence: create a child instance and wait for it to complete.
             // Check if child already exists for this block.
             let children = storage.get_child_instances(instance.id).await?;
-            let existing_child = children
-                .iter()
-                .find(|c| c.metadata.get("_parent_block_id").and_then(|v| v.as_str()) == Some(&ss_def.id.0));
+            let existing_child = children.iter().find(|c| {
+                c.metadata.get("_parent_block_id").and_then(|v| v.as_str()) == Some(&ss_def.id.0)
+            });
 
             if let Some(child) = existing_child {
                 // Child exists — check if it's done.
@@ -586,7 +597,9 @@ async fn dispatch_block(
                     Ok(true)
                 } else {
                     // Still running — wait.
-                    storage.update_node_state(node.id, NodeState::Waiting).await?;
+                    storage
+                        .update_node_state(node.id, NodeState::Waiting)
+                        .await?;
                     Ok(true)
                 }
             } else {
@@ -632,7 +645,9 @@ async fn dispatch_block(
                     updated_at: now,
                 };
                 storage.create_instance(&child).await?;
-                storage.update_node_state(node.id, NodeState::Waiting).await?;
+                storage
+                    .update_node_state(node.id, NodeState::Waiting)
+                    .await?;
                 Ok(true) // Re-schedule to check child status later
             }
         }

@@ -79,12 +79,30 @@ fn tokenize(input: &str) -> Vec<Token> {
         match chars[i] {
             ' ' | '\t' | '\n' | '\r' => i += 1,
             '"' | '\'' => i = tokenize_string(&chars, i, &mut tokens),
-            '+' => { tokens.push(Token::Plus); i += 1; }
-            '*' => { tokens.push(Token::Star); i += 1; }
-            '/' => { tokens.push(Token::Slash); i += 1; }
-            '(' => { tokens.push(Token::LParen); i += 1; }
-            ')' => { tokens.push(Token::RParen); i += 1; }
-            '-' => { tokens.push(Token::Minus); i += 1; }
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Star);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Slash);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
             _ => i = tokenize_complex(&chars, i, &mut tokens),
         }
     }
@@ -100,21 +118,56 @@ fn tokenize_string(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usi
     }
     let s: String = chars[begin..i].iter().collect();
     tokens.push(Token::String(s));
-    if i < chars.len() { i + 1 } else { i }
+    if i < chars.len() {
+        i + 1
+    } else {
+        i
+    }
 }
 
 fn tokenize_complex(chars: &[char], i: usize, tokens: &mut Vec<Token>) -> usize {
-    let next = if i + 1 < chars.len() { Some(chars[i + 1]) } else { None };
+    let next = if i + 1 < chars.len() {
+        Some(chars[i + 1])
+    } else {
+        None
+    };
     match (chars[i], next) {
-        ('=', Some('=')) => { tokens.push(Token::Eq); i + 2 }
-        ('!', Some('=')) => { tokens.push(Token::Ne); i + 2 }
-        ('>', Some('=')) => { tokens.push(Token::Ge); i + 2 }
-        ('<', Some('=')) => { tokens.push(Token::Le); i + 2 }
-        ('&', Some('&')) => { tokens.push(Token::And); i + 2 }
-        ('|', Some('|')) => { tokens.push(Token::Or); i + 2 }
-        ('>', _) => { tokens.push(Token::Gt); i + 1 }
-        ('<', _) => { tokens.push(Token::Lt); i + 1 }
-        ('!', _) => { tokens.push(Token::Not); i + 1 }
+        ('=', Some('=')) => {
+            tokens.push(Token::Eq);
+            i + 2
+        }
+        ('!', Some('=')) => {
+            tokens.push(Token::Ne);
+            i + 2
+        }
+        ('>', Some('=')) => {
+            tokens.push(Token::Ge);
+            i + 2
+        }
+        ('<', Some('=')) => {
+            tokens.push(Token::Le);
+            i + 2
+        }
+        ('&', Some('&')) => {
+            tokens.push(Token::And);
+            i + 2
+        }
+        ('|', Some('|')) => {
+            tokens.push(Token::Or);
+            i + 2
+        }
+        ('>', _) => {
+            tokens.push(Token::Gt);
+            i + 1
+        }
+        ('<', _) => {
+            tokens.push(Token::Lt);
+            i + 1
+        }
+        ('!', _) => {
+            tokens.push(Token::Not);
+            i + 1
+        }
         (c, _) if c.is_ascii_digit() => tokenize_number(chars, i, tokens),
         (c, _) if c.is_ascii_alphabetic() || c == '_' => tokenize_word(chars, i, tokens),
         _ => i + 1,
@@ -135,7 +188,9 @@ fn tokenize_number(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usi
 
 fn tokenize_word(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usize {
     let mut i = start;
-    while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+    while i < chars.len()
+        && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+    {
         i += 1;
     }
     let word: String = chars[start..i].iter().collect();
@@ -158,8 +213,17 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Token], context: &'a ExecutionContext, outputs: &'a serde_json::Value) -> Self {
-        Self { tokens, pos: 0, context, outputs }
+    fn new(
+        tokens: &'a [Token],
+        context: &'a ExecutionContext,
+        outputs: &'a serde_json::Value,
+    ) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            context,
+            outputs,
+        }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -198,12 +262,44 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> serde_json::Value {
         let left = self.parse_additive();
         match self.peek() {
-            Some(Token::Eq) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(json_eq(&left, &right)) }
-            Some(Token::Ne) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(!json_eq(&left, &right)) }
-            Some(Token::Gt) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Greater)) }
-            Some(Token::Ge) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Less)) }
-            Some(Token::Lt) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Less)) }
-            Some(Token::Le) => { self.advance(); let right = self.parse_additive(); serde_json::Value::Bool(json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Greater)) }
+            Some(Token::Eq) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(json_eq(&left, &right))
+            }
+            Some(Token::Ne) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(!json_eq(&left, &right))
+            }
+            Some(Token::Gt) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(
+                    json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Greater),
+                )
+            }
+            Some(Token::Ge) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(
+                    json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Less),
+                )
+            }
+            Some(Token::Lt) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(
+                    json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Less),
+                )
+            }
+            Some(Token::Le) => {
+                self.advance();
+                let right = self.parse_additive();
+                serde_json::Value::Bool(
+                    json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Greater),
+                )
+            }
             _ => left,
         }
     }
@@ -324,9 +420,7 @@ fn navigate_json(value: &serde_json::Value, path: &[&str]) -> serde_json::Value 
 
 fn json_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     match (a, b) {
-        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
-            a.as_f64() == b.as_f64()
-        }
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => a.as_f64() == b.as_f64(),
         _ => a == b,
     }
 }
@@ -402,7 +496,10 @@ mod tests {
 
     #[test]
     fn eval_path() {
-        assert_eq!(evaluate("context.data.user.name", &ctx(), &outputs()), json!("Alice"));
+        assert_eq!(
+            evaluate("context.data.user.name", &ctx(), &outputs()),
+            json!("Alice")
+        );
         assert_eq!(evaluate("context.data.count", &ctx(), &outputs()), json!(5));
     }
 
@@ -414,48 +511,104 @@ mod tests {
 
     #[test]
     fn eval_outputs_path() {
-        assert_eq!(evaluate("outputs.step_1.count", &ctx(), &outputs()), json!(42));
+        assert_eq!(
+            evaluate("outputs.step_1.count", &ctx(), &outputs()),
+            json!(42)
+        );
     }
 
     #[test]
     fn eval_equality() {
-        assert_eq!(evaluate("context.data.count == 5", &ctx(), &outputs()), json!(true));
-        assert_eq!(evaluate("context.data.count != 5", &ctx(), &outputs()), json!(false));
-        assert_eq!(evaluate("context.data.user.name == \"Alice\"", &ctx(), &outputs()), json!(true));
+        assert_eq!(
+            evaluate("context.data.count == 5", &ctx(), &outputs()),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("context.data.count != 5", &ctx(), &outputs()),
+            json!(false)
+        );
+        assert_eq!(
+            evaluate("context.data.user.name == \"Alice\"", &ctx(), &outputs()),
+            json!(true)
+        );
     }
 
     #[test]
     fn eval_comparison() {
-        assert_eq!(evaluate("context.data.count > 3", &ctx(), &outputs()), json!(true));
-        assert_eq!(evaluate("context.data.count < 3", &ctx(), &outputs()), json!(false));
-        assert_eq!(evaluate("context.data.count >= 5", &ctx(), &outputs()), json!(true));
-        assert_eq!(evaluate("context.data.count <= 5", &ctx(), &outputs()), json!(true));
+        assert_eq!(
+            evaluate("context.data.count > 3", &ctx(), &outputs()),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("context.data.count < 3", &ctx(), &outputs()),
+            json!(false)
+        );
+        assert_eq!(
+            evaluate("context.data.count >= 5", &ctx(), &outputs()),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("context.data.count <= 5", &ctx(), &outputs()),
+            json!(true)
+        );
     }
 
     #[test]
     fn eval_arithmetic() {
-        assert_eq!(evaluate("context.data.count + 10", &ctx(), &outputs()), json!(15.0));
-        assert_eq!(evaluate("context.data.count * 2", &ctx(), &outputs()), json!(10.0));
-        assert_eq!(evaluate("outputs.step_1.count - 2", &ctx(), &outputs()), json!(40.0));
+        assert_eq!(
+            evaluate("context.data.count + 10", &ctx(), &outputs()),
+            json!(15.0)
+        );
+        assert_eq!(
+            evaluate("context.data.count * 2", &ctx(), &outputs()),
+            json!(10.0)
+        );
+        assert_eq!(
+            evaluate("outputs.step_1.count - 2", &ctx(), &outputs()),
+            json!(40.0)
+        );
         assert_eq!(evaluate("10 / 3", &ctx(), &outputs()), json!(10.0 / 3.0));
     }
 
     #[test]
     fn eval_logical() {
-        assert_eq!(evaluate("context.data.active && context.data.count > 3", &ctx(), &outputs()), json!(true));
-        assert_eq!(evaluate("context.data.active && context.data.count > 10", &ctx(), &outputs()), json!(false));
-        assert_eq!(evaluate("false || context.data.active", &ctx(), &outputs()), json!(true));
+        assert_eq!(
+            evaluate(
+                "context.data.active && context.data.count > 3",
+                &ctx(),
+                &outputs()
+            ),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate(
+                "context.data.active && context.data.count > 10",
+                &ctx(),
+                &outputs()
+            ),
+            json!(false)
+        );
+        assert_eq!(
+            evaluate("false || context.data.active", &ctx(), &outputs()),
+            json!(true)
+        );
     }
 
     #[test]
     fn eval_not() {
         assert_eq!(evaluate("!false", &ctx(), &outputs()), json!(true));
-        assert_eq!(evaluate("!context.data.active", &ctx(), &outputs()), json!(false));
+        assert_eq!(
+            evaluate("!context.data.active", &ctx(), &outputs()),
+            json!(false)
+        );
     }
 
     #[test]
     fn eval_string_concat() {
-        assert_eq!(evaluate("\"hello\" + \" world\"", &ctx(), &outputs()), json!("hello world"));
+        assert_eq!(
+            evaluate("\"hello\" + \" world\"", &ctx(), &outputs()),
+            json!("hello world")
+        );
     }
 
     #[test]
@@ -473,7 +626,10 @@ mod tests {
 
     #[test]
     fn eval_missing_path() {
-        assert_eq!(evaluate("context.data.nonexistent", &ctx(), &outputs()), json!(null));
+        assert_eq!(
+            evaluate("context.data.nonexistent", &ctx(), &outputs()),
+            json!(null)
+        );
     }
 
     #[test]
@@ -489,8 +645,20 @@ mod tests {
 
     #[test]
     fn condition_evaluation() {
-        assert!(evaluate_condition("context.data.active", &ctx(), &outputs()));
-        assert!(evaluate_condition("context.data.count > 3", &ctx(), &outputs()));
-        assert!(!evaluate_condition("context.data.count > 10", &ctx(), &outputs()));
+        assert!(evaluate_condition(
+            "context.data.active",
+            &ctx(),
+            &outputs()
+        ));
+        assert!(evaluate_condition(
+            "context.data.count > 3",
+            &ctx(),
+            &outputs()
+        ));
+        assert!(!evaluate_condition(
+            "context.data.count > 10",
+            &ctx(),
+            &outputs()
+        ));
     }
 }

@@ -48,8 +48,11 @@ pub async fn execute_loop(
 
     // Evaluate condition using the shared expression evaluator.
     let empty_outputs = serde_json::Value::Object(serde_json::Map::new());
-    let condition_value =
-        crate::expression::evaluate_condition(&loop_def.condition, &instance.context, &empty_outputs);
+    let condition_value = crate::expression::evaluate_condition(
+        &loop_def.condition,
+        &instance.context,
+        &empty_outputs,
+    );
     if !condition_value {
         evaluator::complete_node(storage, node.id).await?;
         debug!(
@@ -90,7 +93,6 @@ pub async fn execute_loop(
     // Body still executing.
     Ok(true)
 }
-
 
 #[cfg(test)]
 mod tests {

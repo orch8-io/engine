@@ -103,12 +103,7 @@ pub(crate) async fn list_pools(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<ResourcePool>>, ApiError> {
-    let tenant_id = TenantId(
-        params
-            .get("tenant_id")
-            .cloned()
-            .unwrap_or_default(),
-    );
+    let tenant_id = TenantId(params.get("tenant_id").cloned().unwrap_or_default());
     let pools = state.storage.list_resource_pools(&tenant_id).await?;
     Ok(Json(pools))
 }
@@ -220,8 +215,7 @@ pub(crate) async fn update_resource(
         resource.daily_cap = daily_cap;
     }
     if let Some(warmup_start) = req.warmup_start {
-        resource.warmup_start =
-            chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").ok();
+        resource.warmup_start = chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").ok();
     }
     if let Some(warmup_days) = req.warmup_days {
         resource.warmup_days = warmup_days;

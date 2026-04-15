@@ -34,9 +34,7 @@ fn from_json_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Status> {
 fn storage_err(e: orch8_types::error::StorageError) -> Status {
     use orch8_types::error::StorageError;
     match e {
-        StorageError::NotFound { entity, id } => {
-            Status::not_found(format!("{entity} {id}"))
-        }
+        StorageError::NotFound { entity, id } => Status::not_found(format!("{entity} {id}")),
         StorageError::Conflict(msg) => Status::already_exists(msg),
         StorageError::Connection(msg) => Status::unavailable(msg),
         StorageError::PoolExhausted => Status::unavailable("pool exhausted"),
@@ -65,7 +63,10 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::CreateSequenceRequest>,
     ) -> Result<Response<proto::SequenceResponse>, Status> {
         let seq = from_json_str(&req.into_inner().definition_json)?;
-        self.storage.create_sequence(&seq).await.map_err(storage_err)?;
+        self.storage
+            .create_sequence(&seq)
+            .await
+            .map_err(storage_err)?;
         Ok(Response::new(proto::SequenceResponse {
             definition_json: to_json_string(&seq)?,
         }))
@@ -136,7 +137,9 @@ impl Orch8Service for Orch8GrpcService {
             .create_instances_batch(&instances)
             .await
             .map_err(storage_err)?;
-        Ok(Response::new(proto::CreateInstancesBatchResponse { created }))
+        Ok(Response::new(proto::CreateInstancesBatchResponse {
+            created,
+        }))
     }
 
     async fn get_instance(

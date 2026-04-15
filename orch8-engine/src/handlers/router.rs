@@ -108,7 +108,11 @@ mod tests {
             ..Default::default()
         };
         assert!(evaluate_condition("status == \"active\"", &ctx, &empty()));
-        assert!(!evaluate_condition("status == \"inactive\"", &ctx, &empty()));
+        assert!(!evaluate_condition(
+            "status == \"inactive\"",
+            &ctx,
+            &empty()
+        ));
     }
 
     #[test]

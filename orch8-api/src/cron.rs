@@ -17,7 +17,10 @@ use crate::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/cron", post(create_cron).get(list_cron))
-        .route("/cron/{id}", get(get_cron).put(update_cron).delete(delete_cron))
+        .route(
+            "/cron/{id}",
+            get(get_cron).put(update_cron).delete(delete_cron),
+        )
 }
 
 #[derive(Deserialize, ToSchema)]

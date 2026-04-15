@@ -8,7 +8,7 @@
 //! ```
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, AeadCore, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
@@ -105,9 +105,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, EncryptionError> {
     }
     (0..hex.len())
         .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| EncryptionError::InvalidHex)
-        })
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| EncryptionError::InvalidHex))
         .collect()
 }
 

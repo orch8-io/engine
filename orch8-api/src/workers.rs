@@ -77,7 +77,12 @@ pub(crate) async fn poll_tasks_from_queue(
 ) -> Result<impl IntoResponse, ApiError> {
     let tasks = state
         .storage
-        .claim_worker_tasks_from_queue(&req.queue_name, &req.handler_name, &req.worker_id, req.limit)
+        .claim_worker_tasks_from_queue(
+            &req.queue_name,
+            &req.handler_name,
+            &req.worker_id,
+            req.limit,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
@@ -150,8 +155,7 @@ pub(crate) async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
     if let Some(node) = tree.iter().find(|n| {
-        n.block_id == task_block_id
-            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+        n.block_id == task_block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
     }) {
         state
             .storage

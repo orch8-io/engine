@@ -140,7 +140,9 @@ pub fn calculate_next_fire(schedule: &CronSchedule) -> Option<chrono::DateTime<U
 
 /// Validate a cron expression. Returns an error message if invalid.
 pub fn validate_cron_expr(expr: &str) -> Result<(), String> {
-    Schedule::from_str(expr).map(|_| ()).map_err(|e| e.to_string())
+    Schedule::from_str(expr)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

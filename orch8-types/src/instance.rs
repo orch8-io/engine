@@ -30,9 +30,16 @@ impl InstanceState {
                 Self::Running | Self::Paused | Self::Cancelled
             ) | (
                 Self::Running,
-                Self::Scheduled | Self::Waiting | Self::Completed | Self::Failed | Self::Paused | Self::Cancelled
-            ) | (Self::Waiting, Self::Running | Self::Scheduled | Self::Cancelled | Self::Failed)
-                | (Self::Paused, Self::Scheduled | Self::Cancelled)
+                Self::Scheduled
+                    | Self::Waiting
+                    | Self::Completed
+                    | Self::Failed
+                    | Self::Paused
+                    | Self::Cancelled
+            ) | (
+                Self::Waiting,
+                Self::Running | Self::Scheduled | Self::Cancelled | Self::Failed
+            ) | (Self::Paused, Self::Scheduled | Self::Cancelled)
                 | (Self::Failed, Self::Scheduled) // retry from DLQ
         )
     }

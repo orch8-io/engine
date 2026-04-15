@@ -325,10 +325,8 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
 
     /// Reset stale claimed tasks (no heartbeat within threshold) back to pending.
-    async fn reap_stale_worker_tasks(
-        &self,
-        stale_threshold: Duration,
-    ) -> Result<u64, StorageError>;
+    async fn reap_stale_worker_tasks(&self, stale_threshold: Duration)
+        -> Result<u64, StorageError>;
 
     /// Delete pending/claimed worker tasks for an instance + block (used when race cancels a branch).
     async fn cancel_worker_tasks_for_block(

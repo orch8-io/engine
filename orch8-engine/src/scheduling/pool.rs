@@ -94,9 +94,11 @@ mod tests {
         let mut idx = 0u32;
 
         let keys: Vec<String> = (0..6)
-            .map(|_| match select_resource(&resources, RotationStrategy::RoundRobin, &mut idx, today()) {
-                PoolAssignment::Assigned(k) => k.0,
-                _ => panic!("expected assigned"),
+            .map(|_| {
+                match select_resource(&resources, RotationStrategy::RoundRobin, &mut idx, today()) {
+                    PoolAssignment::Assigned(k) => k.0,
+                    _ => panic!("expected assigned"),
+                }
             })
             .collect();
 
@@ -143,10 +145,7 @@ mod tests {
 
     #[test]
     fn weighted_favors_higher_weight() {
-        let resources = vec![
-            make_resource("heavy", 100, 0),
-            make_resource("light", 1, 0),
-        ];
+        let resources = vec![make_resource("heavy", 100, 0), make_resource("light", 1, 0)];
         let mut idx = 0;
         let mut heavy_count = 0;
         for _ in 0..1000 {

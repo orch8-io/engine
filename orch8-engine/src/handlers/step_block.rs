@@ -70,7 +70,9 @@ async fn dispatch_step_to_external_worker(
         params: step_def.params.clone(),
         context: serde_json::to_value(&instance.context).unwrap_or_default(),
         attempt: 0,
-        timeout_ms: step_def.timeout.map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        timeout_ms: step_def
+            .timeout
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
         state: WorkerTaskState::Pending,
         worker_id: None,
         claimed_at: None,
@@ -111,8 +113,7 @@ pub async fn complete_external_step_node(
 ) -> Result<(), EngineError> {
     let tree = storage.get_execution_tree(instance_id).await?;
     if let Some(node) = tree.iter().find(|n| {
-        n.block_id == *block_id
-            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+        n.block_id == *block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
     }) {
         evaluator::complete_node(storage, node.id).await?;
     }
@@ -128,8 +129,7 @@ pub async fn fail_external_step_node(
 ) -> Result<(), EngineError> {
     let tree = storage.get_execution_tree(instance_id).await?;
     if let Some(node) = tree.iter().find(|n| {
-        n.block_id == *block_id
-            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+        n.block_id == *block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
     }) {
         evaluator::fail_node(storage, node.id).await?;
     }

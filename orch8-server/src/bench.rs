@@ -150,10 +150,7 @@ async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
     println!("  Inserted: {inserted}");
     println!("  Time:     {elapsed:.2?}");
     println!("  Rate:     {rate:.0} instances/sec");
-    println!(
-        "  Target:   < 3s → {}",
-        if pass { "PASS" } else { "FAIL" }
-    );
+    println!("  Target:   < 3s → {}", if pass { "PASS" } else { "FAIL" });
     println!();
 
     cleanup(storage.as_ref(), &tenant).await;

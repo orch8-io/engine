@@ -192,14 +192,15 @@ pub(crate) async fn migrate_instance(
         .get_sequence(SequenceId(req.target_sequence_id))
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("sequence {}", req.target_sequence_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("sequence {}", req.target_sequence_id)))?;
 
     // Rebind: update the instance's sequence_id to the new version.
     state
         .storage
-        .update_instance_sequence(InstanceId(req.instance_id), SequenceId(req.target_sequence_id))
+        .update_instance_sequence(
+            InstanceId(req.instance_id),
+            SequenceId(req.target_sequence_id),
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
