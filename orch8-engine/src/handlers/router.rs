@@ -81,8 +81,9 @@ fn select_branch(
     router_def: &RouterDef,
     context: &orch8_types::context::ExecutionContext,
 ) -> usize {
+    let empty_outputs = serde_json::Value::Object(serde_json::Map::new());
     for (i, route) in router_def.routes.iter().enumerate() {
-        if evaluate_route_condition(&route.condition, context) {
+        if crate::expression::evaluate_condition(&route.condition, context, &empty_outputs) {
             return i;
         }
     }
@@ -90,54 +91,15 @@ fn select_branch(
     router_def.routes.len()
 }
 
-/// Simple condition evaluation against context.data.
-fn evaluate_route_condition(
-    condition: &str,
-    context: &orch8_types::context::ExecutionContext,
-) -> bool {
-    // Support simple "path == value" conditions or truthy path checks.
-    if let Some((path, expected)) = condition.split_once("==") {
-        let path = path.trim();
-        let expected = expected.trim().trim_matches('"');
-        let actual = resolve_path(path, &context.data);
-        return match actual {
-            Some(serde_json::Value::String(s)) => s == expected,
-            Some(serde_json::Value::Number(n)) => n.to_string() == expected,
-            Some(serde_json::Value::Bool(b)) => b.to_string() == expected,
-            _ => false,
-        };
-    }
-
-    // Truthy check.
-    let value = resolve_path(condition, &context.data);
-    value.is_some_and(|v| is_truthy(&v))
-}
-
-fn resolve_path(path: &str, data: &serde_json::Value) -> Option<serde_json::Value> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = data;
-    for part in &parts {
-        current = current.get(part)?;
-    }
-    Some(current.clone())
-}
-
-fn is_truthy(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        serde_json::Value::String(s) => !s.is_empty(),
-        serde_json::Value::Array(a) => !a.is_empty(),
-        serde_json::Value::Object(_) => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::expression::evaluate_condition;
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
+
+    fn empty() -> serde_json::Value {
+        json!({})
+    }
 
     #[test]
     fn equality_condition() {
@@ -145,9 +107,8 @@ mod tests {
             data: json!({"status": "active"}),
             ..Default::default()
         };
-        assert!(evaluate_route_condition("status == active", &ctx));
-        assert!(evaluate_route_condition("status == \"active\"", &ctx));
-        assert!(!evaluate_route_condition("status == inactive", &ctx));
+        assert!(evaluate_condition("status == \"active\"", &ctx, &empty()));
+        assert!(!evaluate_condition("status == \"inactive\"", &ctx, &empty()));
     }
 
     #[test]
@@ -156,8 +117,19 @@ mod tests {
             data: json!({"enabled": true, "disabled": false}),
             ..Default::default()
         };
-        assert!(evaluate_route_condition("enabled", &ctx));
-        assert!(!evaluate_route_condition("disabled", &ctx));
-        assert!(!evaluate_route_condition("missing", &ctx));
+        assert!(evaluate_condition("enabled", &ctx, &empty()));
+        assert!(!evaluate_condition("disabled", &ctx, &empty()));
+        assert!(!evaluate_condition("missing", &ctx, &empty()));
+    }
+
+    #[test]
+    fn comparison_condition() {
+        let ctx = ExecutionContext {
+            data: json!({"count": 10}),
+            ..Default::default()
+        };
+        assert!(evaluate_condition("count > 5", &ctx, &empty()));
+        assert!(!evaluate_condition("count < 5", &ctx, &empty()));
+        assert!(evaluate_condition("count >= 10", &ctx, &empty()));
     }
 }

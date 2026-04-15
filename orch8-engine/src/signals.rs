@@ -1,9 +1,11 @@
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::execution::NodeState;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
+use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::{Signal, SignalType};
 
 use crate::error::EngineError;
@@ -16,7 +18,7 @@ pub async fn process_signals(
     current_state: InstanceState,
 ) -> Result<bool, EngineError> {
     let signals = storage.get_pending_signals(instance_id).await?;
-    process_signals_inner(storage, instance_id, current_state, signals).await
+    process_signals_inner(storage, instance_id, current_state, signals, None).await
 }
 
 /// Process pre-fetched signals (from batch query).
@@ -26,8 +28,9 @@ pub async fn process_signals_prefetched(
     instance_id: InstanceId,
     current_state: InstanceState,
     signals: Vec<Signal>,
+    sequence_def: Option<&SequenceDefinition>,
 ) -> Result<bool, EngineError> {
-    process_signals_inner(storage, instance_id, current_state, signals).await
+    process_signals_inner(storage, instance_id, current_state, signals, sequence_def).await
 }
 
 async fn process_signals_inner(
@@ -35,6 +38,7 @@ async fn process_signals_inner(
     instance_id: InstanceId,
     current_state: InstanceState,
     signals: Vec<Signal>,
+    sequence_def: Option<&SequenceDefinition>,
 ) -> Result<bool, EngineError> {
     if signals.is_empty() {
         return Ok(false);
@@ -83,23 +87,45 @@ async fn process_signals_inner(
                 // If not paused, just mark delivered — already running.
             }
             SignalType::Cancel => {
-                if current_state.can_transition_to(InstanceState::Cancelled) {
-                    crate::lifecycle::transition_instance(
-                        storage,
-                        instance_id,
-                        current_state,
-                        InstanceState::Cancelled,
-                        None,
-                    )
-                    .await?;
+                if !current_state.can_transition_to(InstanceState::Cancelled) {
+                    warn!(
+                        instance_id = %instance_id,
+                        current_state = %current_state,
+                        "cannot cancel instance in current state"
+                    );
                     storage.mark_signal_delivered(signal.id).await?;
-                    return Ok(true);
+                    continue;
                 }
-                warn!(
-                    instance_id = %instance_id,
-                    current_state = %current_state,
-                    "cannot cancel instance in current state"
-                );
+
+                // Scoped cancellation: if we have the sequence definition, cancel only
+                // cancellable nodes and let non-cancellable ones finish.
+                if let Some(seq) = sequence_def {
+                    let has_non_cancellable =
+                        cancel_scoped(storage, instance_id, seq).await?;
+                    if has_non_cancellable {
+                        debug!(
+                            instance_id = %instance_id,
+                            "cancel signal: non-cancellable nodes still running, deferring full cancel"
+                        );
+                        storage.mark_signal_delivered(signal.id).await?;
+                        // Don't abort — let the evaluator continue running
+                        // non-cancellable nodes. The evaluator will check for
+                        // all-terminal and complete the cancellation.
+                        continue;
+                    }
+                }
+
+                // No non-cancellable nodes (or no sequence def) — cancel immediately.
+                crate::lifecycle::transition_instance(
+                    storage,
+                    instance_id,
+                    current_state,
+                    InstanceState::Cancelled,
+                    None,
+                )
+                .await?;
+                storage.mark_signal_delivered(signal.id).await?;
+                return Ok(true);
             }
             SignalType::UpdateContext => {
                 // Payload should be an ExecutionContext JSON.
@@ -128,4 +154,44 @@ async fn process_signals_inner(
     }
 
     Ok(false)
+}
+
+/// Cancel all cancellable nodes and return `true` if any non-cancellable nodes are still active.
+async fn cancel_scoped(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    sequence_def: &SequenceDefinition,
+) -> Result<bool, EngineError> {
+    use orch8_types::sequence::BlockDefinition;
+
+    let tree = storage.get_execution_tree(instance_id).await?;
+    let mut has_non_cancellable_active = false;
+
+    for node in &tree {
+        let is_active = matches!(
+            node.state,
+            NodeState::Pending | NodeState::Running | NodeState::Waiting
+        );
+        if !is_active {
+            continue;
+        }
+
+        // Check if this block is non-cancellable.
+        let is_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
+            .map(|block| match block {
+                BlockDefinition::Step(step) => step.cancellable,
+                _ => true, // compound blocks are cancellable by default
+            })
+            .unwrap_or(true);
+
+        if is_cancellable {
+            storage
+                .update_node_state(node.id, NodeState::Cancelled)
+                .await?;
+        } else {
+            has_non_cancellable_active = true;
+        }
+    }
+
+    Ok(has_non_cancellable_active)
 }

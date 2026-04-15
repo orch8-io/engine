@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::ids::{BlockId, ExecutionNodeId, InstanceId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "node_state", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum NodeState {
@@ -32,7 +33,7 @@ impl std::fmt::Display for NodeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "block_type", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum BlockType {
@@ -60,7 +61,7 @@ impl std::fmt::Display for BlockType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ExecutionNode {
     pub id: ExecutionNodeId,
     pub instance_id: InstanceId,

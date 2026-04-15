@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::context::ExecutionContext;
 use crate::ids::{InstanceId, Namespace, SequenceId, TenantId};
 
 /// Instance states form a strict state machine.
 /// Transitions are validated at runtime via `can_transition_to`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "instance_state", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceState {
@@ -69,6 +70,7 @@ impl std::fmt::Display for InstanceState {
     Serialize,
     Deserialize,
     sqlx::Type,
+    ToSchema,
 )]
 #[repr(i16)]
 pub enum Priority {
@@ -79,7 +81,7 @@ pub enum Priority {
     Critical = 3,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskInstance {
     pub id: InstanceId,
     pub sequence_id: SequenceId,

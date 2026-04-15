@@ -1,25 +1,23 @@
 [package]
-name = "orch8-api"
+name = "orch8-grpc"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 orch8-types = { path = "../orch8-types" }
-orch8-engine = { path = "../orch8-engine" }
 orch8-storage = { path = "../orch8-storage" }
-axum.workspace = true
 tokio.workspace = true
-tower.workspace = true
-tower-http.workspace = true
+tonic.workspace = true
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tracing.workspace = true
-thiserror.workspace = true
-metrics-exporter-prometheus.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-utoipa.workspace = true
-utoipa-swagger-ui.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [lints]
 workspace = true

@@ -1,11 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ids::{BlockId, InstanceId};
 
 /// State of a worker task in its lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerTaskState {
     Pending,
@@ -26,7 +27,7 @@ impl std::fmt::Display for WorkerTaskState {
 }
 
 /// A task dispatched to an external worker for execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct WorkerTask {
     pub id: Uuid,
     pub instance_id: InstanceId,

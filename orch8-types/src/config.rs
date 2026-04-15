@@ -57,6 +57,10 @@ pub struct SchedulerConfig {
     pub shutdown_grace_period_secs: u64,
     #[serde(default = "default_stale_threshold")]
     pub stale_instance_threshold_secs: u64,
+    /// Max instances a single tenant can claim per tick (noisy-neighbor protection).
+    /// 0 means no per-tenant limit (default).
+    #[serde(default)]
+    pub max_instances_per_tenant: u32,
     #[serde(default)]
     pub webhooks: WebhookConfig,
 }
@@ -69,6 +73,7 @@ impl Default for SchedulerConfig {
             max_concurrent_steps: default_max_concurrent(),
             shutdown_grace_period_secs: default_grace_period(),
             stale_instance_threshold_secs: default_stale_threshold(),
+            max_instances_per_tenant: 0,
             webhooks: WebhookConfig::default(),
         }
     }
@@ -128,6 +133,9 @@ pub struct ApiConfig {
     pub grpc_addr: String,
     #[serde(default = "default_http_addr")]
     pub http_addr: String,
+    /// Comma-separated allowed origins for CORS. Use `*` to allow all.
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: String,
 }
 
 impl Default for ApiConfig {
@@ -135,8 +143,13 @@ impl Default for ApiConfig {
         Self {
             grpc_addr: default_grpc_addr(),
             http_addr: default_http_addr(),
+            cors_origins: default_cors_origins(),
         }
     }
+}
+
+fn default_cors_origins() -> String {
+    "*".to_string()
 }
 
 fn default_grpc_addr() -> String {

@@ -4,6 +4,7 @@ members = [
     "orch8-storage",
     "orch8-engine",
     "orch8-api",
+    "orch8-grpc",
     "orch8-server",
 ]
 resolver = "2"
@@ -54,6 +55,10 @@ toml = "0.8"
 
 # Async traits
 async-trait = "0.1"
+
+# OpenAPI
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Misc
 rand = "0.8"

@@ -5,6 +5,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::context::ExecutionContext;
@@ -34,8 +35,8 @@ pub fn routes() -> Router<AppState> {
 
 // === Request/Response types ===
 
-#[derive(Deserialize)]
-struct CreateInstanceRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CreateInstanceRequest {
     sequence_id: SequenceId,
     tenant_id: TenantId,
     namespace: Namespace,
@@ -57,31 +58,31 @@ fn default_timezone() -> String {
     "UTC".to_string()
 }
 
-#[derive(Deserialize)]
-struct BatchCreateRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct BatchCreateRequest {
     instances: Vec<CreateInstanceRequest>,
 }
 
-#[derive(Deserialize)]
-struct UpdateStateRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct UpdateStateRequest {
     state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
-struct UpdateContextRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct UpdateContextRequest {
     context: ExecutionContext,
 }
 
-#[derive(Deserialize)]
-struct SendSignalRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SendSignalRequest {
     signal_type: SignalType,
     #[serde(default)]
     payload: serde_json::Value,
 }
 
 #[derive(Deserialize)]
-struct ListQuery {
+pub(crate) struct ListQuery {
     tenant_id: Option<String>,
     namespace: Option<String>,
     sequence_id: Option<Uuid>,
@@ -96,35 +97,42 @@ fn default_limit() -> u32 {
     100
 }
 
-#[derive(Deserialize)]
-struct BulkUpdateStateRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct BulkUpdateStateRequest {
     filter: BulkFilter,
     state: InstanceState,
 }
 
-#[derive(Deserialize)]
-struct BulkFilter {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct BulkFilter {
     tenant_id: Option<String>,
     namespace: Option<String>,
     sequence_id: Option<Uuid>,
     states: Option<Vec<InstanceState>>,
 }
 
-#[derive(Deserialize)]
-struct BulkRescheduleRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct BulkRescheduleRequest {
     filter: BulkFilter,
     /// Shift `next_fire_at` by this many seconds (positive = later, negative = earlier).
     offset_secs: i64,
 }
 
-#[derive(Serialize)]
-struct CountResponse {
+#[derive(Serialize, ToSchema)]
+pub(crate) struct CountResponse {
     count: u64,
 }
 
 // === Handlers ===
 
-async fn create_instance(
+#[utoipa::path(post, path = "/instances", tag = "instances",
+    request_body = CreateInstanceRequest,
+    responses(
+        (status = 201, description = "Instance created", body = serde_json::Value),
+        (status = 200, description = "Deduplicated (idempotency key match)", body = serde_json::Value),
+    )
+)]
+pub(crate) async fn create_instance(
     State(state): State<AppState>,
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -177,7 +185,14 @@ async fn create_instance(
     ))
 }
 
-async fn create_instances_batch(
+#[utoipa::path(post, path = "/instances/batch", tag = "instances",
+    request_body = BatchCreateRequest,
+    responses(
+        (status = 201, description = "Batch created", body = CountResponse),
+        (status = 400, description = "Empty batch"),
+    )
+)]
+pub(crate) async fn create_instances_batch(
     State(state): State<AppState>,
     Json(req): Json<BatchCreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -219,7 +234,14 @@ async fn create_instances_batch(
     Ok((StatusCode::CREATED, Json(CountResponse { count })))
 }
 
-async fn get_instance(
+#[utoipa::path(get, path = "/instances/{id}", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "Instance found", body = TaskInstance),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn get_instance(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -233,7 +255,18 @@ async fn get_instance(
     Ok(Json(instance))
 }
 
-async fn list_instances(
+#[utoipa::path(get, path = "/instances", tag = "instances",
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("namespace" = Option<String>, Query, description = "Filter by namespace"),
+        ("sequence_id" = Option<Uuid>, Query, description = "Filter by sequence"),
+        ("state" = Option<String>, Query, description = "Comma-separated states"),
+        ("offset" = u64, Query, description = "Pagination offset"),
+        ("limit" = u32, Query, description = "Pagination limit (max 1000)"),
+    ),
+    responses((status = 200, description = "List of instances", body = Vec<TaskInstance>))
+)]
+pub(crate) async fn list_instances(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -261,14 +294,22 @@ async fn list_instances(
     Ok(Json(instances))
 }
 
-async fn update_state(
+#[utoipa::path(patch, path = "/instances/{id}/state", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = UpdateStateRequest,
+    responses(
+        (status = 200, description = "State updated"),
+        (status = 400, description = "Invalid state transition"),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn update_state(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    // Load current state to validate transition.
     let instance = state
         .storage
         .get_instance(instance_id)
@@ -292,14 +333,21 @@ async fn update_state(
     Ok(StatusCode::OK)
 }
 
-async fn update_context(
+#[utoipa::path(patch, path = "/instances/{id}/context", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = UpdateContextRequest,
+    responses(
+        (status = 200, description = "Context updated"),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn update_context(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateContextRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    // Verify instance exists.
     state
         .storage
         .get_instance(instance_id)
@@ -316,14 +364,22 @@ async fn update_context(
     Ok(StatusCode::OK)
 }
 
-async fn send_signal(
+#[utoipa::path(post, path = "/instances/{id}/signals", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = SendSignalRequest,
+    responses(
+        (status = 201, description = "Signal enqueued", body = serde_json::Value),
+        (status = 400, description = "Instance is in terminal state"),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn send_signal(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<SendSignalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    // Verify instance exists and is not terminal.
     let instance = state
         .storage
         .get_instance(instance_id)
@@ -360,7 +416,11 @@ async fn send_signal(
     ))
 }
 
-async fn get_outputs(
+#[utoipa::path(get, path = "/instances/{id}/outputs", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses((status = 200, description = "Block outputs", body = Vec<orch8_types::output::BlockOutput>))
+)]
+pub(crate) async fn get_outputs(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -373,13 +433,19 @@ async fn get_outputs(
     Ok(Json(outputs))
 }
 
-async fn get_execution_tree(
+#[utoipa::path(get, path = "/instances/{id}/tree", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "Execution tree", body = Vec<orch8_types::execution::ExecutionNode>),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn get_execution_tree(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    // Verify instance exists.
     state
         .storage
         .get_instance(instance_id)
@@ -396,7 +462,11 @@ async fn get_execution_tree(
     Ok(Json(tree))
 }
 
-async fn bulk_update_state(
+#[utoipa::path(patch, path = "/instances/bulk/state", tag = "instances",
+    request_body = BulkUpdateStateRequest,
+    responses((status = 200, description = "Bulk state update result", body = CountResponse))
+)]
+pub(crate) async fn bulk_update_state(
     State(state): State<AppState>,
     Json(req): Json<BulkUpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -418,7 +488,11 @@ async fn bulk_update_state(
     Ok(Json(CountResponse { count }))
 }
 
-async fn bulk_reschedule(
+#[utoipa::path(patch, path = "/instances/bulk/reschedule", tag = "instances",
+    request_body = BulkRescheduleRequest,
+    responses((status = 200, description = "Bulk reschedule result", body = CountResponse))
+)]
+pub(crate) async fn bulk_reschedule(
     State(state): State<AppState>,
     Json(req): Json<BulkRescheduleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -441,7 +515,16 @@ async fn bulk_reschedule(
 }
 
 /// DLQ: list failed instances.
-async fn list_dlq(
+#[utoipa::path(get, path = "/instances/dlq", tag = "instances",
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("namespace" = Option<String>, Query, description = "Filter by namespace"),
+        ("offset" = u64, Query, description = "Pagination offset"),
+        ("limit" = u32, Query, description = "Pagination limit"),
+    ),
+    responses((status = 200, description = "Failed instances (DLQ)", body = Vec<TaskInstance>))
+)]
+pub(crate) async fn list_dlq(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -470,7 +553,15 @@ async fn list_dlq(
 }
 
 /// Retry a failed instance: reset to scheduled with immediate fire time.
-async fn retry_instance(
+#[utoipa::path(post, path = "/instances/{id}/retry", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "Instance retried", body = serde_json::Value),
+        (status = 400, description = "Instance is not in failed state"),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn retry_instance(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {

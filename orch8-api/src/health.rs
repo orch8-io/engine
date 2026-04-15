@@ -13,12 +13,21 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Liveness probe: returns 200 if the process is running.
-async fn liveness() -> impl IntoResponse {
+#[utoipa::path(get, path = "/health/live", tag = "health",
+    responses((status = 200, description = "Process is alive"))
+)]
+pub(crate) async fn liveness() -> impl IntoResponse {
     StatusCode::OK
 }
 
 /// Readiness probe: returns 200 if the database is reachable.
-async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
+#[utoipa::path(get, path = "/health/ready", tag = "health",
+    responses(
+        (status = 200, description = "Database is reachable"),
+        (status = 503, description = "Database is unreachable"),
+    )
+)]
+pub(crate) async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
     match state.storage.ping().await {
         Ok(()) => StatusCode::OK,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,

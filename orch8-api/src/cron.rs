@@ -5,6 +5,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::cron::CronSchedule;
@@ -19,8 +20,8 @@ pub fn routes() -> Router<AppState> {
         .route("/cron/{id}", get(get_cron).put(update_cron).delete(delete_cron))
 }
 
-#[derive(Deserialize)]
-struct CreateCronRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CreateCronRequest {
     tenant_id: TenantId,
     namespace: Namespace,
     sequence_id: SequenceId,
@@ -41,8 +42,8 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Deserialize)]
-struct UpdateCronRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct UpdateCronRequest {
     cron_expr: Option<String>,
     timezone: Option<String>,
     enabled: Option<bool>,
@@ -50,22 +51,27 @@ struct UpdateCronRequest {
 }
 
 #[derive(Deserialize)]
-struct ListCronQuery {
+pub(crate) struct ListCronQuery {
     tenant_id: Option<String>,
 }
 
-async fn create_cron(
+#[utoipa::path(post, path = "/cron", tag = "cron",
+    request_body = CreateCronRequest,
+    responses(
+        (status = 201, description = "Cron schedule created", body = serde_json::Value),
+        (status = 400, description = "Invalid cron expression"),
+    )
+)]
+pub(crate) async fn create_cron(
     State(state): State<AppState>,
     Json(req): Json<CreateCronRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Validate cron expression.
     orch8_engine::cron::validate_cron_expr(&req.cron_expr)
         .map_err(|e| ApiError::InvalidArgument(format!("invalid cron expression: {e}")))?;
 
     let now = Utc::now();
     let id = Uuid::new_v4();
 
-    // Calculate initial next_fire_at.
     let schedule = CronSchedule {
         id,
         tenant_id: req.tenant_id,
@@ -81,7 +87,6 @@ async fn create_cron(
         updated_at: now,
     };
 
-    // Compute next fire time from the cron expression.
     let next_fire = orch8_engine::cron::calculate_next_fire(&schedule);
     let schedule = CronSchedule {
         next_fire_at: next_fire,
@@ -103,7 +108,14 @@ async fn create_cron(
     ))
 }
 
-async fn get_cron(
+#[utoipa::path(get, path = "/cron/{id}", tag = "cron",
+    params(("id" = Uuid, Path, description = "Cron schedule ID")),
+    responses(
+        (status = 200, description = "Cron schedule found", body = CronSchedule),
+        (status = 404, description = "Cron schedule not found"),
+    )
+)]
+pub(crate) async fn get_cron(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -117,7 +129,11 @@ async fn get_cron(
     Ok(Json(schedule))
 }
 
-async fn list_cron(
+#[utoipa::path(get, path = "/cron", tag = "cron",
+    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
+    responses((status = 200, description = "List of cron schedules", body = Vec<CronSchedule>))
+)]
+pub(crate) async fn list_cron(
     State(state): State<AppState>,
     Query(q): Query<ListCronQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -131,7 +147,16 @@ async fn list_cron(
     Ok(Json(schedules))
 }
 
-async fn update_cron(
+#[utoipa::path(put, path = "/cron/{id}", tag = "cron",
+    params(("id" = Uuid, Path, description = "Cron schedule ID")),
+    request_body = UpdateCronRequest,
+    responses(
+        (status = 200, description = "Cron schedule updated", body = CronSchedule),
+        (status = 400, description = "Invalid cron expression"),
+        (status = 404, description = "Cron schedule not found"),
+    )
+)]
+pub(crate) async fn update_cron(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateCronRequest>,
@@ -158,7 +183,6 @@ async fn update_cron(
         schedule.metadata = metadata;
     }
 
-    // Recalculate next fire time.
     schedule.next_fire_at = orch8_engine::cron::calculate_next_fire(&schedule);
 
     state
@@ -170,7 +194,11 @@ async fn update_cron(
     Ok(Json(schedule))
 }
 
-async fn delete_cron(
+#[utoipa::path(delete, path = "/cron/{id}", tag = "cron",
+    params(("id" = Uuid, Path, description = "Cron schedule ID")),
+    responses((status = 204, description = "Cron schedule deleted"))
+)]
+pub(crate) async fn delete_cron(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {

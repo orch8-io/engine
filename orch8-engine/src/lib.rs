@@ -1,6 +1,7 @@
 pub mod cron;
 pub mod error;
 pub mod evaluator;
+pub mod expression;
 pub mod handlers;
 pub mod lifecycle;
 pub mod metrics;

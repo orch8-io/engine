@@ -49,6 +49,12 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl From<StorageError> for ApiError {
+    fn from(err: StorageError) -> Self {
+        Self::from_storage(err, "resource")
+    }
+}
+
 impl From<EngineError> for ApiError {
     fn from(err: EngineError) -> Self {
         match err {

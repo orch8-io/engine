@@ -1,0 +1,119 @@
+use utoipa::OpenApi;
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Orch8.io API",
+        description = "Durable task sequencing engine — REST API",
+        version = "0.1.0",
+        license(name = "BUSL-1.1"),
+    ),
+    paths(
+        // Health
+        crate::health::liveness,
+        crate::health::readiness,
+        // Sequences
+        crate::sequences::create_sequence,
+        crate::sequences::get_sequence,
+        crate::sequences::get_sequence_by_name,
+        // Instances
+        crate::instances::create_instance,
+        crate::instances::list_instances,
+        crate::instances::create_instances_batch,
+        crate::instances::get_instance,
+        crate::instances::update_state,
+        crate::instances::update_context,
+        crate::instances::send_signal,
+        crate::instances::get_outputs,
+        crate::instances::get_execution_tree,
+        crate::instances::retry_instance,
+        crate::instances::bulk_update_state,
+        crate::instances::bulk_reschedule,
+        crate::instances::list_dlq,
+        // Cron
+        crate::cron::create_cron,
+        crate::cron::get_cron,
+        crate::cron::list_cron,
+        crate::cron::update_cron,
+        crate::cron::delete_cron,
+        // Workers
+        crate::workers::poll_tasks,
+        crate::workers::complete_task,
+        crate::workers::fail_task,
+        crate::workers::heartbeat_task,
+        // Pools
+        crate::pools::create_pool,
+        crate::pools::list_pools,
+        crate::pools::get_pool,
+        crate::pools::delete_pool,
+        crate::pools::list_resources,
+        crate::pools::add_resource,
+        crate::pools::update_resource,
+        crate::pools::delete_resource,
+    ),
+    components(schemas(
+        // IDs
+        orch8_types::ids::InstanceId,
+        orch8_types::ids::SequenceId,
+        orch8_types::ids::ExecutionNodeId,
+        orch8_types::ids::BlockId,
+        orch8_types::ids::TenantId,
+        orch8_types::ids::Namespace,
+        orch8_types::ids::ResourceKey,
+        // Instance
+        orch8_types::instance::InstanceState,
+        orch8_types::instance::Priority,
+        orch8_types::instance::TaskInstance,
+        // Context
+        orch8_types::context::ExecutionContext,
+        orch8_types::context::RuntimeContext,
+        orch8_types::context::AuditEntry,
+        // Execution tree
+        orch8_types::execution::NodeState,
+        orch8_types::execution::BlockType,
+        orch8_types::execution::ExecutionNode,
+        // Sequence
+        orch8_types::sequence::SequenceDefinition,
+        orch8_types::sequence::BlockDefinition,
+        orch8_types::sequence::StepDef,
+        orch8_types::sequence::DelaySpec,
+        orch8_types::sequence::SendWindow,
+        orch8_types::sequence::ContextAccess,
+        orch8_types::sequence::HumanInputDef,
+        orch8_types::sequence::RetryPolicy,
+        orch8_types::sequence::ParallelDef,
+        orch8_types::sequence::RaceDef,
+        orch8_types::sequence::RaceSemantics,
+        orch8_types::sequence::TryCatchDef,
+        orch8_types::sequence::LoopDef,
+        orch8_types::sequence::ForEachDef,
+        orch8_types::sequence::RouterDef,
+        orch8_types::sequence::Route,
+        // Signal
+        orch8_types::signal::Signal,
+        orch8_types::signal::SignalType,
+        // Output
+        orch8_types::output::BlockOutput,
+        // Cron
+        orch8_types::cron::CronSchedule,
+        // Worker
+        orch8_types::worker::WorkerTask,
+        orch8_types::worker::WorkerTaskState,
+        // Pools
+        orch8_types::pool::ResourcePool,
+        orch8_types::pool::PoolResource,
+        orch8_types::pool::RotationStrategy,
+        crate::pools::CreatePoolRequest,
+        crate::pools::AddResourceRequest,
+        crate::pools::UpdateResourceRequest,
+    )),
+    tags(
+        (name = "health", description = "Health check endpoints"),
+        (name = "sequences", description = "Sequence definition management"),
+        (name = "instances", description = "Task instance lifecycle"),
+        (name = "cron", description = "Cron schedule management"),
+        (name = "workers", description = "External worker task polling"),
+        (name = "pools", description = "Resource pool management"),
+    )
+)]
+pub struct ApiDoc;

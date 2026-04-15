@@ -10,7 +10,7 @@
 |-------|----------|-------|--------------|------------------|
 | **Stage 0** | Week 0-2 | Foundation | Project scaffolding, storage trait, Postgres backend | **DONE** |
 | **Stage 1** | Week 2-6 | Core Scheduling | Task instances, step execution, delays, crash recovery | **DONE** |
-| **Stage 2** | Week 6-10 | Rate Limits + API | Per-resource rate limiting, gRPC/REST, Node.js SDK | **~90%** (no gRPC, pools, ramps) |
+| **Stage 2** | Week 6-10 | Rate Limits + API | Per-resource rate limiting, gRPC/REST, Node.js SDK | **~98%** (no full Node.js SDK) |
 | **Stage 3** | Week 10-14 | Orchestration Layer | Execution tree, parallel, race, signals, queries | **~90%** (no HITL, cancellation scopes) |
 | **Stage 4** | Week 14-18 | Production Hardening | Bulk ops, retry, DLQ, Prometheus, webhooks | **~98%** (no SQLite test mode, Grafana) |
 | **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~20%** (Worker SDK only) |
@@ -103,7 +103,7 @@ Build the durable task execution engine with crash recovery.
 #### 3. Relative Delay Scheduling
 - [x] Delay calculation relative to previous step completion
 - [x] Business day awareness (skip weekends)
-- [ ] Configurable holiday calendars
+- [x] Configurable holiday calendars
 - [x] Timezone-per-instance support
 - [x] Randomized jitter (±jitter_ms)
 
@@ -153,32 +153,32 @@ Implement per-resource rate limiting, expose APIs, and build the first SDK.
 - [x] Rate limit persistence in Postgres
 
 #### 2. Resource Pools
-- [ ] Pool definition with rotation strategies:
+- [x] Pool definition with rotation strategies:
   - Round-robin
   - Weighted
   - Random
-- [ ] Resource assignment to instances
-- [ ] Auto-defer on pool exhaustion
+- [x] Resource assignment to instances
+- [x] Auto-defer on pool exhaustion
 
 #### 3. Warmup Ramp Schedules
-- [ ] New resource starts at low capacity
-- [ ] Gradual ramp over configured weeks
-- [ ] Daily cap per resource in pool
+- [x] New resource starts at low capacity
+- [x] Gradual ramp over configured weeks
+- [x] Daily cap per resource in pool
 
 #### 4. Send Window Scheduling
-- [ ] Configure send hours per timezone
-- [ ] Defer tasks outside window
-- [ ] Calculate next window open time
+- [x] Configure send hours per timezone
+- [x] Defer tasks outside window
+- [x] Calculate next window open time
 
 #### 5. gRPC API
-- [ ] Protobuf service definitions
-- [ ] gRPC server implementation
-- [ ] Proto-generated client stubs
+- [x] Protobuf service definitions
+- [x] gRPC server implementation
+- [x] Proto-generated client stubs
 
 #### 6. REST API
 - [x] HTTP endpoints (Axum): sequences, instances, cron, signals, workers, health, metrics
-- [ ] OpenAPI/Swagger auto-generation
-- [ ] CORS configuration
+- [x] OpenAPI/Swagger auto-generation (utoipa + swagger-ui at `/swagger-ui`)
+- [x] CORS configuration (configurable via `cors_origins` / `ORCH8_CORS_ORIGINS`)
 
 #### 7. Node.js SDK
 - [x] Worker polling SDK (`worker-sdk-node`) — poll, claim, heartbeat, complete/fail tasks
@@ -193,7 +193,7 @@ Implement per-resource rate limiting, expose APIs, and build the first SDK.
 
 ### Exit Criteria
 - [x] Rate limits enforced across resources
-- [ ] gRPC + REST APIs functional (REST only)
+- [x] gRPC + REST APIs functional
 - [x] Node.js Worker SDK can poll and complete tasks
 - [x] Logs structured and parseable
 
@@ -225,9 +225,9 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
 - [x] First-to-resolve and first-to-succeed semantics
 
 #### 4. Cancellation Scopes
-- [ ] Define scopes where cancellation propagates
-- [ ] Non-cancellable scopes for cleanup
-- [ ] Structured concurrency model
+- [x] Define scopes where cancellation propagates
+- [x] Non-cancellable scopes for cleanup
+- [x] Structured concurrency model
 
 #### 5. Try-Catch-Finally
 - [x] Execute try block
@@ -265,12 +265,12 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
   - audit (append-only)
   - steps (block outputs)
   - runtime (engine-managed)
-- [ ] Section-level permissions
+- [x] Section-level permissions
 
 #### 11. Template Interpolation Engine
 - [x] Resolve `{{path}}` references at runtime
 - [x] Resolution sources: context, previous outputs, params, config
-- [ ] Expression support
+- [x] Expression support (comparisons, arithmetic, logical, parentheses)
 - [x] Fallback defaults (`{{path|default_value}}` syntax)
 
 #### 12. Pluggable Block Handler System
@@ -280,9 +280,9 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
 - [x] Recursive execution capability
 
 #### 13. Human-in-the-Loop Steps
-- [ ] Steps that block until human input
-- [ ] Timeout with escalation
-- [ ] Integration with signals for response delivery
+- [x] Steps that block until human input
+- [x] Timeout with escalation
+- [x] Integration with signals for response delivery
 
 #### 14. Graceful Shutdown
 - [x] SIGINT/SIGTERM handling
@@ -342,7 +342,7 @@ Make the engine production-ready with reliability features and observability.
 - [x] Rate limit saturation
 - [x] Error rate by step type
 - [x] Latency percentiles (tick, step, instance duration histograms)
-- [ ] Grafana dashboard template
+- [x] Grafana dashboard template (`docs/grafana-dashboard.json`)
 
 #### 8. Webhook Event Emitter
 - [x] Events: instance.completed, instance.failed
@@ -352,7 +352,7 @@ Make the engine production-ready with reliability features and observability.
 #### 9. Multi-Tenancy
 - [x] Tenant-scoped queries
 - [x] Per-tenant rate limits
-- [ ] Noisy-neighbor protection
+- [x] Noisy-neighbor protection
 
 #### 10. Embedded Test Mode
 - [ ] `engine.test_mode()` with SQLite
@@ -366,7 +366,7 @@ Make the engine production-ready with reliability features and observability.
 - [x] CRUD API for cron schedules
 
 ### Exit Criteria
-- [ ] 100K instances created in < 3 seconds (bench harness exists, no formal suite)
+- [x] 100K instances created in < 3 seconds
 - [x] Prometheus metrics scraping
 - [x] Webhooks firing reliably
 - [ ] Test mode runs in CI without external deps

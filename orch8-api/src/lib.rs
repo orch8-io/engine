@@ -3,6 +3,9 @@ pub mod error;
 pub mod health;
 pub mod instances;
 pub mod metrics;
+#[allow(clippy::needless_for_each)]
+pub mod openapi;
+pub mod pools;
 pub mod sequences;
 pub mod workers;
 
@@ -25,5 +28,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(instances::routes())
         .merge(cron::routes())
         .merge(workers::routes())
+        .merge(pools::routes())
         .with_state(state)
 }

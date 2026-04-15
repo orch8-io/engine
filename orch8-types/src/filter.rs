@@ -1,7 +1,9 @@
+use serde::Deserialize;
+
 use crate::ids::{Namespace, SequenceId, TenantId};
 use crate::instance::{InstanceState, Priority};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct InstanceFilter {
     pub tenant_id: Option<TenantId>,
     pub namespace: Option<Namespace>,

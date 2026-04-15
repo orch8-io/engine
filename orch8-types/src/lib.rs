@@ -7,6 +7,7 @@ pub mod filter;
 pub mod ids;
 pub mod instance;
 pub mod output;
+pub mod pool;
 pub mod rate_limit;
 pub mod sequence;
 pub mod signal;

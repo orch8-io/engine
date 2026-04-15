@@ -19,7 +19,14 @@ pub fn routes() -> Router<AppState> {
         .route("/sequences/by-name", get(get_sequence_by_name))
 }
 
-async fn create_sequence(
+#[utoipa::path(post, path = "/sequences", tag = "sequences",
+    request_body = SequenceDefinition,
+    responses(
+        (status = 201, description = "Sequence created", body = serde_json::Value),
+        (status = 409, description = "Sequence already exists"),
+    )
+)]
+pub(crate) async fn create_sequence(
     State(state): State<AppState>,
     Json(seq): Json<SequenceDefinition>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -35,7 +42,14 @@ async fn create_sequence(
     ))
 }
 
-async fn get_sequence(
+#[utoipa::path(get, path = "/sequences/{id}", tag = "sequences",
+    params(("id" = Uuid, Path, description = "Sequence ID")),
+    responses(
+        (status = 200, description = "Sequence found", body = SequenceDefinition),
+        (status = 404, description = "Sequence not found"),
+    )
+)]
+pub(crate) async fn get_sequence(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -50,14 +64,26 @@ async fn get_sequence(
 }
 
 #[derive(Deserialize)]
-struct ByNameQuery {
+pub(crate) struct ByNameQuery {
     tenant_id: String,
     namespace: String,
     name: String,
     version: Option<i32>,
 }
 
-async fn get_sequence_by_name(
+#[utoipa::path(get, path = "/sequences/by-name", tag = "sequences",
+    params(
+        ("tenant_id" = String, Query, description = "Tenant ID"),
+        ("namespace" = String, Query, description = "Namespace"),
+        ("name" = String, Query, description = "Sequence name"),
+        ("version" = Option<i32>, Query, description = "Optional version"),
+    ),
+    responses(
+        (status = 200, description = "Sequence found", body = SequenceDefinition),
+        (status = 404, description = "Sequence not found"),
+    )
+)]
+pub(crate) async fn get_sequence_by_name(
     State(state): State<AppState>,
     Query(q): Query<ByNameQuery>,
 ) -> Result<impl IntoResponse, ApiError> {

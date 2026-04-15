@@ -42,6 +42,10 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
                 retry: None,
                 timeout: None,
                 rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
             })
         })
         .collect();
@@ -167,7 +171,7 @@ async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
     let mut claim_ticks = 0u32;
     loop {
         let claimed = storage
-            .claim_due_instances(Utc::now(), batch_size)
+            .claim_due_instances(Utc::now(), batch_size, 0)
             .await
             .unwrap();
         if claimed.is_empty() {

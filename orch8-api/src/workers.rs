@@ -4,6 +4,7 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::instance::InstanceState;
@@ -22,8 +23,8 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/tasks/{id}/heartbeat", post(heartbeat_task))
 }
 
-#[derive(Deserialize)]
-struct PollRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PollRequest {
     handler_name: String,
     worker_id: String,
     #[serde(default = "default_poll_limit")]
@@ -34,7 +35,11 @@ fn default_poll_limit() -> u32 {
     1
 }
 
-async fn poll_tasks(
+#[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
+    request_body = PollRequest,
+    responses((status = 200, description = "Claimed worker tasks", body = Vec<orch8_types::worker::WorkerTask>))
+)]
+pub(crate) async fn poll_tasks(
     State(state): State<AppState>,
     Json(req): Json<PollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -47,18 +52,25 @@ async fn poll_tasks(
     Ok(Json(tasks))
 }
 
-#[derive(Deserialize)]
-struct CompleteRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct CompleteRequest {
     worker_id: String,
     output: serde_json::Value,
 }
 
-async fn complete_task(
+#[utoipa::path(post, path = "/workers/tasks/{id}/complete", tag = "workers",
+    params(("id" = Uuid, Path, description = "Worker task ID")),
+    request_body = CompleteRequest,
+    responses(
+        (status = 200, description = "Task completed"),
+        (status = 404, description = "Worker task not found"),
+    )
+)]
+pub(crate) async fn complete_task(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
     Json(req): Json<CompleteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Mark the worker task as completed.
     let updated = state
         .storage
         .complete_worker_task(task_id, &req.worker_id, &req.output)
@@ -69,7 +81,6 @@ async fn complete_task(
         return Err(ApiError::NotFound(format!("worker_task {task_id}")));
     }
 
-    // Fetch the task to get instance_id and block_id for the block output.
     let task = state
         .storage
         .get_worker_task(task_id)
@@ -77,7 +88,6 @@ async fn complete_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
-    // Build BlockOutput from the worker's result.
     let output_json = serde_json::to_string(&req.output).unwrap_or_default();
     let task_block_id = task.block_id.clone();
     let block_output = BlockOutput {
@@ -91,7 +101,6 @@ async fn complete_task(
         created_at: chrono::Utc::now(),
     };
 
-    // Save block output and transition instance Waiting → Scheduled in one transaction.
     state
         .storage
         .save_output_and_transition(
@@ -103,7 +112,6 @@ async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
-    // If this instance uses an execution tree, mark the corresponding node as completed.
     let tree = state
         .storage
         .get_execution_tree(task.instance_id)
@@ -123,15 +131,23 @@ async fn complete_task(
     Ok(StatusCode::OK)
 }
 
-#[derive(Deserialize)]
-struct FailRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct FailRequest {
     worker_id: String,
     message: String,
     #[serde(default)]
     retryable: bool,
 }
 
-async fn fail_task(
+#[utoipa::path(post, path = "/workers/tasks/{id}/fail", tag = "workers",
+    params(("id" = Uuid, Path, description = "Worker task ID")),
+    request_body = FailRequest,
+    responses(
+        (status = 200, description = "Task failed"),
+        (status = 404, description = "Worker task not found"),
+    )
+)]
+pub(crate) async fn fail_task(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
     Json(req): Json<FailRequest>,
@@ -153,7 +169,6 @@ async fn fail_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
-    // Check if this instance uses an execution tree.
     let tree = state
         .storage
         .get_execution_tree(task.instance_id)
@@ -162,14 +177,12 @@ async fn fail_task(
     let has_tree = !tree.is_empty();
 
     if req.retryable {
-        // Delete the failed task so the scheduler can re-create it on re-dispatch.
         state
             .storage
             .delete_worker_task(task_id)
             .await
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
-        // Re-schedule instance so the scheduler re-dispatches the step.
         state
             .storage
             .update_instance_state(
@@ -180,9 +193,6 @@ async fn fail_task(
             .await
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
     } else if has_tree {
-        // Permanent failure in a tree-based instance — mark the execution node
-        // as failed and re-schedule the instance so the evaluator can handle it
-        // (e.g., try-catch can catch the failure).
         if let Some(node) = tree.iter().find(|n| {
             n.block_id == task.block_id
                 && matches!(n.state, NodeState::Running | NodeState::Waiting)
@@ -203,7 +213,6 @@ async fn fail_task(
             .await
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
     } else {
-        // Permanent failure — mark instance as failed.
         state
             .storage
             .update_instance_state(task.instance_id, InstanceState::Failed, None)
@@ -214,12 +223,20 @@ async fn fail_task(
     Ok(StatusCode::OK)
 }
 
-#[derive(Deserialize)]
-struct HeartbeatRequest {
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct HeartbeatRequest {
     worker_id: String,
 }
 
-async fn heartbeat_task(
+#[utoipa::path(post, path = "/workers/tasks/{id}/heartbeat", tag = "workers",
+    params(("id" = Uuid, Path, description = "Worker task ID")),
+    request_body = HeartbeatRequest,
+    responses(
+        (status = 200, description = "Heartbeat updated"),
+        (status = 404, description = "Worker task not found"),
+    )
+)]
+pub(crate) async fn heartbeat_task(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
     Json(req): Json<HeartbeatRequest>,

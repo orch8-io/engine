@@ -81,6 +81,7 @@ pub async fn run_tick_loop(
                     &handlers,
                     &semaphore,
                     batch_size,
+                    config.max_instances_per_tenant,
                     &webhook_config,
                     &sequence_cache,
                 ).await {
@@ -107,13 +108,14 @@ async fn process_tick(
     handlers: &Arc<HandlerRegistry>,
     semaphore: &Arc<Semaphore>,
     batch_size: u32,
+    max_per_tenant: u32,
     webhook_config: &Arc<WebhookConfig>,
     sequence_cache: &Arc<Cache<SequenceId, Arc<SequenceDefinition>>>,
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
     let now = Utc::now();
-    let instances = storage.claim_due_instances(now, batch_size).await?;
+    let instances = storage.claim_due_instances(now, batch_size, max_per_tenant).await?;
 
     if instances.is_empty() {
         return Ok(());
@@ -244,6 +246,9 @@ async fn process_instance(
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
 
+    // Fetch sequence definition early — needed for cancellation scopes and evaluation.
+    let sequence = get_sequence_cached(storage, sequence_cache, instance.sequence_id).await?;
+
     // claim_due_instances already set state to Running.
     // Process any pending signals (using pre-fetched data).
     if !prefetched.signals.is_empty() {
@@ -252,6 +257,7 @@ async fn process_instance(
             instance_id,
             InstanceState::Running,
             prefetched.signals,
+            Some(&sequence),
         )
         .await?;
         if abort {
@@ -278,8 +284,6 @@ async fn process_instance(
         }
     }
 
-    // Fetch sequence definition — cached to avoid repeated DB lookups.
-    let sequence = get_sequence_cached(storage, sequence_cache, instance.sequence_id).await?;
 
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
@@ -482,8 +486,12 @@ async fn check_step_delay(
         return Ok(false);
     };
 
-    let fire_at =
-        crate::scheduling::delay::calculate_next_fire_at(Utc::now(), delay, &instance.timezone);
+    let fire_at = crate::scheduling::delay::calculate_next_fire_at(
+        Utc::now(),
+        delay,
+        &instance.timezone,
+        Some(&instance.context.config),
+    );
 
     crate::lifecycle::transition_instance(
         storage,
@@ -499,6 +507,40 @@ async fn check_step_delay(
         block_id = %step_def.id,
         fire_at = %fire_at,
         "step delayed, re-scheduling instance"
+    );
+    Ok(true)
+}
+
+/// Check if the step has a send window and defer if outside it. Returns `true` if deferred.
+async fn check_send_window(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Result<bool, EngineError> {
+    let Some(window) = &step_def.send_window else {
+        return Ok(false);
+    };
+
+    let Some(next_open) =
+        crate::scheduling::send_window::check_window(Utc::now(), window, &instance.timezone)
+    else {
+        return Ok(false); // Inside window
+    };
+
+    crate::lifecycle::transition_instance(
+        storage,
+        instance.id,
+        InstanceState::Running,
+        InstanceState::Scheduled,
+        Some(next_open),
+    )
+    .await?;
+
+    debug!(
+        instance_id = %instance.id,
+        block_id = %step_def.id,
+        next_open = %next_open,
+        "step outside send window, deferring"
     );
     Ok(true)
 }
@@ -542,6 +584,107 @@ async fn check_step_rate_limit(
     Ok(false)
 }
 
+/// Check if a human-in-the-loop step has received its input signal.
+/// If the response signal exists, stores it as block output and returns `false` (continue).
+/// If not received yet, pauses the instance and returns `true` (deferred).
+async fn check_human_input(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+) -> Result<bool, EngineError> {
+    let signal_name = format!("human_input:{}", step_def.id.0);
+
+    // Check if the response signal has already been delivered.
+    let signals = storage.get_pending_signals(instance.id).await?;
+    for signal in &signals {
+        if let orch8_types::signal::SignalType::Custom(name) = &signal.signal_type {
+            if *name == signal_name {
+                // Human responded — store payload as block output and continue execution.
+                let output = orch8_types::output::BlockOutput {
+                    id: uuid::Uuid::new_v4(),
+                    instance_id: instance.id,
+                    block_id: step_def.id.clone(),
+                    output: signal.payload.clone(),
+                    output_ref: None,
+                    output_size: serde_json::to_vec(&signal.payload)
+                        .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
+                        .unwrap_or(0),
+                    attempt: 0,
+                    created_at: chrono::Utc::now(),
+                };
+                storage.save_block_output(&output).await?;
+                storage.mark_signal_delivered(signal.id).await?;
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %step_def.id,
+                    "human input received"
+                );
+                return Ok(false); // Continue execution
+            }
+        }
+    }
+
+    // No response yet. Check timeout.
+    if let Some(timeout) = human_def.timeout {
+        if let Some(started) = instance.context.runtime.started_at {
+            let elapsed = chrono::Utc::now() - started;
+            if elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::days(365))
+            {
+                // Timeout expired — fail or escalate.
+                if let Some(ref escalation) = human_def.escalation_handler {
+                    debug!(
+                        instance_id = %instance.id,
+                        block_id = %step_def.id,
+                        escalation = %escalation,
+                        "human input timeout, escalating"
+                    );
+                    // Store escalation marker as output so the next step can handle it.
+                    let output = orch8_types::output::BlockOutput {
+                        id: uuid::Uuid::new_v4(),
+                        instance_id: instance.id,
+                        block_id: step_def.id.clone(),
+                        output: serde_json::json!({
+                            "_escalated": true,
+                            "_escalation_handler": escalation,
+                            "_timeout_seconds": timeout.as_secs()
+                        }),
+                        output_ref: None,
+                        output_size: 0,
+                        attempt: 0,
+                        created_at: chrono::Utc::now(),
+                    };
+                    storage.save_block_output(&output).await?;
+                    return Ok(false); // Continue — escalation handler proceeds
+                }
+                return Err(EngineError::StepTimeout {
+                    block_id: step_def.id.clone(),
+                    timeout,
+                });
+            }
+        }
+    }
+
+    // Still waiting — re-schedule the instance for a future tick.
+    let check_interval = chrono::Duration::seconds(5);
+    let next_check = chrono::Utc::now() + check_interval;
+    crate::lifecycle::transition_instance(
+        storage,
+        instance.id,
+        InstanceState::Running,
+        InstanceState::Scheduled,
+        Some(next_check),
+    )
+    .await?;
+
+    debug!(
+        instance_id = %instance.id,
+        block_id = %step_def.id,
+        "waiting for human input, deferring"
+    );
+    Ok(true) // Deferred
+}
+
 /// Execute a single step block within an instance.
 /// Returns `StepOutcome` wrapped in `Result` — the outcome tells the caller
 /// whether to continue executing more blocks or stop.
@@ -558,8 +701,20 @@ async fn execute_step_block(
         return Ok(StepOutcome::Deferred);
     }
 
+    if check_send_window(storage, instance, step_def).await? {
+        return Ok(StepOutcome::Deferred);
+    }
+
     if check_step_rate_limit(storage, instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
+    }
+
+    // Human-in-the-loop: if this step waits for human input, check if a response
+    // signal has been delivered. If not, pause the instance.
+    if let Some(human_def) = &step_def.wait_for_input {
+        if check_human_input(storage, instance, step_def, human_def).await? {
+            return Ok(StepOutcome::Deferred);
+        }
     }
 
     // Determine attempt number from previous output for this block.
@@ -582,7 +737,10 @@ async fn execute_step_block(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: step_def.params.clone(),
-        context: instance.context.clone(),
+        context: match &step_def.context_access {
+            Some(access) => instance.context.filtered(access),
+            None => instance.context.clone(),
+        },
         attempt,
         timeout: step_def.timeout,
     };

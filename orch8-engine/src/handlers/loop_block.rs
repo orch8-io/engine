@@ -46,8 +46,10 @@ pub async fn execute_loop(
         return Ok(true);
     }
 
-    // Evaluate condition (simple truthy check on context path).
-    let condition_value = evaluate_condition(&loop_def.condition, &instance.context);
+    // Evaluate condition using the shared expression evaluator.
+    let empty_outputs = serde_json::Value::Object(serde_json::Map::new());
+    let condition_value =
+        crate::expression::evaluate_condition(&loop_def.condition, &instance.context, &empty_outputs);
     if !condition_value {
         evaluator::complete_node(storage, node.id).await?;
         debug!(
@@ -89,35 +91,16 @@ pub async fn execute_loop(
     Ok(true)
 }
 
-/// Simple condition evaluation: check if a dot-path into context.data is truthy.
-fn evaluate_condition(condition: &str, context: &orch8_types::context::ExecutionContext) -> bool {
-    let parts: Vec<&str> = condition.split('.').collect();
-    let mut current = &context.data;
-    for part in &parts {
-        match current.get(part) {
-            Some(v) => current = v,
-            None => return false,
-        }
-    }
-    is_truthy(current)
-}
-
-fn is_truthy(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::Bool(b) => *b,
-        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        serde_json::Value::String(s) => !s.is_empty(),
-        serde_json::Value::Array(a) => !a.is_empty(),
-        serde_json::Value::Object(_) => true,
-    }
-}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::expression::{evaluate_condition, is_truthy};
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
+
+    fn empty() -> serde_json::Value {
+        json!({})
+    }
 
     #[test]
     fn truthy_values() {
@@ -143,7 +126,7 @@ mod tests {
             data: json!({"loop": {"active": true}}),
             ..Default::default()
         };
-        assert!(evaluate_condition("loop.active", &ctx));
-        assert!(!evaluate_condition("loop.missing", &ctx));
+        assert!(evaluate_condition("loop.active", &ctx, &empty()));
+        assert!(!evaluate_condition("loop.missing", &ctx, &empty()));
     }
 }

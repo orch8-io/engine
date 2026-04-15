@@ -301,7 +301,7 @@ fn count_ancestors(tree: &[ExecutionNode], mut node_id: ExecutionNodeId) -> usiz
 
 /// Find a block definition by ID in the block tree.
 #[allow(clippy::needless_lifetimes)]
-fn find_block<'a>(
+pub fn find_block<'a>(
     blocks: &'a [BlockDefinition],
     target_id: &BlockId,
 ) -> Option<&'a BlockDefinition> {
@@ -509,6 +509,10 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
         })];
 
         let found = find_block(&blocks, &BlockId("step_1".into()));
@@ -531,6 +535,10 @@ mod tests {
                     retry: None,
                     timeout: None,
                     rate_limit_key: None,
+                    send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
                 })]],
             },
         )];
@@ -549,6 +557,10 @@ mod tests {
             retry: None,
             timeout: None,
             rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
         });
         let (id, bt) = block_meta(&step);
         assert_eq!(id.0, "s");

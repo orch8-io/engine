@@ -54,10 +54,12 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Hot path. Uses `FOR UPDATE SKIP LOCKED` on Postgres.
     /// Returns instances with `next_fire_at <= now`, ordered by priority DESC, `next_fire_at` ASC.
+    /// When `max_per_tenant > 0`, applies per-tenant fairness cap (noisy-neighbor protection).
     async fn claim_due_instances(
         &self,
         now: DateTime<Utc>,
         limit: u32,
+        max_per_tenant: u32,
     ) -> Result<Vec<TaskInstance>, StorageError>;
 
     async fn update_instance_state(
@@ -313,6 +315,56 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: Uuid,
         block_id: &str,
     ) -> Result<u64, StorageError>;
+
+    // === Resource Pools ===
+
+    async fn create_resource_pool(
+        &self,
+        pool: &orch8_types::pool::ResourcePool,
+    ) -> Result<(), StorageError>;
+
+    async fn get_resource_pool(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::pool::ResourcePool>, StorageError>;
+
+    async fn list_resource_pools(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::pool::ResourcePool>, StorageError>;
+
+    async fn update_pool_round_robin_index(
+        &self,
+        pool_id: uuid::Uuid,
+        index: u32,
+    ) -> Result<(), StorageError>;
+
+    async fn delete_resource_pool(&self, id: uuid::Uuid) -> Result<(), StorageError>;
+
+    async fn add_pool_resource(
+        &self,
+        resource: &orch8_types::pool::PoolResource,
+    ) -> Result<(), StorageError>;
+
+    async fn list_pool_resources(
+        &self,
+        pool_id: uuid::Uuid,
+    ) -> Result<Vec<orch8_types::pool::PoolResource>, StorageError>;
+
+    async fn update_pool_resource(
+        &self,
+        resource: &orch8_types::pool::PoolResource,
+    ) -> Result<(), StorageError>;
+
+    async fn delete_pool_resource(&self, id: uuid::Uuid) -> Result<(), StorageError>;
+
+    /// Atomically increment the daily usage counter for a resource.
+    /// Resets the counter if the date has changed.
+    async fn increment_resource_usage(
+        &self,
+        resource_id: uuid::Uuid,
+        today: chrono::NaiveDate,
+    ) -> Result<(), StorageError>;
 
     // === Health ===
 
