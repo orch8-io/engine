@@ -83,10 +83,14 @@ async fn main() -> anyhow::Result<()> {
         registry: cb_registry,
     };
     let cors = build_cors_layer(&config.api.cors_origins);
+    let api_key = config.api.api_key.clone();
     let app = build_router(app_state)
         .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .layer(axum::middleware::from_fn(move |req, next| {
+            orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
+        }))
         .layer(cors);
 
     // Start HTTP server.
@@ -233,6 +237,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
         config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
+    }
+    if let Ok(val) = std::env::var("ORCH8_API_KEY") {
+        config.api.api_key = val;
     }
 }
 

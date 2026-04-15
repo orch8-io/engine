@@ -19,6 +19,7 @@ pub mod sequence;
 pub mod session;
 pub mod signal;
 pub mod worker;
+pub mod worker_filter;
 
 // Re-exports for convenience.
 pub use config::EngineConfig;

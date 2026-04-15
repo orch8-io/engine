@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod circuit_breakers;
 pub mod cluster;
 pub mod cron;

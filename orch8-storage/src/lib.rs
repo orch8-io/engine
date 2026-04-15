@@ -337,6 +337,18 @@ pub trait StorageBackend: Send + Sync + 'static {
         block_id: &str,
     ) -> Result<u64, StorageError>;
 
+    /// List worker tasks with optional filtering and pagination.
+    async fn list_worker_tasks(
+        &self,
+        filter: &orch8_types::worker_filter::WorkerTaskFilter,
+        pagination: &orch8_types::filter::Pagination,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Aggregate worker task statistics: counts by state, by handler, and active workers.
+    async fn worker_task_stats(
+        &self,
+    ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+
     // === Resource Pools ===
 
     async fn create_resource_pool(

@@ -16,6 +16,9 @@ pub enum ApiError {
     #[error("already exists: {0}")]
     AlreadyExists(String),
 
+    #[error("unauthorized")]
+    Unauthorized,
+
     #[error("internal: {0}")]
     Internal(String),
 
@@ -39,6 +42,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

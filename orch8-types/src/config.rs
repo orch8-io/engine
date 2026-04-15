@@ -148,6 +148,9 @@ pub struct ApiConfig {
     /// Comma-separated allowed origins for CORS. Use `*` to allow all.
     #[serde(default = "default_cors_origins")]
     pub cors_origins: String,
+    /// Optional API key for authenticating requests. Empty means no auth.
+    #[serde(default)]
+    pub api_key: String,
 }
 
 impl Default for ApiConfig {
@@ -156,6 +159,7 @@ impl Default for ApiConfig {
             grpc_addr: default_grpc_addr(),
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
+            api_key: String::new(),
         }
     }
 }
