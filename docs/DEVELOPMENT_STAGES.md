@@ -13,7 +13,7 @@
 | **Stage 2** | Week 6-10 | Rate Limits + API | Per-resource rate limiting, gRPC/REST, Node.js SDK | **~98%** (no full Node.js SDK) |
 | **Stage 3** | Week 10-14 | Orchestration Layer | Execution tree, parallel, race, signals, queries | **~90%** (no HITL, cancellation scopes) |
 | **Stage 4** | Week 14-18 | Production Hardening | Bulk ops, retry, DLQ, Prometheus, webhooks | **~98%** (no SQLite test mode, Grafana) |
-| **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~50%** (CLI, versioning, debug, externalization, checkpoints, audit log) |
+| **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~55%** (CLI, versioning, debug, externalization, checkpoints, audit log, SQLite standalone) |
 | **Stage 6** | Week 22+ | Enterprise + Scale | Go SDK, clustering, dashboard | **~60%** (8 features implemented) |
 
 ---
@@ -387,9 +387,10 @@ Expand SDK support and deployment options.
 - [ ] Async support
 
 #### 2. SQLite Backend
-- [ ] Embedded storage for dev/small deploy
-- [ ] Same schema as Postgres
-- [ ] Zero external dependencies
+- [x] Embedded storage for dev/small deploy
+- [x] Same schema as Postgres
+- [x] Zero external dependencies
+- [x] File-backed mode with WAL (`ORCH8_STORAGE_BACKEND=sqlite ORCH8_DATABASE_URL=./orch8.db`)
 
 #### 3. CLI Tool
 - [x] Admin operations:

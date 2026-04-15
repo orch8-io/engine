@@ -15,6 +15,9 @@ pub struct EngineConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
+    /// Storage backend: "postgres" (default) or "sqlite".
+    #[serde(default = "default_backend")]
+    pub backend: String,
     #[serde(default = "default_database_url")]
     pub url: String,
     #[serde(default = "default_max_connections")]
@@ -26,11 +29,16 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
+            backend: default_backend(),
             url: default_database_url(),
             max_connections: default_max_connections(),
             run_migrations: true,
         }
     }
+}
+
+fn default_backend() -> String {
+    "postgres".to_string()
 }
 
 fn default_database_url() -> String {

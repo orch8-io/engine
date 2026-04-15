@@ -23,6 +23,8 @@ use orch8_engine::Engine;
 use orch8_grpc::service::Orch8GrpcService;
 use orch8_grpc::Orch8ServiceServer;
 use orch8_storage::postgres::PostgresStorage;
+use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::StorageBackend;
 use orch8_types::config::EngineConfig;
 
 #[derive(Parser)]
@@ -50,23 +52,35 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting Orch8.io engine v{}", env!("CARGO_PKG_VERSION"));
 
-    // Connect to Postgres.
-    let storage = PostgresStorage::new(&config.database.url, config.database.max_connections)
-        .await
-        .context("Failed to connect to PostgreSQL")?;
-
-    tracing::info!("Connected to PostgreSQL");
-
-    // Run migrations.
-    if config.database.run_migrations {
-        storage
-            .run_migrations()
+    // Connect to storage backend.
+    let storage: Arc<dyn StorageBackend> = if config.database.backend == "sqlite" {
+        let url = &config.database.url;
+        let sqlite = if url == "sqlite::memory:" || url.is_empty() {
+            SqliteStorage::in_memory()
+                .await
+                .context("Failed to create in-memory SQLite storage")?
+        } else {
+            SqliteStorage::file(url)
+                .await
+                .context("Failed to open SQLite database")?
+        };
+        tracing::info!("Connected to SQLite ({})", url);
+        Arc::new(sqlite)
+    } else {
+        let pg = PostgresStorage::new(&config.database.url, config.database.max_connections)
             .await
-            .context("Failed to run migrations")?;
-        tracing::info!("Migrations applied");
-    }
+            .context("Failed to connect to PostgreSQL")?;
 
-    let storage = Arc::new(storage);
+        tracing::info!("Connected to PostgreSQL");
+
+        if config.database.run_migrations {
+            pg.run_migrations()
+                .await
+                .context("Failed to run migrations")?;
+            tracing::info!("Migrations applied");
+        }
+        Arc::new(pg)
+    };
 
     // Install Prometheus metrics recorder.
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -192,6 +206,9 @@ fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
 }
 
 fn apply_env_overrides(config: &mut EngineConfig) {
+    if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
+        config.database.backend = val;
+    }
     if let Ok(url) = std::env::var("ORCH8_DATABASE_URL") {
         config.database.url = url;
     }
