@@ -30,6 +30,7 @@ pub async fn execute_step_node(
         context: instance.context.clone(),
         attempt: 0,
         timeout: step_def.timeout,
+        externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
     };
 
     match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
@@ -65,6 +66,7 @@ async fn dispatch_step_to_external_worker(
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
+        queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
         context: serde_json::to_value(&instance.context).unwrap_or_default(),
         attempt: 0,

@@ -33,6 +33,9 @@ pub struct WorkerTask {
     pub instance_id: InstanceId,
     pub block_id: BlockId,
     pub handler_name: String,
+    /// Named task queue for routing to dedicated worker pools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
     pub params: serde_json::Value,
     /// Serialized `ExecutionContext` — kept as raw JSON to avoid coupling workers to Rust types.
     pub context: serde_json::Value,

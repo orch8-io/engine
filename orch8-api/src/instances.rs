@@ -28,6 +28,23 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/outputs", get(get_outputs))
         .route("/instances/{id}/tree", get(get_execution_tree))
         .route("/instances/{id}/retry", post(retry_instance))
+        .route(
+            "/instances/{id}/checkpoints",
+            get(list_checkpoints).post(save_checkpoint),
+        )
+        .route(
+            "/instances/{id}/checkpoints/latest",
+            get(get_latest_checkpoint),
+        )
+        .route(
+            "/instances/{id}/checkpoints/prune",
+            post(prune_checkpoints),
+        )
+        .route("/instances/{id}/audit", get(list_audit_log))
+        .route(
+            "/instances/{id}/inject-blocks",
+            post(inject_blocks),
+        )
         .route("/instances/bulk/state", patch(bulk_update_state))
         .route("/instances/bulk/reschedule", patch(bulk_reschedule))
         .route("/instances/dlq", get(list_dlq))
@@ -169,6 +186,8 @@ pub(crate) async fn create_instance(
         concurrency_key: req.concurrency_key,
         max_concurrency: req.max_concurrency,
         idempotency_key: req.idempotency_key,
+        session_id: None,
+        parent_instance_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -220,6 +239,8 @@ pub(crate) async fn create_instances_batch(
             concurrency_key: r.concurrency_key,
             max_concurrency: r.max_concurrency,
             idempotency_key: r.idempotency_key,
+            session_id: None,
+            parent_instance_id: None,
             created_at: now,
             updated_at: now,
         })
@@ -593,7 +614,165 @@ pub(crate) async fn retry_instance(
     ))
 }
 
+// === Checkpoints ===
+
+#[derive(Deserialize, ToSchema)]
+pub struct SaveCheckpointRequest {
+    checkpoint_data: serde_json::Value,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct PruneCheckpointsRequest {
+    /// Number of most recent checkpoints to keep.
+    keep: u32,
+}
+
+#[utoipa::path(post, path = "/instances/{id}/checkpoints", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = SaveCheckpointRequest,
+    responses(
+        (status = 201, description = "Checkpoint saved", body = serde_json::Value),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn save_checkpoint(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SaveCheckpointRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_id = InstanceId(id);
+
+    state
+        .storage
+        .get_instance(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    let checkpoint = orch8_types::checkpoint::Checkpoint {
+        id: Uuid::new_v4(),
+        instance_id,
+        checkpoint_data: req.checkpoint_data,
+        created_at: Utc::now(),
+    };
+
+    state
+        .storage
+        .save_checkpoint(&checkpoint)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "checkpoint"))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": checkpoint.id })),
+    ))
+}
+
+#[utoipa::path(get, path = "/instances/{id}/checkpoints", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses((status = 200, description = "List of checkpoints", body = Vec<orch8_types::checkpoint::Checkpoint>))
+)]
+pub(crate) async fn list_checkpoints(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let checkpoints = state
+        .storage
+        .list_checkpoints(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "checkpoints"))?;
+
+    Ok(Json(checkpoints))
+}
+
+#[utoipa::path(get, path = "/instances/{id}/checkpoints/latest", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses(
+        (status = 200, description = "Latest checkpoint", body = orch8_types::checkpoint::Checkpoint),
+        (status = 404, description = "No checkpoint found"),
+    )
+)]
+pub(crate) async fn get_latest_checkpoint(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let checkpoint = state
+        .storage
+        .get_latest_checkpoint(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "checkpoint"))?
+        .ok_or_else(|| ApiError::NotFound(format!("checkpoint for instance {id}")))?;
+
+    Ok(Json(checkpoint))
+}
+
+#[utoipa::path(post, path = "/instances/{id}/checkpoints/prune", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = PruneCheckpointsRequest,
+    responses((status = 200, description = "Pruned checkpoints", body = CountResponse))
+)]
+pub(crate) async fn prune_checkpoints(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PruneCheckpointsRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let count = state
+        .storage
+        .prune_checkpoints(InstanceId(id), req.keep)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "checkpoints"))?;
+
+    Ok(Json(CountResponse { count }))
+}
+
 /// Parse comma-separated state values.
+// === Audit Log ===
+
+#[utoipa::path(
+    get,
+    path = "/instances/{id}/audit",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    responses((status = 200, body = Vec<orch8_types::audit::AuditLogEntry>))
+)]
+async fn list_audit_log(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let entries = state
+        .storage
+        .list_audit_log(InstanceId(id), 200)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "audit_log"))?;
+    Ok(Json(entries))
+}
+
+// === Dynamic Step Injection ===
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct InjectBlocksRequest {
+    pub blocks: serde_json::Value,
+}
+
+#[utoipa::path(
+    post,
+    path = "/instances/{id}/inject-blocks",
+    params(("id" = Uuid, Path, description = "Instance ID")),
+    request_body = InjectBlocksRequest,
+    responses((status = 200, description = "Blocks injected"))
+)]
+async fn inject_blocks(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<InjectBlocksRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    state
+        .storage
+        .inject_blocks(InstanceId(id), &body.blocks)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    Ok(StatusCode::OK)
+}
+
 fn parse_states(s: &str) -> Vec<InstanceState> {
     s.split(',')
         .filter_map(|part| {

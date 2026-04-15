@@ -1,3 +1,7 @@
+// Postgres uses i32 for integer columns; our domain types use u32.
+// The values are always small enough that wrapping/sign-loss cannot occur.
+#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -52,11 +56,14 @@ impl StorageBackend for PostgresStorage {
     // === Sequences ===
 
     async fn create_sequence(&self, seq: &SequenceDefinition) -> Result<(), StorageError> {
-        let definition = serde_json::to_value(&seq.blocks)?;
+        let definition = serde_json::json!({
+            "blocks": seq.blocks,
+            "interceptors": seq.interceptors,
+        });
         sqlx::query(
             r"
-            INSERT INTO sequences (id, tenant_id, namespace, name, definition, version, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO sequences (id, tenant_id, namespace, name, definition, version, deprecated, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ",
         )
         .bind(seq.id.0)
@@ -65,6 +72,7 @@ impl StorageBackend for PostgresStorage {
         .bind(&seq.name)
         .bind(&definition)
         .bind(seq.version)
+        .bind(seq.deprecated)
         .bind(seq.created_at)
         .execute(&self.pool)
         .await?;
@@ -76,7 +84,7 @@ impl StorageBackend for PostgresStorage {
         id: SequenceId,
     ) -> Result<Option<SequenceDefinition>, StorageError> {
         let row = sqlx::query_as::<_, SequenceRow>(
-            "SELECT id, tenant_id, namespace, name, definition, version, created_at FROM sequences WHERE id = $1",
+            "SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at FROM sequences WHERE id = $1",
         )
         .bind(id.0)
         .fetch_optional(&self.pool)
@@ -120,6 +128,36 @@ impl StorageBackend for PostgresStorage {
         row.map(SequenceRow::into_definition).transpose()
     }
 
+    async fn list_sequence_versions(
+        &self,
+        tenant_id: &TenantId,
+        namespace: &Namespace,
+        name: &str,
+    ) -> Result<Vec<SequenceDefinition>, StorageError> {
+        let rows = sqlx::query_as::<_, SequenceRow>(
+            r"SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at
+              FROM sequences
+              WHERE tenant_id = $1 AND namespace = $2 AND name = $3
+              ORDER BY version DESC",
+        )
+        .bind(&tenant_id.0)
+        .bind(&namespace.0)
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(SequenceRow::into_definition)
+            .collect()
+    }
+
+    async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
+        sqlx::query("UPDATE sequences SET deprecated = TRUE WHERE id = $1")
+            .bind(id.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // === Task Instances ===
 
     async fn create_instance(&self, inst: &TaskInstance) -> Result<(), StorageError> {
@@ -130,8 +168,9 @@ impl StorageBackend for PostgresStorage {
                 (id, sequence_id, tenant_id, namespace, state, next_fire_at,
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
+                 session_id, parent_instance_id,
                  created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ",
         )
         .bind(inst.id.0)
@@ -147,6 +186,8 @@ impl StorageBackend for PostgresStorage {
         .bind(&inst.concurrency_key)
         .bind(inst.max_concurrency)
         .bind(&inst.idempotency_key)
+        .bind(inst.session_id)
+        .bind(inst.parent_instance_id.map(|id| id.0))
         .bind(inst.created_at)
         .bind(inst.updated_at)
         .execute(&self.pool)
@@ -171,6 +212,7 @@ impl StorageBackend for PostgresStorage {
                     (id, sequence_id, tenant_id, namespace, state, next_fire_at,
                      priority, timezone, metadata, context,
                      concurrency_key, max_concurrency, idempotency_key,
+                     session_id, parent_instance_id,
                      created_at, updated_at) ",
             );
             qb.push_values(chunk, |mut b, inst| {
@@ -188,6 +230,8 @@ impl StorageBackend for PostgresStorage {
                     .push_bind(&inst.concurrency_key)
                     .push_bind(inst.max_concurrency)
                     .push_bind(&inst.idempotency_key)
+                    .push_bind(inst.session_id)
+                    .push_bind(inst.parent_instance_id.map(|id| id.0))
                     .push_bind(inst.created_at)
                     .push_bind(inst.updated_at);
             });
@@ -204,7 +248,7 @@ impl StorageBackend for PostgresStorage {
             r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                       priority, timezone, metadata, context,
                       concurrency_key, max_concurrency, idempotency_key,
-                      created_at, updated_at
+                      session_id, parent_instance_id, created_at, updated_at
                FROM task_instances WHERE id = $1",
         )
         .bind(id.0)
@@ -240,7 +284,7 @@ impl StorageBackend for PostgresStorage {
                 RETURNING id, sequence_id, tenant_id, namespace, state, next_fire_at,
                           priority, timezone, metadata, context,
                           concurrency_key, max_concurrency, idempotency_key,
-                          created_at, updated_at
+                          session_id, parent_instance_id, created_at, updated_at
                 ",
             )
             .bind(now)
@@ -264,7 +308,7 @@ impl StorageBackend for PostgresStorage {
                 RETURNING id, sequence_id, tenant_id, namespace, state, next_fire_at,
                           priority, timezone, metadata, context,
                           concurrency_key, max_concurrency, idempotency_key,
-                          created_at, updated_at
+                          session_id, parent_instance_id, created_at, updated_at
                 ",
             )
             .bind(now)
@@ -313,6 +357,21 @@ impl StorageBackend for PostgresStorage {
         Ok(())
     }
 
+    async fn update_instance_sequence(
+        &self,
+        id: InstanceId,
+        new_sequence_id: SequenceId,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE task_instances SET sequence_id = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(new_sequence_id.0)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn merge_context_data(
         &self,
         id: InstanceId,
@@ -342,7 +401,7 @@ impl StorageBackend for PostgresStorage {
             r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                       priority, timezone, metadata, context,
                       concurrency_key, max_concurrency, idempotency_key,
-                      created_at, updated_at
+                      session_id, parent_instance_id, created_at, updated_at
                FROM task_instances WHERE 1=1",
         );
         apply_instance_filter(&mut qb, filter);
@@ -804,7 +863,7 @@ impl StorageBackend for PostgresStorage {
             r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                       priority, timezone, metadata, context,
                       concurrency_key, max_concurrency, idempotency_key,
-                      created_at, updated_at
+                      session_id, parent_instance_id, created_at, updated_at
                FROM task_instances
                WHERE tenant_id = $1 AND idempotency_key = $2",
         )
@@ -995,15 +1054,16 @@ impl StorageBackend for PostgresStorage {
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
         sqlx::query(
             r"INSERT INTO worker_tasks
-                (id, instance_id, block_id, handler_name, params, context,
+                (id, instance_id, block_id, handler_name, queue_name, params, context,
                  attempt, timeout_ms, state, created_at)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
               ON CONFLICT (instance_id, block_id) DO NOTHING",
         )
         .bind(task.id)
         .bind(task.instance_id.0)
         .bind(&task.block_id.0)
         .bind(&task.handler_name)
+        .bind(&task.queue_name)
         .bind(&task.params)
         .bind(&task.context)
         .bind(task.attempt)
@@ -1312,6 +1372,363 @@ impl StorageBackend for PostgresStorage {
         Ok(())
     }
 
+    // === Checkpoints ===
+
+    async fn save_checkpoint(
+        &self,
+        cp: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO checkpoints (id, instance_id, checkpoint_data, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(cp.id)
+        .bind(cp.instance_id.0)
+        .bind(&cp.checkpoint_data)
+        .bind(cp.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_latest_checkpoint(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        let row: Option<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(instance_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id, inst_id, data, created_at)| orch8_types::checkpoint::Checkpoint {
+            id,
+            instance_id: InstanceId(inst_id),
+            checkpoint_data: data,
+            created_at,
+        }))
+    }
+
+    async fn list_checkpoints(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        let rows: Vec<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC",
+        )
+        .bind(instance_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, inst_id, data, created_at)| orch8_types::checkpoint::Checkpoint {
+                id,
+                instance_id: InstanceId(inst_id),
+                checkpoint_data: data,
+                created_at,
+            })
+            .collect())
+    }
+
+    async fn prune_checkpoints(
+        &self,
+        instance_id: InstanceId,
+        keep: u32,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            r"DELETE FROM checkpoints WHERE instance_id = $1 AND id NOT IN (
+                SELECT id FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2
+              )",
+        )
+        .bind(instance_id.0)
+        .bind(i64::from(keep))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    // === Externalized State ===
+
+    async fn save_externalized_state(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO externalized_state (id, instance_id, ref_key, payload, created_at)
+              VALUES ($1, $2, $3, $4, NOW())
+              ON CONFLICT (ref_key) DO UPDATE SET payload = $4",
+        )
+        .bind(Uuid::new_v4())
+        .bind(instance_id.0)
+        .bind(ref_key)
+        .bind(payload)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_externalized_state(
+        &self,
+        ref_key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT payload FROM externalized_state WHERE ref_key = $1")
+                .bind(ref_key)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM externalized_state WHERE ref_key = $1")
+            .bind(ref_key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // === Health ===
+
+    // === Audit Log ===
+
+    async fn append_audit_log(
+        &self,
+        entry: &orch8_types::audit::AuditLogEntry,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO audit_log (id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(entry.id)
+        .bind(entry.instance_id.0)
+        .bind(&entry.tenant_id.0)
+        .bind(&entry.event_type)
+        .bind(&entry.from_state)
+        .bind(&entry.to_state)
+        .bind(&entry.block_id)
+        .bind(&entry.details)
+        .bind(entry.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_audit_log(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
+        let rows = sqlx::query_as::<_, AuditLogRow>(
+            r"SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
+              FROM audit_log WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(instance_id.0)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(AuditLogRow::into_entry).collect())
+    }
+
+    async fn list_audit_log_by_tenant(
+        &self,
+        tenant_id: &TenantId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
+        let rows = sqlx::query_as::<_, AuditLogRow>(
+            r"SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
+              FROM audit_log WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(&tenant_id.0)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(AuditLogRow::into_entry).collect())
+    }
+
+    // === Sessions ===
+
+    async fn create_session(
+        &self,
+        session: &orch8_types::session::Session,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO sessions (id, tenant_id, session_key, data, state, created_at, updated_at, expires_at)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        )
+        .bind(session.id)
+        .bind(&session.tenant_id.0)
+        .bind(&session.session_key)
+        .bind(&session.data)
+        .bind(session.state.to_string())
+        .bind(session.created_at)
+        .bind(session.updated_at)
+        .bind(session.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_session(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::session::Session>, StorageError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r"SELECT id, tenant_id, session_key, data, state, created_at, updated_at, expires_at
+              FROM sessions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(SessionRow::into_session))
+    }
+
+    async fn get_session_by_key(
+        &self,
+        tenant_id: &TenantId,
+        session_key: &str,
+    ) -> Result<Option<orch8_types::session::Session>, StorageError> {
+        let row = sqlx::query_as::<_, SessionRow>(
+            r"SELECT id, tenant_id, session_key, data, state, created_at, updated_at, expires_at
+              FROM sessions WHERE tenant_id = $1 AND session_key = $2",
+        )
+        .bind(&tenant_id.0)
+        .bind(session_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(SessionRow::into_session))
+    }
+
+    async fn update_session_data(
+        &self,
+        id: Uuid,
+        data: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE sessions SET data = $2, updated_at = NOW() WHERE id = $1")
+            .bind(id)
+            .bind(data)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_session_state(
+        &self,
+        id: Uuid,
+        state: orch8_types::session::SessionState,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE sessions SET state = $2, updated_at = NOW() WHERE id = $1")
+            .bind(id)
+            .bind(state.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_session_instances(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<TaskInstance>, StorageError> {
+        let rows = sqlx::query_as::<_, InstanceRow>(
+            r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      session_id, parent_instance_id, created_at, updated_at
+               FROM task_instances WHERE session_id = $1 ORDER BY created_at",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(InstanceRow::into_instance).collect()
+    }
+
+    // === Sub-Sequences ===
+
+    async fn get_child_instances(
+        &self,
+        parent_instance_id: InstanceId,
+    ) -> Result<Vec<TaskInstance>, StorageError> {
+        let rows = sqlx::query_as::<_, InstanceRow>(
+            r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
+                      priority, timezone, metadata, context,
+                      concurrency_key, max_concurrency, idempotency_key,
+                      session_id, parent_instance_id, created_at, updated_at
+               FROM task_instances WHERE parent_instance_id = $1 ORDER BY created_at",
+        )
+        .bind(parent_instance_id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(InstanceRow::into_instance).collect()
+    }
+
+    // === Task Queue Routing ===
+
+    async fn claim_worker_tasks_from_queue(
+        &self,
+        queue_name: &str,
+        handler_name: &str,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        let rows = sqlx::query_as::<_, WorkerTaskRow>(
+            r"
+            UPDATE worker_tasks
+            SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW()
+            WHERE id IN (
+                SELECT id FROM worker_tasks
+                WHERE handler_name = $1 AND state = 'pending' AND queue_name = $5
+                ORDER BY created_at ASC
+                LIMIT $3
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            ",
+        )
+        .bind(handler_name)
+        .bind(worker_id)
+        .bind(i64::from(limit))
+        .bind(worker_id)
+        .bind(queue_name)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    }
+
+    // === Dynamic Step Injection ===
+
+    async fn inject_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks_json: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        // Store injected blocks in instance metadata under `_injected_blocks`.
+        sqlx::query(
+            r"UPDATE task_instances
+              SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{_injected_blocks}',
+                  COALESCE(metadata->'_injected_blocks', '[]'::jsonb) || $2),
+                  updated_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(instance_id.0)
+        .bind(blocks_json)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_injected_blocks(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT metadata->'_injected_blocks' FROM task_instances WHERE id = $1",
+        )
+        .bind(instance_id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(v,)| if v.is_null() { None } else { Some(v) }))
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -1333,19 +1750,32 @@ struct SequenceRow {
     name: String,
     definition: serde_json::Value,
     version: i32,
+    deprecated: bool,
     created_at: DateTime<Utc>,
 }
 
 impl SequenceRow {
     fn into_definition(self) -> Result<SequenceDefinition, StorageError> {
-        let blocks = serde_json::from_value(self.definition)?;
+        // Support both old format (array of blocks) and new format ({blocks, interceptors}).
+        let (blocks, interceptors) = if self.definition.is_array() {
+            (serde_json::from_value(self.definition)?, None)
+        } else {
+            let blocks = serde_json::from_value(
+                self.definition.get("blocks").cloned().unwrap_or(serde_json::Value::Array(vec![])),
+            )?;
+            let interceptors = self.definition.get("interceptors")
+                .and_then(|v| if v.is_null() { None } else { serde_json::from_value(v.clone()).ok() });
+            (blocks, interceptors)
+        };
         Ok(SequenceDefinition {
             id: SequenceId(self.id),
             tenant_id: TenantId(self.tenant_id),
             namespace: Namespace(self.namespace),
             name: self.name,
             version: self.version,
+            deprecated: self.deprecated,
             blocks,
+            interceptors,
             created_at: self.created_at,
         })
     }
@@ -1366,6 +1796,8 @@ struct InstanceRow {
     concurrency_key: Option<String>,
     max_concurrency: Option<i32>,
     idempotency_key: Option<String>,
+    session_id: Option<Uuid>,
+    parent_instance_id: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -1408,6 +1840,8 @@ impl InstanceRow {
             concurrency_key: self.concurrency_key,
             max_concurrency: self.max_concurrency,
             idempotency_key: self.idempotency_key,
+            session_id: self.session_id,
+            parent_instance_id: self.parent_instance_id.map(InstanceId),
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -1575,6 +2009,7 @@ struct WorkerTaskRow {
     instance_id: Uuid,
     block_id: String,
     handler_name: String,
+    queue_name: Option<String>,
     params: serde_json::Value,
     context: serde_json::Value,
     attempt: i16,
@@ -1603,6 +2038,7 @@ impl WorkerTaskRow {
             instance_id: InstanceId(self.instance_id),
             block_id: BlockId(self.block_id),
             handler_name: self.handler_name,
+            queue_name: self.queue_name,
             params: self.params,
             context: self.context,
             attempt: self.attempt,
@@ -1682,6 +2118,67 @@ impl PoolResourceRow {
             warmup_days: self.warmup_days as u32,
             warmup_start_cap: self.warmup_start_cap as u32,
             created_at: self.created_at,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct AuditLogRow {
+    id: Uuid,
+    instance_id: Uuid,
+    tenant_id: String,
+    event_type: String,
+    from_state: Option<String>,
+    to_state: Option<String>,
+    block_id: Option<String>,
+    details: serde_json::Value,
+    created_at: DateTime<Utc>,
+}
+
+impl AuditLogRow {
+    fn into_entry(self) -> orch8_types::audit::AuditLogEntry {
+        orch8_types::audit::AuditLogEntry {
+            id: self.id,
+            instance_id: InstanceId(self.instance_id),
+            tenant_id: TenantId(self.tenant_id),
+            event_type: self.event_type,
+            from_state: self.from_state,
+            to_state: self.to_state,
+            block_id: self.block_id,
+            details: self.details,
+            created_at: self.created_at,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    id: Uuid,
+    tenant_id: String,
+    session_key: String,
+    data: serde_json::Value,
+    state: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl SessionRow {
+    fn into_session(self) -> orch8_types::session::Session {
+        let state = match self.state.as_str() {
+            "completed" => orch8_types::session::SessionState::Completed,
+            "expired" => orch8_types::session::SessionState::Expired,
+            _ => orch8_types::session::SessionState::Active,
+        };
+        orch8_types::session::Session {
+            id: self.id,
+            tenant_id: TenantId(self.tenant_id),
+            session_key: self.session_key,
+            data: self.data,
+            state,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            expires_at: self.expires_at,
         }
     }
 }

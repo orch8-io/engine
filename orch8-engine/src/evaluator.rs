@@ -62,7 +62,7 @@ fn build_nodes(
 
         // Recurse into children.
         match block {
-            BlockDefinition::Step(_) => {}
+            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
             BlockDefinition::Parallel(p) => {
                 for (i, branch) in p.branches.iter().enumerate() {
                     build_branch_nodes(instance_id, node_id, i, branch, out);
@@ -123,7 +123,7 @@ fn build_branch_nodes(
 
         // Recurse for nested composites within the branch.
         match block {
-            BlockDefinition::Step(_) => {}
+            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
             BlockDefinition::Parallel(p) => {
                 for (i, branch) in p.branches.iter().enumerate() {
                     build_branch_nodes(instance_id, node_id, i, branch, out);
@@ -168,6 +168,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
         BlockDefinition::ForEach(f) => (&f.id, BlockType::ForEach),
         BlockDefinition::Router(r) => (&r.id, BlockType::Router),
         BlockDefinition::TryCatch(tc) => (&tc.id, BlockType::TryCatch),
+        BlockDefinition::SubSequence(ss) => (&ss.id, BlockType::SubSequence),
     }
 }
 
@@ -314,13 +315,14 @@ pub fn find_block<'a>(
             BlockDefinition::ForEach(f) => &f.id,
             BlockDefinition::Router(r) => &r.id,
             BlockDefinition::TryCatch(tc) => &tc.id,
+            BlockDefinition::SubSequence(ss) => &ss.id,
         };
         if id == target_id {
             return Some(block);
         }
         // Recurse into children.
         let children = match block {
-            BlockDefinition::Step(_) => None,
+            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => None,
             BlockDefinition::Parallel(p) => {
                 for branch in &p.branches {
                     if let Some(found) = find_block(branch, target_id) {
@@ -368,6 +370,7 @@ pub fn find_block<'a>(
 
 /// Dispatch a single execution node to the appropriate block handler.
 /// Returns `true` if the instance has more work to do.
+#[allow(clippy::too_many_lines)]
 async fn dispatch_block(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
@@ -423,6 +426,89 @@ async fn dispatch_block(
                 storage, handlers, instance, node, tc_def, tree,
             )
             .await
+        }
+        BlockDefinition::SubSequence(ss_def) => {
+            // Sub-sequence: create a child instance and wait for it to complete.
+            // Check if child already exists for this block.
+            let children = storage.get_child_instances(instance.id).await?;
+            let existing_child = children
+                .iter()
+                .find(|c| c.metadata.get("_parent_block_id").and_then(|v| v.as_str()) == Some(&ss_def.id.0));
+
+            if let Some(child) = existing_child {
+                // Child exists — check if it's done.
+                if child.state == orch8_types::instance::InstanceState::Completed {
+                    // Save child outputs as this block's output.
+                    let child_outputs = storage.get_all_outputs(child.id).await?;
+                    let output_val = serde_json::to_value(&child_outputs).unwrap_or_default();
+                    let block_output = orch8_types::output::BlockOutput {
+                        id: uuid::Uuid::new_v4(),
+                        instance_id: instance.id,
+                        block_id: ss_def.id.clone(),
+                        output: output_val,
+                        output_ref: None,
+                        output_size: 0,
+                        attempt: 0,
+                        created_at: chrono::Utc::now(),
+                    };
+                    storage.save_block_output(&block_output).await?;
+                    complete_node(storage, node.id).await?;
+                    Ok(true)
+                } else if child.state.is_terminal() {
+                    // Child failed or cancelled.
+                    fail_node(storage, node.id).await?;
+                    Ok(true)
+                } else {
+                    // Still running — wait.
+                    storage.update_node_state(node.id, NodeState::Waiting).await?;
+                    Ok(true)
+                }
+            } else {
+                // Create the child instance.
+                let child_seq = storage
+                    .get_sequence_by_name(
+                        &instance.tenant_id,
+                        &instance.namespace,
+                        &ss_def.sequence_name,
+                        ss_def.version,
+                    )
+                    .await?
+                    .ok_or_else(|| EngineError::StepFailed {
+                        instance_id: instance.id,
+                        block_id: ss_def.id.clone(),
+                        message: format!("sub-sequence '{}' not found", ss_def.sequence_name),
+                        retryable: false,
+                    })?;
+
+                let now = chrono::Utc::now();
+                let child_context = orch8_types::context::ExecutionContext {
+                    data: ss_def.input.clone(),
+                    ..Default::default()
+                };
+
+                let child = orch8_types::instance::TaskInstance {
+                    id: orch8_types::ids::InstanceId::new(),
+                    sequence_id: child_seq.id,
+                    tenant_id: instance.tenant_id.clone(),
+                    namespace: instance.namespace.clone(),
+                    state: orch8_types::instance::InstanceState::Scheduled,
+                    next_fire_at: Some(now),
+                    priority: instance.priority,
+                    timezone: instance.timezone.clone(),
+                    metadata: serde_json::json!({ "_parent_block_id": ss_def.id.0 }),
+                    context: child_context,
+                    concurrency_key: None,
+                    max_concurrency: None,
+                    idempotency_key: None,
+                    session_id: instance.session_id,
+                    parent_instance_id: Some(instance.id),
+                    created_at: now,
+                    updated_at: now,
+                };
+                storage.create_instance(&child).await?;
+                storage.update_node_state(node.id, NodeState::Waiting).await?;
+                Ok(true) // Re-schedule to check child status later
+            }
         }
     }
 }
@@ -513,6 +599,7 @@ mod tests {
             context_access: None,
             cancellable: true,
             wait_for_input: None,
+            queue_name: None,
         })];
 
         let found = find_block(&blocks, &BlockId("step_1".into()));
@@ -539,6 +626,7 @@ mod tests {
             context_access: None,
             cancellable: true,
             wait_for_input: None,
+            queue_name: None,
                 })]],
             },
         )];
@@ -561,6 +649,7 @@ mod tests {
             context_access: None,
             cancellable: true,
             wait_for_input: None,
+            queue_name: None,
         });
         let (id, bt) = block_meta(&step);
         assert_eq!(id.0, "s");

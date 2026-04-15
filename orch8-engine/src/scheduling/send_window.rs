@@ -12,21 +12,21 @@ pub fn check_window(
     let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
     let local = now.with_timezone(&tz);
 
-    let hour = u8::try_from(local.hour()).unwrap_or(0);
+    #[allow(clippy::cast_possible_truncation)]
+    let hour = local.hour() as u8;
+    #[allow(clippy::cast_possible_truncation)]
     let weekday_num = local.weekday().num_days_from_monday() as u8; // 0=Mon
 
     // Check day-of-week restriction.
     let day_ok = window.days.is_empty() || window.days.contains(&weekday_num);
 
     // Check hour window.
-    let hour_ok = if window.start_hour < window.end_hour {
-        hour >= window.start_hour && hour < window.end_hour
-    } else if window.start_hour > window.end_hour {
+    let hour_ok = match window.start_hour.cmp(&window.end_hour) {
+        std::cmp::Ordering::Less => hour >= window.start_hour && hour < window.end_hour,
         // Wrapping window (e.g., 22:00-06:00)
-        hour >= window.start_hour || hour < window.end_hour
-    } else {
+        std::cmp::Ordering::Greater => hour >= window.start_hour || hour < window.end_hour,
         // start == end means 24h window
-        true
+        std::cmp::Ordering::Equal => true,
     };
 
     if day_ok && hour_ok {
@@ -47,24 +47,24 @@ fn next_window_open(
 
     // Try up to 8 days ahead (handles full week + 1).
     for _ in 0..8 {
+        #[allow(clippy::cast_possible_truncation)]
         let weekday_num = candidate.weekday().num_days_from_monday() as u8;
         let day_ok = window.days.is_empty() || window.days.contains(&weekday_num);
-        let hour = u8::try_from(candidate.hour()).unwrap_or(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let hour = candidate.hour() as u8;
 
-        if day_ok {
-            if hour < window.start_hour {
-                // Same day, advance to start_hour.
-                let target = candidate
-                    .with_hour(u32::from(window.start_hour))
-                    .unwrap_or(candidate)
-                    .with_minute(0)
-                    .unwrap_or(candidate)
-                    .with_second(0)
-                    .unwrap_or(candidate);
-                return target.with_timezone(&Utc);
-            }
-            // If we're past end_hour on a valid day, fall through to next day.
+        if day_ok && hour < window.start_hour {
+            // Same day, advance to start_hour.
+            let target = candidate
+                .with_hour(u32::from(window.start_hour))
+                .unwrap_or(candidate)
+                .with_minute(0)
+                .unwrap_or(candidate)
+                .with_second(0)
+                .unwrap_or(candidate);
+            return target.with_timezone(&Utc);
         }
+        // If we're past end_hour on a valid day, fall through to next day.
 
         // Advance to start of next day.
         candidate = (candidate + Duration::days(1))

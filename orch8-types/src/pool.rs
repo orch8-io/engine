@@ -88,6 +88,7 @@ impl PoolResource {
             return self.daily_cap;
         }
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let days_active = (today - warmup_start).num_days().max(0) as u32;
         if days_active >= self.warmup_days {
             return self.daily_cap;

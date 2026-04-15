@@ -21,6 +21,8 @@ pub struct StepExecParams {
     pub context: orch8_types::context::ExecutionContext,
     pub attempt: u32,
     pub timeout: Option<Duration>,
+    /// If > 0, outputs exceeding this byte size are externalized.
+    pub externalize_threshold: u32,
 }
 
 /// Execute a step without persisting the output — returns the `BlockOutput` for
@@ -84,20 +86,21 @@ pub async fn execute_step_dry(
                 .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
                 .unwrap_or(0);
 
-            let block_output = BlockOutput {
-                id: Uuid::new_v4(),
+            let block_output = maybe_externalize(
+                storage,
                 instance_id,
                 block_id,
                 output,
-                output_ref: None,
                 output_size,
-                attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-                created_at: Utc::now(),
-            };
+                i16::try_from(attempt).unwrap_or(i16::MAX),
+                exec.externalize_threshold,
+            )
+            .await?;
 
             info!(
                 instance_id = %instance_id,
                 output_size = output_size,
+                externalized = block_output.output_ref.is_some(),
                 "step completed successfully"
             );
 
@@ -175,28 +178,27 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
-            // Estimate output size from the serialized form without a separate
-            // to_string() allocation — serde_json::to_vec is used by the DB layer anyway.
             let output_size = serde_json::to_vec(&output)
                 .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
                 .unwrap_or(0);
 
-            let block_output = BlockOutput {
-                id: Uuid::new_v4(),
+            let block_output = maybe_externalize(
+                storage,
                 instance_id,
                 block_id,
                 output,
-                output_ref: None,
                 output_size,
-                attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-                created_at: Utc::now(),
-            };
+                i16::try_from(attempt).unwrap_or(i16::MAX),
+                exec.externalize_threshold,
+            )
+            .await?;
 
             storage.save_block_output(&block_output).await?;
 
             info!(
                 instance_id = %instance_id,
                 output_size = output_size,
+                externalized = block_output.output_ref.is_some(),
                 "step completed successfully"
             );
 
@@ -211,6 +213,49 @@ pub async fn execute_step(
             );
             Err(map_step_error(step_err, instance_id, &block_id))
         }
+    }
+}
+
+/// If output exceeds the externalization threshold, store the payload in
+/// `externalized_state` and replace the output with a reference marker.
+async fn maybe_externalize(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    block_id: BlockId,
+    output: serde_json::Value,
+    output_size: i32,
+    attempt: i16,
+    threshold: u32,
+) -> Result<BlockOutput, EngineError> {
+    #[allow(clippy::cast_sign_loss)]
+    let should_externalize = threshold > 0 && output_size > 0 && (output_size as u32) > threshold;
+
+    if should_externalize {
+        let ref_key = format!("{}:{}", instance_id, block_id.0);
+        storage
+            .save_externalized_state(instance_id, &ref_key, &output)
+            .await?;
+        Ok(BlockOutput {
+            id: Uuid::new_v4(),
+            instance_id,
+            block_id,
+            output: serde_json::json!({"_externalized": true, "_ref": ref_key}),
+            output_ref: Some(ref_key),
+            output_size,
+            attempt,
+            created_at: Utc::now(),
+        })
+    } else {
+        Ok(BlockOutput {
+            id: Uuid::new_v4(),
+            instance_id,
+            block_id,
+            output,
+            output_ref: None,
+            output_size,
+            attempt,
+            created_at: Utc::now(),
+        })
     }
 }
 

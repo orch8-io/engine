@@ -13,9 +13,11 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use orch8_api::circuit_breakers::CircuitBreakerState;
 use orch8_api::metrics::MetricsState;
 use orch8_api::openapi::ApiDoc;
 use orch8_api::{build_router, AppState};
+use orch8_engine::circuit_breaker::CircuitBreakerRegistry;
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::Engine;
 use orch8_grpc::service::Orch8GrpcService;
@@ -36,6 +38,7 @@ struct Cli {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -75,8 +78,13 @@ async fn main() -> anyhow::Result<()> {
         storage: storage.clone(),
     };
     let metrics_state = MetricsState { handle };
+    let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60));
+    let cb_state = CircuitBreakerState {
+        registry: cb_registry,
+    };
     let cors = build_cors_layer(&config.api.cors_origins);
     let app = build_router(app_state)
+        .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(cors);
@@ -216,6 +224,11 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_MAX_INSTANCES_PER_TENANT") {
         if let Ok(n) = val.parse() {
             config.engine.max_instances_per_tenant = n;
+        }
+    }
+    if let Ok(val) = std::env::var("ORCH8_EXTERNALIZE_THRESHOLD") {
+        if let Ok(n) = val.parse() {
+            config.engine.externalize_output_threshold = n;
         }
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {

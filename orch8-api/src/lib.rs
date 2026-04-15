@@ -1,3 +1,4 @@
+pub mod circuit_breakers;
 pub mod cron;
 pub mod error;
 pub mod health;
@@ -7,6 +8,7 @@ pub mod metrics;
 pub mod openapi;
 pub mod pools;
 pub mod sequences;
+pub mod sessions;
 pub mod workers;
 
 use std::sync::Arc;
@@ -29,5 +31,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(cron::routes())
         .merge(workers::routes())
         .merge(pools::routes())
+        .merge(sessions::routes())
         .with_state(state)
 }

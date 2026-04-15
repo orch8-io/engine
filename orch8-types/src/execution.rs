@@ -44,6 +44,7 @@ pub enum BlockType {
     ForEach,
     Router,
     TryCatch,
+    SubSequence,
 }
 
 impl std::fmt::Display for BlockType {
@@ -56,6 +57,7 @@ impl std::fmt::Display for BlockType {
             Self::ForEach => "for_each",
             Self::Router => "router",
             Self::TryCatch => "try_catch",
+            Self::SubSequence => "sub_sequence",
         };
         f.write_str(s)
     }

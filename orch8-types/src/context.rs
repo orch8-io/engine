@@ -25,6 +25,7 @@ pub struct ExecutionContext {
 impl ExecutionContext {
     /// Return a filtered copy of the context based on section-level permissions.
     /// Denied sections are replaced with their default (empty) values.
+    #[must_use]
     pub fn filtered(&self, access: &ContextAccess) -> Self {
         Self {
             data: if access.data {

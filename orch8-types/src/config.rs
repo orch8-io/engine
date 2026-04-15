@@ -63,6 +63,11 @@ pub struct SchedulerConfig {
     pub max_instances_per_tenant: u32,
     #[serde(default)]
     pub webhooks: WebhookConfig,
+    /// Output size threshold in bytes. Outputs larger than this are externalized
+    /// to `externalized_state` and replaced with a reference key in `block_outputs`.
+    /// 0 means no externalization (default).
+    #[serde(default)]
+    pub externalize_output_threshold: u32,
 }
 
 impl Default for SchedulerConfig {
@@ -75,6 +80,7 @@ impl Default for SchedulerConfig {
             stale_instance_threshold_secs: default_stale_threshold(),
             max_instances_per_tenant: 0,
             webhooks: WebhookConfig::default(),
+            externalize_output_threshold: 0,
         }
     }
 }

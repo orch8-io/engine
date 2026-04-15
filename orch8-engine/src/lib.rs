@@ -1,3 +1,4 @@
+pub mod circuit_breaker;
 pub mod cron;
 pub mod error;
 pub mod evaluator;

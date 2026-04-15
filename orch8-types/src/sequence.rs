@@ -12,7 +12,14 @@ pub struct SequenceDefinition {
     pub namespace: Namespace,
     pub name: String,
     pub version: i32,
+    /// If true, this version is deprecated. New instances should use a newer version.
+    /// Running instances bound to this version continue unaffected.
+    #[serde(default)]
+    pub deprecated: bool,
     pub blocks: Vec<BlockDefinition>,
+    /// Lifecycle interceptors (before/after step, on-signal, on-complete, on-failure).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interceptors: Option<crate::interceptor::InterceptorDef>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -20,6 +27,7 @@ pub struct SequenceDefinition {
 /// This recursive enum IS the workflow DSL.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum BlockDefinition {
     Step(StepDef),
     Parallel(ParallelDef),
@@ -28,6 +36,8 @@ pub enum BlockDefinition {
     ForEach(ForEachDef),
     Router(RouterDef),
     TryCatch(TryCatchDef),
+    /// Invoke another sequence as a sub-workflow.
+    SubSequence(SubSequenceDef),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -62,6 +72,10 @@ pub struct StepDef {
     /// The signal name is `human_input:{block_id}`. Contains optional timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for_input: Option<HumanInputDef>,
+    /// Named task queue for routing to dedicated worker pools.
+    /// If omitted, uses the default queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -110,6 +124,7 @@ fn default_window_end() -> u8 {
 /// Controls which context sections a step handler can see.
 /// When set, only the listed sections are passed to the handler.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ContextAccess {
     /// Allow reading `context.data`.
     #[serde(default = "default_true_seq")]
@@ -238,4 +253,19 @@ pub struct RouterDef {
 pub struct Route {
     pub condition: String,
     pub blocks: Vec<BlockDefinition>,
+}
+
+/// Invoke another sequence as a child workflow.
+/// The child instance is created and linked; the parent waits for completion.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SubSequenceDef {
+    pub id: BlockId,
+    /// Name of the sequence to invoke (resolved by tenant + namespace + name).
+    pub sequence_name: String,
+    /// Optional specific version. If omitted, uses the latest non-deprecated version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    /// Input data to pass as the child instance's initial context data.
+    #[serde(default)]
+    pub input: serde_json::Value,
 }

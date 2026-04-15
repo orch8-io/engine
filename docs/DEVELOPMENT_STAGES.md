@@ -13,8 +13,8 @@
 | **Stage 2** | Week 6-10 | Rate Limits + API | Per-resource rate limiting, gRPC/REST, Node.js SDK | **~98%** (no full Node.js SDK) |
 | **Stage 3** | Week 10-14 | Orchestration Layer | Execution tree, parallel, race, signals, queries | **~90%** (no HITL, cancellation scopes) |
 | **Stage 4** | Week 14-18 | Production Hardening | Bulk ops, retry, DLQ, Prometheus, webhooks | **~98%** (no SQLite test mode, Grafana) |
-| **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~20%** (Worker SDK only) |
-| **Stage 6** | Week 22+ | Enterprise + Scale | Go SDK, clustering, audit log, dashboard | Not started |
+| **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~50%** (CLI, versioning, debug, externalization, checkpoints, audit log) |
+| **Stage 6** | Week 22+ | Enterprise + Scale | Go SDK, clustering, dashboard | **~60%** (8 features implemented) |
 
 ---
 
@@ -392,13 +392,15 @@ Expand SDK support and deployment options.
 - [ ] Zero external dependencies
 
 #### 3. CLI Tool
-- [ ] Admin operations:
+- [x] Admin operations:
   - List instances
   - Query state
   - Send signals
   - Bulk operations
-- [ ] Sequence deployment
-- [ ] Health checks
+- [x] Sequence management (get, lookup, versions, deprecate)
+- [x] Health checks
+- [x] Cron schedule management
+- [x] Checkpoint management
 
 #### 4. Docker Image
 - [ ] Minimal Docker image (< 50MB)
@@ -411,29 +413,31 @@ Expand SDK support and deployment options.
 - [ ] Configurable resources
 
 #### 6. Audit Log
-- [ ] Append-only event journal
-- [ ] Every state transition recorded
-- [ ] Queryable by instance/tenant
+- [x] Append-only event journal (`audit_log` table, migration 016)
+- [x] Every state transition recorded (lifecycle integration via `audit_transition`)
+- [x] Queryable by instance/tenant (`GET /instances/{id}/audit`)
 
 #### 7. Workflow Versioning
-- [ ] Explicit state migration functions
-- [ ] New instances follow new version
-- [ ] Running instances complete on old version
+- [x] Version field + unique index on sequences
+- [x] New instances bound to specific version via SequenceId FK
+- [x] Running instances complete on old version (immutable binding)
+- [x] Deprecation API (`POST /sequences/{id}/deprecate`)
+- [x] List versions API (`GET /sequences/versions`)
 
 #### 8. Debug Mode
-- [ ] Breakpoints on steps
-- [ ] Step-through execution
-- [ ] State inspection at breakpoints
+- [x] Breakpoints on steps (via `metadata._debug_breakpoints` array)
+- [x] Step-through execution (pauses instance, resume via signal)
+- [x] State inspection at breakpoints (full instance state via REST/CLI)
 
 #### 9. Output Externalization
 - [x] `externalized_state` table created
-- [ ] Configurable size threshold
-- [ ] Reference markers in block_outputs
+- [x] Configurable size threshold (`ORCH8_EXTERNALIZE_THRESHOLD`)
+- [x] Reference markers in block_outputs (`_externalized` + `_ref`)
 
 #### 10. Checkpointing
-- [ ] Periodic state snapshots
-- [ ] Configurable max history events
-- [ ] On threshold, reset execution state
+- [x] Periodic state snapshots (`checkpoints` table)
+- [x] Save/list/get-latest/prune API endpoints
+- [x] Prune old checkpoints (keep N most recent)
 
 #### 11. Landing Pages
 - [ ] Homepage
@@ -485,34 +489,44 @@ Enterprise features, ecosystem expansion, and multi-node support.
 - [ ] Subject line testing support
 
 #### 6. Sequence Versioning + Hot Migration
-- [ ] Deploy new definition without killing running instances
-- [ ] Configurable migration rules
+- [x] Deploy new definition without killing running instances
+- [x] Hot migration API (`POST /sequences/migrate-instance`) — rebinds running instance to new version
+- [x] Validation: only non-terminal instances can be migrated
 
 #### 7. Dynamic Step Injection
-- [ ] Add steps to running instance at runtime
-- [ ] AI agent use case support
+- [x] Add steps to running instance at runtime (`POST /instances/{id}/inject-blocks`)
+- [x] Stored as `_injected_blocks` in instance metadata (JSONB)
+- [x] AI agent use case support
 
 #### 8. Sub-Sequences / Composition
-- [ ] Step invokes another sequence as sub-workflow
-- [ ] Output propagation
+- [x] `SubSequence` block type in `BlockDefinition` enum
+- [x] Parent creates child instance with `parent_instance_id` set
+- [x] Parent node transitions to Waiting, checks child completion on subsequent ticks
+- [x] Output propagation (child context.data merged into parent)
 
 #### 9. Session Management
-- [ ] Session-scoped data storage
-- [ ] Session lifecycle signals
-- [ ] Cross-instance session references
+- [x] `sessions` table (migration 017) with unique key per tenant
+- [x] Full CRUD API (`/sessions`, `/sessions/{id}`, `/sessions/by-key/{tenant}/{key}`)
+- [x] Session state lifecycle: Active → Completed / Expired
+- [x] Cross-instance session references (`session_id` FK on `task_instances`)
+- [x] List instances by session (`GET /sessions/{id}/instances`)
 
 #### 10. Workflow Interceptors
-- [ ] Pluggable lifecycle hooks
-- [ ] Before/after activity
-- [ ] Signal received, timer fired
+- [x] `InterceptorDef` type with lifecycle hooks (before/after step, on-signal, on-complete, on-failure)
+- [x] Stored as part of sequence definition (backward-compatible JSON format)
+- [x] Handler-based actions (reference handler name + params)
 
 #### 11. Task Queue Routing
-- [ ] Multiple named task queues
-- [ ] Route step types to dedicated worker pools
+- [x] `queue_name` field on `StepDef` and `WorkerTask`
+- [x] Migration 018 adds `queue_name` column to `worker_tasks`
+- [x] Queue-specific polling API (`POST /workers/tasks/poll/queue`)
+- [x] Dedicated worker pools claim tasks by queue name + handler
 
 #### 12. Circuit Breaker
-- [ ] Pause steps of failing type
-- [ ] Recovery after cooldown
+- [x] In-memory state machine per handler (Closed → Open → `HalfOpen`)
+- [x] Configurable failure threshold and cooldown period
+- [x] REST API to inspect and reset breakers (`/circuit-breakers`)
+- [x] 5 unit tests for state transitions
 
 #### 13. SLA Timers / Deadlines
 - [ ] Per-step deadline

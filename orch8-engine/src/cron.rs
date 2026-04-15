@@ -90,6 +90,8 @@ async fn trigger_cron_schedule(
         concurrency_key: None,
         max_concurrency: None,
         idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
         created_at: now,
         updated_at: now,
     };

@@ -102,6 +102,12 @@ pub struct TaskInstance {
     /// Optional idempotency key for deduplication at creation time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Session ID for cross-instance shared state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<uuid::Uuid>,
+    /// Parent instance ID (set when this instance is a sub-sequence child).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_instance_id: Option<InstanceId>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

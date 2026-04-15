@@ -1,3 +1,6 @@
+pub mod audit;
+pub mod checkpoint;
+pub mod circuit_breaker;
 pub mod config;
 pub mod context;
 pub mod cron;
@@ -6,10 +9,12 @@ pub mod execution;
 pub mod filter;
 pub mod ids;
 pub mod instance;
+pub mod interceptor;
 pub mod output;
 pub mod pool;
 pub mod rate_limit;
 pub mod sequence;
+pub mod session;
 pub mod signal;
 pub mod worker;
 

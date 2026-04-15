@@ -16,6 +16,9 @@ use utoipa::OpenApi;
         crate::sequences::create_sequence,
         crate::sequences::get_sequence,
         crate::sequences::get_sequence_by_name,
+        crate::sequences::deprecate_sequence,
+        crate::sequences::list_sequence_versions,
+        crate::sequences::migrate_instance,
         // Instances
         crate::instances::create_instance,
         crate::instances::list_instances,
@@ -30,6 +33,12 @@ use utoipa::OpenApi;
         crate::instances::bulk_update_state,
         crate::instances::bulk_reschedule,
         crate::instances::list_dlq,
+        crate::instances::save_checkpoint,
+        crate::instances::list_checkpoints,
+        crate::instances::get_latest_checkpoint,
+        crate::instances::prune_checkpoints,
+        crate::instances::list_audit_log,
+        crate::instances::inject_blocks,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -38,9 +47,21 @@ use utoipa::OpenApi;
         crate::cron::delete_cron,
         // Workers
         crate::workers::poll_tasks,
+        crate::workers::poll_tasks_from_queue,
         crate::workers::complete_task,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
+        // Sessions
+        crate::sessions::create_session,
+        crate::sessions::get_session,
+        crate::sessions::get_session_by_key,
+        crate::sessions::update_session_data,
+        crate::sessions::update_session_state,
+        crate::sessions::list_session_instances,
+        // Circuit breakers
+        crate::circuit_breakers::list_breakers,
+        crate::circuit_breakers::get_breaker,
+        crate::circuit_breakers::reset_breaker,
         // Pools
         crate::pools::create_pool,
         crate::pools::list_pools,
@@ -76,6 +97,7 @@ use utoipa::OpenApi;
         orch8_types::sequence::SequenceDefinition,
         orch8_types::sequence::BlockDefinition,
         orch8_types::sequence::StepDef,
+        orch8_types::sequence::SubSequenceDef,
         orch8_types::sequence::DelaySpec,
         orch8_types::sequence::SendWindow,
         orch8_types::sequence::ContextAccess,
@@ -99,10 +121,30 @@ use utoipa::OpenApi;
         // Worker
         orch8_types::worker::WorkerTask,
         orch8_types::worker::WorkerTaskState,
+        // Audit
+        orch8_types::audit::AuditLogEntry,
+        // Session
+        orch8_types::session::Session,
+        orch8_types::session::SessionState,
+        // Circuit breaker
+        orch8_types::circuit_breaker::CircuitBreakerState,
+        orch8_types::circuit_breaker::BreakerState,
+        // Interceptor
+        orch8_types::interceptor::InterceptorDef,
+        orch8_types::interceptor::InterceptorAction,
         // Pools
         orch8_types::pool::ResourcePool,
         orch8_types::pool::PoolResource,
         orch8_types::pool::RotationStrategy,
+        orch8_types::checkpoint::Checkpoint,
+        crate::instances::SaveCheckpointRequest,
+        crate::instances::PruneCheckpointsRequest,
+        crate::instances::InjectBlocksRequest,
+        crate::sessions::CreateSessionRequest,
+        crate::sessions::UpdateSessionDataRequest,
+        crate::sessions::UpdateSessionStateRequest,
+        crate::sequences::MigrateInstanceRequest,
+        crate::workers::QueuePollRequest,
         crate::pools::CreatePoolRequest,
         crate::pools::AddResourceRequest,
         crate::pools::UpdateResourceRequest,
@@ -113,6 +155,8 @@ use utoipa::OpenApi;
         (name = "instances", description = "Task instance lifecycle"),
         (name = "cron", description = "Cron schedule management"),
         (name = "workers", description = "External worker task polling"),
+        (name = "sessions", description = "Cross-instance session management"),
+        (name = "circuit_breakers", description = "Circuit breaker inspection and reset"),
         (name = "pools", description = "Resource pool management"),
     )
 )]

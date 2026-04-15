@@ -74,9 +74,7 @@ fn skip_non_business_days(
 
         if weekday == Weekday::Sat {
             current += Duration::days(2);
-        } else if weekday == Weekday::Sun {
-            current += Duration::days(1);
-        } else if holidays.contains(&local_date) {
+        } else if weekday == Weekday::Sun || holidays.contains(&local_date) {
             current += Duration::days(1);
         } else {
             break;

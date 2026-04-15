@@ -46,6 +46,7 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
                 context_access: None,
                 cancellable: true,
                 wait_for_input: None,
+                queue_name: None,
             })
         })
         .collect();
@@ -55,7 +56,9 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
         namespace: Namespace("default".into()),
         name: format!("bench-seq-{}", uuid::Uuid::new_v4()),
         version: 1,
+        deprecated: false,
         blocks,
+        interceptors: None,
         created_at: Utc::now(),
     }
 }
@@ -77,6 +80,8 @@ fn make_instances(count: usize, seq_id: SequenceId, tenant: &str) -> Vec<TaskIns
             concurrency_key: None,
             max_concurrency: None,
             idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
             created_at: now,
             updated_at: now,
         })

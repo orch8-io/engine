@@ -53,6 +53,7 @@ pub async fn run_tick_loop(
 
     // Share WebhookConfig via Arc to avoid cloning per instance.
     let webhook_config = Arc::new(config.webhooks.clone());
+    let externalize_threshold = config.externalize_output_threshold;
 
     let mut ticker = interval(tick_duration);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -84,6 +85,7 @@ pub async fn run_tick_loop(
                     config.max_instances_per_tenant,
                     &webhook_config,
                     &sequence_cache,
+                    externalize_threshold,
                 ).await {
                     error!(error = %e, "tick processing failed");
                 }
@@ -103,6 +105,7 @@ async fn wait_for_drain(semaphore: &Semaphore, max_permits: usize) {
 }
 
 /// Process a single tick: claim due instances and spawn processing tasks.
+#[allow(clippy::too_many_arguments)]
 async fn process_tick(
     storage: &Arc<dyn StorageBackend>,
     handlers: &Arc<HandlerRegistry>,
@@ -111,6 +114,7 @@ async fn process_tick(
     max_per_tenant: u32,
     webhook_config: &Arc<WebhookConfig>,
     sequence_cache: &Arc<Cache<SequenceId, Arc<SequenceDefinition>>>,
+    externalize_threshold: u32,
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
@@ -181,6 +185,7 @@ async fn process_tick(
                 &seq_cache,
                 instance,
                 data,
+                externalize_threshold,
             )
             .await
             {
@@ -243,6 +248,7 @@ async fn process_instance(
     sequence_cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
     instance: orch8_types::instance::TaskInstance,
     prefetched: PrefetchedData,
+    externalize_threshold: u32,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
 
@@ -313,7 +319,7 @@ async fn process_instance(
             continue;
         }
 
-        match execute_step_block(storage, handlers, webhook_config, &instance, step_def).await? {
+        match execute_step_block(storage, handlers, webhook_config, externalize_threshold, &instance, step_def).await? {
             StepOutcome::Completed => {
                 completed_blocks.insert(step_def.id.0.clone());
             }
@@ -688,14 +694,38 @@ async fn check_human_input(
 /// Execute a single step block within an instance.
 /// Returns `StepOutcome` wrapped in `Result` — the outcome tells the caller
 /// whether to continue executing more blocks or stop.
+#[allow(clippy::too_many_lines)]
 async fn execute_step_block(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
     webhook_config: &WebhookConfig,
+    externalize_threshold: u32,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
 ) -> Result<StepOutcome, EngineError> {
     let instance_id = instance.id;
+
+    // Debug mode: if instance has breakpoints set and this step is in the list, pause.
+    if let Some(breakpoints) = instance.metadata.get("_debug_breakpoints") {
+        if let Some(arr) = breakpoints.as_array() {
+            if arr.iter().any(|v| v.as_str() == Some(&step_def.id.0)) {
+                debug!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    "debug breakpoint hit, pausing instance"
+                );
+                crate::lifecycle::transition_instance(
+                    storage,
+                    instance_id,
+                    InstanceState::Running,
+                    InstanceState::Paused,
+                    None,
+                )
+                .await?;
+                return Ok(StepOutcome::Deferred);
+            }
+        }
+    }
 
     if check_step_delay(storage, instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
@@ -743,6 +773,7 @@ async fn execute_step_block(
         },
         attempt,
         timeout: step_def.timeout,
+        externalize_threshold,
     };
 
     let result = crate::handlers::step::execute_step_dry(storage, handlers, exec_params).await;
@@ -913,6 +944,7 @@ async fn dispatch_to_external_worker(
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
+        queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
         context: serde_json::to_value(&instance.context).unwrap_or_default(),
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),

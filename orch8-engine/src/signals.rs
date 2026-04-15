@@ -33,6 +33,7 @@ pub async fn process_signals_prefetched(
     process_signals_inner(storage, instance_id, current_state, signals, sequence_def).await
 }
 
+#[allow(clippy::too_many_lines)]
 async fn process_signals_inner(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -178,9 +179,9 @@ async fn cancel_scoped(
 
         // Check if this block is non-cancellable.
         let is_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
-            .map(|block| match block {
-                BlockDefinition::Step(step) => step.cancellable,
-                _ => true, // compound blocks are cancellable by default
+            .and_then(|block| match block {
+                BlockDefinition::Step(step) => Some(step.cancellable),
+                _ => None,
             })
             .unwrap_or(true);
 

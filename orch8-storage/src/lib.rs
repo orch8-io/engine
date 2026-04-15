@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
+use orch8_types::audit::AuditLogEntry;
 use orch8_types::cron::CronSchedule;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
@@ -16,6 +17,7 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::output::BlockOutput;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
+use orch8_types::session::Session;
 use orch8_types::signal::Signal;
 use orch8_types::worker::WorkerTask;
 
@@ -42,6 +44,17 @@ pub trait StorageBackend: Send + Sync + 'static {
         name: &str,
         version: Option<i32>,
     ) -> Result<Option<SequenceDefinition>, StorageError>;
+
+    /// List all versions of a sequence by name.
+    async fn list_sequence_versions(
+        &self,
+        tenant_id: &TenantId,
+        namespace: &Namespace,
+        name: &str,
+    ) -> Result<Vec<SequenceDefinition>, StorageError>;
+
+    /// Mark a sequence version as deprecated.
+    async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
 
     // === Task Instances ===
 
@@ -73,6 +86,13 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         id: InstanceId,
         context: &orch8_types::context::ExecutionContext,
+    ) -> Result<(), StorageError>;
+
+    /// Hot migration: rebind an instance to a different sequence version.
+    async fn update_instance_sequence(
+        &self,
+        id: InstanceId,
+        new_sequence_id: SequenceId,
     ) -> Result<(), StorageError>;
 
     /// Merge a key-value pair into context->'data' (JSONB merge).
@@ -365,6 +385,135 @@ pub trait StorageBackend: Send + Sync + 'static {
         resource_id: uuid::Uuid,
         today: chrono::NaiveDate,
     ) -> Result<(), StorageError>;
+
+    // === Checkpoints ===
+
+    /// Save a checkpoint for an instance.
+    async fn save_checkpoint(
+        &self,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<(), StorageError>;
+
+    /// Get the latest checkpoint for an instance.
+    async fn get_latest_checkpoint(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError>;
+
+    /// List all checkpoints for an instance.
+    async fn list_checkpoints(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
+
+    /// Delete old checkpoints, keeping only the latest N.
+    async fn prune_checkpoints(
+        &self,
+        instance_id: InstanceId,
+        keep: u32,
+    ) -> Result<u64, StorageError>;
+
+    // === Externalized State ===
+
+    /// Store a large payload externally, returning the `ref_key`.
+    async fn save_externalized_state(
+        &self,
+        instance_id: InstanceId,
+        ref_key: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Retrieve an externalized payload by `ref_key`.
+    async fn get_externalized_state(
+        &self,
+        ref_key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError>;
+
+    /// Delete externalized state by `ref_key`.
+    async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;
+
+    // === Audit Log ===
+
+    /// Append an audit log entry.
+    async fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), StorageError>;
+
+    /// List audit log entries for an instance.
+    async fn list_audit_log(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+    ) -> Result<Vec<AuditLogEntry>, StorageError>;
+
+    /// List audit log entries for a tenant.
+    async fn list_audit_log_by_tenant(
+        &self,
+        tenant_id: &TenantId,
+        limit: u32,
+    ) -> Result<Vec<AuditLogEntry>, StorageError>;
+
+    // === Sessions ===
+
+    async fn create_session(&self, session: &Session) -> Result<(), StorageError>;
+
+    async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
+
+    async fn get_session_by_key(
+        &self,
+        tenant_id: &TenantId,
+        session_key: &str,
+    ) -> Result<Option<Session>, StorageError>;
+
+    async fn update_session_data(
+        &self,
+        id: Uuid,
+        data: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    async fn update_session_state(
+        &self,
+        id: Uuid,
+        state: orch8_types::session::SessionState,
+    ) -> Result<(), StorageError>;
+
+    /// Get all instances belonging to a session.
+    async fn list_session_instances(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<TaskInstance>, StorageError>;
+
+    // === Sub-Sequences ===
+
+    /// Get child instances of a parent.
+    async fn get_child_instances(
+        &self,
+        parent_instance_id: InstanceId,
+    ) -> Result<Vec<TaskInstance>, StorageError>;
+
+    // === Task Queue Routing ===
+
+    /// Claim worker tasks from a specific named queue.
+    async fn claim_worker_tasks_from_queue(
+        &self,
+        queue_name: &str,
+        handler_name: &str,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    // === Dynamic Step Injection ===
+
+    /// Append blocks to a running instance's sequence (stored as instance-level overrides).
+    async fn inject_blocks(
+        &self,
+        instance_id: InstanceId,
+        blocks_json: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Get injected blocks for an instance.
+    async fn get_injected_blocks(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Option<serde_json::Value>, StorageError>;
 
     // === Health ===
 

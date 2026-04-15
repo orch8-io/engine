@@ -18,6 +18,7 @@ use crate::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/workers/tasks/poll", post(poll_tasks))
+        .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
         .route("/workers/tasks/{id}/fail", post(fail_task))
         .route("/workers/tasks/{id}/heartbeat", post(heartbeat_task))
@@ -46,6 +47,32 @@ pub(crate) async fn poll_tasks(
     let tasks = state
         .storage
         .claim_worker_tasks(&req.handler_name, &req.worker_id, req.limit)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+
+    Ok(Json(tasks))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct QueuePollRequest {
+    queue_name: String,
+    handler_name: String,
+    worker_id: String,
+    #[serde(default = "default_poll_limit")]
+    limit: u32,
+}
+
+#[utoipa::path(post, path = "/workers/tasks/poll/queue", tag = "workers",
+    request_body = QueuePollRequest,
+    responses((status = 200, description = "Claimed worker tasks from queue", body = Vec<orch8_types::worker::WorkerTask>))
+)]
+pub(crate) async fn poll_tasks_from_queue(
+    State(state): State<AppState>,
+    Json(req): Json<QueuePollRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tasks = state
+        .storage
+        .claim_worker_tasks_from_queue(&req.queue_name, &req.handler_name, &req.worker_id, req.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
