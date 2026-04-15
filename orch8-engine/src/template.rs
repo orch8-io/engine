@@ -72,6 +72,13 @@ fn resolve_path(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> Result<serde_json::Value, EngineError> {
+    // Support fallback defaults: {{path|default_value}}
+    let (path, fallback) = if let Some(idx) = path.find('|') {
+        (path[..idx].trim(), Some(path[idx + 1..].trim()))
+    } else {
+        (path, None)
+    };
+
     let parts: Vec<&str> = path.split('.').collect();
 
     let resolved = match parts.first().copied() {
@@ -96,7 +103,16 @@ fn resolve_path(
         }
     };
 
-    Ok(resolved.unwrap_or(serde_json::Value::Null))
+    match resolved {
+        Some(v) if !v.is_null() => Ok(v),
+        _ => {
+            if let Some(default) = fallback {
+                Ok(serde_json::Value::String(default.to_string()))
+            } else {
+                Ok(serde_json::Value::Null)
+            }
+        }
+    }
 }
 
 fn navigate_json(value: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
@@ -200,5 +216,32 @@ mod tests {
         let input = json!(42);
         let result = resolve(&input, &ctx, &outputs).unwrap();
         assert_eq!(result, json!(42));
+    }
+
+    #[test]
+    fn resolve_with_fallback_default() {
+        let ctx = test_context();
+        let outputs = test_outputs();
+        let input = json!("{{context.data.nonexistent | fallback_value}}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("fallback_value"));
+    }
+
+    #[test]
+    fn resolve_existing_value_ignores_fallback() {
+        let ctx = test_context();
+        let outputs = test_outputs();
+        let input = json!("{{context.data.user.name | default_name}}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("Alice"));
+    }
+
+    #[test]
+    fn resolve_inline_with_fallback() {
+        let ctx = test_context();
+        let outputs = test_outputs();
+        let input = json!("Hello {{context.data.missing|stranger}}!");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("Hello stranger!"));
     }
 }

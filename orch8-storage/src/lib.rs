@@ -73,6 +73,14 @@ pub trait StorageBackend: Send + Sync + 'static {
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError>;
 
+    /// Merge a key-value pair into context->'data' (JSONB merge).
+    async fn merge_context_data(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -85,6 +93,13 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         filter: &InstanceFilter,
         new_state: InstanceState,
+    ) -> Result<u64, StorageError>;
+
+    /// Shift `next_fire_at` by `offset_secs` for scheduled instances matching the filter.
+    async fn bulk_reschedule(
+        &self,
+        filter: &InstanceFilter,
+        offset_secs: i64,
     ) -> Result<u64, StorageError>;
 
     // === Execution Tree ===

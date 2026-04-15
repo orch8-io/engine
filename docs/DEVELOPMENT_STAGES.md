@@ -11,8 +11,8 @@
 | **Stage 0** | Week 0-2 | Foundation | Project scaffolding, storage trait, Postgres backend | **DONE** |
 | **Stage 1** | Week 2-6 | Core Scheduling | Task instances, step execution, delays, crash recovery | **DONE** |
 | **Stage 2** | Week 6-10 | Rate Limits + API | Per-resource rate limiting, gRPC/REST, Node.js SDK | **~90%** (no gRPC, pools, ramps) |
-| **Stage 3** | Week 10-14 | Orchestration Layer | Execution tree, parallel, race, signals, queries | **~85%** (no HITL, cancellation scopes) |
-| **Stage 4** | Week 14-18 | Production Hardening | Bulk ops, retry, DLQ, Prometheus, webhooks | **~95%** (no SQLite test mode, Grafana) |
+| **Stage 3** | Week 10-14 | Orchestration Layer | Execution tree, parallel, race, signals, queries | **~90%** (no HITL, cancellation scopes) |
+| **Stage 4** | Week 14-18 | Production Hardening | Bulk ops, retry, DLQ, Prometheus, webhooks | **~98%** (no SQLite test mode, Grafana) |
 | **Stage 5** | Week 18-22 | Second SDK + Polish | Python SDK, SQLite, CLI, Docker, Helm chart | **~20%** (Worker SDK only) |
 | **Stage 6** | Week 22+ | Enterprise + Scale | Go SDK, clustering, audit log, dashboard | Not started |
 
@@ -233,7 +233,7 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
 - [x] Execute try block
 - [x] On failure, execute catch block
 - [x] Always run finally block
-- [ ] Error context passed to catch
+- [x] Error context passed to catch (`context.data._error` with failed block IDs)
 
 #### 6. Loop / ForEach
 - [x] Iterate over collections (ForEach)
@@ -256,7 +256,7 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
 - [x] `GET /instances/{id}` returns full context
 - [x] No handler boilerplate needed
 - [x] Filter by metadata (JSONB queries)
-- [ ] Dedicated execution tree inspection endpoint
+- [x] Dedicated execution tree inspection endpoint (`GET /instances/{id}/tree`)
 
 #### 10. Structured Context Management
 - [x] Multi-section context:
@@ -271,7 +271,7 @@ Add workflow orchestration capabilities: parallel, race, signals, queries.
 - [x] Resolve `{{path}}` references at runtime
 - [x] Resolution sources: context, previous outputs, params, config
 - [ ] Expression support
-- [ ] Fallback defaults
+- [x] Fallback defaults (`{{path|default_value}}` syntax)
 
 #### 12. Pluggable Block Handler System
 - [x] Built-in handlers (noop, log, sleep, http_request)
@@ -309,7 +309,7 @@ Make the engine production-ready with reliability features and observability.
 #### 1. Bulk Operations
 - [x] Bulk create (batch endpoint with 500-row chunks)
 - [x] Bulk pause/resume/cancel by filter
-- [ ] Bulk re-schedule (shift by +/-N hours)
+- [x] Bulk re-schedule (`PATCH /instances/bulk/reschedule` with offset_secs)
 
 #### 2. Retry Configuration
 - [x] Per-step retry policy:
@@ -324,8 +324,8 @@ Make the engine production-ready with reliability features and observability.
 - [x] Manual retry from DLQ (`POST /instances/{id}/retry`)
 
 #### 4. Priority Queues
-- [ ] At least 3 levels: high/normal/low
-- [ ] Priority-based ordering in tick loop
+- [x] 4 levels: Low/Normal/High/Critical
+- [x] Priority-based ordering in tick loop (`ORDER BY priority DESC`)
 
 #### 5. Concurrency Control
 - [x] Max N instances per entity key (`concurrency_key` + `max_concurrency`)

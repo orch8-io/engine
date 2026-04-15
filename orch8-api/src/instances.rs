@@ -25,8 +25,10 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/context", patch(update_context))
         .route("/instances/{id}/signals", post(send_signal))
         .route("/instances/{id}/outputs", get(get_outputs))
+        .route("/instances/{id}/tree", get(get_execution_tree))
         .route("/instances/{id}/retry", post(retry_instance))
         .route("/instances/bulk/state", patch(bulk_update_state))
+        .route("/instances/bulk/reschedule", patch(bulk_reschedule))
         .route("/instances/dlq", get(list_dlq))
 }
 
@@ -106,6 +108,13 @@ struct BulkFilter {
     namespace: Option<String>,
     sequence_id: Option<Uuid>,
     states: Option<Vec<InstanceState>>,
+}
+
+#[derive(Deserialize)]
+struct BulkRescheduleRequest {
+    filter: BulkFilter,
+    /// Shift `next_fire_at` by this many seconds (positive = later, negative = earlier).
+    offset_secs: i64,
 }
 
 #[derive(Serialize)]
@@ -364,6 +373,29 @@ async fn get_outputs(
     Ok(Json(outputs))
 }
 
+async fn get_execution_tree(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_id = InstanceId(id);
+
+    // Verify instance exists.
+    state
+        .storage
+        .get_instance(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    let tree = state
+        .storage
+        .get_execution_tree(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
+
+    Ok(Json(tree))
+}
+
 async fn bulk_update_state(
     State(state): State<AppState>,
     Json(req): Json<BulkUpdateStateRequest>,
@@ -380,6 +412,28 @@ async fn bulk_update_state(
     let count = state
         .storage
         .bulk_update_state(&filter, req.state)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+
+    Ok(Json(CountResponse { count }))
+}
+
+async fn bulk_reschedule(
+    State(state): State<AppState>,
+    Json(req): Json<BulkRescheduleRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let filter = InstanceFilter {
+        tenant_id: req.filter.tenant_id.map(TenantId),
+        namespace: req.filter.namespace.map(Namespace),
+        sequence_id: req.filter.sequence_id.map(SequenceId),
+        states: req.filter.states,
+        metadata_filter: None,
+        priority: None,
+    };
+
+    let count = state
+        .storage
+        .bulk_reschedule(&filter, req.offset_secs)
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 

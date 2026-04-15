@@ -280,6 +280,26 @@ impl StorageBackend for PostgresStorage {
         Ok(())
     }
 
+    async fn merge_context_data(
+        &self,
+        id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"UPDATE task_instances
+              SET context = jsonb_set(context, ARRAY['data', $2], $3, true),
+                  updated_at = NOW()
+              WHERE id = $1",
+        )
+        .bind(id.0)
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -327,6 +347,23 @@ impl StorageBackend for PostgresStorage {
         let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state = ");
         qb.push_bind(new_state.to_string());
         qb.push(", updated_at = NOW() WHERE 1=1");
+        apply_instance_filter(&mut qb, filter);
+
+        let result = qb.build().execute(&self.pool).await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn bulk_reschedule(
+        &self,
+        filter: &InstanceFilter,
+        offset_secs: i64,
+    ) -> Result<u64, StorageError> {
+        let mut qb = sqlx::QueryBuilder::new(
+            "UPDATE task_instances SET next_fire_at = next_fire_at + make_interval(secs => ",
+        );
+        #[allow(clippy::cast_precision_loss)] // offset_secs is bounded to practical ranges
+        qb.push_bind(offset_secs as f64);
+        qb.push("), updated_at = NOW() WHERE state = 'scheduled'");
         apply_instance_filter(&mut qb, filter);
 
         let result = qb.build().execute(&self.pool).await?;

@@ -42,6 +42,25 @@ pub async fn execute_try_catch(
     // Phase 2: Handle catch block.
     if try_failed && !catch_children.is_empty() {
         if !evaluator::all_terminal(&catch_children) {
+            // Inject error context before activating catch children.
+            // Find which try block(s) failed and expose via context.data._error.
+            let failed_blocks: Vec<String> = try_children
+                .iter()
+                .filter(|c| c.state == NodeState::Failed)
+                .map(|c| c.block_id.0.clone())
+                .collect();
+            let error_ctx = serde_json::json!({
+                "failed_blocks": failed_blocks,
+                "source": "try_catch",
+                "block_id": tc_def.id.0,
+            });
+            if let Err(e) = storage
+                .merge_context_data(instance.id, "_error", &error_ctx)
+                .await
+            {
+                debug!(error = %e, "failed to inject error context for catch block");
+            }
+
             // Activate catch children.
             for child in &catch_children {
                 if child.state == NodeState::Pending {
