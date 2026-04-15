@@ -1,0 +1,54 @@
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+use orch8_engine::error::EngineError;
+use orch8_types::error::StorageError;
+
+/// API-level errors mapped to HTTP status codes.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
+    #[error("internal: {0}")]
+    Internal(String),
+
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+            ApiError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
+            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        let body = serde_json::json!({ "error": self.to_string() });
+        (status, axum::Json(body)).into_response()
+    }
+}
+
+impl From<EngineError> for ApiError {
+    fn from(err: EngineError) -> Self {
+        match err {
+            EngineError::Storage(StorageError::NotFound { entity, id }) => {
+                ApiError::NotFound(format!("{entity} {id}"))
+            }
+            EngineError::Storage(StorageError::Conflict(msg)) => ApiError::AlreadyExists(msg),
+            EngineError::InvalidTransition { .. } => ApiError::InvalidArgument(err.to_string()),
+            EngineError::HandlerNotFound(h) => ApiError::NotFound(format!("handler: {h}")),
+            EngineError::ShuttingDown => ApiError::Unavailable("shutdown in progress".into()),
+            other => ApiError::Internal(other.to_string()),
+        }
+    }
+}

@@ -1,0 +1,23 @@
+[package]
+name = "orch8-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+orch8-storage = { path = "../orch8-storage" }
+orch8-engine = { path = "../orch8-engine" }
+orch8-api = { path = "../orch8-api" }
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+metrics-exporter-prometheus.workspace = true
+clap.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+axum.workspace = true
+
+[lints]
+workspace = true

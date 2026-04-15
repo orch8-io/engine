@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine -> target
+      - name: Check
+        working-directory: engine
+        run: cargo check --workspace
+      - name: Clippy
+        working-directory: engine
+        run: cargo clippy --workspace -- -D warnings
+      - name: Format
+        working-directory: engine
+        run: cargo fmt --check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: orch8_test
+          POSTGRES_USER: orch8
+          POSTGRES_PASSWORD: orch8
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
+      DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine -> target
+      - name: Test
+        working-directory: engine
+        run: cargo test --workspace
