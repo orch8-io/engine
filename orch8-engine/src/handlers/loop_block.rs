@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::ExecutionNode;
+use orch8_types::execution::{ExecutionNode, NodeState};
 
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::LoopDef;
@@ -57,6 +57,15 @@ pub async fn execute_loop(
             "loop condition false, completing"
         );
         return Ok(true);
+    }
+
+    // Activate pending body children.
+    for child in &children {
+        if child.state == NodeState::Pending {
+            storage
+                .update_node_state(child.id, NodeState::Running)
+                .await?;
+        }
     }
 
     // If body children are all done, it means one iteration completed.

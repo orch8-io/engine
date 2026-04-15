@@ -1,7 +1,7 @@
 use tracing::debug;
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::ExecutionNode;
+use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::ParallelDef;
 
@@ -25,6 +25,15 @@ pub async fn execute_parallel(
     if children.is_empty() {
         evaluator::complete_node(storage, node.id).await?;
         return Ok(true);
+    }
+
+    // Activate all pending children so they can be dispatched.
+    for child in &children {
+        if child.state == NodeState::Pending {
+            storage
+                .update_node_state(child.id, NodeState::Running)
+                .await?;
+        }
     }
 
     // Check if all children are done.

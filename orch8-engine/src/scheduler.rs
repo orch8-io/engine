@@ -378,15 +378,18 @@ async fn process_instance_tree(
                     )
                 });
 
+            // Read current instance state — may differ from Running if an external
+            // worker dispatch changed it to Waiting within this tick.
+            let current_state = storage
+                .get_instance(instance_id)
+                .await?
+                .map_or(InstanceState::Running, |i| i.state);
+
             if root_failed {
-                crate::lifecycle::transition_instance(
-                    storage,
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Failed,
-                    None,
-                )
-                .await?;
+                // Use update_instance_state directly to handle any current state.
+                storage
+                    .update_instance_state(instance_id, InstanceState::Failed, None)
+                    .await?;
                 crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
                 crate::webhooks::emit(
                     webhook_config,
@@ -396,16 +399,11 @@ async fn process_instance_tree(
                         serde_json::json!({}),
                     ),
                 );
-                info!(instance_id = %instance_id, "instance failed (tree evaluation)");
+                info!(instance_id = %instance_id, from = %current_state, "instance failed (tree evaluation)");
             } else {
-                crate::lifecycle::transition_instance(
-                    storage,
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Completed,
-                    None,
-                )
-                .await?;
+                storage
+                    .update_instance_state(instance_id, InstanceState::Completed, None)
+                    .await?;
                 crate::metrics::inc(crate::metrics::INSTANCES_COMPLETED);
                 crate::webhooks::emit(
                     webhook_config,
@@ -415,7 +413,7 @@ async fn process_instance_tree(
                         serde_json::json!({}),
                     ),
                 );
-                info!(instance_id = %instance_id, "instance completed (tree evaluation)");
+                info!(instance_id = %instance_id, from = %current_state, "instance completed (tree evaluation)");
             }
         }
         Err(e) => {

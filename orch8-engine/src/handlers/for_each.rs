@@ -1,7 +1,7 @@
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::ExecutionNode;
+use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::ForEachDef;
 
@@ -39,39 +39,31 @@ pub async fn execute_for_each(
         return Ok(true);
     }
 
-    let max = u32::try_from(items.len())
-        .unwrap_or(u32::MAX)
-        .min(fe_def.max_iterations);
-
-    // Count completed iterations.
-    let outputs = storage.get_all_outputs(instance.id).await?;
-    let iteration_count = outputs
-        .iter()
-        .filter(|o| o.block_id.0.starts_with(&format!("{}__iter_", fe_def.id.0)))
-        .count();
-    let iteration = u32::try_from(iteration_count).unwrap_or(u32::MAX);
-
-    if iteration >= max {
-        evaluator::complete_node(storage, node.id).await?;
-        debug!(
-            instance_id = %instance.id,
-            block_id = %fe_def.id,
-            iterations = iteration,
-            "forEach completed all items"
-        );
-        return Ok(true);
+    // Activate pending body children.
+    for child in &children {
+        if child.state == NodeState::Pending {
+            storage
+                .update_node_state(child.id, NodeState::Running)
+                .await?;
+        }
     }
 
-    // If body children are done for current iteration, advance.
+    // If body children are done, the forEach is complete.
     if !children.is_empty() && evaluator::all_terminal(&children) {
         if evaluator::any_failed(&children) {
             evaluator::fail_node(storage, node.id).await?;
-            return Ok(true);
+        } else {
+            evaluator::complete_node(storage, node.id).await?;
+            debug!(
+                instance_id = %instance.id,
+                block_id = %fe_def.id,
+                "forEach completed"
+            );
         }
         return Ok(true);
     }
 
-    // Body still executing for current item.
+    // Body still executing.
     Ok(true)
 }
 

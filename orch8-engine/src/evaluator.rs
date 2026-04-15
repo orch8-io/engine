@@ -1,4 +1,4 @@
-use tracing::debug;
+use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
@@ -211,21 +211,51 @@ pub async fn evaluate(
             return Ok(false);
         }
 
-        // Phase 1: find a Pending node whose parent is Running (or root).
-        if let Some((node, block)) = find_pending_ready(&tree, &sequence.blocks) {
-            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
-            continue;
-        }
-
-        // Phase 2: find a Running composite node to re-evaluate (check child completion).
-        if let Some((node, block)) = find_running_composite(&tree, &sequence.blocks) {
-            let changed = dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
-            if changed {
+        // Phase 1: activate the first Pending root node.
+        if let Some(node) = root_nodes.iter().find(|n| n.state == NodeState::Pending) {
+            if let Some(block) = find_block(&sequence.blocks, &node.block_id) {
+                dispatch_block(storage, handlers, instance, node, block, &tree).await?;
                 continue;
             }
         }
 
+        // Phase 2: execute Running step nodes (leaf work first).
+        if let Some((node, block)) = find_running_step(&tree, &sequence.blocks) {
+            let more = dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            if !more {
+                // Step deferred to external worker. Re-evaluate composites one more
+                // time (a race branch may have completed), then yield.
+                let tree = storage.get_execution_tree(instance.id).await?;
+                if let Some((cnode, cblock)) = find_running_composite(&tree, &sequence.blocks) {
+                    dispatch_block(storage, handlers, instance, &cnode, cblock, &tree).await?;
+                }
+                // Re-check termination after composite re-eval.
+                let tree = storage.get_execution_tree(instance.id).await?;
+                let roots: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
+                if roots.iter().all(|n| matches!(n.state, NodeState::Completed | NodeState::Skipped)) {
+                    return Ok(false);
+                }
+                if roots.iter().any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled)) {
+                    return Ok(false);
+                }
+                return Ok(true);
+            }
+            continue;
+        }
+
+        // Phase 3: re-evaluate Running composite nodes (parents check child completion,
+        // activate next phases like catch/finally, dispatch pending children).
+        if let Some((node, block)) = find_running_composite(&tree, &sequence.blocks) {
+            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            continue;
+        }
+
         // No actionable work this tick — either waiting for external work or stuck.
+        warn!(
+            instance_id = %instance.id,
+            nodes = ?tree.iter().map(|n| format!("{}:{}:{:?}", n.block_id, n.block_type, n.state)).collect::<Vec<_>>(),
+            "evaluate: no actionable work"
+        );
         return Ok(true);
     }
 
@@ -233,34 +263,31 @@ pub async fn evaluate(
     Ok(true)
 }
 
-/// Find the first Pending node whose parent is Running (or root-level).
-fn find_pending_ready<'a>(
+/// Find the first Running composite node (deepest first for proper nesting).
+fn find_running_composite<'a>(
     tree: &'a [ExecutionNode],
     blocks: &'a [BlockDefinition],
 ) -> Option<(ExecutionNode, &'a BlockDefinition)> {
-    for node in tree {
-        if node.state != NodeState::Pending {
-            continue;
-        }
-        // Check that parent is Running (or node is root-level).
-        let parent_ready = match node.parent_id {
-            None => true,
-            Some(pid) => tree
-                .iter()
-                .any(|p| p.id == pid && p.state == NodeState::Running),
-        };
-        if !parent_ready {
-            continue;
-        }
-        if let Some(block) = find_block(blocks, &node.block_id) {
-            return Some((node.clone(), block));
-        }
-    }
-    None
+    // Process deepest composites first (children before parents) so inner
+    // composites complete before their parents re-evaluate.
+    let mut composites: Vec<_> = tree
+        .iter()
+        .filter(|n| n.state == NodeState::Running)
+        .filter_map(|n| {
+            find_block(blocks, &n.block_id)
+                .filter(|b| !matches!(b, BlockDefinition::Step(_)))
+                .map(|b| (n.clone(), b))
+        })
+        .collect();
+    // Sort by tree depth (deeper = more ancestors = processed first).
+    composites.sort_by_key(|(n, _)| {
+        std::cmp::Reverse(count_ancestors(tree, n.id))
+    });
+    composites.into_iter().next()
 }
 
-/// Find the first Running composite node (for re-evaluation of child states).
-fn find_running_composite<'a>(
+/// Find a Running step node that can be executed.
+fn find_running_step<'a>(
     tree: &'a [ExecutionNode],
     blocks: &'a [BlockDefinition],
 ) -> Option<(ExecutionNode, &'a BlockDefinition)> {
@@ -269,12 +296,22 @@ fn find_running_composite<'a>(
             continue;
         }
         if let Some(block) = find_block(blocks, &node.block_id) {
-            if !matches!(block, BlockDefinition::Step(_)) {
+            if matches!(block, BlockDefinition::Step(_)) {
                 return Some((node.clone(), block));
             }
         }
     }
     None
+}
+
+/// Count ancestors to determine tree depth.
+fn count_ancestors(tree: &[ExecutionNode], mut node_id: ExecutionNodeId) -> usize {
+    let mut depth = 0;
+    while let Some(parent_id) = tree.iter().find(|n| n.id == node_id).and_then(|n| n.parent_id) {
+        depth += 1;
+        node_id = parent_id;
+    }
+    depth
 }
 
 /// Find a block definition by ID in the block tree.

@@ -24,20 +24,25 @@ pub async fn execute_try_catch(
     let catch_children = evaluator::children_of(tree, node.id, Some(1));
     let finally_children = evaluator::children_of(tree, node.id, Some(2));
 
-    // Phase 1: Try block executing.
+    // Phase 1: Activate and wait for try block.
     if !try_children.is_empty() && !evaluator::all_terminal(&try_children) {
+        // Activate pending try children.
+        for child in &try_children {
+            if child.state == NodeState::Pending {
+                storage
+                    .update_node_state(child.id, NodeState::Running)
+                    .await?;
+            }
+        }
         return Ok(true);
     }
 
     let try_failed = evaluator::any_failed(&try_children);
 
-    // Phase 2: If try failed, activate catch block.
+    // Phase 2: Handle catch block.
     if try_failed && !catch_children.is_empty() {
-        let catch_done = evaluator::all_terminal(&catch_children);
-
-        if !catch_done {
-            // Catch not yet started or still running — let it proceed.
-            // Activate catch children that are still pending.
+        if !evaluator::all_terminal(&catch_children) {
+            // Activate catch children.
             for child in &catch_children {
                 if child.state == NodeState::Pending {
                     storage
@@ -59,18 +64,15 @@ pub async fn execute_try_catch(
     }
 
     // Phase 3: Finally block always runs.
-    if !finally_children.is_empty() {
-        let finally_done = evaluator::all_terminal(&finally_children);
-        if !finally_done {
-            for child in &finally_children {
-                if child.state == NodeState::Pending {
-                    storage
-                        .update_node_state(child.id, NodeState::Running)
-                        .await?;
-                }
+    if !finally_children.is_empty() && !evaluator::all_terminal(&finally_children) {
+        for child in &finally_children {
+            if child.state == NodeState::Pending {
+                storage
+                    .update_node_state(child.id, NodeState::Running)
+                    .await?;
             }
-            return Ok(true);
         }
+        return Ok(true);
     }
 
     // All phases complete. Node succeeds if try succeeded (or catch recovered).

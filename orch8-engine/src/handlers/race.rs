@@ -26,6 +26,15 @@ pub async fn execute_race(
         return Ok(true);
     }
 
+    // Activate all pending children so they can race.
+    for child in &children {
+        if child.state == NodeState::Pending {
+            storage
+                .update_node_state(child.id, NodeState::Running)
+                .await?;
+        }
+    }
+
     // Check if any branch completed (winner).
     if evaluator::any_completed(&children) {
         // Cancel all non-terminal branches.
