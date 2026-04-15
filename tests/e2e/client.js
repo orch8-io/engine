@@ -87,6 +87,38 @@ export class Orch8Client {
     return this.#post(`/instances/${id}/retry`, {});
   }
 
+  // --- Cron ---
+
+  async createCron(req) {
+    return this.#post("/cron", req);
+  }
+
+  async getCron(id) {
+    return this.#get(`/cron/${id}`);
+  }
+
+  async listCron(query = {}) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v != null) params.set(k, v);
+    }
+    const qs = params.toString();
+    return this.#get(`/cron${qs ? `?${qs}` : ""}`);
+  }
+
+  async updateCron(id, body) {
+    return this.#put(`/cron/${id}`, body);
+  }
+
+  async deleteCron(id) {
+    const res = await fetch(`${this.baseUrl}/cron/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, `/cron/${id}`);
+    }
+    return {};
+  }
+
   // --- Health ---
 
   async healthLive() {
@@ -166,6 +198,20 @@ export class Orch8Client {
       throw new ApiError(res.status, text, path);
     }
     return res.json();
+  }
+
+  async #put(path, body) {
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, path);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
   }
 
   async #patch(path, body) {

@@ -1,3 +1,4 @@
+pub mod cron;
 pub mod error;
 pub mod health;
 pub mod instances;
@@ -21,5 +22,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(health::routes())
         .merge(sequences::routes())
         .merge(instances::routes())
+        .merge(cron::routes())
         .with_state(state)
 }

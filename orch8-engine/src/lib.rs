@@ -1,3 +1,4 @@
+pub mod cron;
 pub mod error;
 pub mod evaluator;
 pub mod handlers;
@@ -49,7 +50,7 @@ impl Engine {
         &self.config
     }
 
-    /// Start the engine: runs the tick loop until cancelled.
+    /// Start the engine: runs recovery, cron loop, and the main tick loop until cancelled.
     pub async fn run(&self) -> Result<(), error::EngineError> {
         // Recover stale instances from previous crash
         recovery::recover_stale_instances(
@@ -58,7 +59,22 @@ impl Engine {
         )
         .await?;
 
-        // Run the tick loop
+        // Spawn cron loop (checks every 10 seconds for due cron schedules).
+        let cron_storage = Arc::clone(&self.storage);
+        let cron_cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cron::run_cron_loop(
+                cron_storage,
+                std::time::Duration::from_secs(10),
+                cron_cancel,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "cron loop exited with error");
+            }
+        });
+
+        // Run the main tick loop
         scheduler::run_tick_loop(
             Arc::clone(&self.storage),
             Arc::clone(&self.handlers),

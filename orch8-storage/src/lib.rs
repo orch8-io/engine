@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use std::time::Duration;
 use uuid::Uuid;
 
+use orch8_types::cron::CronSchedule;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -180,6 +181,35 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// and reset them to `Scheduled` for re-execution.
     async fn recover_stale_instances(&self, stale_threshold: Duration)
         -> Result<u64, StorageError>;
+
+    // === Cron Schedules ===
+
+    async fn create_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
+
+    async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError>;
+
+    async fn list_cron_schedules(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<CronSchedule>, StorageError>;
+
+    async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
+
+    async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
+
+    /// Fetch all enabled cron schedules whose `next_fire_at <= now`.
+    async fn claim_due_cron_schedules(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<CronSchedule>, StorageError>;
+
+    /// After triggering, update `last_triggered_at` and `next_fire_at`.
+    async fn update_cron_fire_times(
+        &self,
+        id: Uuid,
+        last_triggered_at: DateTime<Utc>,
+        next_fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
 
     // === Health ===
 

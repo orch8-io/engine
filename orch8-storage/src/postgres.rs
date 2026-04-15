@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 
+use orch8_types::cron::CronSchedule;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -677,6 +678,129 @@ impl StorageBackend for PostgresStorage {
         Ok(result.rows_affected())
     }
 
+    // === Cron Schedules ===
+
+    async fn create_cron_schedule(&self, s: &CronSchedule) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO cron_schedules
+                (id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                 metadata, last_triggered_at, next_fire_at, created_at, updated_at)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        )
+        .bind(s.id)
+        .bind(&s.tenant_id.0)
+        .bind(&s.namespace.0)
+        .bind(s.sequence_id.0)
+        .bind(&s.cron_expr)
+        .bind(&s.timezone)
+        .bind(s.enabled)
+        .bind(&s.metadata)
+        .bind(s.last_triggered_at)
+        .bind(s.next_fire_at)
+        .bind(s.created_at)
+        .bind(s.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError> {
+        let row = sqlx::query_as::<_, CronRow>(
+            r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                     metadata, last_triggered_at, next_fire_at, created_at, updated_at
+              FROM cron_schedules WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(CronRow::into_schedule))
+    }
+
+    async fn list_cron_schedules(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<CronSchedule>, StorageError> {
+        let rows = if let Some(tid) = tenant_id {
+            sqlx::query_as::<_, CronRow>(
+                r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                         metadata, last_triggered_at, next_fire_at, created_at, updated_at
+                  FROM cron_schedules WHERE tenant_id = $1 ORDER BY created_at",
+            )
+            .bind(&tid.0)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, CronRow>(
+                r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                         metadata, last_triggered_at, next_fire_at, created_at, updated_at
+                  FROM cron_schedules ORDER BY created_at",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows.into_iter().map(CronRow::into_schedule).collect())
+    }
+
+    async fn update_cron_schedule(&self, s: &CronSchedule) -> Result<(), StorageError> {
+        sqlx::query(
+            r"UPDATE cron_schedules
+              SET cron_expr=$2, timezone=$3, enabled=$4, metadata=$5, next_fire_at=$6, updated_at=NOW()
+              WHERE id=$1",
+        )
+        .bind(s.id)
+        .bind(&s.cron_expr)
+        .bind(&s.timezone)
+        .bind(s.enabled)
+        .bind(&s.metadata)
+        .bind(s.next_fire_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM cron_schedules WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn claim_due_cron_schedules(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<CronSchedule>, StorageError> {
+        let rows = sqlx::query_as::<_, CronRow>(
+            r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                     metadata, last_triggered_at, next_fire_at, created_at, updated_at
+              FROM cron_schedules
+              WHERE enabled = TRUE AND next_fire_at <= $1
+              ORDER BY next_fire_at
+              FOR UPDATE SKIP LOCKED",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(CronRow::into_schedule).collect())
+    }
+
+    async fn update_cron_fire_times(
+        &self,
+        id: Uuid,
+        last_triggered_at: DateTime<Utc>,
+        next_fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE cron_schedules SET last_triggered_at=$2, next_fire_at=$3, updated_at=NOW() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(last_triggered_at)
+        .bind(next_fire_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -894,6 +1018,41 @@ impl SignalRow {
             delivered: self.delivered,
             created_at: self.created_at,
             delivered_at: self.delivered_at,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct CronRow {
+    id: Uuid,
+    tenant_id: String,
+    namespace: String,
+    sequence_id: Uuid,
+    cron_expr: String,
+    timezone: String,
+    enabled: bool,
+    metadata: serde_json::Value,
+    last_triggered_at: Option<DateTime<Utc>>,
+    next_fire_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl CronRow {
+    fn into_schedule(self) -> CronSchedule {
+        CronSchedule {
+            id: self.id,
+            tenant_id: TenantId(self.tenant_id),
+            namespace: Namespace(self.namespace),
+            sequence_id: SequenceId(self.sequence_id),
+            cron_expr: self.cron_expr,
+            timezone: self.timezone,
+            enabled: self.enabled,
+            metadata: self.metadata,
+            last_triggered_at: self.last_triggered_at,
+            next_fire_at: self.next_fire_at,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         }
     }
 }
