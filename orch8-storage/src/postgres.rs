@@ -1211,6 +1211,72 @@ impl StorageBackend for PostgresStorage {
         Ok(result.rows_affected())
     }
 
+    async fn list_worker_tasks(
+        &self,
+        filter: &orch8_types::worker_filter::WorkerTaskFilter,
+        pagination: &orch8_types::filter::Pagination,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        let mut qb = sqlx::QueryBuilder::new(
+            r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
+                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                     completed_at, output, error_message, error_retryable, created_at
+               FROM worker_tasks WHERE 1=1",
+        );
+        apply_worker_task_filter(&mut qb, filter);
+        qb.push(" ORDER BY created_at DESC");
+        qb.push(" LIMIT ")
+            .push_bind(i64::from(pagination.limit.min(1000)));
+        qb.push(" OFFSET ")
+            .push_bind(i64::try_from(pagination.offset).unwrap_or(i64::MAX));
+
+        let rows = qb
+            .build_query_as::<WorkerTaskRow>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    }
+
+    async fn worker_task_stats(
+        &self,
+    ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
+        // Count by state + handler_name
+        let counts: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks GROUP BY state, handler_name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut by_state = std::collections::HashMap::<String, u64>::new();
+        let mut by_handler =
+            std::collections::HashMap::<String, std::collections::HashMap<String, u64>>::new();
+        for (state, handler, cnt) in counts {
+            #[allow(clippy::cast_sign_loss)]
+            let cnt = cnt.max(0) as u64;
+            *by_state.entry(state.clone()).or_default() += cnt;
+            *by_handler
+                .entry(handler)
+                .or_default()
+                .entry(state)
+                .or_default() += cnt;
+        }
+
+        // Active workers
+        let workers: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let active_workers = workers.into_iter().map(|(w,)| w).collect();
+
+        Ok(orch8_types::worker_filter::WorkerTaskStats {
+            by_state,
+            by_handler,
+            active_workers,
+        })
+    }
+
     // === Resource Pools ===
 
     async fn create_resource_pool(
@@ -2207,5 +2273,29 @@ fn apply_instance_filter(qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>, filter
     }
     if let Some(ref p) = filter.priority {
         qb.push(" AND priority = ").push_bind(*p as i16);
+    }
+}
+
+/// Apply `WorkerTaskFilter` conditions to a query builder.
+fn apply_worker_task_filter(
+    qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
+    filter: &orch8_types::worker_filter::WorkerTaskFilter,
+) {
+    if let Some(ref states) = filter.states {
+        if !states.is_empty() {
+            let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
+            qb.push(" AND state = ANY(")
+                .push_bind(state_strings)
+                .push(")");
+        }
+    }
+    if let Some(ref handler) = filter.handler_name {
+        qb.push(" AND handler_name = ").push_bind(handler.clone());
+    }
+    if let Some(ref wid) = filter.worker_id {
+        qb.push(" AND worker_id = ").push_bind(wid.clone());
+    }
+    if let Some(ref queue) = filter.queue_name {
+        qb.push(" AND queue_name = ").push_bind(queue.clone());
     }
 }
