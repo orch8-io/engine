@@ -9,6 +9,8 @@ use crate::ids::{BlockId, ExecutionNodeId, InstanceId};
 pub enum NodeState {
     Pending,
     Running,
+    /// Dispatched to an external worker; awaiting completion callback.
+    Waiting,
     Completed,
     Failed,
     Cancelled,
@@ -20,6 +22,7 @@ impl std::fmt::Display for NodeState {
         let s = match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",

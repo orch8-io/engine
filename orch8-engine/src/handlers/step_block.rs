@@ -51,14 +51,13 @@ pub async fn execute_step_node(
 }
 
 /// Dispatch a step within the execution tree to the external worker queue.
-/// The node stays Running; the instance transitions to Waiting.
+/// The node is marked Waiting; the instance state is NOT changed here.
 async fn dispatch_step_to_external_worker(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
-    _node: &ExecutionNode,
+    node: &ExecutionNode,
     step_def: &StepDef,
 ) -> Result<bool, EngineError> {
-    use orch8_types::instance::InstanceState;
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
     let task = WorkerTask {
@@ -83,22 +82,13 @@ async fn dispatch_step_to_external_worker(
 
     storage.create_worker_task(&task).await?;
 
-    // Keep the node as Running — it will be resolved when the worker completes.
-    // Transition instance to Waiting so the scheduler doesn't re-claim it.
-    crate::lifecycle::transition_instance(
-        storage,
-        instance.id,
-        InstanceState::Running,
-        InstanceState::Waiting,
-        None,
-    )
-    .await?;
-
-    // Mark step node as a special "waiting" state. Since execution nodes don't
-    // have a Waiting state, we keep it Running — the evaluate loop will find
-    // no actionable work and return Ok(true), causing re-schedule. The instance
-    // is Waiting so the scheduler won't pick it up until the worker completes
-    // and transitions it back to Scheduled.
+    // Mark the execution node as Waiting so the evaluator won't re-dispatch it.
+    // The instance state is NOT changed here — the evaluator may have other steps
+    // to execute within the same composite. The caller (evaluator / process_instance_tree)
+    // is responsible for transitioning the instance to Waiting when no more work remains.
+    storage
+        .update_node_state(node.id, orch8_types::execution::NodeState::Waiting)
+        .await?;
 
     tracing::info!(
         instance_id = %instance.id,
@@ -118,7 +108,10 @@ pub async fn complete_external_step_node(
     block_id: &orch8_types::ids::BlockId,
 ) -> Result<(), EngineError> {
     let tree = storage.get_execution_tree(instance_id).await?;
-    if let Some(node) = tree.iter().find(|n| n.block_id == *block_id && n.state == NodeState::Running) {
+    if let Some(node) = tree.iter().find(|n| {
+        n.block_id == *block_id
+            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+    }) {
         evaluator::complete_node(storage, node.id).await?;
     }
     Ok(())
@@ -132,7 +125,10 @@ pub async fn fail_external_step_node(
     block_id: &orch8_types::ids::BlockId,
 ) -> Result<(), EngineError> {
     let tree = storage.get_execution_tree(instance_id).await?;
-    if let Some(node) = tree.iter().find(|n| n.block_id == *block_id && n.state == NodeState::Running) {
+    if let Some(node) = tree.iter().find(|n| {
+        n.block_id == *block_id
+            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+    }) {
         evaluator::fail_node(storage, node.id).await?;
     }
     Ok(())

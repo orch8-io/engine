@@ -109,10 +109,10 @@ async fn complete_task(
         .get_execution_tree(task.instance_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    if let Some(node) = tree
-        .iter()
-        .find(|n| n.block_id == task_block_id && n.state == NodeState::Running)
-    {
+    if let Some(node) = tree.iter().find(|n| {
+        n.block_id == task_block_id
+            && matches!(n.state, NodeState::Running | NodeState::Waiting)
+    }) {
         state
             .storage
             .update_node_state(node.id, NodeState::Completed)
@@ -183,10 +183,10 @@ async fn fail_task(
         // Permanent failure in a tree-based instance — mark the execution node
         // as failed and re-schedule the instance so the evaluator can handle it
         // (e.g., try-catch can catch the failure).
-        if let Some(node) = tree
-            .iter()
-            .find(|n| n.block_id == task.block_id && n.state == NodeState::Running)
-        {
+        if let Some(node) = tree.iter().find(|n| {
+            n.block_id == task.block_id
+                && matches!(n.state, NodeState::Running | NodeState::Waiting)
+        }) {
             state
                 .storage
                 .update_node_state(node.id, NodeState::Failed)

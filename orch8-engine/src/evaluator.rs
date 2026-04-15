@@ -221,25 +221,10 @@ pub async fn evaluate(
 
         // Phase 2: execute Running step nodes (leaf work first).
         if let Some((node, block)) = find_running_step(&tree, &sequence.blocks) {
-            let more = dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
-            if !more {
-                // Step deferred to external worker. Re-evaluate composites one more
-                // time (a race branch may have completed), then yield.
-                let tree = storage.get_execution_tree(instance.id).await?;
-                if let Some((cnode, cblock)) = find_running_composite(&tree, &sequence.blocks) {
-                    dispatch_block(storage, handlers, instance, &cnode, cblock, &tree).await?;
-                }
-                // Re-check termination after composite re-eval.
-                let tree = storage.get_execution_tree(instance.id).await?;
-                let roots: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
-                if roots.iter().all(|n| matches!(n.state, NodeState::Completed | NodeState::Skipped)) {
-                    return Ok(false);
-                }
-                if roots.iter().any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled)) {
-                    return Ok(false);
-                }
-                return Ok(true);
-            }
+            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            // Whether the step completed or deferred (external worker), continue
+            // the loop. Deferred steps are now in Waiting state and won't be
+            // found again by find_running_step. Other sibling steps can proceed.
             continue;
         }
 
@@ -502,6 +487,11 @@ pub fn all_completed(nodes: &[&ExecutionNode]) -> bool {
 /// Check if any node failed.
 pub fn any_failed(nodes: &[&ExecutionNode]) -> bool {
     nodes.iter().any(|n| n.state == NodeState::Failed)
+}
+
+/// Check if the tree has any nodes waiting for external work.
+pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
+    tree.iter().any(|n| n.state == NodeState::Waiting)
 }
 
 #[cfg(test)]

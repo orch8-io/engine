@@ -355,14 +355,28 @@ async fn process_instance_tree(
 
     match crate::evaluator::evaluate(storage, handlers, instance, sequence).await {
         Ok(true) => {
-            // More work — re-schedule for next tick.
-            storage
-                .update_instance_state(
+            // More work — check if the tree has nodes waiting for external workers.
+            // If so, transition to Waiting (the worker completion callback will
+            // re-schedule). Otherwise, re-schedule for the next tick.
+            let tree = storage.get_execution_tree(instance_id).await?;
+            if crate::evaluator::has_waiting_nodes(&tree) {
+                crate::lifecycle::transition_instance(
+                    storage,
                     instance_id,
-                    InstanceState::Scheduled,
-                    Some(Utc::now()),
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    None,
                 )
                 .await?;
+            } else {
+                storage
+                    .update_instance_state(
+                        instance_id,
+                        InstanceState::Scheduled,
+                        Some(Utc::now()),
+                    )
+                    .await?;
+            }
         }
         Ok(false) => {
             // Evaluator says done. Check if any root node failed.

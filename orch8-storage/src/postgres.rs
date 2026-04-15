@@ -1195,6 +1195,7 @@ impl ExecutionNodeRow {
         };
         let state = match self.state.as_str() {
             "running" => NodeState::Running,
+            "waiting" => NodeState::Waiting,
             "completed" => NodeState::Completed,
             "failed" => NodeState::Failed,
             "cancelled" => NodeState::Cancelled,
