@@ -4,6 +4,7 @@ pub mod health;
 pub mod instances;
 pub mod metrics;
 pub mod sequences;
+pub mod workers;
 
 use std::sync::Arc;
 
@@ -23,5 +24,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sequences::routes())
         .merge(instances::routes())
         .merge(cron::routes())
+        .merge(workers::routes())
         .with_state(state)
 }

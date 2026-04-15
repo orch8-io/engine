@@ -23,6 +23,98 @@ pub struct StepExecParams {
     pub timeout: Option<Duration>,
 }
 
+/// Execute a step without persisting the output — returns the `BlockOutput` for
+/// the caller to save (typically combined with a state transition in one transaction).
+pub async fn execute_step_dry(
+    storage: &dyn StorageBackend,
+    handlers: &HandlerRegistry,
+    exec: StepExecParams,
+) -> Result<BlockOutput, EngineError> {
+    // Memoization: if output already exists for this block+attempt, return it.
+    if exec.attempt > 0 {
+        if let Some(existing) = storage
+            .get_block_output(exec.instance_id, &exec.block_id)
+            .await?
+        {
+            if existing.attempt == i16::try_from(exec.attempt).unwrap_or(i16::MAX) {
+                info!(
+                    instance_id = %exec.instance_id,
+                    block_id = %exec.block_id,
+                    "step already executed (memoized), returning cached output"
+                );
+                return Ok(existing);
+            }
+        }
+    }
+
+    let handler = handlers
+        .get(&exec.handler_name)
+        .ok_or_else(|| EngineError::HandlerNotFound(exec.handler_name.clone()))?;
+
+    let instance_id = exec.instance_id;
+    let block_id = exec.block_id.clone();
+    let attempt = exec.attempt;
+    let timeout = exec.timeout;
+
+    let step_ctx = StepContext {
+        instance_id,
+        block_id: exec.block_id,
+        params: exec.params,
+        context: exec.context,
+        attempt,
+    };
+
+    let result = if let Some(dur) = timeout {
+        match tokio::time::timeout(dur, handler(step_ctx)).await {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(EngineError::StepTimeout {
+                    block_id,
+                    timeout: dur,
+                });
+            }
+        }
+    } else {
+        handler(step_ctx).await
+    };
+
+    match result {
+        Ok(output) => {
+            let output_size = serde_json::to_vec(&output)
+                .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
+                .unwrap_or(0);
+
+            let block_output = BlockOutput {
+                id: Uuid::new_v4(),
+                instance_id,
+                block_id,
+                output,
+                output_ref: None,
+                output_size,
+                attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
+                created_at: Utc::now(),
+            };
+
+            info!(
+                instance_id = %instance_id,
+                output_size = output_size,
+                "step completed successfully"
+            );
+
+            Ok(block_output)
+        }
+        Err(step_err) => {
+            warn!(
+                instance_id = %instance_id,
+                attempt = attempt,
+                error = %step_err,
+                "step execution failed"
+            );
+            Err(map_step_error(step_err, instance_id, &block_id))
+        }
+    }
+}
+
 /// Execute a step with memoization: check if output already exists (idempotency),
 /// invoke the handler if not, persist the result.
 pub async fn execute_step(

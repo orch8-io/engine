@@ -16,6 +16,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
+use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 use crate::StorageBackend;
 
@@ -500,6 +501,72 @@ impl StorageBackend for PostgresStorage {
         Ok(rows.into_iter().map(|(id,)| BlockId(id)).collect())
     }
 
+    async fn get_completed_block_ids_batch(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<std::collections::HashMap<InstanceId, Vec<BlockId>>, StorageError> {
+        if instance_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let uuids: Vec<Uuid> = instance_ids.iter().map(|id| id.0).collect();
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT instance_id, block_id FROM block_outputs WHERE instance_id = ANY($1)",
+        )
+        .bind(&uuids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map: std::collections::HashMap<InstanceId, Vec<BlockId>> =
+            std::collections::HashMap::new();
+        for (iid, bid) in rows {
+            map.entry(InstanceId(iid))
+                .or_default()
+                .push(BlockId(bid));
+        }
+        Ok(map)
+    }
+
+    async fn save_output_and_transition(
+        &self,
+        output: &BlockOutput,
+        instance_id: InstanceId,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            r"
+            INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (instance_id, block_id) DO UPDATE
+            SET output = $4, output_ref = $5, output_size = $6, attempt = $7
+            ",
+        )
+        .bind(output.id)
+        .bind(output.instance_id.0)
+        .bind(&output.block_id.0)
+        .bind(&output.output)
+        .bind(&output.output_ref)
+        .bind(output.output_size)
+        .bind(output.attempt)
+        .bind(output.created_at)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE task_instances SET state = $2, next_fire_at = $3, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(instance_id.0)
+        .bind(new_state.to_string())
+        .bind(next_fire_at)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
+    }
+
     // === Rate Limits ===
 
     async fn check_rate_limit(
@@ -609,11 +676,50 @@ impl StorageBackend for PostgresStorage {
         Ok(rows.into_iter().map(SignalRow::into_signal).collect())
     }
 
+    async fn get_pending_signals_batch(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError> {
+        if instance_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let uuids: Vec<Uuid> = instance_ids.iter().map(|id| id.0).collect();
+        let rows = sqlx::query_as::<_, SignalRow>(
+            r"SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
+               FROM signal_inbox WHERE instance_id = ANY($1) AND delivered = FALSE
+               ORDER BY created_at",
+        )
+        .bind(&uuids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut map: std::collections::HashMap<InstanceId, Vec<Signal>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let signal = row.into_signal();
+            map.entry(signal.instance_id).or_default().push(signal);
+        }
+        Ok(map)
+    }
+
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError> {
         sqlx::query("UPDATE signal_inbox SET delivered = TRUE, delivered_at = NOW() WHERE id = $1")
             .bind(signal_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError> {
+        if signal_ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE signal_inbox SET delivered = TRUE, delivered_at = NOW() WHERE id = ANY($1)",
+        )
+        .bind(signal_ids)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -812,6 +918,152 @@ impl StorageBackend for PostgresStorage {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // === Worker Tasks ===
+
+    async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO worker_tasks
+                (id, instance_id, block_id, handler_name, params, context,
+                 attempt, timeout_ms, state, created_at)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              ON CONFLICT (instance_id, block_id) DO NOTHING",
+        )
+        .bind(task.id)
+        .bind(task.instance_id.0)
+        .bind(&task.block_id.0)
+        .bind(&task.handler_name)
+        .bind(&task.params)
+        .bind(&task.context)
+        .bind(task.attempt)
+        .bind(task.timeout_ms)
+        .bind(task.state.to_string())
+        .bind(task.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError> {
+        let row = sqlx::query_as::<_, WorkerTaskRow>(
+            r"SELECT id, instance_id, block_id, handler_name, params, context,
+                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                     completed_at, output, error_message, error_retryable, created_at
+              FROM worker_tasks WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(WorkerTaskRow::into_task))
+    }
+
+    async fn claim_worker_tasks(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        let rows = sqlx::query_as::<_, WorkerTaskRow>(
+            r"UPDATE worker_tasks
+              SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW()
+              WHERE id IN (
+                  SELECT id FROM worker_tasks
+                  WHERE handler_name = $1 AND state = 'pending'
+                  ORDER BY created_at
+                  LIMIT $3
+                  FOR UPDATE SKIP LOCKED
+              )
+              RETURNING id, instance_id, block_id, handler_name, params, context,
+                        attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                        completed_at, output, error_message, error_retryable, created_at",
+        )
+        .bind(handler_name)
+        .bind(worker_id)
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    }
+
+    async fn complete_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        output: &serde_json::Value,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r"UPDATE worker_tasks
+              SET state = 'completed', output = $3, completed_at = NOW()
+              WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(output)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn fail_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r"UPDATE worker_tasks
+              SET state = 'failed', error_message = $3, error_retryable = $4, completed_at = NOW()
+              WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(message)
+        .bind(retryable)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn heartbeat_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE worker_tasks SET heartbeat_at = NOW() WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM worker_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn reap_stale_worker_tasks(
+        &self,
+        stale_threshold: Duration,
+    ) -> Result<u64, StorageError> {
+        let threshold_secs = stale_threshold.as_secs_f64();
+        let result = sqlx::query(
+            r"UPDATE worker_tasks
+              SET state = 'pending', worker_id = NULL, claimed_at = NULL, heartbeat_at = NULL
+              WHERE state = 'claimed'
+                AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)",
+        )
+        .bind(threshold_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     // === Health ===
@@ -1066,6 +1318,57 @@ impl CronRow {
             next_fire_at: self.next_fire_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
+        }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct WorkerTaskRow {
+    id: Uuid,
+    instance_id: Uuid,
+    block_id: String,
+    handler_name: String,
+    params: serde_json::Value,
+    context: serde_json::Value,
+    attempt: i16,
+    timeout_ms: Option<i64>,
+    state: String,
+    worker_id: Option<String>,
+    claimed_at: Option<DateTime<Utc>>,
+    heartbeat_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    output: Option<serde_json::Value>,
+    error_message: Option<String>,
+    error_retryable: Option<bool>,
+    created_at: DateTime<Utc>,
+}
+
+impl WorkerTaskRow {
+    fn into_task(self) -> WorkerTask {
+        let state = match self.state.as_str() {
+            "claimed" => WorkerTaskState::Claimed,
+            "completed" => WorkerTaskState::Completed,
+            "failed" => WorkerTaskState::Failed,
+            _ => WorkerTaskState::Pending,
+        };
+        WorkerTask {
+            id: self.id,
+            instance_id: InstanceId(self.instance_id),
+            block_id: BlockId(self.block_id),
+            handler_name: self.handler_name,
+            params: self.params,
+            context: self.context,
+            attempt: self.attempt,
+            timeout_ms: self.timeout_ms,
+            state,
+            worker_id: self.worker_id,
+            claimed_at: self.claimed_at,
+            heartbeat_at: self.heartbeat_at,
+            completed_at: self.completed_at,
+            output: self.output,
+            error_message: self.error_message,
+            error_retryable: self.error_retryable,
+            created_at: self.created_at,
         }
     }
 }

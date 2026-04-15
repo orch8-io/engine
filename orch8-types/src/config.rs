@@ -38,7 +38,7 @@ fn default_database_url() -> String {
 }
 
 fn default_max_connections() -> u32 {
-    20
+    64
 }
 
 fn default_true() -> bool {

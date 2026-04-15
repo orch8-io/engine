@@ -119,6 +119,37 @@ export class Orch8Client {
     return {};
   }
 
+  // --- Workers ---
+
+  async pollWorkerTasks(handlerName, workerId, limit = 1) {
+    return this.#post("/workers/tasks/poll", {
+      handler_name: handlerName,
+      worker_id: workerId,
+      limit,
+    });
+  }
+
+  async completeWorkerTask(taskId, workerId, output = {}) {
+    return this.#post(`/workers/tasks/${taskId}/complete`, {
+      worker_id: workerId,
+      output,
+    });
+  }
+
+  async failWorkerTask(taskId, workerId, message, retryable = false) {
+    return this.#post(`/workers/tasks/${taskId}/fail`, {
+      worker_id: workerId,
+      message,
+      retryable,
+    });
+  }
+
+  async heartbeatWorkerTask(taskId, workerId) {
+    return this.#post(`/workers/tasks/${taskId}/heartbeat`, {
+      worker_id: workerId,
+    });
+  }
+
   // --- Health ---
 
   async healthLive() {
@@ -197,7 +228,8 @@ export class Orch8Client {
       const text = await res.text();
       throw new ApiError(res.status, text, path);
     }
-    return res.json();
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
   }
 
   async #put(path, body) {

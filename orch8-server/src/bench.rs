@@ -10,6 +10,9 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,22 +31,27 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
 
 const DB_URL: &str = "postgres://orch8:orch8@localhost:5434/orch8";
 
-fn make_sequence(tenant: &str) -> SequenceDefinition {
+fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
+    let blocks = (0..num_steps)
+        .map(|i| {
+            BlockDefinition::Step(StepDef {
+                id: BlockId(format!("s{}", i + 1)),
+                handler: "noop".into(),
+                params: serde_json::Value::Null,
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+            })
+        })
+        .collect();
     SequenceDefinition {
         id: SequenceId(uuid::Uuid::new_v4()),
         tenant_id: TenantId(tenant.into()),
         namespace: Namespace("default".into()),
         name: format!("bench-seq-{}", uuid::Uuid::new_v4()),
         version: 1,
-        blocks: vec![BlockDefinition::Step(StepDef {
-            id: BlockId("s1".into()),
-            handler: "noop".into(),
-            params: serde_json::Value::Null,
-            delay: None,
-            retry: None,
-            timeout: None,
-            rate_limit_key: None,
-        })],
+        blocks,
         created_at: Utc::now(),
     }
 }
@@ -72,7 +80,7 @@ fn make_instances(count: usize, seq_id: SequenceId, tenant: &str) -> Vec<TaskIns
 }
 
 async fn setup_storage() -> Arc<PostgresStorage> {
-    let storage = PostgresStorage::new(DB_URL, 20)
+    let storage = PostgresStorage::new(DB_URL, 64)
         .await
         .expect("Failed to connect to Postgres — is docker compose running?");
     storage
@@ -103,7 +111,8 @@ async fn main() {
 
     bench_batch_insert(storage.clone()).await;
     bench_claim_throughput(storage.clone()).await;
-    bench_e2e_throughput(storage.clone()).await;
+    bench_e2e_throughput(storage.clone(), 1).await;
+    bench_e2e_throughput(storage.clone(), 3).await;
 
     println!("\n=== Benchmark Complete ===");
 }
@@ -112,7 +121,7 @@ async fn main() {
 /// Target: < 3 seconds.
 async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
     let tenant = format!("bench-insert-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let seq = make_sequence(&tenant);
+    let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
     let count = 100_000;
@@ -143,7 +152,7 @@ async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
 /// How fast can we claim batches of 256 from a pool of 10K scheduled instances?
 async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
     let tenant = format!("bench-claim-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let seq = make_sequence(&tenant);
+    let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
     let count = 10_000;
@@ -178,11 +187,11 @@ async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
     cleanup(storage.as_ref(), &tenant).await;
 }
 
-/// Benchmark 3: End-to-end throughput.
-/// Schedule N instances with noop handler, run engine, measure time to complete all.
-async fn bench_e2e_throughput(storage: Arc<PostgresStorage>) {
+/// Benchmark: End-to-end throughput.
+/// Schedule N instances with noop handler(s), run engine, measure time to complete all.
+async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
     let tenant = format!("bench-e2e-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    let seq = make_sequence(&tenant);
+    let seq = make_sequence(&tenant, num_steps);
     storage.create_sequence(&seq).await.unwrap();
 
     let count = 5_000;
@@ -191,7 +200,9 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>) {
 
     storage.create_instances_batch(&instances).await.unwrap();
 
-    println!("--- End-to-end: {count} noop instances (tick=50ms, batch=512, concurrent=256) ---");
+    println!(
+        "--- End-to-end: {count} instances x {num_steps} steps (tick=50ms, batch=512, concurrent=256) ---"
+    );
 
     let cancel = CancellationToken::new();
 

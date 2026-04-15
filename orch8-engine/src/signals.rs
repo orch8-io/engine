@@ -4,7 +4,7 @@ use tracing::{info, warn};
 use orch8_storage::StorageBackend;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
-use orch8_types::signal::SignalType;
+use orch8_types::signal::{Signal, SignalType};
 
 use crate::error::EngineError;
 
@@ -16,7 +16,26 @@ pub async fn process_signals(
     current_state: InstanceState,
 ) -> Result<bool, EngineError> {
     let signals = storage.get_pending_signals(instance_id).await?;
+    process_signals_inner(storage, instance_id, current_state, signals).await
+}
 
+/// Process pre-fetched signals (from batch query).
+/// Returns `true` if execution should be aborted (e.g., pause or cancel).
+pub async fn process_signals_prefetched(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+    signals: Vec<Signal>,
+) -> Result<bool, EngineError> {
+    process_signals_inner(storage, instance_id, current_state, signals).await
+}
+
+async fn process_signals_inner(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    current_state: InstanceState,
+    signals: Vec<Signal>,
+) -> Result<bool, EngineError> {
     if signals.is_empty() {
         return Ok(false);
     }

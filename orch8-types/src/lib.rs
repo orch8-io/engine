@@ -10,6 +10,7 @@ pub mod output;
 pub mod rate_limit;
 pub mod sequence;
 pub mod signal;
+pub mod worker;
 
 // Re-exports for convenience.
 pub use config::EngineConfig;

@@ -59,6 +59,7 @@ async-trait = "0.1"
 rand = "0.8"
 cron = "0.15"
 moka = { version = "0.12", features = ["future"] }
+tikv-jemallocator = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -59,6 +59,28 @@ impl Engine {
         )
         .await?;
 
+        // Spawn worker task reaper (resets stale claimed tasks every 30 seconds).
+        let reaper_storage = Arc::clone(&self.storage);
+        let reaper_cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    () = reaper_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        match reaper_storage
+                            .reap_stale_worker_tasks(std::time::Duration::from_secs(60))
+                            .await
+                        {
+                            Ok(0) => {}
+                            Ok(n) => tracing::info!(count = n, "reaped stale worker tasks"),
+                            Err(e) => tracing::error!(error = %e, "worker task reaper error"),
+                        }
+                    }
+                }
+            }
+        });
+
         // Spawn cron loop (checks every 10 seconds for due cron schedules).
         let cron_storage = Arc::clone(&self.storage);
         let cron_cancel = self.cancel.clone();

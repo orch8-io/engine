@@ -17,6 +17,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
+use orch8_types::worker::WorkerTask;
 
 /// The core storage abstraction.
 ///
@@ -133,6 +134,22 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<BlockId>, StorageError>;
 
+    /// Batch variant: fetch completed block IDs for multiple instances in one query.
+    async fn get_completed_block_ids_batch(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<std::collections::HashMap<InstanceId, Vec<BlockId>>, StorageError>;
+
+    /// Atomic: save block output + update instance state in a single transaction.
+    /// Eliminates one DB round-trip on the hot path.
+    async fn save_output_and_transition(
+        &self,
+        output: &BlockOutput,
+        instance_id: InstanceId,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
     // === Rate Limits ===
 
     /// Atomic check-and-increment. Single DB round-trip.
@@ -154,7 +171,16 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<Signal>, StorageError>;
 
+    /// Batch variant: fetch pending signals for multiple instances in one query.
+    async fn get_pending_signals_batch(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
+
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+
+    /// Batch variant: mark multiple signals delivered in one query.
+    async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 
     // === Idempotency ===
 
@@ -217,6 +243,54 @@ pub trait StorageBackend: Send + Sync + 'static {
         last_triggered_at: DateTime<Utc>,
         next_fire_at: DateTime<Utc>,
     ) -> Result<(), StorageError>;
+
+    // === Worker Tasks ===
+
+    async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
+
+    async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
+
+    /// Atomically claim up to `limit` pending tasks for a handler.
+    /// Uses `FOR UPDATE SKIP LOCKED` for safe concurrent polling.
+    async fn claim_worker_tasks(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    /// Mark a claimed task as completed with output. Verifies `worker_id` ownership.
+    async fn complete_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        output: &serde_json::Value,
+    ) -> Result<bool, StorageError>;
+
+    /// Mark a claimed task as failed. Verifies `worker_id` ownership.
+    async fn fail_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        message: &str,
+        retryable: bool,
+    ) -> Result<bool, StorageError>;
+
+    /// Update heartbeat timestamp for a claimed task. Verifies `worker_id` ownership.
+    async fn heartbeat_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Delete a worker task (used when retryable failure needs re-dispatch).
+    async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
+
+    /// Reset stale claimed tasks (no heartbeat within threshold) back to pending.
+    async fn reap_stale_worker_tasks(
+        &self,
+        stale_threshold: Duration,
+    ) -> Result<u64, StorageError>;
 
     // === Health ===
 

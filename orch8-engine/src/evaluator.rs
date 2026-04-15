@@ -1,4 +1,4 @@
-use tracing::{debug, warn};
+use tracing::debug;
 
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
@@ -171,7 +171,8 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
     }
 }
 
-/// Evaluate the execution tree: find the next node to execute and dispatch it.
+/// Evaluate the execution tree: dispatch actionable nodes until no more
+/// progress can be made within this tick.
 /// Returns `true` if there is more work to do (instance should be re-scheduled).
 pub async fn evaluate(
     storage: &dyn StorageBackend,
@@ -179,36 +180,101 @@ pub async fn evaluate(
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
-    let tree = ensure_execution_tree(storage, instance, sequence).await?;
+    // Ensure the execution tree exists (creates on first call).
+    ensure_execution_tree(storage, instance, sequence).await?;
 
-    // Find root-level nodes (no parent) in order.
-    let root_nodes: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
+    // Loop: each iteration dispatches one actionable node, then re-reads
+    // the tree to find more work. This lets parallel branches, try-catch
+    // phases, etc. all make progress within a single scheduler tick.
+    let max_iterations = 200;
+    for _ in 0..max_iterations {
+        // Re-fetch tree to see latest state after each dispatch.
+        let tree = storage.get_execution_tree(instance.id).await?;
+        let root_nodes: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
 
-    for node in &root_nodes {
-        match node.state {
-            NodeState::Completed | NodeState::Skipped => {}
-            NodeState::Failed | NodeState::Cancelled => {
-                // If a root node failed, the whole instance fails.
-                return Ok(false);
+        // Termination: all root nodes done.
+        if root_nodes.iter().all(|n| {
+            matches!(
+                n.state,
+                NodeState::Completed | NodeState::Skipped
+            )
+        }) {
+            return Ok(false);
+        }
+        // Termination: any root node failed/cancelled.
+        if root_nodes.iter().any(|n| {
+            matches!(
+                n.state,
+                NodeState::Failed | NodeState::Cancelled
+            )
+        }) {
+            return Ok(false);
+        }
+
+        // Phase 1: find a Pending node whose parent is Running (or root).
+        if let Some((node, block)) = find_pending_ready(&tree, &sequence.blocks) {
+            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            continue;
+        }
+
+        // Phase 2: find a Running composite node to re-evaluate (check child completion).
+        if let Some((node, block)) = find_running_composite(&tree, &sequence.blocks) {
+            let changed = dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            if changed {
+                continue;
             }
-            NodeState::Pending | NodeState::Running => {
-                // Execute this node.
-                let block = find_block(&sequence.blocks, &node.block_id);
-                if let Some(block) = block {
-                    return dispatch_block(storage, handlers, instance, node, block, &tree).await;
-                }
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %node.block_id,
-                    "block definition not found in sequence"
-                );
-                return Ok(false);
+        }
+
+        // No actionable work this tick — either waiting for external work or stuck.
+        return Ok(true);
+    }
+
+    // Safety limit — re-schedule for next tick.
+    Ok(true)
+}
+
+/// Find the first Pending node whose parent is Running (or root-level).
+fn find_pending_ready<'a>(
+    tree: &'a [ExecutionNode],
+    blocks: &'a [BlockDefinition],
+) -> Option<(ExecutionNode, &'a BlockDefinition)> {
+    for node in tree {
+        if node.state != NodeState::Pending {
+            continue;
+        }
+        // Check that parent is Running (or node is root-level).
+        let parent_ready = match node.parent_id {
+            None => true,
+            Some(pid) => tree
+                .iter()
+                .any(|p| p.id == pid && p.state == NodeState::Running),
+        };
+        if !parent_ready {
+            continue;
+        }
+        if let Some(block) = find_block(blocks, &node.block_id) {
+            return Some((node.clone(), block));
+        }
+    }
+    None
+}
+
+/// Find the first Running composite node (for re-evaluation of child states).
+fn find_running_composite<'a>(
+    tree: &'a [ExecutionNode],
+    blocks: &'a [BlockDefinition],
+) -> Option<(ExecutionNode, &'a BlockDefinition)> {
+    for node in tree {
+        if node.state != NodeState::Running {
+            continue;
+        }
+        if let Some(block) = find_block(blocks, &node.block_id) {
+            if !matches!(block, BlockDefinition::Step(_)) {
+                return Some((node.clone(), block));
             }
         }
     }
-
-    // All root nodes completed — instance is done.
-    Ok(false)
+    None
 }
 
 /// Find a block definition by ID in the block tree.
