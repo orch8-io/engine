@@ -402,6 +402,49 @@ describe("Composite Blocks", () => {
     assert.equal(completed.state, "completed");
   });
 
+  // --- Nested composites ---
+
+  it("nested: parallel with try-catch containing external worker", async () => {
+    // Branch A: try-catch where try uses external worker that fails => catch recovers.
+    // Branch B: simple noop.
+    const seq = testSequence("nested-par-tc", [
+      parallel("p1", [
+        [
+          tryCatch(
+            "tc1",
+            [step("try_ext", "nested_fail_handler", {})],
+            [step("catch_step", "log", { message: "recovered" })]
+          ),
+        ],
+        [step("b1", "noop")],
+      ]),
+    ]);
+    await client.createSequence(seq);
+
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: "test",
+      namespace: "default",
+    });
+
+    // Wait for external handler dispatch.
+    await client.waitForState(id, "waiting", { timeoutMs: 5000 });
+
+    // Fail the try step permanently so catch kicks in.
+    const tasks = await client.pollWorkerTasks("nested_fail_handler", "worker-1");
+    assert.equal(tasks.length, 1);
+    await client.failWorkerTask(tasks[0].id, "worker-1", "nested fail", false);
+
+    // Instance should complete — catch recovers branch A, branch B already done.
+    const completed = await client.waitForState(id, "completed", { timeoutMs: 10000 });
+    assert.equal(completed.state, "completed");
+
+    const outputs = await client.getOutputs(id);
+    const blockIds = outputs.map((o) => o.block_id);
+    assert.ok(blockIds.includes("catch_step"), "catch_step should run after try failure");
+    assert.ok(blockIds.includes("b1"), "b1 should complete in parallel");
+  });
+
   // --- Composite after steps ---
 
   it("step then parallel: sequential + concurrent mix", async () => {

@@ -787,7 +787,7 @@ impl StorageBackend for PostgresStorage {
             r"
             UPDATE task_instances
             SET state = 'scheduled', next_fire_at = NOW(), updated_at = NOW()
-            WHERE state = 'running'
+            WHERE state IN ('running', 'waiting')
               AND updated_at < NOW() - make_interval(secs => $1::double precision)
             ",
         )
@@ -1061,6 +1061,21 @@ impl StorageBackend for PostgresStorage {
                 AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)",
         )
         .bind(threshold_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn cancel_worker_tasks_for_block(
+        &self,
+        instance_id: Uuid,
+        block_id: &str,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = $2 AND state IN ('pending', 'claimed')",
+        )
+        .bind(instance_id)
+        .bind(block_id)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected())

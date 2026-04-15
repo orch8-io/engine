@@ -292,6 +292,13 @@ pub trait StorageBackend: Send + Sync + 'static {
         stale_threshold: Duration,
     ) -> Result<u64, StorageError>;
 
+    /// Delete pending/claimed worker tasks for an instance + block (used when race cancels a branch).
+    async fn cancel_worker_tasks_for_block(
+        &self,
+        instance_id: Uuid,
+        block_id: &str,
+    ) -> Result<u64, StorageError>;
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError>;

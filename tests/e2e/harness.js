@@ -6,7 +6,7 @@
  *   - cargo build (binary must exist)
  */
 
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, execSync, execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,36 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
 
   const binaryPath = findBinary();
   console.log(`  Using binary: ${binaryPath}`);
+
+  // Kill any stale process on the target port.
+  try {
+    const pids = execFileSync("lsof", ["-ti", `:${port}`], { encoding: "utf-8" }).trim();
+    if (pids) {
+      execFileSync("kill", ["-9", ...pids.split("\n")], { stdio: "ignore" });
+      console.log(`  Killed stale process(es) on port ${port}`);
+      await sleep(500);
+    }
+  } catch {
+    // No process on port — expected.
+  }
+
+  // Clean stale data from previous test runs.
+  try {
+    const dbUrl = new URL(DB_URL);
+    execFileSync("psql", [
+      "-h", dbUrl.hostname,
+      "-p", dbUrl.port,
+      "-U", dbUrl.username,
+      "-d", dbUrl.pathname.slice(1),
+      "-c", "DELETE FROM worker_tasks; DELETE FROM block_outputs; DELETE FROM execution_tree; DELETE FROM signal_inbox; DELETE FROM task_instances;",
+    ], {
+      env: { ...process.env, PGPASSWORD: dbUrl.password },
+      stdio: "pipe",
+    });
+    console.log("  Cleaned stale test data from database");
+  } catch (e) {
+    console.log(`  Warning: DB cleanup failed: ${e.message}`);
+  }
 
   const httpAddr = `0.0.0.0:${port}`;
 

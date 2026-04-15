@@ -37,7 +37,7 @@ pub async fn execute_race(
 
     // Check if any branch completed (winner).
     if evaluator::any_completed(&children) {
-        // Cancel all non-terminal branches.
+        // Cancel all non-terminal branches and their worker tasks.
         for child in &children {
             if !matches!(
                 child.state,
@@ -46,6 +46,12 @@ pub async fn execute_race(
                     | NodeState::Cancelled
                     | NodeState::Skipped
             ) {
+                // If the node is Waiting, cancel its pending worker task.
+                if child.state == NodeState::Waiting {
+                    storage
+                        .cancel_worker_tasks_for_block(instance.id.0, &child.block_id.0)
+                        .await?;
+                }
                 storage
                     .update_node_state(child.id, NodeState::Cancelled)
                     .await?;
