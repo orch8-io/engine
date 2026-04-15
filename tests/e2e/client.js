@@ -150,6 +150,19 @@ export class Orch8Client {
     });
   }
 
+  async listWorkerTasks(query = {}) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v != null) params.set(k, v);
+    }
+    const qs = params.toString();
+    return this.#get(`/workers/tasks${qs ? `?${qs}` : ""}`);
+  }
+
+  async workerTaskStats() {
+    return this.#get("/workers/tasks/stats");
+  }
+
   // --- Health ---
 
   async healthLive() {
