@@ -18,6 +18,9 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("log", handle_log);
     registry.register("sleep", handle_sleep);
     registry.register("http_request", handle_http_request);
+    registry.register("llm_call", super::llm::handle_llm_call);
+    registry.register("tool_call", super::tool_call::handle_tool_call);
+    registry.register("human_review", super::human_review::handle_human_review);
 }
 
 /// No-op handler. Always succeeds with an empty result.
@@ -95,12 +98,13 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
     Ok(json!({ "slept_ms": duration_ms }))
 }
 
-/// HTTP request handler. Makes a simple HTTP request.
+/// HTTP request handler. Makes an HTTP request via reqwest.
 ///
 /// Params:
 /// - `url` (string, required): The URL to request.
 /// - `method` (string): HTTP method. Defaults to "GET".
 /// - `body` (string): Request body for POST/PUT.
+/// - `headers` (object): Extra HTTP headers.
 /// - `timeout_ms` (u64): Timeout in milliseconds. Defaults to 10000.
 async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     let url = ctx
@@ -118,15 +122,14 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or("GET");
 
-    let body = ctx.params.get("body").and_then(Value::as_str).unwrap_or("");
+    let body_str = ctx.params.get("body").and_then(Value::as_str).unwrap_or("");
 
-    let timeout_ms = ctx
-        .params
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(10_000);
-
-    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let timeout = std::time::Duration::from_millis(
+        ctx.params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(10_000),
+    );
 
     debug!(
         instance_id = %ctx.instance_id,
@@ -136,91 +139,57 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
         "http_request step"
     );
 
-    match send_http(url, method, body, timeout).await {
-        Ok((status, response_body)) => {
-            if status >= 500 {
-                return Err(StepError::Retryable {
-                    message: format!("HTTP {status} from {url}"),
-                    details: Some(json!({ "status": status, "body": response_body })),
-                });
+    let client = super::llm::http_client();
+
+    let mut req = match method.to_uppercase().as_str() {
+        "POST" => client.post(url),
+        "PUT" => client.put(url),
+        "PATCH" => client.patch(url),
+        "DELETE" => client.delete(url),
+        _ => client.get(url),
+    };
+
+    req = req.timeout(timeout);
+
+    if let Some(headers) = ctx.params.get("headers").and_then(Value::as_object) {
+        for (k, v) in headers {
+            if let Some(val) = v.as_str() {
+                req = req.header(k.as_str(), val);
             }
-            if status >= 400 {
-                return Err(StepError::Permanent {
-                    message: format!("HTTP {status} from {url}"),
-                    details: Some(json!({ "status": status, "body": response_body })),
-                });
-            }
-            Ok(json!({
-                "status": status,
-                "body": response_body,
-            }))
         }
-        Err(e) => Err(StepError::Retryable {
-            message: format!("HTTP request failed: {e}"),
-            details: None,
-        }),
-    }
-}
-
-/// Minimal TCP-based HTTP client. For production, replace with reqwest.
-async fn send_http(
-    url: &str,
-    method: &str,
-    body: &str,
-    timeout: std::time::Duration,
-) -> Result<(u16, String), String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let url_str = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"));
-    let rest = url_str.ok_or("invalid URL scheme")?;
-
-    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let path = format!("/{path}");
-
-    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(host_port))
-        .await
-        .map_err(|_| "connection timeout".to_string())?
-        .map_err(|e| e.to_string())?;
-
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-
-    let mut stream = stream;
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    if !body.is_empty() {
-        stream
-            .write_all(body.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
     }
 
-    let mut response = Vec::with_capacity(4096);
-    stream
-        .read_to_end(&mut response)
-        .await
-        .map_err(|e| e.to_string())?;
-    let response_str = String::from_utf8_lossy(&response);
+    if !body_str.is_empty() {
+        req = req
+            .header("Content-Type", "application/json")
+            .body(body_str.to_string());
+    }
 
-    // Split headers from body.
-    let (headers, resp_body) = response_str
-        .split_once("\r\n\r\n")
-        .unwrap_or((&response_str, ""));
+    let resp = req.send().await.map_err(|e| StepError::Retryable {
+        message: format!("HTTP request failed: {e}"),
+        details: None,
+    })?;
 
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .unwrap_or(500);
+    let status = resp.status().as_u16();
+    let response_body = resp.text().await.unwrap_or_default();
 
-    Ok((status, resp_body.to_string()))
+    if status >= 500 {
+        return Err(StepError::Retryable {
+            message: format!("HTTP {status} from {url}"),
+            details: Some(json!({ "status": status, "body": response_body })),
+        });
+    }
+    if status >= 400 {
+        return Err(StepError::Permanent {
+            message: format!("HTTP {status} from {url}"),
+            details: Some(json!({ "status": status, "body": response_body })),
+        });
+    }
+
+    Ok(json!({
+        "status": status,
+        "body": response_body,
+    }))
 }
 
 #[cfg(test)]

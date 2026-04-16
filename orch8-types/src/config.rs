@@ -159,6 +159,13 @@ pub struct ApiConfig {
     /// Optional API key for authenticating requests. Empty means no auth.
     #[serde(default)]
     pub api_key: String,
+    /// If true, require `X-Tenant-Id` header on all requests and enforce
+    /// tenant isolation. Requests without the header get `400 Bad Request`.
+    #[serde(default)]
+    pub require_tenant_header: bool,
+    /// Maximum API requests per second (global). 0 means no limit (default).
+    #[serde(default)]
+    pub rate_limit_rps: u64,
 }
 
 impl Default for ApiConfig {
@@ -168,6 +175,8 @@ impl Default for ApiConfig {
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
             api_key: String::new(),
+            require_tenant_header: false,
+            rate_limit_rps: 0,
         }
     }
 }

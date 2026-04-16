@@ -11,6 +11,7 @@ pub mod openapi;
 pub mod pools;
 pub mod sequences;
 pub mod sessions;
+pub mod streaming;
 pub mod workers;
 
 use std::sync::Arc;

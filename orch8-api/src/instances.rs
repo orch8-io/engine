@@ -39,6 +39,10 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/checkpoints/prune", post(prune_checkpoints))
         .route("/instances/{id}/audit", get(list_audit_log))
         .route("/instances/{id}/inject-blocks", post(inject_blocks))
+        .route(
+            "/instances/{id}/stream",
+            get(crate::streaming::stream_instance),
+        )
         .route("/instances/bulk/state", patch(bulk_update_state))
         .route("/instances/bulk/reschedule", patch(bulk_reschedule))
         .route("/instances/dlq", get(list_dlq))
@@ -145,16 +149,30 @@ pub(crate) struct CountResponse {
 )]
 pub(crate) async fn create_instance(
     State(state): State<AppState>,
+    tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = Utc::now();
+
+    // Enforce tenant isolation: if X-Tenant-Id header was provided, use it
+    // and reject requests that try to write to a different tenant.
+    let tenant_id = if let Some(axum::Extension(ctx)) = &tenant_ctx {
+        if !req.tenant_id.0.is_empty() && req.tenant_id != ctx.tenant_id {
+            return Err(ApiError::Forbidden(
+                "tenant_id in body does not match X-Tenant-Id header".into(),
+            ));
+        }
+        ctx.tenant_id.clone()
+    } else {
+        req.tenant_id.clone()
+    };
 
     // Idempotency check: if key exists, return existing instance id.
     if let Some(ref idem_key) = req.idempotency_key {
         if !idem_key.is_empty() {
             if let Some(existing) = state
                 .storage
-                .find_by_idempotency_key(&req.tenant_id, idem_key)
+                .find_by_idempotency_key(&tenant_id, idem_key)
                 .await
                 .map_err(|e| ApiError::from_storage(e, "instance"))?
             {
@@ -169,7 +187,7 @@ pub(crate) async fn create_instance(
     let instance = TaskInstance {
         id: InstanceId::new(),
         sequence_id: req.sequence_id,
-        tenant_id: req.tenant_id,
+        tenant_id,
         namespace: req.namespace,
         state: InstanceState::Scheduled,
         next_fire_at: Some(req.next_fire_at.unwrap_or(now)),
@@ -263,6 +281,7 @@ pub(crate) async fn create_instances_batch(
 )]
 pub(crate) async fn get_instance(
     State(state): State<AppState>,
+    tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance = state
@@ -271,6 +290,13 @@ pub(crate) async fn get_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    // Enforce tenant isolation: if header-based tenant is set, reject cross-tenant reads.
+    if let Some(axum::Extension(ctx)) = &tenant_ctx {
+        if instance.tenant_id != ctx.tenant_id {
+            return Err(ApiError::NotFound(format!("instance {id}")));
+        }
+    }
 
     Ok(Json(instance))
 }
@@ -288,10 +314,17 @@ pub(crate) async fn get_instance(
 )]
 pub(crate) async fn list_instances(
     State(state): State<AppState>,
+    tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Enforce tenant isolation: header-based tenant overrides query param.
+    let tenant_id = if let Some(axum::Extension(ctx)) = &tenant_ctx {
+        Some(ctx.tenant_id.clone())
+    } else {
+        q.tenant_id.map(TenantId)
+    };
     let filter = InstanceFilter {
-        tenant_id: q.tenant_id.map(TenantId),
+        tenant_id,
         namespace: q.namespace.map(Namespace),
         sequence_id: q.sequence_id.map(SequenceId),
         states: q.state.map(|s| parse_states(&s)),
@@ -751,10 +784,15 @@ async fn list_audit_log(
 pub(crate) struct InjectBlocksRequest {
     /// Blocks must be a valid JSON array of `BlockDefinition` objects.
     pub blocks: serde_json::Value,
+    /// Position to inject at (0-indexed). If omitted, blocks are appended.
+    #[serde(default)]
+    pub position: Option<usize>,
 }
 
-/// Validate that injected blocks conform to the expected structure.
-fn validate_injected_blocks(blocks: &serde_json::Value) -> Result<(), ApiError> {
+/// Validate injected blocks and return their IDs.
+fn validate_injected_blocks(
+    blocks: &serde_json::Value,
+) -> Result<Vec<String>, ApiError> {
     let arr = blocks
         .as_array()
         .ok_or_else(|| ApiError::InvalidArgument("blocks must be a JSON array".into()))?;
@@ -763,16 +801,31 @@ fn validate_injected_blocks(blocks: &serde_json::Value) -> Result<(), ApiError> 
             "blocks array must not be empty".into(),
         ));
     }
-    // Validate each block can deserialize as a BlockDefinition.
+    let mut ids = Vec::with_capacity(arr.len());
     for (i, block) in arr.iter().enumerate() {
-        if serde_json::from_value::<orch8_types::sequence::BlockDefinition>(block.clone()).is_err()
-        {
-            return Err(ApiError::InvalidArgument(format!(
-                "blocks[{i}] is not a valid BlockDefinition"
-            )));
-        }
+        let def = serde_json::from_value::<orch8_types::sequence::BlockDefinition>(block.clone())
+            .map_err(|_| {
+                ApiError::InvalidArgument(format!("blocks[{i}] is not a valid BlockDefinition"))
+            })?;
+        ids.push(block_def_id(&def));
     }
-    Ok(())
+    Ok(ids)
+}
+
+/// Extract the ID from any block definition variant.
+fn block_def_id(def: &orch8_types::sequence::BlockDefinition) -> String {
+    use orch8_types::sequence::BlockDefinition;
+    match def {
+        BlockDefinition::Step(s) => s.id.0.clone(),
+        BlockDefinition::Parallel(p) => p.id.0.clone(),
+        BlockDefinition::Race(r) => r.id.0.clone(),
+        BlockDefinition::Loop(l) => l.id.0.clone(),
+        BlockDefinition::ForEach(f) => f.id.0.clone(),
+        BlockDefinition::Router(r) => r.id.0.clone(),
+        BlockDefinition::TryCatch(t) => t.id.0.clone(),
+        BlockDefinition::SubSequence(s) => s.id.0.clone(),
+        BlockDefinition::ABSplit(a) => a.id.0.clone(),
+    }
 }
 
 #[utoipa::path(
@@ -787,13 +840,41 @@ async fn inject_blocks(
     Path(id): Path<Uuid>,
     Json(body): Json<InjectBlocksRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    validate_injected_blocks(&body.blocks)?;
+    let block_ids = validate_injected_blocks(&body.blocks)?;
+
+    // If position is specified, merge with existing injected blocks at that index.
+    let final_blocks = if let Some(pos) = body.position {
+        let existing = state
+            .storage
+            .get_injected_blocks(InstanceId(id))
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+        let mut arr = existing
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+
+        let new_blocks = body.blocks.as_array().cloned().unwrap_or_default();
+        let insert_at = pos.min(arr.len());
+        for (i, block) in new_blocks.into_iter().enumerate() {
+            arr.insert(insert_at + i, block);
+        }
+        serde_json::Value::Array(arr)
+    } else {
+        body.blocks
+    };
+
     state
         .storage
-        .inject_blocks(InstanceId(id), &body.blocks)
+        .inject_blocks(InstanceId(id), &final_blocks)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
-    Ok(StatusCode::OK)
+
+    Ok(Json(serde_json::json!({
+        "injected_block_ids": block_ids,
+        "position": body.position,
+        "total_injected": final_blocks.as_array().map_or(0, Vec::len),
+    })))
 }
 
 fn parse_states(s: &str) -> Vec<InstanceState> {

@@ -19,6 +19,9 @@ pub enum ApiError {
     #[error("unauthorized")]
     Unauthorized,
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("internal: {0}")]
     Internal(String),
 
@@ -43,6 +46,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

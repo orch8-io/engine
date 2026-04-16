@@ -1,14 +1,25 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::Utc;
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, warn};
 
 use orch8_types::config::WebhookConfig;
 use orch8_types::ids::InstanceId;
 
 use crate::metrics;
+
+/// Shared HTTP client (connection pooling, TLS, keep-alive).
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(4)
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
 
 /// Webhook event payload sent to configured URLs.
 #[derive(Debug, Clone, Serialize)]
@@ -79,8 +90,7 @@ async fn send_with_retry(url: &str, event: &WebhookEvent, timeout: Duration, max
         }
 
         if attempt < max_retries {
-            let backoff = Duration::from_millis(500 * u64::from(2_u32.pow(attempt)));
-            tokio::time::sleep(backoff).await;
+            tokio::time::sleep(backoff_duration(attempt)).await;
         }
     }
 
@@ -92,55 +102,23 @@ async fn send_with_retry(url: &str, event: &WebhookEvent, timeout: Duration, max
     );
 }
 
-/// Send an HTTP POST request. Uses a minimal TCP-based approach to avoid
-/// pulling in a full HTTP client dependency. For production, replace with reqwest.
+/// Send an HTTP POST request via reqwest (TLS, connection pooling, proper HTTP).
 async fn send_request(url: &str, body: &[u8], timeout: Duration) -> Result<u16, String> {
-    // Parse URL to extract host and path.
-    let url_str = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"));
-    let Some(rest) = url_str else {
-        return Err("invalid URL scheme".into());
-    };
-
-    let (host_port, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let path = format!("/{path}");
-
-    let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(host_port))
-        .await
-        .map_err(|_| "connection timeout".to_string())?
-        .map_err(|e| e.to_string())?;
-
-    let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        path,
-        host_port,
-        body.len()
-    );
-
-    let mut stream = stream;
-    stream
-        .write_all(request.as_bytes())
+    let resp = http_client()
+        .post(url)
+        .header("Content-Type", "application/json")
+        .timeout(timeout)
+        .body(body.to_vec())
+        .send()
         .await
         .map_err(|e| e.to_string())?;
-    stream.write_all(body).await.map_err(|e| e.to_string())?;
 
-    let mut response = vec![0u8; 1024];
-    let n = stream
-        .read(&mut response)
-        .await
-        .map_err(|e| e.to_string())?;
-    let response_str = String::from_utf8_lossy(&response[..n]);
+    Ok(resp.status().as_u16())
+}
 
-    // Parse status code from "HTTP/1.1 200 OK"
-    let status = response_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .unwrap_or(500);
-
-    Ok(status)
+/// Compute exponential backoff delay for a given attempt.
+pub(crate) fn backoff_duration(attempt: u32) -> Duration {
+    Duration::from_millis(500 * u64::from(2_u32.pow(attempt)))
 }
 
 /// Helper to create common webhook events.
@@ -154,5 +132,57 @@ pub fn instance_event(
         instance_id: Some(instance_id),
         timestamp: Utc::now().to_rfc3339(),
         data,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_increases_exponentially() {
+        assert_eq!(backoff_duration(0), Duration::from_millis(500));
+        assert_eq!(backoff_duration(1), Duration::from_millis(1_000));
+        assert_eq!(backoff_duration(2), Duration::from_millis(2_000));
+        assert_eq!(backoff_duration(3), Duration::from_millis(4_000));
+    }
+
+    #[test]
+    fn instance_event_sets_fields() {
+        let id = InstanceId(uuid::Uuid::new_v4());
+        let event = instance_event("instance.completed", id, serde_json::json!({"key": "val"}));
+        assert_eq!(event.event_type, "instance.completed");
+        assert_eq!(event.instance_id, Some(id));
+        assert_eq!(event.data["key"], "val");
+        assert!(!event.timestamp.is_empty());
+    }
+
+    #[test]
+    fn webhook_event_serializes() {
+        let event = WebhookEvent {
+            event_type: "test".into(),
+            instance_id: None,
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            data: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"event_type\":\"test\""));
+    }
+
+    #[test]
+    fn emit_skips_empty_urls() {
+        let config = WebhookConfig {
+            urls: vec![],
+            timeout_secs: 5,
+            max_retries: 0,
+        };
+        let event = WebhookEvent {
+            event_type: "test".into(),
+            instance_id: None,
+            timestamp: "now".into(),
+            data: serde_json::json!({}),
+        };
+        // Should not panic or spawn tasks.
+        emit(&config, &event);
     }
 }

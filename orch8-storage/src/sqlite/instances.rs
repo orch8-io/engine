@@ -87,12 +87,12 @@ pub(super) async fn get(
     row.as_ref().map(row_to_instance).transpose()
 }
 
-#[instrument(skip(storage, _max_per_tenant), fields(limit))]
+#[instrument(skip(storage), fields(limit, max_per_tenant))]
 pub(super) async fn claim_due(
     storage: &SqliteStorage,
     now: DateTime<Utc>,
     limit: u32,
-    _max_per_tenant: u32,
+    max_per_tenant: u32,
 ) -> Result<Vec<TaskInstance>, StorageError> {
     let now_s = ts(now);
     let mut tx = storage
@@ -100,11 +100,36 @@ pub(super) async fn claim_due(
         .begin()
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    let rows = sqlx::query(
-        "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
-    )
-    .bind(&now_s).bind(limit as i64)
-    .fetch_all(&mut *tx).await.map_err(|e| StorageError::Query(e.to_string()))?;
+
+    let rows = if max_per_tenant > 0 {
+        // Noisy-neighbor protection: cap instances per tenant using ROW_NUMBER().
+        sqlx::query(
+            "SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY priority DESC, next_fire_at ASC) AS rn
+                FROM task_instances
+                WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+            ) ranked
+            WHERE rn <= ?3
+            ORDER BY priority DESC, next_fire_at ASC
+            LIMIT ?2"
+        )
+        .bind(&now_s)
+        .bind(limit as i64)
+        .bind(max_per_tenant as i64)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?
+    } else {
+        // No per-tenant cap — original fast path.
+        sqlx::query(
+            "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
+        )
+        .bind(&now_s)
+        .bind(limit as i64)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?
+    };
 
     let instances: Vec<TaskInstance> = rows
         .iter()

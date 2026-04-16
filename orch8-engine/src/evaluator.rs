@@ -99,6 +99,9 @@ fn build_nodes(
                     build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
                 }
             }
+            BlockDefinition::CancellationScope(cs) => {
+                build_nodes(instance_id, Some(node_id), &cs.blocks, out);
+            }
         }
     }
 }
@@ -165,6 +168,9 @@ fn build_branch_nodes(
                     build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
                 }
             }
+            BlockDefinition::CancellationScope(cs) => {
+                build_nodes(instance_id, Some(node_id), &cs.blocks, out);
+            }
         }
     }
 }
@@ -180,6 +186,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
         BlockDefinition::TryCatch(tc) => (&tc.id, BlockType::TryCatch),
         BlockDefinition::SubSequence(ss) => (&ss.id, BlockType::SubSequence),
         BlockDefinition::ABSplit(ab) => (&ab.id, BlockType::ABSplit),
+        BlockDefinition::CancellationScope(cs) => (&cs.id, BlockType::CancellationScope),
     }
 }
 
@@ -332,6 +339,7 @@ pub fn find_block<'a>(
             BlockDefinition::TryCatch(tc) => &tc.id,
             BlockDefinition::SubSequence(ss) => &ss.id,
             BlockDefinition::ABSplit(ab) => &ab.id,
+            BlockDefinition::CancellationScope(cs) => &cs.id,
         };
         if id == target_id {
             return Some(block);
@@ -382,6 +390,7 @@ pub fn find_block<'a>(
                 }
                 None
             }
+            BlockDefinition::CancellationScope(cs) => Some(&cs.blocks),
         };
         if let Some(children) = children {
             if let Some(found) = find_block(children, target_id) {
@@ -561,6 +570,12 @@ async fn dispatch_block(
         BlockDefinition::ABSplit(ab_def) => {
             crate::handlers::ab_split::execute_ab_split(
                 storage, handlers, instance, node, ab_def, tree,
+            )
+            .await
+        }
+        BlockDefinition::CancellationScope(cs_def) => {
+            crate::handlers::cancellation_scope::execute_cancellation_scope(
+                storage, handlers, instance, node, cs_def, tree,
             )
             .await
         }

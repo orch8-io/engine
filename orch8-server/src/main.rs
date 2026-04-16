@@ -82,6 +82,25 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(pg)
     };
 
+    // Wrap storage with encryption layer if an encryption key is configured.
+    let storage: Arc<dyn StorageBackend> = {
+        let key = if config.engine.encryption_key.is_empty() {
+            std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default()
+        } else {
+            config.engine.encryption_key.clone()
+        };
+        if key.is_empty() {
+            storage
+        } else {
+            let encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(&key)
+                .context("Invalid encryption key (expected 64 hex chars for AES-256-GCM)")?;
+            tracing::info!("Encryption at rest enabled for context.data");
+            Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
+                storage, encryptor,
+            ))
+        }
+    };
+
     // Install Prometheus metrics recorder.
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = prometheus_handle.handle();
@@ -98,14 +117,27 @@ async fn main() -> anyhow::Result<()> {
     };
     let cors = build_cors_layer(&config.api.cors_origins);
     let api_key = config.api.api_key.clone();
-    let app = build_router(app_state)
+    let require_tenant = config.api.require_tenant_header;
+    let mut app = build_router(app_state)
         .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(move |req, next| {
+            orch8_api::auth::tenant_middleware(require_tenant, req, next)
+        }))
+        .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
         }))
         .layer(cors);
+
+    // Apply global rate limit if configured.
+    if config.api.rate_limit_rps > 0 {
+        let rps = config.api.rate_limit_rps;
+        tracing::info!(rps, "API rate limiting enabled");
+        #[allow(clippy::cast_possible_truncation)]
+        let concurrency_limit = rps.min(usize::MAX as u64) as usize;
+        app = app.layer(tower::limit::ConcurrencyLimitLayer::new(concurrency_limit));
+    }
 
     // Start HTTP server.
     let http_addr: std::net::SocketAddr = config
@@ -273,6 +305,14 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_RATE_LIMIT_RPS") {
+        if let Ok(n) = val.parse() {
+            config.api.rate_limit_rps = n;
+        }
+    }
+    if let Ok(val) = std::env::var("ORCH8_REQUIRE_TENANT_HEADER") {
+        config.api.require_tenant_header = val == "true" || val == "1";
     }
 }
 

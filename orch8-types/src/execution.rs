@@ -46,6 +46,7 @@ pub enum BlockType {
     TryCatch,
     SubSequence,
     ABSplit,
+    CancellationScope,
 }
 
 impl std::fmt::Display for BlockType {
@@ -60,6 +61,7 @@ impl std::fmt::Display for BlockType {
             Self::TryCatch => "try_catch",
             Self::SubSequence => "sub_sequence",
             Self::ABSplit => "ab_split",
+            Self::CancellationScope => "cancellation_scope",
         };
         f.write_str(s)
     }

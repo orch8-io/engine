@@ -1,0 +1,66 @@
+{
+  "name": "Tool-Calling Pipeline",
+  "description": "LLM generates a plan, executes tools in sequence, then synthesizes results. Linear pipeline with no looping — suited for structured multi-step tasks.",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "plan",
+      "handler": "llm_call",
+      "params": {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Given the user's request, create an execution plan. Return JSON: {\"steps\": [{\"tool\": \"name\", \"input\": {...}}, ...]}"
+          },
+          {
+            "role": "user",
+            "content": "{{context.task}}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "for_each",
+      "id": "execute_tools",
+      "collection_expr": "outputs.plan.message.content.steps",
+      "item_var": "tool_step",
+      "blocks": [
+        {
+          "type": "step",
+          "id": "call_tool",
+          "handler": "tool_call",
+          "params": {
+            "tool_name": "{{item.tool_step.tool}}",
+            "arguments": "{{item.tool_step.input}}",
+            "url": "{{context.tool_dispatch_url}}"
+          },
+          "retry": {
+            "max_attempts": 2,
+            "delay_seconds": 1
+          }
+        }
+      ]
+    },
+    {
+      "type": "step",
+      "id": "synthesize",
+      "handler": "llm_call",
+      "params": {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Synthesize the results of all tool executions into a final response."
+          },
+          {
+            "role": "user",
+            "content": "Task: {{context.task}}\n\nTool results: {{outputs.execute_tools}}"
+          }
+        ]
+      }
+    }
+  ]
+}

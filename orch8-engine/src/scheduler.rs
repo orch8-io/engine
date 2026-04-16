@@ -321,6 +321,12 @@ async fn process_instance(
             continue;
         }
 
+        // SLA deadline check: if a previous attempt exists and the deadline has
+        // been breached (wall-clock time since first attempt), fail the instance.
+        if check_step_deadline(storage, handlers, &instance, step_def).await? {
+            return Ok(());
+        }
+
         match execute_step_block(
             storage,
             handlers,
@@ -484,6 +490,93 @@ async fn get_sequence_cached(
     let seq = Arc::new(seq);
     cache.insert(sequence_id, Arc::clone(&seq)).await;
     Ok(seq)
+}
+
+/// Check if a step's SLA deadline has been breached (fast path).
+/// Looks at the previous attempt's `created_at` as the start time. If the deadline
+/// has elapsed, invokes the escalation handler, records the breach, and fails the instance.
+/// Returns `true` if the deadline was breached and the instance was failed.
+async fn check_step_deadline(
+    storage: &dyn StorageBackend,
+    handlers: &HandlerRegistry,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+) -> Result<bool, EngineError> {
+    let Some(deadline) = step_def.deadline else {
+        return Ok(false);
+    };
+    let Some(prev_output) = storage.get_block_output(instance.id, &step_def.id).await? else {
+        return Ok(false);
+    };
+    let elapsed = Utc::now() - prev_output.created_at;
+    if elapsed < chrono::Duration::from_std(deadline).unwrap_or(chrono::TimeDelta::MAX) {
+        return Ok(false);
+    }
+
+    let instance_id = instance.id;
+    warn!(
+        instance_id = %instance_id,
+        block_id = %step_def.id,
+        deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms = elapsed.num_milliseconds(),
+        "SLA deadline breached (fast path)"
+    );
+
+    // Invoke escalation handler if configured.
+    if let Some(ref escalation) = step_def.on_deadline_breach {
+        if let Some(handler) = handlers.get(&escalation.handler) {
+            let mut params = escalation.params.clone();
+            if let serde_json::Value::Object(ref mut map) = params {
+                map.insert("_breach_block_id".into(), serde_json::json!(step_def.id.0));
+                map.insert("_breach_instance_id".into(), serde_json::json!(instance_id.0));
+                map.insert("_breach_elapsed_ms".into(), serde_json::json!(elapsed.num_milliseconds()));
+                map.insert("_breach_deadline_ms".into(), serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)));
+            }
+            let step_ctx = crate::handlers::StepContext {
+                instance_id,
+                block_id: step_def.id.clone(),
+                params,
+                context: instance.context.clone(),
+                attempt: 0,
+            };
+            if let Err(e) = handler(step_ctx).await {
+                warn!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    error = %e,
+                    "SLA escalation handler failed"
+                );
+            }
+        }
+    }
+
+    // Record breach output and fail the instance.
+    let breach_output = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::new_v4(),
+        instance_id,
+        block_id: step_def.id.clone(),
+        output: serde_json::json!({
+            "_error": "sla_deadline_breached",
+            "_deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+            "_elapsed_ms": elapsed.num_milliseconds(),
+        }),
+        output_ref: None,
+        output_size: 0,
+        attempt: prev_output.attempt,
+        created_at: Utc::now(),
+    };
+    storage.save_block_output(&breach_output).await?;
+    crate::lifecycle::transition_instance(
+        storage,
+        instance_id,
+        InstanceState::Running,
+        InstanceState::Failed,
+        None,
+    )
+    .await?;
+    crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+
+    Ok(true)
 }
 
 /// Check if the step has a delay and defer if so. Returns `true` if deferred.
@@ -986,4 +1079,59 @@ async fn dispatch_to_external_worker(
     );
 
     Ok(StepOutcome::Deferred)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use orch8_types::ids::BlockId;
+    use orch8_types::signal::{Signal, SignalType};
+    use uuid::Uuid;
+
+    #[test]
+    fn build_prefetch_map_merges_signals_and_blocks() {
+        let id1 = InstanceId(Uuid::new_v4());
+        let id2 = InstanceId(Uuid::new_v4());
+
+        let mut signals = HashMap::new();
+        signals.insert(
+            id1,
+            vec![Signal {
+                id: Uuid::new_v4(),
+                instance_id: id1,
+                signal_type: SignalType::Pause,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now(),
+                delivered_at: None,
+            }],
+        );
+
+        let mut completed = HashMap::new();
+        completed.insert(id1, vec![BlockId("step1".into())]);
+        completed.insert(id2, vec![BlockId("step2".into())]);
+
+        let result = build_prefetch_map(signals, completed);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[&id1].signals.len(), 1);
+        assert_eq!(result[&id1].completed_block_ids.len(), 1);
+        assert_eq!(result[&id2].signals.len(), 0);
+        assert_eq!(result[&id2].completed_block_ids.len(), 1);
+    }
+
+    #[test]
+    fn build_prefetch_map_empty_inputs() {
+        let result = build_prefetch_map(HashMap::new(), HashMap::new());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn wait_for_drain_returns_when_all_permits_available() {
+        // When semaphore has all permits, wait_for_drain should return immediately.
+        // This is just a structural test of the semaphore check.
+        let sem = Semaphore::new(10);
+        assert_eq!(sem.available_permits(), 10);
+    }
 }

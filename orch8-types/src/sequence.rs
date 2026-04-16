@@ -40,6 +40,9 @@ pub enum BlockDefinition {
     SubSequence(SubSequenceDef),
     /// A/B split: route traffic to one of several variants by weight.
     ABSplit(ABSplitDef),
+    /// Cancellation scope: child blocks cannot be cancelled by external cancel signals.
+    /// Provides subtree-level non-cancellability (Temporal-style structured concurrency).
+    CancellationScope(CancellationScopeDef),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -303,6 +306,17 @@ pub struct ABSplitDef {
     pub id: BlockId,
     /// Weighted variants. Weights are relative (e.g. 70 + 30 = 100%).
     pub variants: Vec<ABVariant>,
+}
+
+/// Cancellation scope: wraps child blocks in a non-cancellable boundary.
+/// When a cancel signal is received, blocks inside a `CancellationScope`
+/// continue executing until completion. The cancel takes effect only after
+/// all scoped blocks finish.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CancellationScopeDef {
+    pub id: BlockId,
+    /// Child blocks protected from cancellation.
+    pub blocks: Vec<BlockDefinition>,
 }
 
 /// One arm of an A/B split.
