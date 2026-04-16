@@ -71,7 +71,7 @@ export const NODE_TONE: Record<string, Tone> = {
 
 export const TASK_TONE: Record<string, Tone> = {
   pending: "hold",
-  claimed: "signal",
+  claimed: "live",
   completed: "ok",
   failed: "warn",
 };

@@ -9,41 +9,36 @@ import {
   streamInstance,
   type BlockType,
   type ExecutionNode,
-  type InstanceState,
   type NodeState,
   type TaskInstance,
   type BlockOutput,
   type SignalType,
 } from "../api";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel, PanelBody, PanelHeader } from "../components/ui/Panel";
+import { Badge, INSTANCE_TONE, NODE_TONE } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
+import { StatusDot } from "../components/ui/StatusDot";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconPause,
+  IconPlay,
+  IconStop,
+  IconRetry,
+  IconRefresh,
+  IconSend,
+} from "../components/ui/Icons";
 
-const NODE_STATE_COLOR: Record<NodeState, string> = {
-  pending: "text-muted",
-  running: "text-accent",
-  waiting: "text-warning",
-  completed: "text-success",
-  failed: "text-danger",
-  cancelled: "text-muted",
-  skipped: "text-muted",
-};
-
-const NODE_STATE_BORDER: Record<NodeState, string> = {
-  pending: "border-border",
-  running: "border-accent",
-  waiting: "border-warning",
-  completed: "border-success",
-  failed: "border-danger",
-  cancelled: "border-muted",
-  skipped: "border-muted",
-};
-
-const INSTANCE_STATE_COLOR: Record<InstanceState, string> = {
-  scheduled: "text-muted",
-  running: "text-accent",
-  waiting: "text-warning",
-  paused: "text-warning",
-  completed: "text-success",
-  failed: "text-danger",
-  cancelled: "text-muted",
+const NODE_BORDER: Record<NodeState, string> = {
+  pending: "border-hairline",
+  running: "border-live",
+  waiting: "border-hold",
+  completed: "border-ok",
+  failed: "border-warn",
+  cancelled: "border-hairline",
+  skipped: "border-hairline",
 };
 
 interface TreeNode extends ExecutionNode {
@@ -77,7 +72,7 @@ function buildTree(nodes: ExecutionNode[]): TreeNode[] {
 }
 
 function formatDuration(node: ExecutionNode): string {
-  if (!node.started_at) return "-";
+  if (!node.started_at) return "—";
   const start = new Date(node.started_at).getTime();
   const end = node.completed_at ? new Date(node.completed_at).getTime() : Date.now();
   const ms = end - start;
@@ -88,7 +83,7 @@ function formatDuration(node: ExecutionNode): string {
 
 function BlockTypeBadge({ type }: { type: BlockType }) {
   return (
-    <span className="inline-block bg-secondary/60 text-muted text-xs font-mono px-1.5 py-0.5 rounded">
+    <span className="inline-block bg-sunken border border-hairline text-muted text-[11px] font-mono px-1.5 py-0.5 rounded-sm">
       {type}
     </span>
   );
@@ -106,37 +101,47 @@ function TreeNodeView({
   const [expanded, setExpanded] = useState(true);
   const output = outputs.get(node.block_id);
   const hasChildren = node.children.length > 0;
+  const collapsible = hasChildren || !!output;
 
   return (
     <div>
       <div
         className={`flex items-start gap-2 py-1.5 pl-2 border-l-2 ${
-          NODE_STATE_BORDER[node.state]
+          NODE_BORDER[node.state]
         } ${depth > 0 ? "ml-4" : ""}`}
       >
         <button
           onClick={() => setExpanded((e) => !e)}
-          disabled={!hasChildren && !output}
-          className={`text-muted hover:text-foreground text-xs w-4 ${
-            !hasChildren && !output ? "opacity-0 cursor-default" : ""
+          disabled={!collapsible}
+          className={`text-muted hover:text-fg w-4 shrink-0 ${
+            !collapsible ? "opacity-0 cursor-default" : ""
           }`}
+          aria-label={expanded ? "collapse" : "expand"}
         >
-          {expanded ? "▼" : "▶"}
+          {expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-sm truncate">{node.block_id}</span>
+            <span className="font-mono text-[13px] truncate">{node.block_id}</span>
             <BlockTypeBadge type={node.block_type} />
-            <span className={`text-xs font-medium ${NODE_STATE_COLOR[node.state]}`}>
+            <Badge
+              tone={NODE_TONE[node.state] ?? "dim"}
+              dot
+              live={node.state === "running"}
+            >
               {node.state}
-            </span>
+            </Badge>
             {node.branch_index !== null && (
-              <span className="text-xs text-muted">branch {node.branch_index}</span>
+              <span className="text-[11px] text-muted font-mono">
+                branch {node.branch_index}
+              </span>
             )}
-            <span className="text-xs text-muted ml-auto">{formatDuration(node)}</span>
+            <span className="text-[11px] text-faint font-mono tabular ml-auto">
+              {formatDuration(node)}
+            </span>
           </div>
           {expanded && output !== undefined && output.output !== null && (
-            <pre className="mt-1 bg-secondary/40 rounded p-2 text-xs font-mono overflow-x-auto max-h-40">
+            <pre className="mt-1.5 bg-sunken border border-hairline rounded-sm p-2 text-[12px] font-mono text-fg-dim overflow-x-auto max-h-40">
               {JSON.stringify(output.output, null, 2)}
             </pre>
           )}
@@ -249,177 +254,246 @@ export default function InstanceDetail() {
     }
   };
 
-  if (!id) return <div className="text-danger">Missing instance id</div>;
+  if (!id)
+    return (
+      <div className="rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
+        Missing instance id
+      </div>
+    );
+
+  const terminal = instance && ["completed", "cancelled", "failed"].includes(instance.state);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link to="/instances" className="text-muted hover:text-foreground text-sm">
-          ← Instances
-        </Link>
-        <span className="text-muted">/</span>
-        <span className="font-mono text-sm">{id}</span>
-      </div>
+      <PageHeader
+        eyebrow={
+          <Link
+            to="/instances"
+            className="hover:text-fg transition-colors"
+          >
+            ← Instances
+          </Link>
+        }
+        title={
+          <span className="font-mono text-[20px] tracking-tight">
+            {id.slice(0, 8)}…
+          </span>
+        }
+        description={
+          <span className="font-mono text-[11px] text-faint">{id}</span>
+        }
+        actions={
+          instance && (
+            <Badge
+              tone={INSTANCE_TONE[instance.state] ?? "dim"}
+              dot
+              live={instance.state === "running"}
+            >
+              {instance.state}
+            </Badge>
+          )
+        }
+      />
 
       {error && (
-        <div className="rounded border border-danger/40 bg-danger/10 text-danger p-3 text-sm">
+        <div className="rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
           {error}
         </div>
       )}
       {toast && (
-        <div className="rounded border border-accent/40 bg-accent/10 text-accent p-3 text-sm">
+        <div className="rounded-md border border-signal/40 bg-signal/10 text-signal p-3 text-[13px]">
           {toast}
         </div>
       )}
 
       {instance && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-card border border-border rounded-lg p-4">
-          <Stat label="State">
-            <span className={`font-semibold ${INSTANCE_STATE_COLOR[instance.state]}`}>
-              {instance.state}
-            </span>
-          </Stat>
-          <Stat label="Namespace">
-            <span className="font-mono text-sm">{instance.namespace}</span>
-          </Stat>
-          <Stat label="Tenant">
-            <span className="font-mono text-sm">{instance.tenant_id}</span>
-          </Stat>
-          <Stat label="Sequence">
-            <Link
-              to={`/sequences/${instance.sequence_id}`}
-              className="font-mono text-xs text-primary hover:underline"
-            >
-              {instance.sequence_id.slice(0, 8)}…
-            </Link>
-          </Stat>
-          <Stat label="Created">
-            <span className="text-sm">{new Date(instance.created_at).toLocaleString()}</span>
-          </Stat>
-          <Stat label="Updated">
-            <span className="text-sm">{new Date(instance.updated_at).toLocaleString()}</span>
-          </Stat>
-          <Stat label="Next fire">
-            <span className="text-sm">
-              {instance.next_fire_at ? new Date(instance.next_fire_at).toLocaleString() : "-"}
-            </span>
-          </Stat>
-          <Stat label="Priority">
-            <span className="text-sm">{instance.priority}</span>
-          </Stat>
-        </div>
+        <Panel>
+          <PanelBody>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
+              <Stat label="Namespace" mono>
+                {instance.namespace}
+              </Stat>
+              <Stat label="Tenant" mono>
+                {instance.tenant_id}
+              </Stat>
+              <Stat label="Sequence">
+                <Link
+                  to={`/sequences/${instance.sequence_id}`}
+                  className="font-mono text-[12px] text-signal hover:underline"
+                >
+                  {instance.sequence_id.slice(0, 8)}…
+                </Link>
+              </Stat>
+              <Stat label="Priority" mono>
+                {instance.priority}
+              </Stat>
+              <Stat label="Created">
+                <span className="text-[13px] tabular">
+                  {new Date(instance.created_at).toLocaleString()}
+                </span>
+              </Stat>
+              <Stat label="Updated">
+                <span className="text-[13px] tabular">
+                  {new Date(instance.updated_at).toLocaleString()}
+                </span>
+              </Stat>
+              <Stat label="Next fire">
+                <span className="text-[13px] tabular">
+                  {instance.next_fire_at
+                    ? new Date(instance.next_fire_at).toLocaleString()
+                    : "—"}
+                </span>
+              </Stat>
+            </div>
+          </PanelBody>
+        </Panel>
       )}
 
-      <div className="flex gap-2 flex-wrap items-center">
-        <button
-          disabled={busy || !instance || instance.state === "paused" || instance.state === "completed"}
-          onClick={() => doSignal("pause", "pause")}
-          className="bg-card border border-border rounded px-3 py-1.5 text-sm hover:bg-secondary/50 disabled:opacity-50"
-        >
-          Pause
-        </button>
-        <button
-          disabled={busy || !instance || instance.state !== "paused"}
-          onClick={() => doSignal("resume", "resume")}
-          className="bg-card border border-border rounded px-3 py-1.5 text-sm hover:bg-secondary/50 disabled:opacity-50"
-        >
-          Resume
-        </button>
-        <button
-          disabled={busy || !instance || ["completed", "cancelled", "failed"].includes(instance.state)}
-          onClick={() => {
-            if (confirm("Cancel this instance?")) doSignal("cancel", "cancel");
-          }}
-          className="bg-card border border-danger/40 text-danger rounded px-3 py-1.5 text-sm hover:bg-danger/10 disabled:opacity-50"
-        >
-          Cancel
-        </button>
-        <button
-          disabled={busy || !instance || instance.state !== "failed"}
-          onClick={doRetry}
-          className="bg-card border border-accent/40 text-accent rounded px-3 py-1.5 text-sm hover:bg-accent/10 disabled:opacity-50"
-        >
-          Retry
-        </button>
+      <Panel>
+        <PanelHeader>
+          <span className="eyebrow">Controls</span>
+          <label className="ml-auto flex items-center gap-1.5 text-[12px] text-muted cursor-pointer">
+            <input
+              type="checkbox"
+              checked={live}
+              onChange={(e) => setLive(e.target.checked)}
+              className="accent-signal"
+            />
+            <StatusDot tone={live ? "live" : "dim"} live={live} />
+            Live
+          </label>
+          <Button variant="ghost" size="sm" onClick={refresh}>
+            <IconRefresh size={13} /> Refresh
+          </Button>
+        </PanelHeader>
+        <PanelBody>
+          <div className="flex gap-2 flex-wrap items-center">
+            <Button
+              size="sm"
+              disabled={
+                busy ||
+                !instance ||
+                instance.state === "paused" ||
+                instance.state === "completed"
+              }
+              onClick={() => doSignal("pause", "pause")}
+            >
+              <IconPause size={13} /> Pause
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy || !instance || instance.state !== "paused"}
+              onClick={() => doSignal("resume", "resume")}
+            >
+              <IconPlay size={13} /> Resume
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={busy || !instance || terminal}
+              onClick={() => {
+                if (confirm("Cancel this instance?")) doSignal("cancel", "cancel");
+              }}
+            >
+              <IconStop size={13} /> Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              disabled={busy || !instance || instance.state !== "failed"}
+              onClick={doRetry}
+            >
+              <IconRetry size={13} /> Retry
+            </Button>
 
-        <div className="flex gap-1 ml-auto items-center">
-          <input
-            type="text"
-            value={customSignal}
-            onChange={(e) => setCustomSignal(e.target.value)}
-            placeholder="custom signal name"
-            className="bg-card border border-border rounded px-3 py-1.5 text-sm w-48 text-foreground"
-          />
-          <button
-            disabled={busy || !customSignal || !instance || ["completed", "cancelled", "failed"].includes(instance.state)}
-            onClick={() => {
-              doSignal({ Custom: customSignal }, `signal "${customSignal}"`);
-              setCustomSignal("");
-            }}
-            className="bg-card border border-border rounded px-3 py-1.5 text-sm hover:bg-secondary/50 disabled:opacity-50"
-          >
-            Send
-          </button>
-        </div>
+            <div className="flex gap-1.5 ml-auto items-center">
+              <Input
+                type="text"
+                value={customSignal}
+                onChange={(e) => setCustomSignal(e.target.value)}
+                placeholder="custom signal name"
+                className="w-56"
+              />
+              <Button
+                size="sm"
+                disabled={busy || !customSignal || !instance || terminal}
+                onClick={() => {
+                  doSignal({ Custom: customSignal }, `signal "${customSignal}"`);
+                  setCustomSignal("");
+                }}
+              >
+                <IconSend size={13} /> Send
+              </Button>
+            </div>
+          </div>
+        </PanelBody>
+      </Panel>
 
-        <label className="flex items-center gap-2 text-sm text-muted ml-2">
-          <input
-            type="checkbox"
-            checked={live}
-            onChange={(e) => setLive(e.target.checked)}
-          />
-          Live
-        </label>
-        <button
-          onClick={refresh}
-          className="text-sm text-muted hover:text-foreground px-2"
-        >
-          Refresh
-        </button>
-      </div>
-
-      <section className="space-y-3">
-        <div className="flex items-baseline gap-3">
-          <h2 className="text-lg font-semibold">Execution tree</h2>
-          <span className="text-xs text-muted">{tree.length} nodes</span>
-          <div className="flex gap-3 text-xs ml-auto">
+      <Panel>
+        <PanelHeader>
+          <span className="eyebrow">Execution tree</span>
+          <span className="font-mono text-[11px] text-faint tabular">
+            {tree.length} NODES
+          </span>
+          <div className="ml-auto flex gap-2 flex-wrap">
             {(Object.keys(counts) as NodeState[])
               .filter((s) => counts[s] > 0)
               .map((s) => (
-                <span key={s} className={NODE_STATE_COLOR[s]}>
-                  {s}: {counts[s]}
-                </span>
+                <Badge key={s} tone={NODE_TONE[s] ?? "dim"}>
+                  {s} {counts[s]}
+                </Badge>
               ))}
           </div>
-        </div>
-        <div className="bg-card border border-border rounded-lg p-3">
+        </PanelHeader>
+        <PanelBody>
           {roots.length === 0 ? (
-            <div className="text-muted text-sm py-4 text-center">No execution nodes yet</div>
+            <div className="text-muted text-[13px] py-6 text-center">
+              No execution nodes yet
+            </div>
           ) : (
             roots.map((r) => (
-              <TreeNodeView key={r.id} node={r} outputs={outputsByBlock} depth={0} />
+              <TreeNodeView
+                key={r.id}
+                node={r}
+                outputs={outputsByBlock}
+                depth={0}
+              />
             ))
           )}
-        </div>
-      </section>
+        </PanelBody>
+      </Panel>
 
       {instance && Object.keys(instance.context).length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-lg font-semibold">Context</h2>
-          <pre className="bg-secondary/50 rounded p-3 text-xs font-mono overflow-x-auto max-h-96">
-            {JSON.stringify(instance.context, null, 2)}
-          </pre>
-        </section>
+        <Panel>
+          <PanelHeader>
+            <span className="eyebrow">Context</span>
+          </PanelHeader>
+          <PanelBody>
+            <pre className="bg-sunken border border-hairline rounded-sm p-3 text-[12px] font-mono text-fg-dim overflow-x-auto max-h-96">
+              {JSON.stringify(instance.context, null, 2)}
+            </pre>
+          </PanelBody>
+        </Panel>
       )}
     </div>
   );
 }
 
-function Stat({ label, children }: { label: string; children: React.ReactNode }) {
+function Stat({
+  label,
+  children,
+  mono,
+}: {
+  label: string;
+  children: React.ReactNode;
+  mono?: boolean;
+}) {
   return (
-    <div>
-      <div className="text-muted text-xs mb-0.5">{label}</div>
-      <div>{children}</div>
+    <div className="min-w-0">
+      <div className="eyebrow mb-1">{label}</div>
+      <div className={`truncate ${mono ? "font-mono text-[12px]" : "text-[13px]"}`}>
+        {children}
+      </div>
     </div>
   );
 }

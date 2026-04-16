@@ -1,5 +1,10 @@
 import { useState } from "react";
 import { setApiUrl, setApiKey, clearApiKey, checkHealth } from "../api";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel, PanelBody } from "../components/ui/Panel";
+import { Button } from "../components/ui/Button";
+import { Input, FieldLabel } from "../components/ui/Input";
+import { StatusDot } from "../components/ui/StatusDot";
 
 export default function Settings() {
   const [url, setUrl] = useState(
@@ -29,42 +34,57 @@ export default function Settings() {
 
   return (
     <div className="max-w-lg space-y-6">
-      <h1 className="text-2xl font-bold">Settings</h1>
+      <PageHeader
+        eyebrow="Operator"
+        title="Settings"
+        description="Point the console at an engine and (optionally) authenticate."
+      />
 
-      <div className="space-y-4">
-        <div>
-          <label className="block text-sm text-muted mb-1">Engine API URL</label>
-          <input
-            type="text"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            className="w-full bg-card border border-border rounded px-3 py-2 text-sm font-mono text-foreground"
-            placeholder="http://localhost:8080"
-          />
-        </div>
+      <Panel>
+        <PanelBody>
+          <div className="space-y-4">
+            <div>
+              <FieldLabel>Engine API URL</FieldLabel>
+              <Input
+                type="text"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                className="w-full font-mono"
+                placeholder="http://localhost:8080"
+              />
+            </div>
 
-        <div>
-          <label className="block text-sm text-muted mb-1">API Key (optional)</label>
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            className="w-full bg-card border border-border rounded px-3 py-2 text-sm font-mono text-foreground"
-            placeholder="Leave empty if no auth required"
-          />
-        </div>
+            <div>
+              <FieldLabel>API Key</FieldLabel>
+              <Input
+                type="password"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                className="w-full font-mono"
+                placeholder="Leave empty if no auth required"
+              />
+            </div>
 
-        <div className="flex items-center gap-4">
-          <button
-            onClick={testConnection}
-            className="bg-primary text-primary-foreground px-4 py-2 rounded text-sm font-medium hover:bg-primary/90 transition-colors"
-          >
-            Test Connection
-          </button>
-          {status === "ok" && <span className="text-success text-sm">{msg}</span>}
-          {status === "error" && <span className="text-danger text-sm">{msg}</span>}
-        </div>
-      </div>
+            <div className="flex items-center gap-3 pt-1">
+              <Button variant="primary" onClick={testConnection}>
+                Test connection
+              </Button>
+              {status === "ok" && (
+                <span className="flex items-center gap-1.5 text-ok text-[13px]">
+                  <StatusDot tone="ok" live />
+                  {msg}
+                </span>
+              )}
+              {status === "error" && (
+                <span className="flex items-center gap-1.5 text-warn text-[13px]">
+                  <StatusDot tone="warn" />
+                  {msg}
+                </span>
+              )}
+            </div>
+          </div>
+        </PanelBody>
+      </Panel>
     </div>
   );
 }

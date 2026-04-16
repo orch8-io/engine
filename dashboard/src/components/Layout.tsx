@@ -2,6 +2,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { checkHealth, getWorkerTaskStats } from "../api";
 import { Wordmark } from "./ui/Brand";
+import { StatusDot } from "./ui/StatusDot";
 import {
   IconHome,
   IconActivity,
@@ -9,6 +10,12 @@ import {
   IconList,
   IconSliders,
 } from "./ui/Icons";
+
+const CONN_TONE = {
+  online: "ok",
+  offline: "warn",
+  connecting: "hold",
+} as const;
 
 const NAV = [
   { to: "/", label: "Overview", icon: IconHome, end: true },
@@ -80,15 +87,7 @@ export default function Layout() {
         <div className="p-3 border-t border-hairline">
           <div className="eyebrow mb-1.5">Engine</div>
           <div className="flex items-center gap-2">
-            <span
-              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                conn === "online"
-                  ? "bg-ok pulse-live"
-                  : conn === "offline"
-                  ? "bg-warn"
-                  : "bg-hold"
-              }`}
-            />
+            <StatusDot tone={CONN_TONE[conn]} live={conn === "online"} />
             <span className="text-[12px] text-fg-dim capitalize">{conn}</span>
           </div>
         </div>
@@ -104,11 +103,7 @@ export default function Layout() {
       {/* ── Statusline ──────────────────────────────────────── */}
       <footer className="col-start-2 border-t border-hairline bg-surface px-4 flex items-center gap-6 text-[11px] font-mono text-muted tracking-wider uppercase">
         <span className="flex items-center gap-1.5">
-          <span
-            className={`w-1 h-1 rounded-full ${
-              conn === "online" ? "bg-ok" : conn === "offline" ? "bg-warn" : "bg-hold"
-            }`}
-          />
+          <StatusDot tone={CONN_TONE[conn]} live={conn === "online"} />
           {conn}
         </span>
         <span>WRK · {workers}</span>

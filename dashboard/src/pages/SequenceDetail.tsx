@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { getSequence, type SequenceDefinition } from "../api";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel, PanelBody, PanelHeader } from "../components/ui/Panel";
+import { Badge } from "../components/ui/Badge";
+import { IconChevronDown, IconChevronRight } from "../components/ui/Icons";
 
 interface BlockLike {
   type?: string;
@@ -37,7 +41,7 @@ function countNodes(blocks: BlockLike[]): number {
 
 function BlockList({ blocks, depth = 0 }: { blocks: BlockLike[]; depth?: number }) {
   return (
-    <div className={depth > 0 ? "ml-4 border-l border-border pl-3" : ""}>
+    <div className={depth > 0 ? "ml-4 border-l border-hairline pl-3" : ""}>
       {blocks.map((b, i) => (
         <BlockView key={`${b.id ?? i}`} block={b} />
       ))}
@@ -65,68 +69,71 @@ function BlockView({ block }: { block: BlockLike }) {
         <button
           onClick={() => setOpen((o) => !o)}
           disabled={!hasChildren}
-          className={`text-muted text-xs w-4 ${!hasChildren ? "opacity-0" : ""}`}
+          className={`text-muted hover:text-fg w-4 shrink-0 ${
+            !hasChildren ? "opacity-0 cursor-default" : ""
+          }`}
+          aria-label={open ? "collapse" : "expand"}
         >
-          {open ? "▼" : "▶"}
+          {open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
         </button>
-        <span className="font-mono text-sm">{block.id ?? "(no id)"}</span>
-        <span className="bg-secondary/60 text-muted text-xs font-mono px-1.5 py-0.5 rounded">
+        <span className="font-mono text-[13px]">{block.id ?? "(no id)"}</span>
+        <span className="bg-sunken border border-hairline text-muted text-[11px] font-mono px-1.5 py-0.5 rounded-sm">
           {block.type}
         </span>
         {block.handler && (
-          <span className="text-xs text-muted font-mono">→ {block.handler}</span>
+          <span className="text-[11px] text-muted font-mono">→ {block.handler}</span>
         )}
       </div>
       {open && (
         <>
           {block.branches?.map((br, i) => (
             <div key={`br-${i}`} className="ml-4">
-              <div className="text-xs text-muted py-1">branch {i}</div>
+              <div className="text-[11px] text-muted font-mono py-1">branch {i}</div>
               <BlockList blocks={br} depth={1} />
             </div>
           ))}
           {block.body && (
             <>
-              <div className="ml-4 text-xs text-muted pt-1">body</div>
+              <div className="ml-4 text-[11px] text-muted font-mono pt-1">body</div>
               <BlockList blocks={block.body} depth={1} />
             </>
           )}
           {block.try_block && (
             <>
-              <div className="ml-4 text-xs text-muted pt-1">try</div>
+              <div className="ml-4 text-[11px] text-muted font-mono pt-1">try</div>
               <BlockList blocks={block.try_block} depth={1} />
             </>
           )}
           {block.catch_block && (
             <>
-              <div className="ml-4 text-xs text-danger pt-1">catch</div>
+              <div className="ml-4 text-[11px] text-warn font-mono pt-1">catch</div>
               <BlockList blocks={block.catch_block} depth={1} />
             </>
           )}
           {block.finally_block && (
             <>
-              <div className="ml-4 text-xs text-muted pt-1">finally</div>
+              <div className="ml-4 text-[11px] text-muted font-mono pt-1">finally</div>
               <BlockList blocks={block.finally_block} depth={1} />
             </>
           )}
           {block.routes?.map((r, i) => (
             <div key={`r-${i}`} className="ml-4">
-              <div className="text-xs text-muted py-1">
-                when <span className="font-mono">{r.condition}</span>
+              <div className="text-[11px] text-muted font-mono py-1">
+                when <span className="text-fg-dim">{r.condition}</span>
               </div>
               <BlockList blocks={r.blocks} depth={1} />
             </div>
           ))}
           {block.default && (
             <>
-              <div className="ml-4 text-xs text-muted pt-1">default</div>
+              <div className="ml-4 text-[11px] text-muted font-mono pt-1">default</div>
               <BlockList blocks={block.default} depth={1} />
             </>
           )}
           {block.variants?.map((v, i) => (
             <div key={`v-${i}`} className="ml-4">
-              <div className="text-xs text-muted py-1">
-                variant <span className="font-mono">{v.name}</span> (weight {v.weight})
+              <div className="text-[11px] text-muted font-mono py-1">
+                variant <span className="text-fg-dim">{v.name}</span> (weight {v.weight})
               </div>
               <BlockList blocks={v.blocks} depth={1} />
             </div>
@@ -150,57 +157,84 @@ export default function SequenceDetail() {
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [id]);
 
-  if (!id) return <div className="text-danger">Missing sequence id</div>;
+  if (!id)
+    return (
+      <div className="rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
+        Missing sequence id
+      </div>
+    );
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link to="/sequences" className="text-muted hover:text-foreground text-sm">
-          ← Sequences
-        </Link>
-        <span className="text-muted">/</span>
-        <span className="font-mono text-sm">{id}</span>
-      </div>
+      <PageHeader
+        eyebrow={
+          <Link to="/sequences" className="hover:text-fg transition-colors">
+            ← Sequences
+          </Link>
+        }
+        title={
+          <span className="font-mono text-[20px] tracking-tight">
+            {seq ? `${seq.name} · v${seq.version}` : id.slice(0, 8) + "…"}
+          </span>
+        }
+        description={
+          <span className="font-mono text-[11px] text-faint">{id}</span>
+        }
+        actions={
+          seq && (seq.deprecated ? (
+            <Badge tone="hold">deprecated</Badge>
+          ) : (
+            <Badge tone="ok">active</Badge>
+          ))
+        }
+      />
 
       {error && (
-        <div className="rounded border border-danger/40 bg-danger/10 text-danger p-3 text-sm">
+        <div className="rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
           {error}
         </div>
       )}
 
       {seq && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-card border border-border rounded-lg p-4">
-            <Stat label="Name" mono>
-              {seq.name}
-            </Stat>
-            <Stat label="Version" mono>
-              v{seq.version}
-            </Stat>
-            <Stat label="Namespace" mono>
-              {seq.namespace}
-            </Stat>
-            <Stat label="Tenant" mono>
-              {seq.tenant_id}
-            </Stat>
-            <Stat label="Status">
-              {seq.deprecated ? (
-                <span className="text-warning">deprecated</span>
-              ) : (
-                <span className="text-success">active</span>
-              )}
-            </Stat>
-            <Stat label="Top-level blocks">{seq.blocks.length}</Stat>
-            <Stat label="Total nodes">{countNodes(seq.blocks as BlockLike[])}</Stat>
-            <Stat label="Created">{new Date(seq.created_at).toLocaleString()}</Stat>
-          </div>
+          <Panel>
+            <PanelBody>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
+                <Stat label="Name" mono>
+                  {seq.name}
+                </Stat>
+                <Stat label="Version" mono>
+                  v{seq.version}
+                </Stat>
+                <Stat label="Namespace" mono>
+                  {seq.namespace}
+                </Stat>
+                <Stat label="Tenant" mono>
+                  {seq.tenant_id}
+                </Stat>
+                <Stat label="Top-level blocks" mono>
+                  {seq.blocks.length}
+                </Stat>
+                <Stat label="Total nodes" mono>
+                  {countNodes(seq.blocks as BlockLike[])}
+                </Stat>
+                <Stat label="Created">
+                  <span className="text-[13px] tabular">
+                    {new Date(seq.created_at).toLocaleString()}
+                  </span>
+                </Stat>
+              </div>
+            </PanelBody>
+          </Panel>
 
-          <section>
-            <h2 className="text-lg font-semibold mb-2">Block tree</h2>
-            <div className="bg-card border border-border rounded-lg p-3">
+          <Panel>
+            <PanelHeader>
+              <span className="eyebrow">Block tree</span>
+            </PanelHeader>
+            <PanelBody>
               <BlockList blocks={seq.blocks as BlockLike[]} />
-            </div>
-          </section>
+            </PanelBody>
+          </Panel>
         </>
       )}
     </div>
@@ -217,9 +251,11 @@ function Stat({
   mono?: boolean;
 }) {
   return (
-    <div>
-      <div className="text-muted text-xs mb-0.5">{label}</div>
-      <div className={mono ? "font-mono text-sm" : "text-sm"}>{children}</div>
+    <div className="min-w-0">
+      <div className="eyebrow mb-1">{label}</div>
+      <div className={`truncate ${mono ? "font-mono text-[12px]" : "text-[13px]"}`}>
+        {children}
+      </div>
     </div>
   );
 }

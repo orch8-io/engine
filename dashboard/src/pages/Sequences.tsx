@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { listSequenceVersions, type SequenceDefinition } from "../api";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel, PanelBody } from "../components/ui/Panel";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Input, FieldLabel } from "../components/ui/Input";
+import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 
 export default function Sequences() {
   const [tenant, setTenant] = useState("");
@@ -33,48 +39,57 @@ export default function Sequences() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Sequences</h1>
+      <PageHeader
+        eyebrow="Operator"
+        title="Sequences"
+        description="Sequences are keyed by (tenant, namespace, name, version). Pick a name to see all deployed versions."
+      />
 
-      <div className="bg-card border border-border rounded-lg p-4 space-y-3">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <input
-            type="text"
-            placeholder="tenant_id"
-            value={tenant}
-            onChange={(e) => setTenant(e.target.value)}
-            className="bg-background border border-border rounded px-3 py-1.5 text-sm text-foreground"
-          />
-          <input
-            type="text"
-            placeholder="namespace"
-            value={namespace}
-            onChange={(e) => setNamespace(e.target.value)}
-            className="bg-background border border-border rounded px-3 py-1.5 text-sm text-foreground"
-          />
-          <input
-            type="text"
-            placeholder="sequence name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && search()}
-            className="bg-background border border-border rounded px-3 py-1.5 text-sm text-foreground"
-          />
-        </div>
-        <button
-          onClick={search}
-          disabled={loading}
-          className="bg-primary/10 text-primary border border-primary/40 rounded px-4 py-1.5 text-sm hover:bg-primary/20 disabled:opacity-50"
-        >
-          {loading ? "Loading..." : "List versions"}
-        </button>
-        <p className="text-xs text-muted">
-          The orch8 engine stores sequences keyed by (tenant, namespace, name, version). Pick a
-          name to see all deployed versions and their block counts.
-        </p>
-      </div>
+      <Panel>
+        <PanelBody>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <FieldLabel>Tenant ID</FieldLabel>
+              <Input
+                type="text"
+                placeholder="tenant_id"
+                value={tenant}
+                onChange={(e) => setTenant(e.target.value)}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <FieldLabel>Namespace</FieldLabel>
+              <Input
+                type="text"
+                placeholder="namespace"
+                value={namespace}
+                onChange={(e) => setNamespace(e.target.value)}
+                className="w-full"
+              />
+            </div>
+            <div>
+              <FieldLabel>Name</FieldLabel>
+              <Input
+                type="text"
+                placeholder="sequence name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && search()}
+                className="w-full"
+              />
+            </div>
+          </div>
+          <div className="mt-4">
+            <Button variant="primary" onClick={search} disabled={loading}>
+              {loading ? "Loading…" : "List versions"}
+            </Button>
+          </div>
+        </PanelBody>
+      </Panel>
 
       {error && (
-        <div className="rounded border border-danger/40 bg-danger/10 text-danger p-3 text-sm">
+        <div className="rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
           {error}
         </div>
       )}
@@ -84,42 +99,48 @@ export default function Sequences() {
       )}
 
       {versions && versions.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-muted">
-                <th className="pb-2 pr-3">Version</th>
-                <th className="pb-2 pr-3">ID</th>
-                <th className="pb-2 pr-3">Blocks</th>
-                <th className="pb-2 pr-3">Deprecated</th>
-                <th className="pb-2">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {versions.map((v) => (
-                <tr key={v.id} className="border-b border-border/50 hover:bg-card/80">
-                  <td className="py-2 pr-3 font-medium">v{v.version}</td>
-                  <td className="py-2 pr-3 font-mono text-xs">
-                    <Link to={`/sequences/${v.id}`} className="text-primary hover:underline">
-                      {v.id.slice(0, 8)}…
-                    </Link>
-                  </td>
-                  <td className="py-2 pr-3">{v.blocks.length}</td>
-                  <td className="py-2 pr-3">
-                    {v.deprecated ? (
-                      <span className="text-warning text-xs">deprecated</span>
-                    ) : (
-                      <span className="text-success text-xs">active</span>
-                    )}
-                  </td>
-                  <td className="py-2 text-muted">
-                    {new Date(v.created_at).toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <Panel>
+          <PanelBody padded={false}>
+            <Table>
+              <THead>
+                <TH className="pl-4">Version</TH>
+                <TH>ID</TH>
+                <TH className="text-right">Blocks</TH>
+                <TH>Status</TH>
+                <TH className="pr-4">Created</TH>
+              </THead>
+              <tbody>
+                {versions.map((v) => (
+                  <TR key={v.id}>
+                    <TD className="pl-4 font-mono text-[12px] tabular">
+                      v{v.version}
+                    </TD>
+                    <TD className="font-mono text-[12px]">
+                      <Link
+                        to={`/sequences/${v.id}`}
+                        className="text-signal hover:underline"
+                      >
+                        {v.id.slice(0, 8)}…
+                      </Link>
+                    </TD>
+                    <TD className="text-right tabular">{v.blocks.length}</TD>
+                    <TD>
+                      {v.deprecated ? (
+                        <Badge tone="hold">deprecated</Badge>
+                      ) : (
+                        <Badge tone="ok">active</Badge>
+                      )}
+                    </TD>
+                    <TD className="text-muted tabular pr-4">
+                      {new Date(v.created_at).toLocaleString()}
+                    </TD>
+                  </TR>
+                ))}
+                {versions.length === 0 && <Empty>No versions found.</Empty>}
+              </tbody>
+            </Table>
+          </PanelBody>
+        </Panel>
       )}
     </div>
   );

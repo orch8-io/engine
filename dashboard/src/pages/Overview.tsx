@@ -60,9 +60,9 @@ export default function Overview() {
         description="Worker throughput and queue health across all handlers."
       />
 
-      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <section className="grid grid-cols-2 gap-3 lg:grid-cols-[2fr_1fr_1fr_2fr]">
         <StatCard label="Pending" value={pending} tone="hold" sub={subPct(pending, total)} />
-        <StatCard label="Claimed" value={claimed} tone="signal" sub={subPct(claimed, total)} />
+        <StatCard label="Claimed" value={claimed} tone="live" sub={subPct(claimed, total)} />
         <StatCard label="Completed" value={completed} tone="ok" sub={subPct(completed, total)} />
         <StatCard label="Failed" value={failed} tone="warn" sub={subPct(failed, total)} />
       </section>
@@ -89,7 +89,7 @@ export default function Overview() {
                   <TR key={name}>
                     <TD className="pl-4 font-mono text-[12px]">{name}</TD>
                     <TD className="text-right text-hold tabular">{counts["pending"] ?? 0}</TD>
-                    <TD className="text-right text-signal tabular">{counts["claimed"] ?? 0}</TD>
+                    <TD className="text-right text-live tabular">{counts["claimed"] ?? 0}</TD>
                     <TD className="text-right text-ok tabular">{counts["completed"] ?? 0}</TD>
                     <TD className="text-right text-warn tabular pr-4">
                       {counts["failed"] ?? 0}

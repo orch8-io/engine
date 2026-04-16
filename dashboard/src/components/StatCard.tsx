@@ -25,33 +25,18 @@ interface Props {
   value: number | string;
   tone?: Tone;
   sub?: ReactNode;
-  /** Deprecated legacy prop for old Tailwind class strings. */
-  color?: string;
 }
 
-export default function StatCard({ label, value, tone = "neutral", sub, color }: Props) {
-  // Back-compat: old pages pass `color="text-danger"` etc.
-  const inferredTone: Tone = color
-    ? color.includes("warning") || color.includes("hold")
-      ? "hold"
-      : color.includes("accent") || color.includes("primary")
-      ? "signal"
-      : color.includes("success") || color.includes("ok")
-      ? "ok"
-      : color.includes("danger") || color.includes("warn")
-      ? "warn"
-      : "neutral"
-    : tone;
-
+export default function StatCard({ label, value, tone = "neutral", sub }: Props) {
   return (
-    <div className="relative border border-hairline rounded-md bg-surface overflow-hidden group hover:border-hairline-strong transition-colors">
+    <div className="relative border border-hairline rounded-md bg-surface overflow-hidden hover:border-hairline-strong transition-colors">
       <div
-        className={`absolute left-0 top-0 bottom-0 w-[2px] ${ACCENT[inferredTone]}`}
+        className={`absolute left-0 top-0 bottom-0 w-[2px] ${ACCENT[tone]}`}
         aria-hidden
       />
       <div className="p-4 pl-5">
         <div className="eyebrow mb-2.5">{label}</div>
-        <div className={`display-num ${NUM[inferredTone]}`}>{value}</div>
+        <div className={`display-num ${NUM[tone]}`}>{value}</div>
         {sub && <div className="mt-2 text-[12px] text-muted">{sub}</div>}
       </div>
     </div>
