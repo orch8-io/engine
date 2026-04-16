@@ -1,0 +1,21 @@
+{
+  "name": "@orch8/sdk",
+  "version": "0.1.0",
+  "description": "Node.js SDK for Orch8 workflow engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": ["orch8", "workflow", "orchestration", "sdk"],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "vitest": "^3.0.0"
+  }
+}
