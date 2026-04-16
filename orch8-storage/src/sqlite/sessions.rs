@@ -14,7 +14,7 @@ pub(super) async fn create(storage: &SqliteStorage, s: &Session) -> Result<(), S
         .bind(s.id.to_string())
         .bind(&s.tenant_id.0)
         .bind(&s.session_key)
-        .bind(serde_json::to_string(&s.data).unwrap_or_default())
+        .bind(serde_json::to_string(&s.data)?)
         .bind(s.state.to_string())
         .bind(ts(s.created_at))
         .bind(ts(s.updated_at))
@@ -56,7 +56,7 @@ pub(super) async fn update_data(
 ) -> Result<(), StorageError> {
     sqlx::query("UPDATE sessions SET data=?2, updated_at=?3 WHERE id=?1")
         .bind(id.to_string())
-        .bind(serde_json::to_string(data).unwrap_or_default())
+        .bind(serde_json::to_string(data)?)
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await

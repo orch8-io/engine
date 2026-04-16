@@ -11,7 +11,7 @@ pub(super) async fn save(storage: &SqliteStorage, cp: &Checkpoint) -> Result<(),
     )
     .bind(cp.id.to_string())
     .bind(cp.instance_id.0.to_string())
-    .bind(serde_json::to_string(&cp.checkpoint_data).unwrap_or_default())
+    .bind(serde_json::to_string(&cp.checkpoint_data)?)
     .bind(ts(cp.created_at))
     .execute(&storage.pool)
     .await

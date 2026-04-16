@@ -19,12 +19,12 @@ pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<()
     .bind(t.instance_id.0.to_string())
     .bind(&t.block_id.0)
     .bind(&t.handler_name)
-    .bind(serde_json::to_string(&t.params).unwrap_or_default())
-    .bind(serde_json::to_string(&t.context).unwrap_or_default())
+    .bind(serde_json::to_string(&t.params)?)
+    .bind(serde_json::to_string(&t.context)?)
     .bind(t.state.to_string())
     .bind(&t.worker_id)
     .bind(&t.queue_name)
-    .bind(t.output.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default()))
+    .bind(t.output.as_ref().map(serde_json::to_string).transpose()?)
     .bind(&t.error_message)
     .bind(t.error_retryable.map(|b| b as i32))
     .bind(i64::from(t.attempt))
@@ -114,7 +114,7 @@ pub(super) async fn complete(
     let result = sqlx::query("UPDATE worker_tasks SET state='completed', output=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2 AND state='claimed'")
         .bind(task_id.to_string())
         .bind(worker_id)
-        .bind(serde_json::to_string(output).unwrap_or_default())
+        .bind(serde_json::to_string(output)?)
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await
@@ -171,7 +171,9 @@ pub(super) async fn reap_stale(
     storage: &SqliteStorage,
     stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
-    let cutoff = Utc::now() - chrono::Duration::from_std(stale_threshold).unwrap_or_default();
+    let cutoff = Utc::now()
+        - chrono::Duration::from_std(stale_threshold)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let result = sqlx::query(
         "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
     )

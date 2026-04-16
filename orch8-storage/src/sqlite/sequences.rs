@@ -12,7 +12,8 @@ pub(super) async fn create(
     let interceptors = seq
         .interceptors
         .as_ref()
-        .map(|i| serde_json::to_string(i).unwrap_or_default());
+        .map(serde_json::to_string)
+        .transpose()?;
     sqlx::query(
         "INSERT INTO sequences (id, tenant_id, namespace, name, version, deprecated, blocks, interceptors, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
     )

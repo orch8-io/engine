@@ -43,14 +43,16 @@ pub fn select_resource(
                 }
                 pick -= r.weight;
             }
-            // Fallback (shouldn't reach)
-            PoolAssignment::Assigned(available[0].resource_key.clone())
+            // Fallback (shouldn't reach, but avoid panic)
+            available
+                .first()
+                .map_or(PoolAssignment::Empty, |r| {
+                    PoolAssignment::Assigned(r.resource_key.clone())
+                })
         }
-        RotationStrategy::Random => {
-            let r = available
-                .choose(&mut rand::thread_rng())
-                .expect("available is non-empty");
-            PoolAssignment::Assigned(r.resource_key.clone())
+        RotationStrategy::Random => match available.choose(&mut rand::thread_rng()) {
+            Some(r) => PoolAssignment::Assigned(r.resource_key.clone()),
+            None => PoolAssignment::Empty,
         }
     }
 }

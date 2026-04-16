@@ -17,7 +17,7 @@ pub(super) async fn append(
         .bind(&entry.from_state)
         .bind(&entry.to_state)
         .bind(&entry.block_id)
-        .bind(serde_json::to_string(&entry.details).unwrap_or_default())
+        .bind(serde_json::to_string(&entry.details)?)
         .bind(ts(entry.created_at))
         .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())

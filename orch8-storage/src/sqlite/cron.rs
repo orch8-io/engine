@@ -19,7 +19,7 @@ pub(super) async fn create(storage: &SqliteStorage, s: &CronSchedule) -> Result<
     .bind(&s.cron_expr)
     .bind(&s.timezone)
     .bind(s.enabled as i32)
-    .bind(serde_json::to_string(&s.metadata).unwrap_or_default())
+    .bind(serde_json::to_string(&s.metadata)?)
     .bind(s.next_fire_at.map(ts))
     .bind(s.last_triggered_at.map(ts))
     .bind(ts(s.created_at))
@@ -64,7 +64,7 @@ pub(super) async fn update(storage: &SqliteStorage, s: &CronSchedule) -> Result<
         .bind(&s.cron_expr)
         .bind(&s.timezone)
         .bind(s.enabled as i32)
-        .bind(serde_json::to_string(&s.metadata).unwrap_or_default())
+        .bind(serde_json::to_string(&s.metadata)?)
         .bind(s.next_fire_at.map(ts))
         .bind(ts(Utc::now()))
         .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;

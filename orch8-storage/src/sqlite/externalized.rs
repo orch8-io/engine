@@ -16,7 +16,7 @@ pub(super) async fn save(
     sqlx::query("INSERT OR REPLACE INTO externalized_state (ref_key,instance_id,payload,created_at) VALUES (?1,?2,?3,?4)")
         .bind(ref_key)
         .bind(instance_id.0.to_string())
-        .bind(serde_json::to_string(payload).unwrap_or_default())
+        .bind(serde_json::to_string(payload)?)
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await
@@ -33,7 +33,8 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("payload")).unwrap_or_default()))
+    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("payload")))
+        .transpose()?)
 }
 
 pub(super) async fn delete(storage: &SqliteStorage, ref_key: &str) -> Result<(), StorageError> {

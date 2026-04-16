@@ -108,7 +108,7 @@ pub(crate) async fn stream_instance(
                     for output in outputs.iter().skip(last_output_count) {
                         let event = Event::default()
                             .event("output")
-                            .data(serde_json::to_string(output).unwrap_or_default());
+                            .data(serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()));
                         if tx.send(Ok(event)).await.is_err() {
                             return;
                         }

@@ -119,7 +119,13 @@ pub async fn execute_step_node(
                     } else {
                         blocks.clone()
                     };
-                    let _ = storage.inject_blocks(instance.id, &final_blocks).await;
+                    if let Err(e) = storage.inject_blocks(instance.id, &final_blocks).await {
+                        tracing::warn!(
+                            instance_id = %instance.id,
+                            error = %e,
+                            "failed to inject self-modify blocks"
+                        );
+                    }
                 }
             }
             evaluator::complete_node(storage, node.id).await?;
@@ -155,7 +161,8 @@ async fn dispatch_step_to_external_worker(
         handler_name: step_def.handler.clone(),
         queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
-        context: serde_json::to_value(&instance.context).unwrap_or_default(),
+        context: serde_json::to_value(&instance.context)
+            .map_err(orch8_types::error::StorageError::Serialization)?,
         attempt: 0,
         timeout_ms: step_def
             .timeout
@@ -214,7 +221,14 @@ async fn resolve_plugin_source(
     name: &str,
     expected_type: PluginType,
 ) -> Option<String> {
-    let plugin = storage.get_plugin(name).await.ok()??;
+    let plugin = match storage.get_plugin(name).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(plugin = %name, error = %e, "failed to resolve plugin source");
+            return None;
+        }
+    };
     if plugin.enabled && plugin.plugin_type == expected_type {
         Some(plugin.source)
     } else {

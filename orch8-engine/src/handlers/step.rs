@@ -293,7 +293,8 @@ pub fn calculate_backoff(
     }
     let initial_ms = initial_backoff.as_millis() as f64;
     let max_ms = max_backoff.as_millis() as f64;
-    let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
+    #[allow(clippy::cast_possible_wrap)]
+    let exponent = attempt.min(63) as i32;
     let backoff_ms = (initial_ms * multiplier.powi(exponent)).min(max_ms);
     Duration::from_millis(backoff_ms.max(0.0) as u64)
 }

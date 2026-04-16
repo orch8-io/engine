@@ -167,7 +167,7 @@ pub(crate) async fn complete_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
-    let output_json = serde_json::to_string(&req.output).unwrap_or_default();
+    let output_json = serde_json::to_string(&req.output).unwrap_or_else(|_| "{}".to_string());
     let task_block_id = task.block_id.clone();
     let block_output = BlockOutput {
         id: Uuid::new_v4(),

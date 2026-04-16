@@ -12,8 +12,8 @@ pub(super) async fn enqueue(storage: &SqliteStorage, signal: &Signal) -> Result<
     sqlx::query("INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at) VALUES (?1,?2,?3,?4,0,?5)")
         .bind(signal.id.to_string())
         .bind(signal.instance_id.0.to_string())
-        .bind(serde_json::to_string(&signal.signal_type).unwrap_or_default())
-        .bind(serde_json::to_string(&signal.payload).unwrap_or_default())
+        .bind(serde_json::to_string(&signal.signal_type)?)
+        .bind(serde_json::to_string(&signal.payload)?)
         .bind(ts(signal.created_at))
         .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())

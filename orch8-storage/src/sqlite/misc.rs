@@ -70,7 +70,9 @@ pub(super) async fn recover_stale_instances(
     stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
     let cutoff =
-        chrono::Utc::now() - chrono::Duration::from_std(stale_threshold).unwrap_or_default();
+        chrono::Utc::now()
+            - chrono::Duration::from_std(stale_threshold)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let result = sqlx::query(
         "UPDATE task_instances SET state='scheduled', updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
     )
@@ -146,7 +148,7 @@ pub(super) async fn inject_blocks(
 ) -> Result<(), StorageError> {
     sqlx::query("INSERT OR REPLACE INTO injected_blocks (instance_id, blocks) VALUES (?1, ?2)")
         .bind(instance_id.0.to_string())
-        .bind(serde_json::to_string(blocks_json).unwrap_or_default())
+        .bind(serde_json::to_string(blocks_json)?)
         .execute(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -162,7 +164,8 @@ pub(super) async fn get_injected_blocks(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("blocks")).unwrap_or_default()))
+    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("blocks")))
+        .transpose()?)
 }
 
 // === Health ===

@@ -31,18 +31,21 @@ pub struct Namespace(pub String);
 pub struct ResourceKey(pub String);
 
 impl InstanceId {
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 }
 
 impl SequenceId {
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
 }
 
 impl ExecutionNodeId {
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }

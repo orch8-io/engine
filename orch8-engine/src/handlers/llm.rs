@@ -263,7 +263,7 @@ fn normalize_anthropic_response(resp_body: &Value) -> Value {
                             "name": b.get("name"),
                             "arguments": serde_json::to_string(
                                 b.get("input").unwrap_or(&Value::Null)
-                            ).unwrap_or_default(),
+                            ).unwrap_or_else(|_| "null".to_string()),
                         }
                     })
                 })

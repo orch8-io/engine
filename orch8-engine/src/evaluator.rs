@@ -316,6 +316,11 @@ pub async fn evaluate(
     }
 
     // Safety limit — re-schedule for next tick.
+    warn!(
+        instance_id = %instance.id,
+        max_iterations,
+        "evaluate: iteration limit reached, re-scheduling for next tick"
+    );
     Ok(true)
 }
 

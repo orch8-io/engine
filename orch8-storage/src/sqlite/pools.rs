@@ -16,7 +16,7 @@ pub(super) async fn create(
         .bind(pool.id.to_string())
         .bind(&pool.tenant_id.0)
         .bind(&pool.name)
-        .bind(serde_json::to_string(&pool.strategy).unwrap_or_default().trim_matches('"'))
+        .bind(serde_json::to_string(&pool.strategy)?.trim_matches('"'))
         .bind(pool.round_robin_index as i64)
         .bind(ts(pool.created_at))
         .bind(ts(pool.updated_at))

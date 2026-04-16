@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 use orch8_types::config::WebhookConfig;
@@ -35,7 +36,8 @@ pub struct WebhookEvent {
 
 /// Send a webhook event to all configured URLs.
 /// Non-blocking: spawns a background task for each URL.
-pub fn emit(config: &WebhookConfig, event: &WebhookEvent) {
+/// The `cancel` token allows graceful shutdown to abort in-flight webhook retries.
+pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationToken) {
     if config.urls.is_empty() {
         return;
     }
@@ -51,14 +53,21 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent) {
         let event = event.clone();
         let timeout = Duration::from_secs(config.timeout_secs);
         let max_retries = config.max_retries;
+        let cancel = cancel.clone();
 
         tokio::spawn(async move {
-            send_with_retry(&url, &event, timeout, max_retries).await;
+            send_with_retry(&url, &event, timeout, max_retries, &cancel).await;
         });
     }
 }
 
-async fn send_with_retry(url: &str, event: &WebhookEvent, timeout: Duration, max_retries: u32) {
+async fn send_with_retry(
+    url: &str,
+    event: &WebhookEvent,
+    timeout: Duration,
+    max_retries: u32,
+    cancel: &CancellationToken,
+) {
     let body = match serde_json::to_vec(event) {
         Ok(b) => b,
         Err(e) => {
@@ -93,7 +102,13 @@ async fn send_with_retry(url: &str, event: &WebhookEvent, timeout: Duration, max
         }
 
         if attempt < max_retries {
-            tokio::time::sleep(backoff_duration(attempt)).await;
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    warn!(url = %url, attempt, "webhook retry aborted by shutdown");
+                    return;
+                }
+                () = tokio::time::sleep(backoff_duration(attempt)) => {}
+            }
         }
     }
 
@@ -186,6 +201,6 @@ mod tests {
             data: serde_json::json!({}),
         };
         // Should not panic or spawn tasks.
-        emit(&config, &event);
+        emit(&config, &event, &CancellationToken::new());
     }
 }

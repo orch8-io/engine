@@ -86,6 +86,7 @@ pub async fn run_tick_loop(
                     &webhook_config,
                     &sequence_cache,
                     externalize_threshold,
+                    &cancel,
                 ).await {
                     error!(error = %e, "tick processing failed");
                 }
@@ -115,6 +116,7 @@ async fn process_tick(
     webhook_config: &Arc<WebhookConfig>,
     sequence_cache: &Arc<Cache<SequenceId, Arc<SequenceDefinition>>>,
     externalize_threshold: u32,
+    cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
@@ -159,6 +161,7 @@ async fn process_tick(
         let webhooks = Arc::clone(webhook_config);
         let seq_cache = Arc::clone(sequence_cache);
         let prefetched = Arc::clone(&prefetched);
+        let cancel = cancel.clone();
 
         crate::metrics::inc(crate::metrics::INSTANCES_CLAIMED);
 
@@ -189,6 +192,7 @@ async fn process_tick(
                 instance,
                 data,
                 externalize_threshold,
+                &cancel,
             )
             .await
             {
@@ -244,6 +248,7 @@ enum StepOutcome {
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
+#[allow(clippy::too_many_arguments)]
 async fn process_instance(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
@@ -252,6 +257,7 @@ async fn process_instance(
     instance: orch8_types::instance::TaskInstance,
     prefetched: PrefetchedData,
     externalize_threshold: u32,
+    cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
 
@@ -304,7 +310,7 @@ async fn process_instance(
         .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)));
 
     if has_composite {
-        return process_instance_tree(storage, handlers, webhook_config, &instance, &sequence)
+        return process_instance_tree(storage, handlers, webhook_config, &instance, &sequence, cancel)
             .await;
     }
 
@@ -337,6 +343,7 @@ async fn process_instance(
             externalize_threshold,
             &instance,
             step_def,
+            cancel,
         )
         .await?
         {
@@ -363,6 +370,7 @@ async fn process_instance(
     crate::webhooks::emit(
         webhook_config,
         &crate::webhooks::instance_event("instance.completed", instance_id, serde_json::json!({})),
+        cancel,
     );
 
     info!(instance_id = %instance_id, "instance completed all blocks");
@@ -380,6 +388,7 @@ async fn process_instance_tree(
     webhook_config: &WebhookConfig,
     instance: &orch8_types::instance::TaskInstance,
     sequence: &SequenceDefinition,
+    cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
 
@@ -435,6 +444,7 @@ async fn process_instance_tree(
                         instance_id,
                         serde_json::json!({}),
                     ),
+                    cancel,
                 );
                 info!(instance_id = %instance_id, from = %current_state, "instance failed (tree evaluation)");
             } else {
@@ -449,6 +459,7 @@ async fn process_instance_tree(
                         instance_id,
                         serde_json::json!({}),
                     ),
+                    cancel,
                 );
                 info!(instance_id = %instance_id, from = %current_state, "instance completed (tree evaluation)");
             }
@@ -802,6 +813,7 @@ async fn execute_step_block(
     externalize_threshold: u32,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
+    cancel: &CancellationToken,
 ) -> Result<StepOutcome, EngineError> {
     let instance_id = instance.id;
 
@@ -898,6 +910,7 @@ async fn execute_step_block(
                 attempt,
                 webhook_config,
                 message,
+                cancel,
             )
             .await?;
             Ok(StepOutcome::Failed)
@@ -921,6 +934,7 @@ async fn execute_step_block(
                     instance_id,
                     serde_json::json!({ "error": e.to_string() }),
                 ),
+                cancel,
             );
 
             Ok(StepOutcome::Failed)
@@ -935,6 +949,7 @@ async fn handle_retryable_failure(
     attempt: u32,
     webhook_config: &WebhookConfig,
     message: &str,
+    cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     if let Some(retry) = &step_def.retry {
         // Check if max_attempts has been exhausted.
@@ -967,6 +982,7 @@ async fn handle_retryable_failure(
                         "block_id": step_def.id.0,
                     }),
                 ),
+                cancel,
             );
 
             return Ok(());
@@ -1021,6 +1037,7 @@ async fn handle_retryable_failure(
             instance_id,
             serde_json::json!({ "error": message }),
         ),
+        cancel,
     );
 
     Ok(())
