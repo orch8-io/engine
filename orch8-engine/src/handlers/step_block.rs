@@ -36,6 +36,7 @@ where
 
 /// Execute a step node within the execution tree.
 /// Returns `true` if the instance has more work (should re-schedule).
+#[allow(clippy::too_many_lines)]
 pub async fn execute_step_node(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
@@ -43,6 +44,24 @@ pub async fn execute_step_node(
     node: &ExecutionNode,
     step_def: &StepDef,
 ) -> Result<bool, EngineError> {
+    // If the handler is an ActivePieces sidecar call, dispatch via HTTP to the
+    // Node worker. No plugin-registry lookup needed — the endpoint is a single
+    // env-configured sidecar, and piece/action names live in the handler string.
+    if super::activepieces::is_ap_handler(&step_def.handler) {
+        let handler_name = step_def.handler.clone();
+        let ctx = super::StepContext {
+            instance_id: instance.id,
+            block_id: step_def.id.clone(),
+            params: step_def.params.clone(),
+            context: instance.context.clone(),
+            attempt: 0,
+        };
+        return dispatch_plugin(storage, node, move || async move {
+            super::activepieces::handle_ap(ctx, &handler_name).await
+        })
+        .await;
+    }
+
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
     if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
         let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc)

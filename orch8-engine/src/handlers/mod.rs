@@ -1,4 +1,5 @@
 pub mod ab_split;
+pub mod activepieces;
 pub mod builtin;
 pub mod cancellation_scope;
 pub mod for_each;
