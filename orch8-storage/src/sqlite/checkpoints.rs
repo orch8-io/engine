@@ -30,7 +30,7 @@ pub(super) async fn get_latest(
     .fetch_optional(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_checkpoint))
+    row.as_ref().map(row_to_checkpoint).transpose()
 }
 
 pub(super) async fn list(
@@ -43,7 +43,7 @@ pub(super) async fn list(
             .fetch_all(&storage.pool)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_checkpoint).collect())
+    rows.iter().map(row_to_checkpoint).collect()
 }
 
 pub(super) async fn prune(

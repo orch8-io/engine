@@ -176,12 +176,21 @@ fn tokenize_complex(chars: &[char], i: usize, tokens: &mut Vec<Token>) -> usize 
 
 fn tokenize_number(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usize {
     let mut i = start;
+    let mut has_dot = false;
     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+        if chars[i] == '.' {
+            if has_dot {
+                break; // stop at second dot (e.g. "1.2.3" -> parse "1.2")
+            }
+            has_dot = true;
+        }
         i += 1;
     }
     let num_str: String = chars[start..i].iter().collect();
     if let Ok(n) = num_str.parse::<f64>() {
-        tokens.push(Token::Number(n));
+        if n.is_finite() {
+            tokens.push(Token::Number(n));
+        }
     }
     i
 }
@@ -436,11 +445,22 @@ fn json_cmp(a: &serde_json::Value, b: &serde_json::Value) -> Option<std::cmp::Or
 }
 
 fn to_f64(v: &serde_json::Value) -> Option<f64> {
-    match v {
-        serde_json::Value::Number(n) => n.as_f64(),
-        serde_json::Value::String(s) => s.parse().ok(),
-        serde_json::Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-        _ => None,
+    let f = match v {
+        serde_json::Value::Number(n) => n.as_f64()?,
+        serde_json::Value::String(s) => s.parse().ok()?,
+        serde_json::Value::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => return None,
+    };
+    if f.is_finite() {
+        Some(f)
+    } else {
+        None
     }
 }
 

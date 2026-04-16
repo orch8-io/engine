@@ -22,6 +22,7 @@ pub enum InstanceState {
 
 impl InstanceState {
     /// Returns true if the transition is legal.
+    #[must_use]
     pub fn can_transition_to(self, target: Self) -> bool {
         matches!(
             (self, target),
@@ -44,6 +45,7 @@ impl InstanceState {
         )
     }
 
+    #[must_use]
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }

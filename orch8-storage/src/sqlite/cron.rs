@@ -37,7 +37,7 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_cron))
+    row.as_ref().map(row_to_cron).transpose()
 }
 
 pub(super) async fn list(
@@ -55,7 +55,7 @@ pub(super) async fn list(
             .await
     }
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_cron).collect())
+    rows.iter().map(row_to_cron).collect()
 }
 
 pub(super) async fn update(storage: &SqliteStorage, s: &CronSchedule) -> Result<(), StorageError> {
@@ -89,7 +89,7 @@ pub(super) async fn claim_due(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_cron).collect())
+    rows.iter().map(row_to_cron).collect()
 }
 
 pub(super) async fn update_fire_times(

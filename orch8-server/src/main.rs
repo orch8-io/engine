@@ -186,20 +186,36 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("HTTP server error")?;
 
-    // Wait for engine and gRPC to finish draining.
-    let _ = engine_handle.await;
-    let _ = grpc_handle.await;
+    // Wait for engine and gRPC to finish draining (with timeout).
+    let drain_timeout = tokio::time::Duration::from_secs(30);
+    if tokio::time::timeout(drain_timeout, async {
+        let _ = engine_handle.await;
+        let _ = grpc_handle.await;
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("Shutdown drain timed out after {drain_timeout:?}, forcing exit");
+    }
 
     tracing::info!("Shutdown complete");
     Ok(())
 }
 
 fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
-    let mut config = if let Ok(contents) = std::fs::read_to_string(path) {
-        toml::from_str::<EngineConfig>(&contents).context("Failed to parse config TOML")?
-    } else {
-        tracing::debug!("No config file found at {path}, using defaults + env vars");
-        EngineConfig::default()
+    let mut config = match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            toml::from_str::<EngineConfig>(&contents).context("Failed to parse config TOML")?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not an error — config file is optional.
+            eprintln!("No config file found at {path}, using defaults + env vars");
+            EngineConfig::default()
+        }
+        Err(e) => {
+            // File exists but can't be read — that's a real error.
+            return Err(anyhow::anyhow!("Failed to read config file {path}: {e}"));
+        }
     };
     apply_env_overrides(&mut config);
     Ok(config)
@@ -279,6 +295,7 @@ fn init_logging(config: &orch8_types::config::LoggingConfig) {
 }
 
 fn build_cors_layer(origins: &str) -> CorsLayer {
+    use http::header::{AUTHORIZATION, CONTENT_TYPE};
     use http::Method;
 
     let layer = CorsLayer::new()
@@ -290,7 +307,7 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers(tower_http::cors::Any);
+        .allow_headers([CONTENT_TYPE, AUTHORIZATION, "x-api-key".parse().unwrap()]);
 
     if origins.trim() == "*" {
         layer.allow_origin(AllowOrigin::any())

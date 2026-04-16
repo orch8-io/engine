@@ -32,7 +32,7 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_session))
+    row.as_ref().map(row_to_session).transpose()
 }
 
 pub(super) async fn get_by_key(
@@ -46,7 +46,7 @@ pub(super) async fn get_by_key(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_session))
+    row.as_ref().map(row_to_session).transpose()
 }
 
 pub(super) async fn update_data(
@@ -88,5 +88,5 @@ pub(super) async fn list_instances(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_instance).collect())
+    rows.iter().map(row_to_instance).collect()
 }

@@ -29,9 +29,29 @@ pub(super) async fn create_batch(
     storage: &SqliteStorage,
     nodes: &[ExecutionNode],
 ) -> Result<(), StorageError> {
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     for node in nodes {
-        create_node(storage, node).await?;
+        sqlx::query(
+            "INSERT INTO execution_tree (id,instance_id,block_id,parent_id,block_type,branch_index,state,started_at,completed_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
+        )
+        .bind(node.id.0.to_string())
+        .bind(node.instance_id.0.to_string())
+        .bind(&node.block_id.0)
+        .bind(node.parent_id.map(|p| p.0.to_string()))
+        .bind(node.block_type.to_string())
+        .bind(node.branch_index.map(|b| b as i32))
+        .bind(node.state.to_string())
+        .bind(node.started_at.map(ts))
+        .bind(node.completed_at.map(ts))
+        .execute(&mut *tx).await.map_err(|e| StorageError::Query(e.to_string()))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }
 
@@ -44,7 +64,7 @@ pub(super) async fn get_tree(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_node).collect())
+    rows.iter().map(row_to_node).collect()
 }
 
 pub(super) async fn update_node_state(
@@ -96,5 +116,5 @@ pub(super) async fn get_children(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_node).collect())
+    rows.iter().map(row_to_node).collect()
 }

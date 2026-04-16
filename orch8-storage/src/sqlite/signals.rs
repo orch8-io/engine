@@ -30,7 +30,7 @@ pub(super) async fn get_pending(
     .fetch_all(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_signal).collect())
+    rows.iter().map(row_to_signal).collect()
 }
 
 pub(super) async fn get_pending_batch(
@@ -60,8 +60,20 @@ pub(super) async fn mark_delivered_batch(
     storage: &SqliteStorage,
     signal_ids: &[Uuid],
 ) -> Result<(), StorageError> {
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     for id in signal_ids {
-        mark_delivered(storage, *id).await?;
+        sqlx::query("UPDATE signal_inbox SET delivered=1 WHERE id=?1")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }

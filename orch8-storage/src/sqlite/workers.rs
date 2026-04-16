@@ -1,6 +1,7 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
+use tracing::instrument;
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
@@ -9,6 +10,7 @@ use orch8_types::worker::WorkerTask;
 use super::helpers::{row_to_worker_task, ts};
 use super::SqliteStorage;
 
+#[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
         "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) ON CONFLICT(instance_id,block_id) DO NOTHING"
@@ -44,9 +46,10 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_worker_task))
+    row.as_ref().map(row_to_worker_task).transpose()
 }
 
+#[instrument(skip(storage), fields(handler_name, worker_id, limit))]
 pub(super) async fn claim(
     storage: &SqliteStorage,
     handler_name: &str,
@@ -54,27 +57,41 @@ pub(super) async fn claim(
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
+    // Use IMMEDIATE transaction to prevent concurrent claims on the same tasks.
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    // SQLite: BEGIN IMMEDIATE is implicit with sqlx when using write operations in a tx.
     let rows = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)
-    .fetch_all(&storage.pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    let tasks: Vec<WorkerTask> = rows.iter().map(row_to_worker_task).collect();
+    let tasks: Vec<WorkerTask> = rows
+        .iter()
+        .map(row_to_worker_task)
+        .collect::<Result<Vec<_>, _>>()?;
     for t in &tasks {
         sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
             .bind(t.id.to_string())
             .bind(worker_id)
             .bind(&now)
-            .execute(&storage.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
     }
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(tasks)
 }
 
+#[instrument(skip(storage, output), fields(%task_id, worker_id))]
 pub(super) async fn complete(
     storage: &SqliteStorage,
     task_id: Uuid,
@@ -92,17 +109,19 @@ pub(super) async fn complete(
     Ok(result.rows_affected() > 0)
 }
 
+#[instrument(skip(storage), fields(%task_id, worker_id, retryable))]
 pub(super) async fn fail(
     storage: &SqliteStorage,
     task_id: Uuid,
     worker_id: &str,
     message: &str,
-    _retryable: bool,
+    retryable: bool,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query("UPDATE worker_tasks SET state='failed', error_message=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2")
+    let result = sqlx::query("UPDATE worker_tasks SET state='failed', error_message=?3, error_retryable=?4, completed_at=?5 WHERE id=?1 AND worker_id=?2")
         .bind(task_id.to_string())
         .bind(worker_id)
         .bind(message)
+        .bind(retryable as i32)
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await
@@ -137,12 +156,13 @@ pub(super) async fn delete(storage: &SqliteStorage, task_id: Uuid) -> Result<(),
 
 pub(super) async fn reap_stale(
     storage: &SqliteStorage,
-    _stale_threshold: Duration,
+    stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
-    // Simplified: just reset all claimed tasks back to pending
+    let cutoff = Utc::now() - chrono::Duration::from_std(stale_threshold).unwrap_or_default();
     let result = sqlx::query(
-        "UPDATE worker_tasks SET state='pending', worker_id=NULL WHERE state='claimed'",
+        "UPDATE worker_tasks SET state='pending', worker_id=NULL WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
     )
+    .bind(ts(cutoff))
     .execute(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -204,7 +224,7 @@ pub(super) async fn list(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_worker_task).collect())
+    rows.iter().map(row_to_worker_task).collect()
 }
 
 pub(super) async fn stats(

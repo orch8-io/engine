@@ -44,25 +44,26 @@ fn resolve_string(
         return resolve_path(path, context, outputs);
     }
 
-    // Inline templates: replace each {{path}} with its string representation.
-    let mut result = s.to_string();
-    let mut start = 0;
-    while let Some(open) = result[start..].find("{{") {
-        let abs_open = start + open;
-        if let Some(close) = result[abs_open..].find("}}") {
-            let abs_close = abs_open + close;
-            let path = result[abs_open + 2..abs_close].trim();
+    // Inline templates: build result string from segments to avoid O(n*m) reallocations.
+    let mut result = String::with_capacity(s.len());
+    let mut remaining = s;
+    while let Some(open) = remaining.find("{{") {
+        result.push_str(&remaining[..open]);
+        let after_open = &remaining[open + 2..];
+        if let Some(close) = after_open.find("}}") {
+            let path = after_open[..close].trim();
             let resolved = resolve_path(path, context, outputs)?;
-            let replacement = match &resolved {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            result.replace_range(abs_open..abs_close + 2, &replacement);
-            start = abs_open + replacement.len();
+            match &resolved {
+                serde_json::Value::String(s) => result.push_str(s),
+                other => result.push_str(&other.to_string()),
+            }
+            remaining = &after_open[close + 2..];
         } else {
-            break;
+            result.push_str("{{");
+            remaining = after_open;
         }
     }
+    result.push_str(remaining);
 
     Ok(serde_json::Value::String(result))
 }

@@ -38,7 +38,7 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| row_to_sequence(&r)))
+    row.map(|r| row_to_sequence(&r)).transpose()
 }
 
 pub(super) async fn get_by_name(
@@ -58,7 +58,7 @@ pub(super) async fn get_by_name(
             .fetch_optional(&storage.pool).await
     }
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| row_to_sequence(&r)))
+    row.map(|r| row_to_sequence(&r)).transpose()
 }
 
 pub(super) async fn list_versions(
@@ -70,7 +70,7 @@ pub(super) async fn list_versions(
     let rows = sqlx::query("SELECT * FROM sequences WHERE tenant_id=?1 AND namespace=?2 AND name=?3 ORDER BY version DESC")
         .bind(&tenant_id.0).bind(&namespace.0).bind(name)
         .fetch_all(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_sequence).collect())
+    rows.iter().map(row_to_sequence).collect()
 }
 
 pub(super) async fn deprecate(storage: &SqliteStorage, id: SequenceId) -> Result<(), StorageError> {

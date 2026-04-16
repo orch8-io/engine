@@ -57,7 +57,7 @@ pub(super) async fn list(storage: &SqliteStorage) -> Result<Vec<ClusterNode>, St
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_cluster_node).collect())
+    rows.iter().map(row_to_cluster_node).collect()
 }
 
 pub(super) async fn should_drain(

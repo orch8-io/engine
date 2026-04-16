@@ -25,6 +25,7 @@ const ENC_PREFIX: &str = "enc:v1:";
 
 impl FieldEncryptor {
     /// Create an encryptor from a 32-byte (64 hex char) key.
+    #[must_use = "returns a new FieldEncryptor; does not modify state"]
     pub fn from_hex_key(hex_key: &str) -> Result<Self, EncryptionError> {
         let key_bytes = hex_decode(hex_key)?;
         if key_bytes.len() != 32 {

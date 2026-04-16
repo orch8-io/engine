@@ -214,6 +214,11 @@ pub(crate) async fn create_instances_batch(
             "instances array must not be empty".into(),
         ));
     }
+    if req.instances.len() > 10_000 {
+        return Err(ApiError::InvalidArgument(
+            "batch size must not exceed 10,000".into(),
+        ));
+    }
 
     let now = Utc::now();
     let instances: Vec<TaskInstance> = req
@@ -744,7 +749,30 @@ async fn list_audit_log(
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct InjectBlocksRequest {
+    /// Blocks must be a valid JSON array of `BlockDefinition` objects.
     pub blocks: serde_json::Value,
+}
+
+/// Validate that injected blocks conform to the expected structure.
+fn validate_injected_blocks(blocks: &serde_json::Value) -> Result<(), ApiError> {
+    let arr = blocks
+        .as_array()
+        .ok_or_else(|| ApiError::InvalidArgument("blocks must be a JSON array".into()))?;
+    if arr.is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "blocks array must not be empty".into(),
+        ));
+    }
+    // Validate each block can deserialize as a BlockDefinition.
+    for (i, block) in arr.iter().enumerate() {
+        if serde_json::from_value::<orch8_types::sequence::BlockDefinition>(block.clone()).is_err()
+        {
+            return Err(ApiError::InvalidArgument(format!(
+                "blocks[{i}] is not a valid BlockDefinition"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -759,6 +787,7 @@ async fn inject_blocks(
     Path(id): Path<Uuid>,
     Json(body): Json<InjectBlocksRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    validate_injected_blocks(&body.blocks)?;
     state
         .storage
         .inject_blocks(InstanceId(id), &body.blocks)

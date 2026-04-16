@@ -33,7 +33,7 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_pool))
+    row.as_ref().map(row_to_pool).transpose()
 }
 
 pub(super) async fn list(
@@ -45,7 +45,7 @@ pub(super) async fn list(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_pool).collect())
+    rows.iter().map(row_to_pool).collect()
 }
 
 pub(super) async fn update_round_robin(
@@ -103,7 +103,7 @@ pub(super) async fn list_resources(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_pool_resource).collect())
+    rows.iter().map(row_to_pool_resource).collect()
 }
 
 pub(super) async fn update_resource(

@@ -37,7 +37,7 @@ pub(super) async fn get(
     let row = sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 AND block_id=?2 ORDER BY created_at DESC LIMIT 1")
         .bind(instance_id.0.to_string()).bind(&block_id.0)
         .fetch_optional(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.as_ref().map(row_to_output))
+    row.as_ref().map(row_to_output).transpose()
 }
 
 pub(super) async fn get_all(
@@ -49,7 +49,7 @@ pub(super) async fn get_all(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_output).collect())
+    rows.iter().map(row_to_output).collect()
 }
 
 pub(super) async fn get_completed_ids(
@@ -85,7 +85,35 @@ pub(super) async fn save_output_and_transition(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<(), StorageError> {
-    save(storage, output).await?;
-    super::instances::update_state(storage, instance_id, new_state, next_fire_at).await?;
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    sqlx::query(
+        "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
+    )
+    .bind(output.id.to_string())
+    .bind(output.instance_id.0.to_string())
+    .bind(&output.block_id.0)
+    .bind(serde_json::to_string(&output.output).unwrap_or_default())
+    .bind(&output.output_ref)
+    .bind(output.output_size as i64)
+    .bind(output.attempt as i64)
+    .bind(ts(output.created_at))
+    .execute(&mut *tx).await.map_err(|e| StorageError::Query(e.to_string()))?;
+
+    sqlx::query("UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1")
+        .bind(instance_id.0.to_string())
+        .bind(new_state.to_string())
+        .bind(next_fire_at.map(ts))
+        .bind(ts(chrono::Utc::now()))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }

@@ -36,7 +36,7 @@ pub(super) async fn list_by_instance(
     .fetch_all(&storage.pool)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_audit).collect())
+    rows.iter().map(row_to_audit).collect()
 }
 
 pub(super) async fn list_by_tenant(
@@ -51,5 +51,5 @@ pub(super) async fn list_by_tenant(
             .fetch_all(&storage.pool)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(rows.iter().map(row_to_audit).collect())
+    rows.iter().map(row_to_audit).collect()
 }

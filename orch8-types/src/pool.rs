@@ -75,6 +75,7 @@ fn default_true_pool() -> bool {
 
 impl PoolResource {
     /// Calculate the effective daily cap, accounting for warmup ramp.
+    #[must_use]
     pub fn effective_daily_cap(&self, today: NaiveDate) -> u32 {
         if self.daily_cap == 0 {
             return 0; // unlimited
@@ -100,6 +101,7 @@ impl PoolResource {
     }
 
     /// Check if this resource has capacity remaining today.
+    #[must_use]
     pub fn has_capacity(&self, today: NaiveDate) -> bool {
         let cap = self.effective_daily_cap(today);
         if cap == 0 {
