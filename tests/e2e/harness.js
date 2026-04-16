@@ -16,6 +16,7 @@ const PROJECT_ROOT = resolve(__dirname, "../..");
 
 const DEFAULT_PORT = 18080;
 const DB_URL = process.env.ORCH8_DATABASE_URL || "postgres://orch8:orch8@localhost:5434/orch8";
+const STORAGE_BACKEND = process.env.ORCH8_STORAGE_BACKEND || "postgres";
 
 /**
  * Find the orch8-server binary. Checks target/debug first, then target/<triple>/debug.
@@ -65,21 +66,37 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
   }
 
   // Clean stale data from previous test runs.
-  try {
-    const dbUrl = new URL(DB_URL);
-    execFileSync("psql", [
-      "-h", dbUrl.hostname,
-      "-p", dbUrl.port,
-      "-U", dbUrl.username,
-      "-d", dbUrl.pathname.slice(1),
-      "-c", "DELETE FROM worker_tasks; DELETE FROM block_outputs; DELETE FROM execution_tree; DELETE FROM signal_inbox; DELETE FROM task_instances;",
-    ], {
-      env: { ...process.env, PGPASSWORD: dbUrl.password },
-      stdio: "pipe",
-    });
-    console.log("  Cleaned stale test data from database");
-  } catch (e) {
-    console.log(`  Warning: DB cleanup failed: ${e.message}`);
+  if (STORAGE_BACKEND === "sqlite") {
+    // For SQLite, delete and recreate the db file so each run starts clean.
+    const sqlitePath = DB_URL.replace(/^sqlite:\/\//, "").replace(/^sqlite:/, "");
+    if (sqlitePath && sqlitePath !== ":memory:") {
+      try {
+        const { unlinkSync } = await import("node:fs");
+        for (const suffix of ["", "-wal", "-shm"]) {
+          try { unlinkSync(sqlitePath + suffix); } catch { /* ignore if absent */ }
+        }
+        console.log(`  Deleted stale SQLite database: ${sqlitePath}`);
+      } catch (e) {
+        console.log(`  Warning: SQLite cleanup failed: ${e.message}`);
+      }
+    }
+  } else {
+    try {
+      const dbUrl = new URL(DB_URL);
+      execFileSync("psql", [
+        "-h", dbUrl.hostname,
+        "-p", dbUrl.port,
+        "-U", dbUrl.username,
+        "-d", dbUrl.pathname.slice(1),
+        "-c", "DELETE FROM worker_tasks; DELETE FROM block_outputs; DELETE FROM execution_tree; DELETE FROM signal_inbox; DELETE FROM task_instances;",
+      ], {
+        env: { ...process.env, PGPASSWORD: dbUrl.password },
+        stdio: "pipe",
+      });
+      console.log("  Cleaned stale test data from database");
+    } catch (e) {
+      console.log(`  Warning: DB cleanup failed: ${e.message}`);
+    }
   }
 
   const httpAddr = `0.0.0.0:${port}`;
@@ -88,6 +105,7 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
     cwd: PROJECT_ROOT,
     env: {
       ...process.env,
+      ORCH8_STORAGE_BACKEND: STORAGE_BACKEND,
       ORCH8_DATABASE_URL: DB_URL,
       ORCH8_HTTP_ADDR: httpAddr,
       ORCH8_LOG_LEVEL: "info",

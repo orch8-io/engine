@@ -26,6 +26,7 @@ pub struct SequenceDefinition {
 /// A block is either a leaf (step) or a composite (parallel, race, etc.).
 /// This recursive enum IS the workflow DSL.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(no_recursion)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
 pub enum BlockDefinition {
