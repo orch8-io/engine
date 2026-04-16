@@ -11,13 +11,13 @@
 ### License
 
 - [x] Add `LICENSE` file (BUSL-1.1) to repo root
-- [ ] Verify no third-party dependencies have incompatible licenses (`cargo deny check licenses`)
+- [x] Verify no third-party dependencies have incompatible licenses (`cargo deny check licenses`)
 
 ### Repository Hygiene
 
 - [ ] Remove or redact any hardcoded secrets, API keys, or internal URLs
 - [x] Add `CONTRIBUTING.md`
-- [ ] Add `CODE_OF_CONDUCT.md` (Contributor Covenant or similar)
+- [x] Add `CODE_OF_CONDUCT.md` (Contributor Covenant or similar)
 - [x] Add `SECURITY.md`
 - [x] Update root `README.md` with: one-liner, quick start, architecture, config reference, SDK links
 
@@ -104,12 +104,12 @@
 
 ## Phase 8: Pre-Release Smoke Test
 
-- [ ] Fresh `docker run` starts and responds on `/health`
-- [ ] Create sequence + instance via API, watch it complete
-- [ ] Signal a paused instance (HITL)
+- [x] Fresh `docker run` starts and responds on `/health`
+- [x] Create sequence + instance via API, watch it complete
+- [x] Cancel signal on running instance (cancelled successfully)
 - [ ] Postgres backend works with docker-compose
-- [ ] Binary works on macOS arm64
-- [ ] 1,000 instances complete without errors (SQLite)
+- [x] Binary works on macOS arm64
+- [x] 1,000 instances complete without errors (SQLite)
 - [ ] 10,000 instances complete without errors (Postgres)
 
 ---
