@@ -76,12 +76,25 @@ pub(super) async fn claim(
         .iter()
         .map(row_to_worker_task)
         .collect::<Result<Vec<_>, _>>()?;
-    for t in &tasks {
-        sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
-            .bind(t.id.to_string())
+    if !tasks.is_empty() {
+        let ids: Vec<String> = tasks.iter().map(|t| t.id.to_string()).collect();
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 4))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE worker_tasks SET state='claimed', worker_id=?1, claimed_at=?2, heartbeat_at=?3 WHERE id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql)
             .bind(worker_id)
             .bind(&now)
-            .execute(&mut *tx)
+            .bind(&now);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        q.execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
     }
@@ -98,7 +111,7 @@ pub(super) async fn complete(
     worker_id: &str,
     output: &serde_json::Value,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query("UPDATE worker_tasks SET state='completed', output=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2")
+    let result = sqlx::query("UPDATE worker_tasks SET state='completed', output=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2 AND state='claimed'")
         .bind(task_id.to_string())
         .bind(worker_id)
         .bind(serde_json::to_string(output).unwrap_or_default())
@@ -117,7 +130,7 @@ pub(super) async fn fail(
     message: &str,
     retryable: bool,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query("UPDATE worker_tasks SET state='failed', error_message=?3, error_retryable=?4, completed_at=?5 WHERE id=?1 AND worker_id=?2")
+    let result = sqlx::query("UPDATE worker_tasks SET state='failed', error_message=?3, error_retryable=?4, completed_at=?5 WHERE id=?1 AND worker_id=?2 AND state='claimed'")
         .bind(task_id.to_string())
         .bind(worker_id)
         .bind(message)
@@ -135,7 +148,7 @@ pub(super) async fn heartbeat(
     worker_id: &str,
 ) -> Result<bool, StorageError> {
     let result =
-        sqlx::query("UPDATE worker_tasks SET heartbeat_at=?3 WHERE id=?1 AND worker_id=?2")
+        sqlx::query("UPDATE worker_tasks SET heartbeat_at=?3 WHERE id=?1 AND worker_id=?2 AND state='claimed'")
             .bind(task_id.to_string())
             .bind(worker_id)
             .bind(ts(Utc::now()))
@@ -160,7 +173,7 @@ pub(super) async fn reap_stale(
 ) -> Result<u64, StorageError> {
     let cutoff = Utc::now() - chrono::Duration::from_std(stale_threshold).unwrap_or_default();
     let result = sqlx::query(
-        "UPDATE worker_tasks SET state='pending', worker_id=NULL WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
+        "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE state='claimed' AND (heartbeat_at IS NULL OR heartbeat_at < ?1)",
     )
     .bind(ts(cutoff))
     .execute(&storage.pool)

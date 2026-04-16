@@ -53,7 +53,10 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
             .pool_max_idle_per_host(8)
             .timeout(Duration::from_secs(300))
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to build optimized HTTP client, using default");
+                reqwest::Client::new()
+            })
     })
 }
 

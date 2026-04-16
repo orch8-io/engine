@@ -106,7 +106,7 @@ pub(crate) async fn list_pools(
     tenant_ctx: crate::auth::OptionalTenant,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<ResourcePool>>, ApiError> {
-    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, params.get("tenant_id").map(|s| s.as_str()))
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, params.get("tenant_id").map(String::as_str))
         .unwrap_or_else(|| TenantId(String::new()));
     let pools = state.storage.list_resource_pools(&tenant_id).await?;
     Ok(Json(pools))
@@ -183,6 +183,15 @@ pub(crate) async fn add_resource(
     Path(pool_id): Path<Uuid>,
     Json(req): Json<AddResourceRequest>,
 ) -> Result<(axum::http::StatusCode, Json<PoolResource>), ApiError> {
+    if req.resource_key.is_empty() || req.resource_key.len() > 255 {
+        return Err(ApiError::InvalidArgument("resource_key must be 1-255 characters".into()));
+    }
+    if req.name.is_empty() || req.name.len() > 255 {
+        return Err(ApiError::InvalidArgument("name must be 1-255 characters".into()));
+    }
+    if req.weight == 0 {
+        return Err(ApiError::InvalidArgument("weight must be at least 1".into()));
+    }
     let pool = state
         .storage
         .get_resource_pool(pool_id)

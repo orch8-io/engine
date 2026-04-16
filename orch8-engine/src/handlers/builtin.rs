@@ -19,9 +19,8 @@ use super::{HandlerRegistry, StepContext};
 /// Returns `true` if the URL uses http/https and resolves to a public IP address.
 /// Returns `false` for private, loopback, link-local, and cloud metadata addresses.
 pub(crate) fn is_url_safe(url: &str) -> bool {
-    let parsed = match url::Url::parse(url) {
-        Ok(u) => u,
-        Err(_) => return false,
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
     };
 
     match parsed.scheme() {
@@ -29,17 +28,15 @@ pub(crate) fn is_url_safe(url: &str) -> bool {
         _ => return false,
     }
 
-    let host = match parsed.host_str() {
-        Some(h) => h,
-        None => return false,
+    let Some(host) = parsed.host_str() else {
+        return false;
     };
 
     let port = parsed.port_or_known_default().unwrap_or(80);
     let addr_str = format!("{host}:{port}");
 
-    let addrs = match addr_str.to_socket_addrs() {
-        Ok(a) => a,
-        Err(_) => return false,
+    let Ok(addrs) = addr_str.to_socket_addrs() else {
+        return false;
     };
 
     for addr in addrs {

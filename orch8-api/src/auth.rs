@@ -2,6 +2,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
+use subtle::ConstantTimeEq;
 
 use orch8_types::ids::TenantId;
 
@@ -18,7 +19,7 @@ pub struct TenantContext {
 pub type OptionalTenant = Option<axum::Extension<TenantContext>>;
 
 /// For create/write endpoints: if a tenant header is present, enforce it matches
-/// the body's tenant_id. Returns the authoritative tenant_id to use.
+/// the body's `tenant_id`. Returns the authoritative `tenant_id` to use.
 pub fn enforce_tenant_create(
     tenant_ctx: &OptionalTenant,
     body_tenant_id: &TenantId,
@@ -82,7 +83,15 @@ pub async fn api_key_middleware(
         .and_then(|v| v.to_str().ok());
 
     match provided {
-        Some(key) if key == expected_key => Ok(next.run(request).await),
+        Some(key)
+            if key.len() == expected_key.len()
+                && key
+                    .as_bytes()
+                    .ct_eq(expected_key.as_bytes())
+                    .into() =>
+        {
+            Ok(next.run(request).await)
+        }
         _ => Err(StatusCode::UNAUTHORIZED),
     }
 }

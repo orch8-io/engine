@@ -59,7 +59,7 @@ pub(super) async fn get_tree(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<ExecutionNode>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM execution_tree WHERE instance_id=?1")
+    let rows = sqlx::query("SELECT * FROM execution_tree WHERE instance_id=?1 ORDER BY id")
         .bind(instance_id.0.to_string())
         .fetch_all(&storage.pool)
         .await

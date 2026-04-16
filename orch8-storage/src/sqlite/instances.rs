@@ -135,11 +135,22 @@ pub(super) async fn claim_due(
         .iter()
         .map(row_to_instance)
         .collect::<Result<Vec<_>, _>>()?;
-    for inst in &instances {
-        sqlx::query("UPDATE task_instances SET state='running', updated_at=?2 WHERE id=?1")
-            .bind(inst.id.0.to_string())
-            .bind(&now_s)
-            .execute(&mut *tx)
+    if !instances.is_empty() {
+        let ids: Vec<String> = instances.iter().map(|i| i.id.0.to_string()).collect();
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE task_instances SET state='running', updated_at=?1 WHERE id IN ({placeholders})"
+        );
+        let mut q = sqlx::query(&sql).bind(&now_s);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        q.execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
     }

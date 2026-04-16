@@ -17,7 +17,10 @@ fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(4)
             .build()
-            .expect("failed to build HTTP client")
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "failed to build optimized HTTP client, using default");
+                reqwest::Client::new()
+            })
     })
 }
 

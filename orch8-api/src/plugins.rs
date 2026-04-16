@@ -69,6 +69,12 @@ async fn create_plugin(
             "name and source are required".into(),
         ));
     }
+    if body.name.len() > 255 {
+        return Err(ApiError::InvalidArgument("name must not exceed 255 characters".into()));
+    }
+    if body.source.len() > 2048 {
+        return Err(ApiError::InvalidArgument("source must not exceed 2048 characters".into()));
+    }
 
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
 

@@ -47,6 +47,11 @@ async fn create_session(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if body.session_key.is_empty() || body.session_key.len() > 512 {
+        return Err(ApiError::InvalidArgument(
+            "session_key must be between 1 and 512 characters".into(),
+        ));
+    }
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     let now = chrono::Utc::now();
     let session = Session {

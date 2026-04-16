@@ -88,7 +88,7 @@ pub(super) async fn get_child_instances(
     storage: &SqliteStorage,
     parent_instance_id: InstanceId,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM task_instances WHERE parent_instance_id=?1")
+    let rows = sqlx::query("SELECT * FROM task_instances WHERE parent_instance_id=?1 ORDER BY created_at")
         .bind(parent_instance_id.0.to_string())
         .fetch_all(&storage.pool)
         .await

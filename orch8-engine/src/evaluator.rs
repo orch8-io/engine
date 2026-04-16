@@ -324,20 +324,16 @@ fn find_running_composite<'a>(
     tree: &'a [ExecutionNode],
     blocks: &'a [BlockDefinition],
 ) -> Option<(ExecutionNode, &'a BlockDefinition)> {
-    // Process deepest composites first (children before parents) so inner
+    // Process deepest composite first (children before parents) so inner
     // composites complete before their parents re-evaluate.
-    let mut composites: Vec<_> = tree
-        .iter()
+    tree.iter()
         .filter(|n| n.state == NodeState::Running)
         .filter_map(|n| {
             find_block(blocks, &n.block_id)
                 .filter(|b| !matches!(b, BlockDefinition::Step(_)))
                 .map(|b| (n.clone(), b))
         })
-        .collect();
-    // Sort by tree depth (deeper = more ancestors = processed first).
-    composites.sort_by_key(|(n, _)| std::cmp::Reverse(count_ancestors(tree, n.id)));
-    composites.into_iter().next()
+        .max_by_key(|(n, _)| count_ancestors(tree, n.id))
 }
 
 /// Find a Running step node that can be executed.
@@ -359,15 +355,16 @@ fn find_running_step<'a>(
 }
 
 /// Count ancestors to determine tree depth.
+/// Uses a `HashMap` index for O(depth) lookup instead of O(n) per ancestor.
 fn count_ancestors(tree: &[ExecutionNode], mut node_id: ExecutionNodeId) -> usize {
-    let mut depth = 0;
-    while let Some(parent_id) = tree
+    let parent_map: std::collections::HashMap<ExecutionNodeId, Option<ExecutionNodeId>> = tree
         .iter()
-        .find(|n| n.id == node_id)
-        .and_then(|n| n.parent_id)
-    {
+        .map(|n| (n.id, n.parent_id))
+        .collect();
+    let mut depth = 0;
+    while let Some(Some(parent_id)) = parent_map.get(&node_id) {
         depth += 1;
-        node_id = parent_id;
+        node_id = *parent_id;
     }
     depth
 }

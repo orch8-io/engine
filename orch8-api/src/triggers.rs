@@ -13,6 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 
 use orch8_types::ids::TenantId;
@@ -60,6 +61,12 @@ async fn create_trigger(
         return Err(ApiError::InvalidArgument(
             "slug and sequence_name are required".into(),
         ));
+    }
+    if body.slug.len() > 255 {
+        return Err(ApiError::InvalidArgument("slug must not exceed 255 characters".into()));
+    }
+    if body.sequence_name.len() > 255 {
+        return Err(ApiError::InvalidArgument("sequence_name must not exceed 255 characters".into()));
     }
 
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
@@ -170,7 +177,10 @@ async fn fire_trigger(
             .get("x-trigger-secret")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if provided != secret.expose() {
+        let expected = secret.expose();
+        if provided.len() != expected.len()
+            || !bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
+        {
             return Err(ApiError::Unauthorized);
         }
     }

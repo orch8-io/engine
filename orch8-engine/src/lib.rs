@@ -43,7 +43,9 @@ impl Engine {
         cancel: CancellationToken,
     ) -> Self {
         let node_id = Uuid::new_v4();
-        let node_name = hostname().unwrap_or_else(|| format!("node-{}", &node_id.to_string()[..8]));
+        let id_str = node_id.to_string();
+        let short_id = id_str.get(..8).unwrap_or(&id_str);
+        let node_name = hostname().unwrap_or_else(|| format!("node-{short_id}"));
         Self {
             storage,
             config,
@@ -193,6 +195,7 @@ impl Engine {
                 trigger_cancel,
             )
             .await;
+            tracing::info!("trigger processor loop exited");
         });
     }
 

@@ -93,7 +93,7 @@ mod cache {
 
     pub fn get_or_compile(path: &str) -> Result<Module, StepError> {
         {
-            let cache = MODULES.lock().unwrap_or_else(|e| e.into_inner());
+            let cache = MODULES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(m) = cache.get(path) {
                 return Ok(m.clone());
             }
@@ -102,7 +102,7 @@ mod cache {
             message: format!("wasm plugin: failed to load module '{path}': {e}"),
             details: None,
         })?;
-        let mut cache = MODULES.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = MODULES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         cache.insert(path.to_string(), module.clone());
         Ok(module)
     }

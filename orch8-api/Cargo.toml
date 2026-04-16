@@ -20,6 +20,7 @@ uuid.workspace = true
 chrono.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
+subtle.workspace = true
 tokio-stream.workspace = true
 
 [lints]

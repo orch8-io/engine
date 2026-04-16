@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
+use tracing;
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
@@ -24,11 +25,18 @@ fn parse_uuid(s: &str) -> Result<Uuid, Status> {
 }
 
 fn to_json_string<T: serde::Serialize>(val: &T) -> Result<String, Status> {
-    serde_json::to_string(val).map_err(|e| Status::internal(format!("json serialize: {e}")))
+    serde_json::to_string(val).map_err(|e| {
+        tracing::error!(error = %e, "json serialization failed");
+        Status::internal("internal error")
+    })
 }
 
 fn from_json_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Status> {
-    serde_json::from_str(s).map_err(|e| Status::invalid_argument(format!("json parse: {e}")))
+    const MAX_JSON_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+    if s.len() > MAX_JSON_SIZE {
+        return Err(Status::invalid_argument("JSON payload too large"));
+    }
+    serde_json::from_str(s).map_err(|_| Status::invalid_argument("invalid JSON payload"))
 }
 
 fn storage_err(e: orch8_types::error::StorageError) -> Status {
@@ -36,9 +44,12 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
     match e {
         StorageError::NotFound { entity, id } => Status::not_found(format!("{entity} {id}")),
         StorageError::Conflict(msg) => Status::already_exists(msg),
-        StorageError::Connection(msg) => Status::unavailable(msg),
+        StorageError::Connection(_) => Status::unavailable("storage unavailable"),
         StorageError::PoolExhausted => Status::unavailable("pool exhausted"),
-        other => Status::internal(other.to_string()),
+        other => {
+            tracing::error!(error = %other, "internal storage error");
+            Status::internal("internal error")
+        }
     }
 }
 
@@ -127,6 +138,13 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::CreateInstancesBatchRequest>,
     ) -> Result<Response<proto::CreateInstancesBatchResponse>, Status> {
         let inner = req.into_inner();
+        const MAX_BATCH_SIZE: usize = 10_000;
+        if inner.instances_json.len() > MAX_BATCH_SIZE {
+            return Err(Status::invalid_argument(format!(
+                "batch size {} exceeds maximum {MAX_BATCH_SIZE}",
+                inner.instances_json.len()
+            )));
+        }
         let instances: Vec<orch8_types::instance::TaskInstance> = inner
             .instances_json
             .iter()

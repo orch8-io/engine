@@ -28,7 +28,10 @@ static GRPC_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
         .build()
-        .expect("failed to build gRPC HTTP client")
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to build gRPC HTTP client, using default");
+            reqwest::Client::new()
+        })
 });
 
 /// Check if a handler name is a gRPC plugin handler.
