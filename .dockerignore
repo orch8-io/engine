@@ -1,0 +1,9 @@
+target/
+.git/
+.worktrees/
+.env
+dashboard/
+tests/
+docs/
+worker-sdk-node/
+*.md

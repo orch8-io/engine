@@ -30,7 +30,7 @@ jobs:
         run: cargo fmt --check
 
   test:
-    name: Test
+    name: Unit Tests
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -57,3 +57,41 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Test
         run: cargo test --workspace
+
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: [check]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: orch8
+          POSTGRES_USER: orch8
+          POSTGRES_PASSWORD: orch8
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5434/orch8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build server
+        run: cargo build --bin orch8-server
+      - name: Run E2E tests
+        run: |
+          for f in tests/e2e/*.test.js; do
+            echo "=== $f ==="
+            node --test "$f" || exit 1
+          done

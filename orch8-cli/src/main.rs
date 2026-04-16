@@ -48,6 +48,12 @@ enum Commands {
     /// Checkpoint management.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
+    /// Initialize a new Orch8 project (config, example sequence, docker-compose).
+    Init {
+        /// Directory to initialize in (defaults to current directory).
+        #[arg(default_value = ".")]
+        dir: String,
+    },
 }
 
 pub fn val_str(v: &Value, key: &str) -> String {
@@ -87,6 +93,7 @@ async fn main() -> Result<()> {
             payload,
         } => commands::signal::run(&client, base, instance_id, signal_type, payload).await?,
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd).await?,
+        Commands::Init { dir } => commands::init::run(&dir)?,
     }
 
     Ok(())

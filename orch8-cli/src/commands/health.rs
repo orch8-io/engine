@@ -4,7 +4,7 @@ use serde_json::Value;
 
 pub async fn run(client: &Client, base: &str) -> Result<()> {
     let resp = client
-        .get(format!("{base}/healthz"))
+        .get(format!("{base}/health/ready"))
         .send()
         .await
         .context("failed to reach server")?;
