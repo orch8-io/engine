@@ -48,7 +48,7 @@ COPY --from=builder /app/target/release/orch8-server /usr/local/bin/orch8-server
 COPY --from=builder /app/target/release/orch8 /usr/local/bin/orch8
 
 # Default SQLite storage (zero-config start).
-ENV ORCH8_DATABASE_BACKEND=sqlite \
+ENV ORCH8_STORAGE_BACKEND=sqlite \
     ORCH8_DATABASE_URL=sqlite:///data/orch8.db \
     ORCH8_HTTP_ADDR=0.0.0.0:8080 \
     ORCH8_GRPC_ADDR=0.0.0.0:50051
