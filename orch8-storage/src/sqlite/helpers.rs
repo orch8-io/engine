@@ -22,12 +22,13 @@ pub(super) fn ts(dt: DateTime<Utc>) -> String {
 }
 
 pub(super) fn parse_ts(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| {
+    DateTime::parse_from_rfc3339(s).map_or_else(
+        |_| {
             tracing::warn!(value = s, "failed to parse timestamp, defaulting to epoch");
             DateTime::default()
-        })
+        },
+        |dt| dt.with_timezone(&Utc),
+    )
 }
 
 pub(super) fn parse_ts_opt(s: Option<String>) -> Option<DateTime<Utc>> {

@@ -208,8 +208,7 @@ pub(super) async fn stats(
 
     // Count by state + handler_name
     let count_sql = format!(
-        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{} GROUP BY state, handler_name",
-        tenant_clause
+        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{tenant_clause} GROUP BY state, handler_name"
     );
     let mut q = sqlx::query_as::<_, (String, String, i64)>(&count_sql);
     if let Some(tid) = tenant_id {
