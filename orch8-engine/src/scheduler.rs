@@ -773,8 +773,7 @@ async fn check_human_input(
                     output: signal.payload.clone(),
                     output_ref: None,
                     output_size: serde_json::to_vec(&signal.payload)
-                        .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
-                        .unwrap_or(0),
+                        .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX)),
                     attempt: 0,
                     created_at: chrono::Utc::now(),
                 };
