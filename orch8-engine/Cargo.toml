@@ -21,5 +21,13 @@ metrics.workspace = true
 cron.workspace = true
 moka.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "engine_bench"
+harness = false
+
 [lints]
 workspace = true

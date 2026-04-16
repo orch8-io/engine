@@ -15,6 +15,11 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "storage_bench"
+harness = false
 
 [lints]
 workspace = true
