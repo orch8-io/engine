@@ -31,8 +31,9 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@activepieces/pieces-framework": "^0.7.0",
-    "@activepieces/pieces-common": "^0.4.0"
+    "@activepieces/piece-http": "^0.11.8",
+    "@activepieces/pieces-common": "^0.4.0",
+    "@activepieces/pieces-framework": "^0.7.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

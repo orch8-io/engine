@@ -152,7 +152,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
     }
     let require_tenant = config.api.require_tenant_header;
-    let mut app = build_router(app_state)
+    // Public webhook routes are deliberately merged AFTER the auth middleware
+    // layers below so they bypass both the tenant header and API key checks —
+    // third-party webhook callers (GitHub, Stripe, ...) authenticate via the
+    // trigger's own HMAC secret, not via orch8's API key.
+    let mut app = build_router(app_state.clone())
         .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
@@ -162,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
         }))
+        .merge(orch8_api::webhooks::public_routes().with_state(app_state))
         .layer(cors);
 
     // Apply global concurrency limit if configured (caps in-flight requests).

@@ -590,6 +590,38 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
 
+    // === Credentials ===
+
+    async fn create_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError>;
+
+    async fn get_credential(
+        &self,
+        id: &str,
+    ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError>;
+
+    async fn list_credentials(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
+
+    async fn update_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError>;
+
+    async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
+
+    /// List `OAuth2` credentials whose `expires_at` is within `threshold` of now
+    /// (and that have a `refresh_url` + `refresh_token` configured). Used by
+    /// the refresh loop — returns an empty vec if no credentials are due.
+    async fn list_credentials_due_for_refresh(
+        &self,
+        threshold: std::time::Duration,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError>;

@@ -3,6 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { usePolling } from "../hooks/usePolling";
 import { getWorkerTaskStats, type WorkerTaskStats, AuthError } from "../api";
 import StatCard from "../components/StatCard";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Panel, PanelBody, PanelHeader } from "../components/ui/Panel";
+import { Badge } from "../components/ui/Badge";
+import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 
 export default function Overview() {
   const navigate = useNavigate();
@@ -15,11 +19,23 @@ export default function Overview() {
   }
 
   if (loading && !data) {
-    return <div className="text-muted">Loading stats...</div>;
+    return (
+      <>
+        <PageHeader eyebrow="Operator" title="Overview" />
+        <div className="mt-6 text-muted text-sm">Loading stats…</div>
+      </>
+    );
   }
 
   if (error) {
-    return <div className="text-danger">Error: {error.message}</div>;
+    return (
+      <>
+        <PageHeader eyebrow="Operator" title="Overview" />
+        <div className="mt-6 rounded-md border border-warn/40 bg-warn/10 text-warn p-3 text-[13px]">
+          {error.message}
+        </div>
+      </>
+    );
   }
 
   if (!data) return null;
@@ -28,65 +44,102 @@ export default function Overview() {
   const claimed = data.by_state["claimed"] ?? 0;
   const completed = data.by_state["completed"] ?? 0;
   const failed = data.by_state["failed"] ?? 0;
+  const total = pending + claimed + completed + failed;
 
-  const handlers = Object.entries(data.by_handler);
+  const handlers = Object.entries(data.by_handler).sort(
+    (a, b) =>
+      Object.values(b[1]).reduce((s, n) => s + n, 0) -
+      Object.values(a[1]).reduce((s, n) => s + n, 0),
+  );
 
   return (
     <div className="space-y-8">
-      <h1 className="text-2xl font-bold">Worker Overview</h1>
+      <PageHeader
+        eyebrow="Operator"
+        title="Overview"
+        description="Worker throughput and queue health across all handlers."
+      />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Pending" value={pending} color="text-warning" />
-        <StatCard label="Claimed" value={claimed} color="text-accent" />
-        <StatCard label="Completed" value={completed} color="text-success" />
-        <StatCard label="Failed" value={failed} color="text-danger" />
-      </div>
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <StatCard label="Pending" value={pending} tone="hold" sub={subPct(pending, total)} />
+        <StatCard label="Claimed" value={claimed} tone="signal" sub={subPct(claimed, total)} />
+        <StatCard label="Completed" value={completed} tone="ok" sub={subPct(completed, total)} />
+        <StatCard label="Failed" value={failed} tone="warn" sub={subPct(failed, total)} />
+      </section>
 
       {handlers.length > 0 && (
-        <div>
-          <h2 className="text-lg font-semibold mb-3">By Handler</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border text-left text-muted">
-                  <th className="pb-2 pr-4">Handler</th>
-                  <th className="pb-2 pr-4">Pending</th>
-                  <th className="pb-2 pr-4">Claimed</th>
-                  <th className="pb-2 pr-4">Completed</th>
-                  <th className="pb-2">Failed</th>
-                </tr>
-              </thead>
+        <Panel>
+          <PanelHeader>
+            <span className="eyebrow">By handler</span>
+            <span className="ml-auto text-[11px] text-faint font-mono tabular">
+              {handlers.length} HANDLERS
+            </span>
+          </PanelHeader>
+          <PanelBody padded={false}>
+            <Table>
+              <THead>
+                <TH>Handler</TH>
+                <TH className="text-right">Pending</TH>
+                <TH className="text-right">Claimed</TH>
+                <TH className="text-right">Completed</TH>
+                <TH className="text-right">Failed</TH>
+              </THead>
               <tbody>
                 {handlers.map(([name, counts]) => (
-                  <tr key={name} className="border-b border-border/50">
-                    <td className="py-2 pr-4 font-mono">{name}</td>
-                    <td className="py-2 pr-4 text-warning">{counts["pending"] ?? 0}</td>
-                    <td className="py-2 pr-4 text-accent">{counts["claimed"] ?? 0}</td>
-                    <td className="py-2 pr-4 text-success">{counts["completed"] ?? 0}</td>
-                    <td className="py-2 text-danger">{counts["failed"] ?? 0}</td>
-                  </tr>
+                  <TR key={name}>
+                    <TD className="pl-4 font-mono text-[12px]">{name}</TD>
+                    <TD className="text-right text-hold tabular">{counts["pending"] ?? 0}</TD>
+                    <TD className="text-right text-signal tabular">{counts["claimed"] ?? 0}</TD>
+                    <TD className="text-right text-ok tabular">{counts["completed"] ?? 0}</TD>
+                    <TD className="text-right text-warn tabular pr-4">
+                      {counts["failed"] ?? 0}
+                    </TD>
+                  </TR>
                 ))}
               </tbody>
-            </table>
-          </div>
-        </div>
+            </Table>
+          </PanelBody>
+        </Panel>
       )}
 
-      {data.active_workers.length > 0 && (
-        <div>
-          <h2 className="text-lg font-semibold mb-3">Active Workers</h2>
-          <div className="flex flex-wrap gap-2">
+      <section>
+        <div className="flex items-baseline justify-between mb-3">
+          <span className="eyebrow">Active workers</span>
+          <span className="text-[11px] text-faint font-mono tabular">
+            {data.active_workers.length} ONLINE
+          </span>
+        </div>
+        {data.active_workers.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
             {data.active_workers.map((w) => (
-              <span
-                key={w}
-                className="px-3 py-1 rounded-full bg-success/10 text-success text-sm font-mono"
-              >
+              <Badge key={w} tone="live" dot live>
                 {w}
-              </span>
+              </Badge>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <Panel>
+            <PanelBody>
+              <div className="py-6 text-center text-muted text-[13px]">
+                No workers currently claimed tasks.
+              </div>
+            </PanelBody>
+          </Panel>
+        )}
+        {data.active_workers.length === 0 && handlers.length === 0 && (
+          <Table>
+            <tbody>
+              <Empty>No data yet.</Empty>
+            </tbody>
+          </Table>
+        )}
+      </section>
     </div>
   );
+}
+
+function subPct(n: number, total: number): string {
+  if (total === 0) return "—";
+  const pct = (n / total) * 100;
+  return `${pct.toFixed(pct < 10 ? 1 : 0)}% of total`;
 }

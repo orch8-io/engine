@@ -12,6 +12,11 @@ pub enum TriggerType {
     Webhook,
     Nats,
     FileWatch,
+    /// In-process event bus — fired by `POST /triggers/{slug}/fire` or
+    /// internally by workflows via the `emit_event` built-in handler.
+    /// Unlike webhooks, event triggers carry no HMAC validation — they're
+    /// intended for trusted server-to-server or in-cluster integration.
+    Event,
 }
 
 impl fmt::Display for TriggerType {
@@ -20,6 +25,7 @@ impl fmt::Display for TriggerType {
             Self::Webhook => f.write_str("webhook"),
             Self::Nats => f.write_str("nats"),
             Self::FileWatch => f.write_str("file_watch"),
+            Self::Event => f.write_str("event"),
         }
     }
 }
@@ -30,6 +36,7 @@ impl TriggerType {
             "webhook" => Some(Self::Webhook),
             "nats" => Some(Self::Nats),
             "file_watch" => Some(Self::FileWatch),
+            "event" => Some(Self::Event),
             _ => None,
         }
     }
@@ -77,6 +84,7 @@ mod tests {
         assert_eq!(TriggerType::Webhook.to_string(), "webhook");
         assert_eq!(TriggerType::Nats.to_string(), "nats");
         assert_eq!(TriggerType::FileWatch.to_string(), "file_watch");
+        assert_eq!(TriggerType::Event.to_string(), "event");
     }
 
     #[test]
@@ -94,6 +102,10 @@ mod tests {
         assert_eq!(
             TriggerType::from_str_loose("file_watch"),
             Some(TriggerType::FileWatch)
+        );
+        assert_eq!(
+            TriggerType::from_str_loose("event"),
+            Some(TriggerType::Event)
         );
         assert_eq!(TriggerType::from_str_loose("unknown"), None);
         assert_eq!(TriggerType::from_str_loose(""), None);

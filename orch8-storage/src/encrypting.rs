@@ -903,6 +903,47 @@ impl StorageBackend for EncryptingStorage {
         self.inner.delete_trigger(slug).await
     }
 
+    // === Credentials (pass-through) ===
+
+    async fn create_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError> {
+        self.inner.create_credential(credential).await
+    }
+
+    async fn get_credential(
+        &self,
+        id: &str,
+    ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
+        self.inner.get_credential(id).await
+    }
+
+    async fn list_credentials(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        self.inner.list_credentials(tenant_id).await
+    }
+
+    async fn update_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError> {
+        self.inner.update_credential(credential).await
+    }
+
+    async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.delete_credential(id).await
+    }
+
+    async fn list_credentials_due_for_refresh(
+        &self,
+        threshold: std::time::Duration,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        self.inner.list_credentials_due_for_refresh(threshold).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {

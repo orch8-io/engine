@@ -70,10 +70,15 @@ async fn sync_triggers(
 
     let mut active = active.write().await;
 
-    // Build set of slugs that should be active.
+    // Build set of slugs that should be active. `Webhook` and `Event` triggers
+    // are fired synchronously via HTTP routes, not by background listeners —
+    // exclude them here so we don't warn about "unsupported trigger type".
     let desired: HashMap<String, &TriggerDef> = triggers
         .iter()
-        .filter(|t| t.enabled && t.trigger_type != TriggerType::Webhook)
+        .filter(|t| {
+            t.enabled
+                && !matches!(t.trigger_type, TriggerType::Webhook | TriggerType::Event)
+        })
         .map(|t| (t.slug.clone(), t))
         .collect();
 

@@ -25,6 +25,7 @@
 mod audit;
 mod checkpoints;
 mod cluster;
+mod credentials;
 mod cron;
 mod execution_tree;
 mod externalized;
@@ -857,6 +858,47 @@ impl StorageBackend for SqliteStorage {
 
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         triggers::delete(self, slug).await
+    }
+
+    // === Credentials ===
+
+    async fn create_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError> {
+        credentials::create(self, credential).await
+    }
+
+    async fn get_credential(
+        &self,
+        id: &str,
+    ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
+        credentials::get(self, id).await
+    }
+
+    async fn list_credentials(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        credentials::list(self, tenant_id).await
+    }
+
+    async fn update_credential(
+        &self,
+        credential: &orch8_types::credential::CredentialDef,
+    ) -> Result<(), StorageError> {
+        credentials::update(self, credential).await
+    }
+
+    async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
+        credentials::delete(self, id).await
+    }
+
+    async fn list_credentials_due_for_refresh(
+        &self,
+        threshold: std::time::Duration,
+    ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
+        credentials::list_due_for_refresh(self, threshold).await
     }
 
     // === Health ===

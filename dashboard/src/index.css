@@ -1,42 +1,161 @@
 @import "tailwindcss";
 
+/*
+ * orch8 console — Signal on Graphite
+ * Swiss rationalism + Braun (Rams) functional honesty + Tufte data-ink ratio.
+ * Every token is intentional. No gradients. No shadows. No ornament.
+ */
+
 :root {
-  --background: #0a0a0f;
-  --foreground: #e4e4e7;
-  --primary: #6366f1;
-  --primary-foreground: #ffffff;
-  --secondary: #1e1b4b;
-  --muted: #71717a;
-  --accent: #818cf8;
-  --border: #27272a;
-  --card: #111118;
-  --card-border: #27272a;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --danger: #ef4444;
+  /* canvas & surfaces */
+  --bg: #0b0d10;
+  --surface: #12151a;
+  --raised: #181c22;
+  --sunken: #090a0d;
+
+  /* structural lines */
+  --hairline: #262b33;
+  --hairline-strong: #363c47;
+
+  /* text */
+  --fg: #edeff2;
+  --fg-dim: #b7bcc5;
+  --muted: #8b919c;
+  --faint: #5b626c;
+
+  /* operator signals */
+  --signal: #4ecde3;
+  --signal-weak: #4ecde31a;
+  --live: #6ae3c7;
+  --hold: #f5b544;
+  --ok: #7ed49b;
+  --warn: #ef6a6a;
+  --dim: #8b919c;
+
+  /* legacy aliases — keep every Tailwind class in the tree valid */
+  --background: var(--bg);
+  --foreground: var(--fg);
+  --primary: var(--signal);
+  --primary-foreground: #06121a;
+  --secondary: var(--raised);
+  --accent: var(--signal);
+  --border: var(--hairline);
+  --card: var(--surface);
+  --card-border: var(--hairline);
+  --success: var(--ok);
+  --warning: var(--hold);
+  --danger: var(--warn);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-sunken: var(--sunken);
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+  --color-fg: var(--fg);
+  --color-fg-dim: var(--fg-dim);
   --color-muted: var(--muted);
-  --color-accent: var(--accent);
-  --color-border: var(--border);
-  --color-card: var(--card);
-  --color-card-border: var(--card-border);
-  --color-success: var(--success);
-  --color-warning: var(--warning);
-  --color-danger: var(--danger);
+  --color-faint: var(--faint);
+  --color-signal: var(--signal);
+  --color-live: var(--live);
+  --color-hold: var(--hold);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-dim: var(--dim);
+
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-primary: var(--signal);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--raised);
+  --color-accent: var(--signal);
+  --color-border: var(--hairline);
+  --color-card: var(--surface);
+  --color-card-border: var(--hairline);
+  --color-success: var(--ok);
+  --color-warning: var(--hold);
+  --color-danger: var(--warn);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 @layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
   html, body {
-    background: var(--background);
-    color: var(--foreground);
-    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
     margin: 0;
   }
+
+  body { min-height: 100vh; }
+
+  /* Every number in a data table aligns at the decimal. */
+  td, th, .font-mono, .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  input, select, textarea, button {
+    font-family: inherit;
+  }
+
+  :where(button, a, input, select, textarea):focus-visible {
+    outline: 1px solid var(--signal);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+    border-radius: 6px;
+    border: 2px solid var(--bg);
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--hairline-strong); }
+
+  ::selection {
+    background: var(--signal-weak);
+    color: var(--fg);
+  }
 }
+
+@layer components {
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .display-num {
+    font-family: var(--font-sans);
+    font-size: 2.5rem;
+    line-height: 1;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.pulse-live { animation: pulse-live 1.8s ease-in-out infinite; }
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: none; }
+}
+.fade-in { animation: fade-in 160ms ease-out; }

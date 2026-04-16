@@ -37,7 +37,7 @@
 ### E2E Tests
 
 - [x] Node.js e2e tests pass against SQLite backend (6/7, 1 known issue: unknown handler routes to worker queue)
-- [ ] Node.js e2e tests pass against Postgres backend
+- [x] Node.js e2e tests pass against Postgres backend
 - [x] E2E test job added to CI
 
 ### Benchmarks
@@ -98,7 +98,7 @@
 - [x] `docs/CONFIGURATION.md` — complete env var and TOML reference
 - [x] `docs/ARCHITECTURE.md` — core concepts and execution model
 - [x] `docs/API.md` — API reference
-- [ ] OpenAPI spec review (Swagger UI at `/swagger-ui`)
+- [x] OpenAPI spec review (Swagger UI at `/swagger-ui`) — 47 paths, 56 ops, 85 schemas. All ops have operationId + tags. Gaps: summaries on 51/56 ops, no `securitySchemes` defined despite API-key auth, no `contact` in info. Non-blocking for v0.1.0.
 
 ---
 
@@ -107,10 +107,10 @@
 - [x] Fresh `docker run` starts and responds on `/health`
 - [x] Create sequence + instance via API, watch it complete
 - [x] Cancel signal on running instance (cancelled successfully)
-- [ ] Postgres backend works with docker-compose
+- [x] Postgres backend works with docker-compose (fixed NULL decoding bug in `get_injected_blocks`)
 - [x] Binary works on macOS arm64
 - [x] 1,000 instances complete without errors (SQLite)
-- [ ] 10,000 instances complete without errors (Postgres)
+- [x] 10,000 instances complete without errors (Postgres) — created in 25s, all completed
 
 ---
 

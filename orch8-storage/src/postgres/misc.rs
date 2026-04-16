@@ -160,12 +160,14 @@ pub(super) async fn get_injected_blocks(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Option<serde_json::Value>, StorageError> {
-    let row: Option<(serde_json::Value,)> =
+    let row: Option<(Option<serde_json::Value>,)> =
         sqlx::query_as("SELECT metadata->'_injected_blocks' FROM task_instances WHERE id = $1")
             .bind(instance_id.0)
             .fetch_optional(&store.pool)
             .await?;
-    Ok(row.and_then(|(v,)| if v.is_null() { None } else { Some(v) }))
+    Ok(row
+        .and_then(|(v,)| v)
+        .and_then(|v| if v.is_null() { None } else { Some(v) }))
 }
 
 // === Health ===

@@ -157,6 +157,11 @@ use utoipa::OpenApi;
         crate::pools::CreatePoolRequest,
         crate::pools::AddResourceRequest,
         crate::pools::UpdateResourceRequest,
+        // Credentials
+        orch8_types::credential::CredentialDef,
+        orch8_types::credential::CredentialKind,
+        crate::credentials::CreateCredentialRequest,
+        crate::credentials::UpdateCredentialRequest,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -168,6 +173,8 @@ use utoipa::OpenApi;
         (name = "circuit_breakers", description = "Circuit breaker inspection and reset"),
         (name = "pools", description = "Resource pool management"),
         (name = "cluster", description = "Multi-node cluster management"),
+        (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),
+        (name = "webhooks", description = "Public, unauthenticated webhook ingestion (HMAC-protected via trigger secret)"),
     )
 )]
 pub struct ApiDoc;

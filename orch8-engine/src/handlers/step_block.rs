@@ -44,6 +44,26 @@ pub async fn execute_step_node(
     node: &ExecutionNode,
     step_def: &StepDef,
 ) -> Result<bool, EngineError> {
+    // Resolve `credentials://` references in step params before handing off to
+    // any handler. Resolving once up front means every dispatch target (AP,
+    // gRPC, WASM, in-process) sees the same expanded params without having to
+    // know about the credential registry. Missing/disabled/cross-tenant refs
+    // surface as StepError::Permanent which fails the node immediately.
+    let mut resolved_params = step_def.params.clone();
+    if let Err(step_err) =
+        crate::credentials::resolve_in_value(storage, &instance.tenant_id.0, &mut resolved_params)
+            .await
+    {
+        tracing::warn!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            error = ?step_err,
+            "failed to resolve credentials for step"
+        );
+        evaluator::fail_node(storage, node.id).await?;
+        return Ok(false);
+    }
+
     // If the handler is an ActivePieces sidecar call, dispatch via HTTP to the
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
     // env-configured sidecar, and piece/action names live in the handler string.
@@ -52,7 +72,7 @@ pub async fn execute_step_node(
         let ctx = super::StepContext {
             instance_id: instance.id,
             block_id: step_def.id.clone(),
-            params: step_def.params.clone(),
+            params: resolved_params.clone(),
             context: instance.context.clone(),
             attempt: 0,
         };
@@ -67,7 +87,7 @@ pub async fn execute_step_node(
         let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc)
             .await
             .unwrap_or_else(|| step_def.handler.clone());
-        let mut params = step_def.params.clone();
+        let mut params = resolved_params.clone();
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
         let ctx = super::StepContext {
             instance_id: instance.id,
@@ -91,7 +111,7 @@ pub async fn execute_step_node(
             let ctx = super::StepContext {
                 instance_id: instance.id,
                 block_id: step_def.id.clone(),
-                params: step_def.params.clone(),
+                params: resolved_params.clone(),
                 context: instance.context.clone(),
                 attempt: 0,
             };
@@ -111,7 +131,7 @@ pub async fn execute_step_node(
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
-        params: step_def.params.clone(),
+        params: resolved_params,
         context: instance.context.clone(),
         attempt: 0,
         timeout: step_def.timeout,

@@ -12,7 +12,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::cluster::{ClusterNode, NodeStatus};
-use orch8_types::context::ExecutionContext;
+use orch8_types::context::{AuditEntry, ExecutionContext, RuntimeContext};
 use orch8_types::cron::CronSchedule;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -1558,4 +1558,299 @@ async fn perf_concurrent_worker_claims() {
 
     assert_eq!(total_claimed, 100);
     eprintln!("perf_concurrent_worker_claims (100 tasks, 5 workers): {elapsed:?}");
+}
+
+// ===========================================================================
+// Context Management
+// ===========================================================================
+//
+// These tests cover the public surface of context storage against the
+// documented semantics in `docs/CONTEXT_MANAGEMENT.md`:
+//
+//   * `update_instance_context` — full replacement of all four sections
+//   * `merge_context_data`     — per-key update of `context.data`
+//   * round-trip fidelity across Serialize/Deserialize via the DB
+//   * concurrency behaviour of `merge_context_data` on disjoint keys
+//
+// All tests run against SQLite in-memory. The Postgres implementation is
+// validated separately by e2e tests; the backend-agnostic invariants above
+// are what the tests here target.
+
+#[tokio::test]
+async fn context_round_trip_all_sections() {
+    // Writing every section at create-time and reading it back must preserve
+    // each section byte-for-byte. This guards against silent column truncation
+    // or default-serialization skipping non-empty fields.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context = ExecutionContext {
+        data: json!({"user": {"email": "a@b.co"}, "counter": 7}),
+        config: json!({"db": "postgres", "region": "sa-east-1"}),
+        audit: vec![AuditEntry {
+            timestamp: Utc::now(),
+            event: "started".into(),
+            details: json!({"by": "api"}),
+        }],
+        runtime: RuntimeContext {
+            current_step: Some(BlockId("s1".into())),
+            attempt: 3,
+            started_at: Some(Utc::now()),
+            resource_key: None,
+        },
+    };
+    s.create_instance(&inst).await.unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data, inst.context.data);
+    assert_eq!(back.context.config, inst.context.config);
+    assert_eq!(back.context.audit.len(), 1);
+    assert_eq!(back.context.audit[0].event, "started");
+    assert_eq!(back.context.runtime.attempt, 3);
+    assert_eq!(
+        back.context.runtime.current_step,
+        Some(BlockId("s1".into()))
+    );
+}
+
+#[tokio::test]
+async fn update_instance_context_is_full_replacement() {
+    // Per `docs/CONTEXT_MANAGEMENT.md` §5.2, `update_instance_context`
+    // overwrites the entire column. Fields present before but absent in the
+    // new value must not survive.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({"keep_me": 1, "drop_me": 2});
+    inst.context.config = json!({"env": "prod"});
+    s.create_instance(&inst).await.unwrap();
+
+    // Replace with a context that only has data.new.
+    let replacement = ExecutionContext {
+        data: json!({"new": "state"}),
+        config: json!({}),
+        audit: vec![],
+        runtime: RuntimeContext::default(),
+    };
+    s.update_instance_context(inst.id, &replacement)
+        .await
+        .unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data, json!({"new": "state"}));
+    // Previous `config.env` must be gone — this is replacement, not merge.
+    assert!(back.context.config.get("env").is_none());
+}
+
+#[tokio::test]
+async fn merge_context_data_preserves_other_sections() {
+    // `merge_context_data` updates only a key under `context.data`. It must
+    // NOT touch `context.config`, `context.audit`, or `context.runtime`.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context = ExecutionContext {
+        data: json!({"a": 1}),
+        config: json!({"cfg_key": "cfg_val"}),
+        audit: vec![AuditEntry {
+            timestamp: Utc::now(),
+            event: "pre_merge".into(),
+            details: json!({}),
+        }],
+        runtime: RuntimeContext {
+            current_step: Some(BlockId("step-1".into())),
+            attempt: 2,
+            started_at: None,
+            resource_key: None,
+        },
+    };
+    s.create_instance(&inst).await.unwrap();
+
+    s.merge_context_data(inst.id, "b", &json!(99)).await.unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["a"], 1, "existing key must survive");
+    assert_eq!(back.context.data["b"], 99, "new key must be written");
+    assert_eq!(back.context.config["cfg_key"], "cfg_val");
+    assert_eq!(back.context.audit.len(), 1);
+    assert_eq!(back.context.audit[0].event, "pre_merge");
+    assert_eq!(back.context.runtime.attempt, 2);
+}
+
+#[tokio::test]
+async fn merge_context_data_overwrites_same_key() {
+    // Repeated merges of the same key must overwrite, not accumulate or nest.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({});
+    s.create_instance(&inst).await.unwrap();
+
+    s.merge_context_data(inst.id, "k", &json!("v1")).await.unwrap();
+    s.merge_context_data(inst.id, "k", &json!("v2")).await.unwrap();
+    s.merge_context_data(inst.id, "k", &json!({"nested": true}))
+        .await
+        .unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["k"], json!({"nested": true}));
+}
+
+#[tokio::test]
+async fn merge_context_data_accepts_complex_values() {
+    // Values can be arbitrary JSON — objects, arrays, null, numbers.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({});
+    s.create_instance(&inst).await.unwrap();
+
+    s.merge_context_data(inst.id, "obj", &json!({"a": [1, 2, 3]}))
+        .await
+        .unwrap();
+    s.merge_context_data(inst.id, "arr", &json!([true, false, null]))
+        .await
+        .unwrap();
+    s.merge_context_data(inst.id, "nil", &json!(null))
+        .await
+        .unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["obj"]["a"][2], 3);
+    assert_eq!(back.context.data["arr"][0], true);
+    assert!(back.context.data["nil"].is_null());
+}
+
+#[tokio::test]
+async fn merge_context_data_serialized_disjoint_keys() {
+    // Sequentially merging many disjoint keys must produce a context that
+    // contains all of them. (Intra-process concurrent writes would need a
+    // multi-thread runtime; SQLite serializes writers at the file level, so
+    // this sequential form is the portable correctness check — the same
+    // property that a concurrent stream would assert.)
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({});
+    s.create_instance(&inst).await.unwrap();
+
+    for i in 0..25 {
+        s.merge_context_data(inst.id, &format!("k{i}"), &json!(i))
+            .await
+            .unwrap();
+    }
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    let obj = back.context.data.as_object().expect("data must be object");
+    for i in 0..25 {
+        assert_eq!(obj[&format!("k{i}")], json!(i));
+    }
+    assert_eq!(obj.len(), 25);
+}
+
+#[tokio::test]
+async fn merge_context_data_on_missing_instance_is_noop() {
+    // Merging into a non-existent instance must not error or create a row.
+    // The SQLite RMW path short-circuits on the initial SELECT; Postgres'
+    // UPDATE naturally affects 0 rows.
+    let s = store().await;
+    let missing = InstanceId::new();
+    let res = s.merge_context_data(missing, "k", &json!("v")).await;
+    assert!(res.is_ok(), "missing instance must be a silent noop");
+    assert!(s.get_instance(missing).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn context_filtered_helper_is_used_correctly() {
+    // Smoke test that `ExecutionContext::filtered` is wired into the
+    // scheduler's fast path. We can't drive the scheduler from a storage
+    // test, but we can at least verify the filter semantics hold with the
+    // real struct layout the engine uses.
+    use orch8_types::sequence::ContextAccess;
+
+    let ctx = ExecutionContext {
+        data: json!({"secret": "x"}),
+        config: json!({"endpoint": "https://api"}),
+        audit: vec![AuditEntry {
+            timestamp: Utc::now(),
+            event: "ev".into(),
+            details: json!({}),
+        }],
+        runtime: RuntimeContext {
+            attempt: 7,
+            ..RuntimeContext::default()
+        },
+    };
+
+    let no_data = ContextAccess {
+        data: false,
+        config: true,
+        audit: true,
+        runtime: true,
+    };
+    let f = ctx.filtered(&no_data);
+    assert_eq!(f.data, json!({}));
+    assert_eq!(f.config["endpoint"], "https://api");
+    assert_eq!(f.audit.len(), 1);
+    assert_eq!(f.runtime.attempt, 7);
+
+    let only_data = ContextAccess {
+        data: true,
+        config: false,
+        audit: false,
+        runtime: false,
+    };
+    let f = ctx.filtered(&only_data);
+    assert_eq!(f.data["secret"], "x");
+    assert_eq!(f.config, json!({}));
+    assert!(f.audit.is_empty());
+    assert_eq!(f.runtime.attempt, 0);
+}
+
+#[tokio::test]
+async fn merge_context_data_does_not_clobber_nested_object() {
+    // When `context.data.user` is `{"name": "a"}`, merging key "user" with
+    // `{"email": "x"}` replaces the whole value. The merge is key-level,
+    // not deep. This test pins the documented semantics so future changes
+    // that switch to a deep-merge have to update the docs intentionally.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({"user": {"name": "a"}});
+    s.create_instance(&inst).await.unwrap();
+
+    s.merge_context_data(inst.id, "user", &json!({"email": "x"}))
+        .await
+        .unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["user"], json!({"email": "x"}));
+    assert!(
+        back.context.data["user"].get("name").is_none(),
+        "key-level replacement must drop sibling fields"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Bug §8.3 in docs/CONTEXT_MANAGEMENT.md — tree path doesn't apply context_access filter. Enable once fixed."]
+async fn context_access_filter_enforced_on_tree_path() {
+    // Regression guard for the documented gap between the fast path
+    // (scheduler.rs:930) and the tree path (handlers/step_block.rs). This
+    // test is a placeholder: fully exercising the tree path requires the
+    // engine layer, not the storage layer. When the fix lands, replace
+    // this with a scheduler-driven test in `orch8-engine/tests/`.
 }

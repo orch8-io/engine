@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod circuit_breakers;
 pub mod cluster;
+pub mod credentials;
 pub mod cron;
 pub mod error;
 pub mod health;
@@ -14,6 +15,7 @@ pub mod sequences;
 pub mod sessions;
 pub mod streaming;
 pub mod triggers;
+pub mod webhooks;
 pub mod workers;
 
 use std::sync::Arc;
@@ -44,5 +46,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(cluster::routes())
         .merge(triggers::routes())
         .merge(plugins::routes())
+        .merge(credentials::routes())
         .with_state(state)
 }

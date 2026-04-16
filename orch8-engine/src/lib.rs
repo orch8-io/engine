@@ -1,4 +1,5 @@
 pub mod circuit_breaker;
+pub mod credentials;
 pub mod cron;
 pub mod error;
 pub mod evaluator;
@@ -198,6 +199,23 @@ impl Engine {
             )
             .await;
             tracing::info!("trigger processor loop exited");
+        });
+
+        Self::spawn_credentials_refresh(Arc::clone(&self.storage), self.cancel.clone());
+    }
+
+    /// Spawn the `OAuth2` credential refresh loop.
+    /// Polls every 60s and refreshes tokens expiring within the next 5 minutes.
+    fn spawn_credentials_refresh(storage: Arc<dyn StorageBackend>, cancel: CancellationToken) {
+        tokio::spawn(async move {
+            credentials::run_refresh_loop(
+                storage,
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(300),
+                cancel,
+            )
+            .await;
+            tracing::info!("credentials refresh loop exited");
         });
     }
 

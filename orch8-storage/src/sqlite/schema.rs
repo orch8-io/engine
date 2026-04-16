@@ -217,6 +217,23 @@ CREATE TABLE IF NOT EXISTS triggers (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'api_key',
+    value TEXT NOT NULL,
+    expires_at TEXT,
+    refresh_url TEXT,
+    refresh_token TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_credentials_expires ON credentials(expires_at);
+
 CREATE INDEX IF NOT EXISTS idx_task_instances_state_fire ON task_instances(state, next_fire_at);
 CREATE INDEX IF NOT EXISTS idx_task_instances_tenant_idemp ON task_instances(tenant_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_task_instances_concurrency ON task_instances(concurrency_key, state);
