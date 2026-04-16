@@ -25,10 +25,8 @@
 ### 4. ~~Zero Engine Unit Tests~~ PARTIALLY FIXED
 - **Fixed:** Added unit tests for webhooks (backoff, event serialization, emit skip) and scheduler (prefetch map, drain). Added 47 unit tests across `orch8-types` (trigger, context, sequence, execution, lib serde helpers) and `orch8-engine` (gRPC plugin, WASM plugin edge cases). Core scheduling loop, step execution, crash recovery remain untested at the Rust level.
 
-### 5. No Dockerfile
-- No Dockerfile exists anywhere. Only `docker-compose.yml` for Postgres dev container.
-- **Impact:** Cannot distribute the engine as a container. Blocks adoption.
-- **Fix:** Multi-stage Dockerfile (builder + distroless/alpine runtime). Target < 30MB.
+### 5. ~~No Dockerfile~~ FIXED
+- **Fixed:** Multi-stage Dockerfile (rust:1.83-bookworm builder + debian:bookworm-slim runtime). Builds `orch8-server` and `orch8` CLI. SQLite defaults, HEALTHCHECK via CLI, exposes 8080/50051.
 
 ### 6. ~~No Tenant Isolation Middleware~~ FIXED
 - **Fixed:** Added `TenantContext` extraction from `X-Tenant-Id` header. Tenant middleware enforces header when `require_tenant_header=true`. Instance handlers reject cross-tenant reads/writes with 403/404.
@@ -39,10 +37,8 @@
 ### 8. ~~SLA Deadlines Skip Fast Path~~ FIXED
 - **Fixed:** Fast path in scheduler now calls `check_sla_deadlines` for step-only sequences.
 
-### 9. E2E Tests Not in CI
-- 46 Node.js e2e tests exist in `tests/e2e/` but `.github/workflows/ci.yml` does not run them.
-- Benchmarks also not in CI.
-- **Impact:** Regressions can merge to main undetected.
+### 9. ~~E2E Tests Not in CI~~ FIXED
+- **Fixed:** Added `e2e` job to CI workflow. Spins up Postgres service, builds server, runs all `tests/e2e/*.test.js` with Node.js 22. Benchmarks still not in CI.
 
 ### 10. ~~SQLite `claim_due` Ignores `max_per_tenant`~~ FIXED
 - **Fixed:** SQLite `claim_due` now enforces `max_per_tenant` with per-tenant counting logic matching Postgres behavior.
@@ -87,6 +83,8 @@ These features are NOT listed in any stage but should be:
 - ~~Python SDK~~ DONE (async httpx + pydantic, 7 tests)
 - ~~Go SDK~~ DONE (net/http, zero deps, 5 tests)
 - ~~Helm chart~~ DONE (standard Helm 3)
-- E2E test CI integration
-- Binary distribution (curl install script)
-- `orch8 init` scaffolding command
+- ~~E2E test CI integration~~ DONE (e2e job in CI workflow)
+- ~~Binary distribution~~ DONE (release workflow builds 4 targets, uploads to GitHub Releases)
+- ~~`orch8 init` scaffolding command~~ DONE (generates orch8.toml, sequence.json, docker-compose.yml)
+- ~~Dockerfile~~ DONE (multi-stage build, HEALTHCHECK, SQLite defaults)
+- ~~SDK CI/publish workflows~~ DONE (npm, PyPI, Go module tag)

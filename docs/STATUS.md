@@ -4,7 +4,7 @@
 
 ## Summary
 
-Stages 0 through 4 are **complete**. Stage 5 is ~90% done (CLI, versioning, debug, audit, checkpoints, SQLite, externalization, Helm chart, Python SDK all shipped — Docker image, binary distribution remain). Stage 6 is ~85% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers, encryption at rest, tenant isolation, API rate limiting, cancellation scopes, NATS/file-watch triggers, Node.js SDK, Go SDK all shipped — full dashboard, visual builder remain).
+Stages 0 through 4 are **complete**. Stage 5 is **complete** (CLI, versioning, debug, audit, checkpoints, SQLite, externalization, Helm chart, Python SDK, Docker image, binary distribution, `orch8 init`, CI/CD all shipped). Stage 6 is ~85% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers, encryption at rest, tenant isolation, API rate limiting, cancellation scopes, NATS/file-watch triggers, Node.js SDK, Go SDK all shipped — full dashboard, visual builder remain).
 
 **Codebase**: ~7,500 lines of Rust across 5 crates, ~1,000 lines of JS E2E tests, 20 SQL migrations. 3 SDKs (Node.js, Python, Go), Helm chart.
 
@@ -69,7 +69,7 @@ Stages 0 through 4 are **complete**. Stage 5 is ~90% done (CLI, versioning, debu
 - Embedded test mode (SQLite in-memory)
 - Grafana dashboard template (`docs/grafana-dashboard.json`)
 
-### Stage 5 — Partial
+### Stage 5 — Complete
 - SQLite backend (file-backed with WAL, same trait implementation)
 - CLI tool (clap) — instances, sequences, signals, cron, checkpoints
 - Audit log (append-only, migration 016, queryable by instance/tenant)
@@ -79,6 +79,11 @@ Stages 0 through 4 are **complete**. Stage 5 is ~90% done (CLI, versioning, debu
 - Checkpointing (save/list/get-latest/prune API)
 - Helm chart ([orch8-io/helm-charts](https://github.com/orch8-io/helm-charts) — deployment, service, configmap, secret, ingress, serviceaccount)
 - Python SDK ([orch8-io/sdk-python](https://github.com/orch8-io/sdk-python) — async httpx + pydantic, 18 typed models, polling worker, 7 tests)
+- Dockerfile (multi-stage build, debian:bookworm-slim runtime, HEALTHCHECK, SQLite defaults)
+- Release workflow (4-target binary builds, Docker to ghcr.io, GitHub Releases with checksums)
+- `orch8 init` scaffolding (orch8.toml, sequence.json, docker-compose.yml)
+- CI: e2e test job, check + clippy + fmt, unit tests with Postgres
+- SDK CI/publish: npm (@orch8/sdk), PyPI (orch8-sdk), Go module (v0.1.0 tagged)
 
 ### Stage 6 — Partial
 - Multi-node clustering (SKIP LOCKED, DB-based node registration, heartbeat)
