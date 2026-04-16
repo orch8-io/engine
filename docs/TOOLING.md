@@ -36,10 +36,17 @@
 
 ---
 
-## Helm Chart
+## Helm Chart — DONE
 
-- Kubernetes deployment with Postgres dependency
-- Configurable resources
+Repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts) — standard Helm 3 chart:
+- Deployment with health probes (liveness + readiness)
+- Service (http 8080 + grpc 50051)
+- ConfigMap for non-secret env vars
+- Secret for `DATABASE_URL` and `ORCH8_ENCRYPTION_KEY`
+- Optional ingress with TLS
+- Optional serviceaccount with annotations
+- Autoscaling support (HPA)
+- Configurable resource limits
 
 ---
 
@@ -52,21 +59,26 @@
 
 ---
 
-## Client SDKs
+## Client SDKs — DONE
 
-### Node.js SDK (expand existing worker-sdk-node)
-- Sequence CRUD
-- Instance lifecycle (create, query, signal, cancel)
-- Worker task management (existing: poll, claim, heartbeat, complete/fail)
-- TypeScript types auto-generated from OpenAPI spec
-- Published to npm
+### Node.js SDK — [orch8-io/sdk-node](https://github.com/orch8-io/sdk-node)
+- Full `Orch8Client` class with typed methods for all 45+ API endpoints
+- 16 TypeScript interfaces matching Rust source types (`SequenceDefinition`, `TaskInstance`, `FireTriggerResponse`, `BulkResponse`, etc.)
+- `Orch8Worker` polling worker (per-handler polling, heartbeats, timeout support, concurrency semaphore)
+- `Orch8Error` class with `status`, `body`, `path`
+- 12 unit tests (vitest)
+- TODO: publish to npm
 
-### Python SDK
-- Same API surface as Node.js SDK
-- Async support (asyncio)
-- Published to PyPI
+### Python SDK — [orch8-io/sdk-python](https://github.com/orch8-io/sdk-python)
+- Async `Orch8Client` with httpx (context manager pattern)
+- 18 Pydantic models matching Rust types
+- `Orch8Worker` async polling worker (per-handler parallel polling, per-task heartbeats, semaphore concurrency)
+- 7 tests (pytest + respx)
+- TODO: publish to PyPI
 
-### Go SDK
-- Idiomatic Go client
-- Context support
-- gRPC + REST dual interface
+### Go SDK — [orch8-io/sdk-go](https://github.com/orch8-io/sdk-go)
+- Zero external dependencies (`net/http`, `encoding/json`)
+- `context.Context` on all methods, idiomatic nil-on-error returns
+- `Worker` with goroutine-based polling, channel semaphore, inflight tracking, heartbeats, logging
+- 5 tests (`httptest`)
+- TODO: publish module

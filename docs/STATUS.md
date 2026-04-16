@@ -4,9 +4,9 @@
 
 ## Summary
 
-Stages 0 through 4 are **complete**. Stage 5 is ~75% done (CLI, versioning, debug, audit, checkpoints, SQLite, externalization all shipped — Docker, Helm, Python SDK, landing pages remain). Stage 6 is ~75% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers, encryption at rest, tenant isolation, API rate limiting, cancellation scopes, NATS/file-watch triggers all shipped — Go SDK, full dashboard, visual builder remain).
+Stages 0 through 4 are **complete**. Stage 5 is ~90% done (CLI, versioning, debug, audit, checkpoints, SQLite, externalization, Helm chart, Python SDK all shipped — Docker image, binary distribution remain). Stage 6 is ~85% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers, encryption at rest, tenant isolation, API rate limiting, cancellation scopes, NATS/file-watch triggers, Node.js SDK, Go SDK all shipped — full dashboard, visual builder remain).
 
-**Codebase**: ~7,500 lines of Rust across 5 crates, ~1,000 lines of JS E2E tests, 20 SQL migrations.
+**Codebase**: ~7,500 lines of Rust across 5 crates, ~1,000 lines of JS E2E tests, 20 SQL migrations. 3 SDKs (Node.js, Python, Go), Helm chart.
 
 ---
 
@@ -77,6 +77,8 @@ Stages 0 through 4 are **complete**. Stage 5 is ~75% done (CLI, versioning, debu
 - Debug mode (breakpoints via metadata, step-through via signals)
 - Output externalization (configurable threshold, reference markers)
 - Checkpointing (save/list/get-latest/prune API)
+- Helm chart ([orch8-io/helm-charts](https://github.com/orch8-io/helm-charts) — deployment, service, configmap, secret, ingress, serviceaccount)
+- Python SDK ([orch8-io/sdk-python](https://github.com/orch8-io/sdk-python) — async httpx + pydantic, 18 typed models, polling worker, 7 tests)
 
 ### Stage 6 — Partial
 - Multi-node clustering (SKIP LOCKED, DB-based node registration, heartbeat)
@@ -99,6 +101,9 @@ Stages 0 through 4 are **complete**. Stage 5 is ~75% done (CLI, versioning, debu
 - Encryption at rest (`EncryptingStorage` decorator, AES-256-GCM, config + env var wiring)
 - Worker dashboard (Vite + React SPA, overview + task inspector)
 - Optional API key auth middleware
+- Node.js SDK ([orch8-io/sdk-node](https://github.com/orch8-io/sdk-node) — full management client, 16 typed interfaces, polling worker, 12 tests)
+- Go SDK ([orch8-io/sdk-go](https://github.com/orch8-io/sdk-go) — net/http, zero external deps, context on all methods, polling worker, 5 tests)
+- Rust unit tests — 47 tests across `orch8-types` (trigger, context, sequence, execution, serde) and `orch8-engine` (gRPC/WASM handler edge cases)
 
 ---
 

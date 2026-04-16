@@ -15,7 +15,12 @@
 - **SLA deadline fast-path** — step-only sequences now check deadlines
 - **SQLite `claim_due`** — now enforces `max_per_tenant`
 - **Cancellation scopes** — `CancellationScope` block type for subtree-level non-cancellability
-- **Engine unit tests** — webhooks (backoff, serialization) + scheduler (prefetch, drain)
+- **Engine unit tests** — webhooks (backoff, serialization) + scheduler (prefetch, drain) + 47 new tests across orch8-types and orch8-engine
+- **Node.js SDK** — [orch8-io/sdk-node](https://github.com/orch8-io/sdk-node) full management client with typed interfaces, polling worker, 12 tests
+- **Python SDK** — [orch8-io/sdk-python](https://github.com/orch8-io/sdk-python) async httpx + pydantic, 18 models, parallel-polling worker, 7 tests
+- **Go SDK** — [orch8-io/sdk-go](https://github.com/orch8-io/sdk-go) zero deps, idiomatic nil-on-error, polling worker with heartbeats, 5 tests
+- **SDK type audit** — all 3 SDKs verified against Rust source types (18 field-name/default/shape fixes)
+- **Helm chart** — [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts) standard Helm 3 (deployment, service, configmap, secret, ingress, serviceaccount)
 - **Agent-optimized handlers** — `llm_call` (9+ providers), `tool_call`, `human_review`
 - **Agent pattern templates** — ReAct loop, tool-calling pipeline, multi-agent delegation, guardrail validation
 - **SSE streaming** — `GET /instances/{id}/stream` for real-time block output

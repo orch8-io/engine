@@ -55,7 +55,7 @@
 - **Fixed:** Added `CancellationScope` block type (`CancellationScopeDef` struct, `BlockDefinition::CancellationScope` variant, `BlockType::CancellationScope`). Sequential child execution handler. `cancel_scoped()` now walks ancestry to detect nodes inside a scope and treats them as non-cancellable.
 
 ### 12. ~~Node.js SDK — Worker Only~~ FIXED
-- **Fixed:** Created `sdk-node/` — full management SDK (`Orch8Client`) with typed methods for all API resources (sequences, instances, cron, triggers, plugins, sessions, workers, cluster, circuit breakers). Includes `Orch8Worker` (polling worker with per-handler heartbeats, timeout support, timer-leak-free). 16 typed response interfaces (`FireTriggerResponse`, `BulkResponse`, `BatchCreateResponse`, `HealthResponse`, etc.). 12 unit tests with vitest.
+- **Fixed:** Created [orch8-io/sdk-node](https://github.com/orch8-io/sdk-node) — full management SDK (`Orch8Client`) with typed methods for all API resources (sequences, instances, cron, triggers, plugins, sessions, workers, cluster, circuit breakers). Includes `Orch8Worker` (polling worker with per-handler heartbeats, timeout support, timer-leak-free). 16 typed response interfaces (`FireTriggerResponse`, `BulkResponse`, `BatchCreateResponse`, `HealthResponse`, etc.). 12 unit tests with vitest.
 
 ### 13. Dashboard — No Auth
 - `dashboard/` is a minimal React SPA (Vite + TypeScript).
@@ -63,10 +63,10 @@
 - No tests.
 
 ### 14. ~~No Python or Go SDKs~~ FIXED
-- **Fixed:** Created `sdk-python/` (async httpx + pydantic, 18 typed models, polling worker with per-handler parallel polling and per-task heartbeats, 7 tests) and `sdk-go/` (net/http, zero external deps, idiomatic nil-on-error returns, polling worker with inflight tracking + heartbeats + logging, 5 tests). Both cover the full API surface. All SDK types verified against Rust source types (field names, defaults, response shapes).
+- **Fixed:** Created [orch8-io/sdk-python](https://github.com/orch8-io/sdk-python) (async httpx + pydantic, 18 typed models, polling worker with per-handler parallel polling and per-task heartbeats, 7 tests) and [orch8-io/sdk-go](https://github.com/orch8-io/sdk-go) (net/http, zero external deps, idiomatic nil-on-error returns, polling worker with inflight tracking + heartbeats + logging, 5 tests). Both cover the full API surface. All SDK types verified against Rust source types (field names, defaults, response shapes).
 
 ### 15. ~~No Helm Chart~~ FIXED
-- **Fixed:** Created `helm/orch8/` — standard Helm 3 chart with deployment, service, configmap, secret, ingress (optional), serviceaccount. Configurable Postgres, env vars, autoscaling, resource limits.
+- **Fixed:** Created [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts) — standard Helm 3 chart with deployment, service, configmap, secret, ingress (optional), serviceaccount. Configurable Postgres, env vars, autoscaling, resource limits.
 
 ### 16. ~~No Landing Pages~~ FIXED
 - **Fixed:** Exists under `/web`.
