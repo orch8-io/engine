@@ -21,6 +21,16 @@ metrics.workspace = true
 cron.workspace = true
 moka.workspace = true
 reqwest.workspace = true
+tokio-stream.workspace = true
+async-nats = { workspace = true, optional = true }
+notify = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
+
+[features]
+default = ["nats", "file-watch", "wasm"]
+nats = ["dep:async-nats"]
+file-watch = ["dep:notify"]
+wasm = ["dep:wasmtime"]
 
 [dev-dependencies]
 tokio = { workspace = true }

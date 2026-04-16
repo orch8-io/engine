@@ -162,10 +162,18 @@ async fn cancel_scoped(
     instance_id: InstanceId,
     sequence_def: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
+    use orch8_types::execution::BlockType;
     use orch8_types::sequence::BlockDefinition;
 
     let tree = storage.get_execution_tree(instance_id).await?;
     let mut has_non_cancellable_active = false;
+
+    // Collect IDs of CancellationScope nodes so we can check ancestry.
+    let scope_node_ids: Vec<_> = tree
+        .iter()
+        .filter(|n| n.block_type == BlockType::CancellationScope)
+        .map(|n| n.id)
+        .collect();
 
     for node in &tree {
         let is_active = matches!(
@@ -176,13 +184,19 @@ async fn cancel_scoped(
             continue;
         }
 
-        // Check if this block is non-cancellable.
-        let is_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
-            .and_then(|block| match block {
-                BlockDefinition::Step(step) => Some(step.cancellable),
-                _ => None,
-            })
-            .unwrap_or(true);
+        // A node inside a CancellationScope is non-cancellable.
+        let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
+
+        // Check per-step cancellable flag.
+        let step_cancellable =
+            crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
+                .and_then(|block| match block {
+                    BlockDefinition::Step(step) => Some(step.cancellable),
+                    _ => None,
+                })
+                .unwrap_or(true);
+
+        let is_cancellable = step_cancellable && !inside_scope;
 
         if is_cancellable {
             storage
@@ -194,4 +208,20 @@ async fn cancel_scoped(
     }
 
     Ok(has_non_cancellable_active)
+}
+
+/// Check if `node` is a descendant of any node whose ID is in `ancestor_ids`.
+fn is_descendant_of_any(
+    tree: &[orch8_types::execution::ExecutionNode],
+    node: &orch8_types::execution::ExecutionNode,
+    ancestor_ids: &[orch8_types::ids::ExecutionNodeId],
+) -> bool {
+    let mut current_parent = node.parent_id;
+    while let Some(pid) = current_parent {
+        if ancestor_ids.contains(&pid) {
+            return true;
+        }
+        current_parent = tree.iter().find(|n| n.id == pid).and_then(|n| n.parent_id);
+    }
+    false
 }

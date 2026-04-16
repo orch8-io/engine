@@ -8,10 +8,12 @@ pub mod instances;
 pub mod metrics;
 #[allow(clippy::needless_for_each)]
 pub mod openapi;
+pub mod plugins;
 pub mod pools;
 pub mod sequences;
 pub mod sessions;
 pub mod streaming;
+pub mod triggers;
 pub mod workers;
 
 use std::sync::Arc;
@@ -36,5 +38,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(pools::routes())
         .merge(sessions::routes())
         .merge(cluster::routes())
+        .merge(triggers::routes())
+        .merge(plugins::routes())
         .with_state(state)
 }

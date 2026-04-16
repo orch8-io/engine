@@ -9,21 +9,63 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 
+/// Fetch any dynamically injected blocks and merge them with the sequence blocks.
+/// Returns the merged list (sequence blocks + injected blocks appended).
+pub async fn merged_blocks(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    sequence: &SequenceDefinition,
+) -> Result<Vec<BlockDefinition>, EngineError> {
+    let injected = storage.get_injected_blocks(instance_id).await?;
+    match injected {
+        Some(val) if val.is_array() => {
+            let extra: Vec<BlockDefinition> =
+                serde_json::from_value(val).unwrap_or_default();
+            if extra.is_empty() {
+                return Ok(sequence.blocks.clone());
+            }
+            let mut merged = sequence.blocks.clone();
+            merged.extend(extra);
+            Ok(merged)
+        }
+        _ => Ok(sequence.blocks.clone()),
+    }
+}
+
 /// Build the execution tree from a sequence definition if it doesn't exist yet.
 /// Returns the root-level nodes for the instance.
 pub async fn ensure_execution_tree(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
-    sequence: &SequenceDefinition,
+    blocks: &[BlockDefinition],
 ) -> Result<Vec<ExecutionNode>, EngineError> {
     let existing = storage.get_execution_tree(instance.id).await?;
     if !existing.is_empty() {
+        // Check for newly injected blocks that don't have execution nodes yet.
+        let existing_block_ids: std::collections::HashSet<&str> =
+            existing.iter().map(|n| n.block_id.0.as_str()).collect();
+        let mut new_nodes = Vec::new();
+        for block in blocks {
+            let (bid, _) = block_meta(block);
+            if !existing_block_ids.contains(bid.0.as_str()) {
+                build_nodes(instance.id, None, std::slice::from_ref(block), &mut new_nodes);
+            }
+        }
+        if !new_nodes.is_empty() {
+            storage.create_execution_nodes_batch(&new_nodes).await?;
+            debug!(
+                instance_id = %instance.id,
+                new_count = new_nodes.len(),
+                "injected blocks added to execution tree"
+            );
+            return storage.get_execution_tree(instance.id).await.map_err(Into::into);
+        }
         return Ok(existing);
     }
 
-    // Build tree from sequence blocks.
+    // Build tree from blocks.
     let mut nodes = Vec::new();
-    build_nodes(instance.id, None, &sequence.blocks, &mut nodes);
+    build_nodes(instance.id, None, blocks, &mut nodes);
 
     if !nodes.is_empty() {
         storage.create_execution_nodes_batch(&nodes).await?;
@@ -199,8 +241,11 @@ pub async fn evaluate(
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
-    // Ensure the execution tree exists (creates on first call).
-    ensure_execution_tree(storage, instance, sequence).await?;
+    // Merge sequence blocks with any dynamically injected blocks.
+    let blocks = merged_blocks(storage, instance.id, sequence).await?;
+
+    // Ensure the execution tree exists (creates on first call, adds new injected nodes).
+    ensure_execution_tree(storage, instance, &blocks).await?;
 
     // Loop: each iteration dispatches one actionable node, then re-reads
     // the tree to find more work. This lets parallel branches, try-catch
@@ -211,7 +256,7 @@ pub async fn evaluate(
         let tree = storage.get_execution_tree(instance.id).await?;
 
         // SLA deadline check: fail any step nodes that have breached their deadline.
-        check_sla_deadlines(storage, handlers, instance, &sequence.blocks, &tree).await?;
+        check_sla_deadlines(storage, handlers, instance, &blocks, &tree).await?;
         // Re-fetch tree if any deadlines were breached (state may have changed).
         let tree = storage.get_execution_tree(instance.id).await?;
         let root_nodes: Vec<&ExecutionNode> =
@@ -234,14 +279,14 @@ pub async fn evaluate(
 
         // Phase 1: activate the first Pending root node.
         if let Some(node) = root_nodes.iter().find(|n| n.state == NodeState::Pending) {
-            if let Some(block) = find_block(&sequence.blocks, &node.block_id) {
+            if let Some(block) = find_block(&blocks, &node.block_id) {
                 dispatch_block(storage, handlers, instance, node, block, &tree).await?;
                 continue;
             }
         }
 
         // Phase 2: execute Running step nodes (leaf work first).
-        if let Some((node, block)) = find_running_step(&tree, &sequence.blocks) {
+        if let Some((node, block)) = find_running_step(&tree, &blocks) {
             dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
             // Whether the step completed or deferred (external worker), continue
             // the loop. Deferred steps are now in Waiting state and won't be
@@ -251,7 +296,7 @@ pub async fn evaluate(
 
         // Phase 3: re-evaluate Running composite nodes (parents check child completion,
         // activate next phases like catch/finally, dispatch pending children).
-        if let Some((node, block)) = find_running_composite(&tree, &sequence.blocks) {
+        if let Some((node, block)) = find_running_composite(&tree, &blocks) {
             dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
             continue;
         }

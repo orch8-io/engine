@@ -1,6 +1,8 @@
 pub mod ab_split;
 pub mod builtin;
 pub mod cancellation_scope;
+pub mod grpc_plugin;
+pub mod self_modify;
 pub mod for_each;
 pub mod human_review;
 pub mod llm;
@@ -12,6 +14,7 @@ pub mod step;
 pub mod step_block;
 pub mod tool_call;
 pub mod try_catch;
+pub mod wasm_plugin;
 
 use std::collections::HashMap;
 use std::future::Future;

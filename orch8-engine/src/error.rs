@@ -39,6 +39,12 @@ pub enum EngineError {
     #[error("template resolution failed: {0}")]
     TemplateError(String),
 
+    #[error("not found: {0}")]
+    NotFound(String),
+
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(String),
+
     #[error("shutdown in progress")]
     ShuttingDown,
 }

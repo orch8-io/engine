@@ -190,4 +190,30 @@ CREATE TABLE IF NOT EXISTS injected_blocks (
     instance_id TEXT PRIMARY KEY,
     blocks TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS plugins (
+    name TEXT PRIMARY KEY,
+    plugin_type TEXT NOT NULL DEFAULT 'wasm',
+    source TEXT NOT NULL,
+    tenant_id TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    config TEXT NOT NULL DEFAULT '{}',
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS triggers (
+    slug TEXT PRIMARY KEY,
+    sequence_name TEXT NOT NULL,
+    version INTEGER,
+    tenant_id TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    secret TEXT,
+    trigger_type TEXT NOT NULL DEFAULT 'webhook',
+    config TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 ";

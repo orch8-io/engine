@@ -329,3 +329,104 @@ pub struct ABVariant {
     /// Blocks to execute when this variant is chosen.
     pub blocks: Vec<BlockDefinition>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_access_defaults() {
+        let ca: ContextAccess = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(ca.data);
+        assert!(ca.config);
+        assert!(!ca.audit);
+        assert!(!ca.runtime);
+    }
+
+    #[test]
+    fn retry_policy_round_trip() {
+        let json = r#"{
+            "max_attempts": 5,
+            "initial_backoff": 1000,
+            "max_backoff": 30000
+        }"#;
+        let rp: RetryPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(rp.max_attempts, 5);
+        assert_eq!(rp.initial_backoff, Duration::from_millis(1000));
+        assert_eq!(rp.max_backoff, Duration::from_secs(30));
+        assert!((rp.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+
+        let out = serde_json::to_value(&rp).unwrap();
+        assert_eq!(out["initial_backoff"], 1000);
+        assert_eq!(out["max_backoff"], 30000);
+    }
+
+    #[test]
+    fn send_window_defaults() {
+        let sw: SendWindow = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(sw.start_hour, 9);
+        assert_eq!(sw.end_hour, 17);
+        assert!(sw.days.is_empty());
+    }
+
+    #[test]
+    fn delay_spec_round_trip() {
+        let ds: DelaySpec = serde_json::from_str(r#"{"duration": 5000}"#).unwrap();
+        assert_eq!(ds.duration, Duration::from_secs(5));
+        assert!(!ds.business_days_only);
+        assert!(ds.jitter.is_none());
+        assert!(ds.holidays.is_empty());
+    }
+
+    #[test]
+    fn loop_def_defaults() {
+        let json = r#"{"id": "loop-1", "condition": "data.count < 10", "body": []}"#;
+        let ld: LoopDef = serde_json::from_str(json).unwrap();
+        assert_eq!(ld.max_iterations, 1000);
+    }
+
+    #[test]
+    fn for_each_def_defaults() {
+        let json = r#"{"id": "fe-1", "collection": "data.items", "body": []}"#;
+        let fe: ForEachDef = serde_json::from_str(json).unwrap();
+        assert_eq!(fe.item_var, "item");
+        assert_eq!(fe.max_iterations, 1000);
+    }
+
+    #[test]
+    fn race_semantics_default() {
+        assert!(matches!(RaceSemantics::default(), RaceSemantics::FirstToResolve));
+    }
+
+    #[test]
+    fn block_definition_tagged_step() {
+        let json = r#"{
+            "type": "step",
+            "id": "s1",
+            "handler": "http_request",
+            "params": {"url": "https://example.com"},
+            "delay": null,
+            "retry": null
+        }"#;
+        let block: BlockDefinition = serde_json::from_str(json).unwrap();
+        if let BlockDefinition::Step(s) = block {
+            assert_eq!(s.handler, "http_request");
+            assert!(s.cancellable);
+        } else {
+            panic!("expected Step variant");
+        }
+    }
+
+    #[test]
+    fn block_definition_tagged_parallel() {
+        let json = r#"{"type": "parallel", "id": "p1", "branches": [[]]}"#;
+        let block: BlockDefinition = serde_json::from_str(json).unwrap();
+        assert!(matches!(block, BlockDefinition::Parallel(_)));
+    }
+
+    #[test]
+    fn block_definition_rejects_unknown_type() {
+        let json = r#"{"type": "unknown_block", "id": "x"}"#;
+        assert!(serde_json::from_str::<BlockDefinition>(json).is_err());
+    }
+}

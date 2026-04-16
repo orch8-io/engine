@@ -1,12 +1,12 @@
 # Orch8 Engine — Project Status
 
-> Last updated: 2026-04-15
+> Last updated: 2026-04-16
 
 ## Summary
 
-Stages 0 through 4 are **complete**. Stage 5 is ~70% done (CLI, versioning, debug, audit, checkpoints, SQLite, externalization all shipped — Docker, Helm, Python SDK, landing pages remain). Stage 6 is ~55% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers all shipped — Go SDK, full dashboard, visual builder remain).
+Stages 0 through 4 are **complete**. Stage 5 is ~75% done (CLI, versioning, debug, audit, checkpoints, SQLite, externalization all shipped — Docker, Helm, Python SDK, landing pages remain). Stage 6 is ~75% done (clustering, A/B split, dynamic injection, sub-sequences, sessions, interceptors, queue routing, circuit breaker, SLA timers, encryption at rest, tenant isolation, API rate limiting, cancellation scopes, NATS/file-watch triggers all shipped — Go SDK, full dashboard, visual builder remain).
 
-**Codebase**: ~6,500 lines of Rust across 5 crates, ~1,000 lines of JS E2E tests, 12 SQL migrations.
+**Codebase**: ~7,500 lines of Rust across 5 crates, ~1,000 lines of JS E2E tests, 20 SQL migrations.
 
 ---
 
@@ -61,8 +61,10 @@ Stages 0 through 4 are **complete**. Stage 5 is ~70% done (CLI, versioning, debu
 - Concurrency control per entity key (position-based)
 - Idempotency keys (unique index, returns existing on duplicate)
 - Prometheus metrics (12 counters, 3 histograms, 2 gauges)
-- Webhook event emitter (instance.completed, instance.failed)
+- Webhook event emitter (reqwest HTTP client, TLS, connection pooling)
 - Multi-tenancy (tenant-scoped queries, per-tenant limits)
+- Tenant isolation middleware (`X-Tenant-Id` header enforcement, cross-tenant rejection)
+- API rate limiting (`ConcurrencyLimitLayer`, configurable RPS)
 - Cron-triggered sequences (CRUD API, tick loop)
 - Embedded test mode (SQLite in-memory)
 - Grafana dashboard template (`docs/grafana-dashboard.json`)
@@ -79,15 +81,22 @@ Stages 0 through 4 are **complete**. Stage 5 is ~70% done (CLI, versioning, debu
 ### Stage 6 — Partial
 - Multi-node clustering (SKIP LOCKED, DB-based node registration, heartbeat)
 - A/B split (deterministic hash-based variant selection)
+- Cancellation scopes (subtree-level non-cancellability, `CancellationScope` block type)
 - Hot migration API (rebind running instance to new version)
-- Dynamic step injection (`POST /instances/{id}/inject-blocks`)
+- Dynamic step injection (position-based insert, evaluator merges injected blocks)
+- Self-modify handler (`self_modify` — agent steps inject blocks into own instance)
+- gRPC sidecar plugin system (`grpc://host:port/Service.Method` handler dispatch)
+- Event-driven triggers (inbound webhook CRUD + fire API, DB-persisted definitions)
+- NATS message queue trigger (`async-nats` subscription, config-driven, auto-creates instances)
+- File watch trigger (`notify` crate, create/modify events, configurable path + recursive mode)
+- Trigger processor loop (background sync of trigger definitions, dynamic listener management)
 - Sub-sequences (SubSequence block type, parent-child instances)
 - Session management (CRUD API, lifecycle, cross-instance references)
 - Workflow interceptors (lifecycle hooks)
 - Task queue routing (queue_name field, queue-specific polling)
 - Circuit breaker (per-handler state machine, REST API)
-- SLA timers / deadlines (per-step enforcement, escalation)
-- Encryption at rest (FieldEncryptor implemented, AES-256-GCM)
+- SLA timers / deadlines (per-step enforcement, escalation, fast-path coverage)
+- Encryption at rest (`EncryptingStorage` decorator, AES-256-GCM, config + env var wiring)
 - Worker dashboard (Vite + React SPA, overview + task inspector)
 - Optional API key auth middleware
 
@@ -131,12 +140,10 @@ orch8-types           Domain types, config, errors
 
 ## What Is Next
 
-See [ROADMAP.md](ROADMAP.md) for full details. Immediate priorities:
-
-1. **Dockerfile** — multi-stage build, < 30MB, zero-config start with SQLite
-2. **Pre-built binaries** — GitHub Actions release workflow
-3. **E2E tests in CI** — currently not run in GitHub Actions
-4. **Fix critical issues** — see [RUST_ISSUES.md](RUST_ISSUES.md)
+- **Product features:** [ROADMAP.md](ROADMAP.md)
+- **SDKs, Docker, CI, distribution:** [TOOLING.md](TOOLING.md)
+- **Pre-release checklist:** [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
+- **Known issues:** [RUST_ISSUES.md](RUST_ISSUES.md)
 
 ---
 

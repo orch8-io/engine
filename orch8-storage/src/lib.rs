@@ -21,6 +21,8 @@ use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::Session;
 use orch8_types::signal::Signal;
+use orch8_types::plugin::PluginDef;
+use orch8_types::trigger::TriggerDef;
 use orch8_types::worker::WorkerTask;
 
 /// The core storage abstraction.
@@ -555,6 +557,36 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         stale_threshold: std::time::Duration,
     ) -> Result<u64, StorageError>;
+
+    // === Plugins ===
+
+    async fn create_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
+
+    async fn get_plugin(&self, name: &str) -> Result<Option<PluginDef>, StorageError>;
+
+    async fn list_plugins(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<PluginDef>, StorageError>;
+
+    async fn update_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
+
+    async fn delete_plugin(&self, name: &str) -> Result<(), StorageError>;
+
+    // === Triggers ===
+
+    async fn create_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
+
+    async fn get_trigger(&self, slug: &str) -> Result<Option<TriggerDef>, StorageError>;
+
+    async fn list_triggers(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<TriggerDef>, StorageError>;
+
+    async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
+
+    async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
 
     // === Health ===
 

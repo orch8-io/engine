@@ -843,6 +843,74 @@ impl StorageBackend for EncryptingStorage {
         self.inner.reap_stale_nodes(stale_threshold).await
     }
 
+    // === Plugins (pass-through) ===
+
+    async fn create_plugin(
+        &self,
+        plugin: &orch8_types::plugin::PluginDef,
+    ) -> Result<(), StorageError> {
+        self.inner.create_plugin(plugin).await
+    }
+
+    async fn get_plugin(
+        &self,
+        name: &str,
+    ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
+        self.inner.get_plugin(name).await
+    }
+
+    async fn list_plugins(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::plugin::PluginDef>, StorageError> {
+        self.inner.list_plugins(tenant_id).await
+    }
+
+    async fn update_plugin(
+        &self,
+        plugin: &orch8_types::plugin::PluginDef,
+    ) -> Result<(), StorageError> {
+        self.inner.update_plugin(plugin).await
+    }
+
+    async fn delete_plugin(&self, name: &str) -> Result<(), StorageError> {
+        self.inner.delete_plugin(name).await
+    }
+
+    // === Triggers (pass-through) ===
+
+    async fn create_trigger(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+    ) -> Result<(), StorageError> {
+        self.inner.create_trigger(trigger).await
+    }
+
+    async fn get_trigger(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError> {
+        self.inner.get_trigger(slug).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
+        self.inner.list_triggers(tenant_id).await
+    }
+
+    async fn update_trigger(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+    ) -> Result<(), StorageError> {
+        self.inner.update_trigger(trigger).await
+    }
+
+    async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
+        self.inner.delete_trigger(slug).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {

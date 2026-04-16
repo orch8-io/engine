@@ -1,12 +1,38 @@
+use std::future::Future;
+
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
+use orch8_types::plugin::PluginType;
 use orch8_types::sequence::StepDef;
 
 use crate::error::EngineError;
 use crate::evaluator;
 use crate::handlers::step::StepExecParams;
 use crate::handlers::HandlerRegistry;
+
+/// Dispatch a plugin handler and map the `StepError` result to node state transitions.
+async fn dispatch_plugin<F, Fut>(
+    storage: &dyn StorageBackend,
+    node: &ExecutionNode,
+    handler_fn: F,
+) -> Result<bool, EngineError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+{
+    match handler_fn().await {
+        Ok(_output) => {
+            evaluator::complete_node(storage, node.id).await?;
+            Ok(true)
+        }
+        Err(orch8_types::error::StepError::Retryable { .. }) => Ok(true),
+        Err(_) => {
+            evaluator::fail_node(storage, node.id).await?;
+            Ok(false)
+        }
+    }
+}
 
 /// Execute a step node within the execution tree.
 /// Returns `true` if the instance has more work (should re-schedule).
@@ -17,6 +43,42 @@ pub async fn execute_step_node(
     node: &ExecutionNode,
     step_def: &StepDef,
 ) -> Result<bool, EngineError> {
+    // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
+    if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
+        let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc).await
+            .unwrap_or_else(|| step_def.handler.clone());
+        let mut params = step_def.params.clone();
+        params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
+        let ctx = super::StepContext {
+            instance_id: instance.id,
+            block_id: step_def.id.clone(),
+            params,
+            context: instance.context.clone(),
+            attempt: 0,
+        };
+        return dispatch_plugin(storage, node, || {
+            super::grpc_plugin::handle_grpc_plugin(ctx)
+        }).await;
+    }
+
+    // If the handler is a WASM plugin, resolve via the plugin registry then dispatch.
+    if super::wasm_plugin::is_wasm_handler(&step_def.handler) {
+        if let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler) {
+            let wasm_path = resolve_plugin_source(storage, plugin_name, PluginType::Wasm).await
+                .unwrap_or_else(|| plugin_name.to_string());
+            let ctx = super::StepContext {
+                instance_id: instance.id,
+                block_id: step_def.id.clone(),
+                params: step_def.params.clone(),
+                context: instance.context.clone(),
+                attempt: 0,
+            };
+            return dispatch_plugin(storage, node, || {
+                super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
+            }).await;
+        }
+    }
+
     // If the handler is not registered in-process, dispatch to external worker queue.
     if !handlers.contains(&step_def.handler) {
         return dispatch_step_to_external_worker(storage, instance, node, step_def).await;
@@ -34,7 +96,32 @@ pub async fn execute_step_node(
     };
 
     match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
-        Ok(_output) => {
+        Ok(output) => {
+            // Check for self-modify output: inject blocks into the instance.
+            if output.get("_self_modify").and_then(serde_json::Value::as_bool) == Some(true) {
+                if let Some(blocks) = output.get("blocks").filter(|v| v.is_array()) {
+                    let position = output.get("position").and_then(serde_json::Value::as_u64);
+                    let final_blocks = if let Some(pos) = position {
+                        let existing = storage
+                            .get_injected_blocks(instance.id)
+                            .await
+                            .unwrap_or(None);
+                        let mut arr = existing
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
+                        let new = blocks.as_array().cloned().unwrap_or_default();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let at = (pos.min(usize::MAX as u64) as usize).min(arr.len());
+                        for (i, b) in new.into_iter().enumerate() {
+                            arr.insert(at + i, b);
+                        }
+                        serde_json::Value::Array(arr)
+                    } else {
+                        blocks.clone()
+                    };
+                    let _ = storage.inject_blocks(instance.id, &final_blocks).await;
+                }
+            }
             evaluator::complete_node(storage, node.id).await?;
             Ok(true)
         }
@@ -118,6 +205,21 @@ pub async fn complete_external_step_node(
         evaluator::complete_node(storage, node.id).await?;
     }
     Ok(())
+}
+
+/// Look up a plugin name in the registry and return its source path/endpoint.
+/// Returns `None` if the plugin isn't registered (caller falls back to the raw handler name).
+async fn resolve_plugin_source(
+    storage: &dyn StorageBackend,
+    name: &str,
+    expected_type: PluginType,
+) -> Option<String> {
+    let plugin = storage.get_plugin(name).await.ok()??;
+    if plugin.enabled && plugin.plugin_type == expected_type {
+        Some(plugin.source)
+    } else {
+        None
+    }
 }
 
 /// Called when an external worker permanently fails a task in an execution tree.

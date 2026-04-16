@@ -825,6 +825,7 @@ fn block_def_id(def: &orch8_types::sequence::BlockDefinition) -> String {
         BlockDefinition::TryCatch(t) => t.id.0.clone(),
         BlockDefinition::SubSequence(s) => s.id.0.clone(),
         BlockDefinition::ABSplit(a) => a.id.0.clone(),
+        BlockDefinition::CancellationScope(cs) => cs.id.0.clone(),
     }
 }
 

@@ -11,6 +11,7 @@ pub mod scheduler;
 pub mod scheduling;
 pub mod signals;
 pub mod template;
+pub mod triggers;
 pub mod webhooks;
 
 use std::sync::Arc;
@@ -77,7 +78,26 @@ impl Engine {
         )
         .await?;
 
-        // Spawn cluster heartbeat + drain check (every 10 seconds).
+        self.spawn_background_tasks();
+
+        // Run the main tick loop
+        let result = scheduler::run_tick_loop(
+            Arc::clone(&self.storage),
+            Arc::clone(&self.handlers),
+            &self.config,
+            self.cancel.clone(),
+        )
+        .await;
+
+        // Deregister this node on shutdown.
+        self.deregister_node().await;
+
+        result
+    }
+
+    /// Spawn all background tasks (heartbeat, reapers, cron, triggers).
+    fn spawn_background_tasks(&self) {
+        // Cluster heartbeat + drain check (every 10 seconds).
         let hb_storage = Arc::clone(&self.storage);
         let hb_cancel = self.cancel.clone();
         let hb_node_id = self.node_id;
@@ -88,11 +108,9 @@ impl Engine {
                 tokio::select! {
                     () = hb_cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        // Send heartbeat.
                         if let Err(e) = hb_storage.heartbeat_node(hb_node_id).await {
                             tracing::error!(error = %e, "cluster heartbeat failed");
                         }
-                        // Check if we should drain.
                         match hb_storage.should_drain(hb_node_id).await {
                             Ok(true) => {
                                 tracing::info!(node_id = %hb_node_id, "drain signal received — initiating shutdown");
@@ -106,7 +124,7 @@ impl Engine {
             }
         });
 
-        // Spawn stale node reaper (every 60 seconds).
+        // Stale node reaper (every 60 seconds).
         let node_reaper_storage = Arc::clone(&self.storage);
         let node_reaper_cancel = self.cancel.clone();
         tokio::spawn(async move {
@@ -128,7 +146,7 @@ impl Engine {
             }
         });
 
-        // Spawn worker task reaper (resets stale claimed tasks every 30 seconds).
+        // Worker task reaper (resets stale claimed tasks every 30 seconds).
         let reaper_storage = Arc::clone(&self.storage);
         let reaper_cancel = self.cancel.clone();
         tokio::spawn(async move {
@@ -150,7 +168,7 @@ impl Engine {
             }
         });
 
-        // Spawn cron loop (checks every 10 seconds for due cron schedules).
+        // Cron loop (checks every 10 seconds for due cron schedules).
         let cron_storage = Arc::clone(&self.storage);
         let cron_cancel = self.cancel.clone();
         tokio::spawn(async move {
@@ -165,19 +183,17 @@ impl Engine {
             }
         });
 
-        // Run the main tick loop
-        let result = scheduler::run_tick_loop(
-            Arc::clone(&self.storage),
-            Arc::clone(&self.handlers),
-            &self.config,
-            self.cancel.clone(),
-        )
-        .await;
-
-        // Deregister this node on shutdown.
-        self.deregister_node().await;
-
-        result
+        // Trigger processor loop (syncs trigger definitions every 15 seconds).
+        let trigger_storage = Arc::clone(&self.storage);
+        let trigger_cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            triggers::run_trigger_loop(
+                trigger_storage,
+                std::time::Duration::from_secs(15),
+                trigger_cancel,
+            )
+            .await;
+        });
     }
 
     /// Register this engine instance as a cluster node.

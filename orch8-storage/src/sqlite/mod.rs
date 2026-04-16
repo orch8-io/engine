@@ -32,12 +32,14 @@ mod helpers;
 mod instances;
 mod misc;
 mod outputs;
+mod plugins;
 mod pools;
 mod rate_limits;
 mod schema;
 mod sequences;
 mod sessions;
 mod signals;
+mod triggers;
 mod workers;
 
 use async_trait::async_trait;
@@ -786,6 +788,74 @@ impl StorageBackend for SqliteStorage {
         stale_threshold: std::time::Duration,
     ) -> Result<u64, StorageError> {
         cluster::reap_stale(self, stale_threshold).await
+    }
+
+    // === Plugins ===
+
+    async fn create_plugin(
+        &self,
+        plugin: &orch8_types::plugin::PluginDef,
+    ) -> Result<(), StorageError> {
+        plugins::create(self, plugin).await
+    }
+
+    async fn get_plugin(
+        &self,
+        name: &str,
+    ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
+        plugins::get(self, name).await
+    }
+
+    async fn list_plugins(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::plugin::PluginDef>, StorageError> {
+        plugins::list(self, tenant_id).await
+    }
+
+    async fn update_plugin(
+        &self,
+        plugin: &orch8_types::plugin::PluginDef,
+    ) -> Result<(), StorageError> {
+        plugins::update(self, plugin).await
+    }
+
+    async fn delete_plugin(&self, name: &str) -> Result<(), StorageError> {
+        plugins::delete(self, name).await
+    }
+
+    // === Triggers ===
+
+    async fn create_trigger(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+    ) -> Result<(), StorageError> {
+        triggers::create(self, trigger).await
+    }
+
+    async fn get_trigger(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError> {
+        triggers::get(self, slug).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: Option<&TenantId>,
+    ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
+        triggers::list(self, tenant_id).await
+    }
+
+    async fn update_trigger(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+    ) -> Result<(), StorageError> {
+        triggers::update(self, trigger).await
+    }
+
+    async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
+        triggers::delete(self, slug).await
     }
 
     // === Health ===

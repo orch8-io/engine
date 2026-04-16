@@ -21,6 +21,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("llm_call", super::llm::handle_llm_call);
     registry.register("tool_call", super::tool_call::handle_tool_call);
     registry.register("human_review", super::human_review::handle_human_review);
+    registry.register("self_modify", super::self_modify::handle_self_modify);
 }
 
 /// No-op handler. Always succeeds with an empty result.

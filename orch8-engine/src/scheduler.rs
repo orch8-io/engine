@@ -293,10 +293,13 @@ async fn process_instance(
         }
     }
 
+    // Merge dynamically injected blocks with the sequence definition.
+    let blocks =
+        crate::evaluator::merged_blocks(storage, instance.id, &sequence).await?;
+
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
-    let has_composite = sequence
-        .blocks
+    let has_composite = blocks
         .iter()
         .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)));
 
@@ -312,7 +315,7 @@ async fn process_instance(
         .map(|id| id.0)
         .collect();
 
-    for block in &sequence.blocks {
+    for block in &blocks {
         let orch8_types::sequence::BlockDefinition::Step(step_def) = block else {
             unreachable!("checked above: all blocks are steps");
         };
