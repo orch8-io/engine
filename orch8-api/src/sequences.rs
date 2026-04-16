@@ -32,8 +32,12 @@ pub fn routes() -> Router<AppState> {
 )]
 pub(crate) async fn create_sequence(
     State(state): State<AppState>,
-    Json(seq): Json<SequenceDefinition>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(mut seq): Json<SequenceDefinition>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
+    seq.tenant_id = tenant_id;
+
     state
         .storage
         .create_sequence(&seq)
@@ -55,6 +59,7 @@ pub(crate) async fn create_sequence(
 )]
 pub(crate) async fn get_sequence(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let seq = state
@@ -63,6 +68,8 @@ pub(crate) async fn get_sequence(
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
         .ok_or_else(|| ApiError::NotFound(format!("sequence {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &seq.tenant_id, &format!("sequence {id}"))?;
 
     Ok(Json(seq))
 }
@@ -89,9 +96,11 @@ pub(crate) struct ByNameQuery {
 )]
 pub(crate) async fn get_sequence_by_name(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ByNameQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let tenant_id = orch8_types::ids::TenantId(q.tenant_id);
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, Some(&q.tenant_id))
+        .unwrap_or_else(|| orch8_types::ids::TenantId(q.tenant_id.clone()));
     let namespace = orch8_types::ids::Namespace(q.namespace);
 
     let seq = state
@@ -100,6 +109,8 @@ pub(crate) async fn get_sequence_by_name(
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
         .ok_or_else(|| ApiError::NotFound(format!("sequence {}", q.name)))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &seq.tenant_id, &format!("sequence {}", q.name))?;
 
     Ok(Json(seq))
 }
@@ -112,8 +123,18 @@ pub(crate) async fn get_sequence_by_name(
 )]
 pub(crate) async fn deprecate_sequence(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
+    let seq = state
+        .storage
+        .get_sequence(SequenceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound(format!("sequence {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &seq.tenant_id, &format!("sequence {id}"))?;
+
     state
         .storage
         .deprecate_sequence(SequenceId(id))
@@ -134,9 +155,11 @@ pub(crate) async fn deprecate_sequence(
 )]
 pub(crate) async fn list_sequence_versions(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ByNameQuery>,
 ) -> Result<Json<Vec<SequenceDefinition>>, ApiError> {
-    let tenant_id = orch8_types::ids::TenantId(q.tenant_id);
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, Some(&q.tenant_id))
+        .unwrap_or_else(|| orch8_types::ids::TenantId(q.tenant_id.clone()));
     let namespace = orch8_types::ids::Namespace(q.namespace);
 
     let versions = state
@@ -169,6 +192,7 @@ pub(crate) struct MigrateInstanceRequest {
 )]
 pub(crate) async fn migrate_instance(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<MigrateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Validate the instance exists and is not terminal.
@@ -178,6 +202,8 @@ pub(crate) async fn migrate_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {}", req.instance_id)))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {}", req.instance_id))?;
 
     if instance.state.is_terminal() {
         return Err(ApiError::InvalidArgument(format!(

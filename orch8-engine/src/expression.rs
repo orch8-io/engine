@@ -214,11 +214,14 @@ fn tokenize_word(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usize
 
 // === Recursive Descent Parser ===
 
+const MAX_PARSE_DEPTH: u32 = 64;
+
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     context: &'a ExecutionContext,
     outputs: &'a serde_json::Value,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -232,6 +235,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             context,
             outputs,
+            depth: 0,
         }
     }
 
@@ -245,32 +249,52 @@ impl<'a> Parser<'a> {
         tok
     }
 
+    fn enter(&mut self) -> bool {
+        self.depth += 1;
+        self.depth <= MAX_PARSE_DEPTH
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     // or: and (|| and)*
     fn parse_or(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         let mut left = self.parse_and();
         while self.peek() == Some(&Token::Or) {
             self.advance();
             let right = self.parse_and();
             left = serde_json::Value::Bool(is_truthy(&left) || is_truthy(&right));
         }
+        self.leave();
         left
     }
 
     // and: comparison (&& comparison)*
     fn parse_and(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         let mut left = self.parse_comparison();
         while self.peek() == Some(&Token::And) {
             self.advance();
             let right = self.parse_comparison();
             left = serde_json::Value::Bool(is_truthy(&left) && is_truthy(&right));
         }
+        self.leave();
         left
     }
 
     // comparison: additive (== | != | > | >= | < | <= additive)?
     fn parse_comparison(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         let left = self.parse_additive();
-        match self.peek() {
+        let result = match self.peek() {
             Some(Token::Eq) => {
                 self.advance();
                 let right = self.parse_additive();
@@ -310,11 +334,16 @@ impl<'a> Parser<'a> {
                 )
             }
             _ => left,
-        }
+        };
+        self.leave();
+        result
     }
 
     // additive: multiplicative ((+ | -) multiplicative)*
     fn parse_additive(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         let mut left = self.parse_multiplicative();
         loop {
             match self.peek() {
@@ -331,11 +360,15 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        self.leave();
         left
     }
 
     // multiplicative: unary ((* | /) unary)*
     fn parse_multiplicative(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         let mut left = self.parse_unary();
         loop {
             match self.peek() {
@@ -352,17 +385,24 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        self.leave();
         left
     }
 
     // unary: !unary | primary
     fn parse_unary(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
         if self.peek() == Some(&Token::Not) {
             self.advance();
             let val = self.parse_unary();
+            self.leave();
             return serde_json::Value::Bool(!is_truthy(&val));
         }
-        self.parse_primary()
+        let result = self.parse_primary();
+        self.leave();
+        result
     }
 
     // primary: literal | path | (expr)

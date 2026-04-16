@@ -225,6 +225,7 @@ pub(crate) async fn create_instance(
 )]
 pub(crate) async fn create_instances_batch(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BatchCreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     if req.instances.is_empty() {
@@ -236,6 +237,11 @@ pub(crate) async fn create_instances_batch(
         return Err(ApiError::InvalidArgument(
             "batch size must not exceed 10,000".into(),
         ));
+    }
+
+    // Enforce tenant isolation for each item in the batch
+    for r in &req.instances {
+        crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
     }
 
     let now = Utc::now();
@@ -358,6 +364,7 @@ pub(crate) async fn list_instances(
 )]
 pub(crate) async fn update_state(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -369,6 +376,8 @@ pub(crate) async fn update_state(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     if !instance.state.can_transition_to(req.state) {
         return Err(ApiError::InvalidArgument(format!(
@@ -396,17 +405,20 @@ pub(crate) async fn update_state(
 )]
 pub(crate) async fn update_context(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateContextRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    state
+    let instance = state
         .storage
         .get_instance(instance_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     state
         .storage
@@ -428,6 +440,7 @@ pub(crate) async fn update_context(
 )]
 pub(crate) async fn send_signal(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(req): Json<SendSignalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -439,6 +452,8 @@ pub(crate) async fn send_signal(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     if instance.state.is_terminal() {
         return Err(ApiError::InvalidArgument(format!(
@@ -475,8 +490,18 @@ pub(crate) async fn send_signal(
 )]
 pub(crate) async fn get_outputs(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let outputs = state
         .storage
         .get_all_outputs(InstanceId(id))
@@ -495,16 +520,19 @@ pub(crate) async fn get_outputs(
 )]
 pub(crate) async fn get_execution_tree(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    state
+    let instance = state
         .storage
         .get_instance(instance_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     let tree = state
         .storage
@@ -521,10 +549,12 @@ pub(crate) async fn get_execution_tree(
 )]
 pub(crate) async fn bulk_update_state(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkUpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
     let filter = InstanceFilter {
-        tenant_id: req.filter.tenant_id.map(TenantId),
+        tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace),
         sequence_id: req.filter.sequence_id.map(SequenceId),
         states: req.filter.states,
@@ -547,10 +577,12 @@ pub(crate) async fn bulk_update_state(
 )]
 pub(crate) async fn bulk_reschedule(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkRescheduleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
     let filter = InstanceFilter {
-        tenant_id: req.filter.tenant_id.map(TenantId),
+        tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace),
         sequence_id: req.filter.sequence_id.map(SequenceId),
         states: req.filter.states,
@@ -579,10 +611,12 @@ pub(crate) async fn bulk_reschedule(
 )]
 pub(crate) async fn list_dlq(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
     let filter = InstanceFilter {
-        tenant_id: q.tenant_id.map(TenantId),
+        tenant_id: scoped_tenant,
         namespace: q.namespace.map(Namespace),
         sequence_id: q.sequence_id.map(SequenceId),
         states: Some(vec![InstanceState::Failed]),
@@ -616,6 +650,7 @@ pub(crate) async fn list_dlq(
 )]
 pub(crate) async fn retry_instance(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
@@ -626,6 +661,8 @@ pub(crate) async fn retry_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     if instance.state != InstanceState::Failed {
         return Err(ApiError::InvalidArgument(format!(
@@ -669,17 +706,20 @@ pub struct PruneCheckpointsRequest {
 )]
 pub(crate) async fn save_checkpoint(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(req): Json<SaveCheckpointRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
-    state
+    let instance = state
         .storage
         .get_instance(instance_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
 
     let checkpoint = orch8_types::checkpoint::Checkpoint {
         id: Uuid::new_v4(),
@@ -706,8 +746,18 @@ pub(crate) async fn save_checkpoint(
 )]
 pub(crate) async fn list_checkpoints(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let checkpoints = state
         .storage
         .list_checkpoints(InstanceId(id))
@@ -726,8 +776,18 @@ pub(crate) async fn list_checkpoints(
 )]
 pub(crate) async fn get_latest_checkpoint(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let checkpoint = state
         .storage
         .get_latest_checkpoint(InstanceId(id))
@@ -745,9 +805,19 @@ pub(crate) async fn get_latest_checkpoint(
 )]
 pub(crate) async fn prune_checkpoints(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(req): Json<PruneCheckpointsRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let count = state
         .storage
         .prune_checkpoints(InstanceId(id), req.keep)
@@ -768,8 +838,18 @@ pub(crate) async fn prune_checkpoints(
 )]
 async fn list_audit_log(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let entries = state
         .storage
         .list_audit_log(InstanceId(id), 200)
@@ -838,9 +918,19 @@ fn block_def_id(def: &orch8_types::sequence::BlockDefinition) -> String {
 )]
 async fn inject_blocks(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(body): Json<InjectBlocksRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Verify instance belongs to caller's tenant
+    let instance = state
+        .storage
+        .get_instance(InstanceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let block_ids = validate_injected_blocks(&body.blocks)?;
 
     // If position is specified, merge with existing injected blocks at that index.

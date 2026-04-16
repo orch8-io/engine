@@ -72,7 +72,7 @@ pub(super) async fn recover_stale_instances(
     let cutoff =
         chrono::Utc::now() - chrono::Duration::from_std(stale_threshold).unwrap_or_default();
     let result = sqlx::query(
-        "UPDATE task_instances SET state='scheduled', updated_at=?1 WHERE state='running' AND updated_at < ?2",
+        "UPDATE task_instances SET state='scheduled', updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
     )
     .bind(ts(chrono::Utc::now()))
     .bind(ts(cutoff))

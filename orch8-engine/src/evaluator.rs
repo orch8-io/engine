@@ -19,8 +19,13 @@ pub async fn merged_blocks(
     let injected = storage.get_injected_blocks(instance_id).await?;
     match injected {
         Some(val) if val.is_array() => {
-            let extra: Vec<BlockDefinition> =
-                serde_json::from_value(val).unwrap_or_default();
+            let extra: Vec<BlockDefinition> = match serde_json::from_value(val) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(instance_id = %instance_id, error = %e, "failed to deserialize injected blocks, ignoring");
+                    return Ok(sequence.blocks.clone());
+                }
+            };
             if extra.is_empty() {
                 return Ok(sequence.blocks.clone());
             }

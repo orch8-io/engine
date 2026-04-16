@@ -19,6 +19,7 @@ use uuid::Uuid;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 
+use crate::error::ApiError;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -44,10 +45,21 @@ fn is_terminal(state: InstanceState) -> bool {
 /// SSE stream for instance progress.
 pub(crate) async fn stream_instance(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Query(query): Query<StreamQuery>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let instance_id = InstanceId(id);
+
+    // Fetch instance to enforce tenant access before starting the stream.
+    let instance = state
+        .storage
+        .get_instance(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+
     let poll_interval = Duration::from_millis(query.poll_ms.clamp(100, 5000));
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -117,6 +129,6 @@ pub(crate) async fn stream_instance(
         }
     });
 
-    Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    Ok(Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }

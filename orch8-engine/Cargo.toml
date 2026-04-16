@@ -21,6 +21,7 @@ metrics.workspace = true
 cron.workspace = true
 moka.workspace = true
 reqwest.workspace = true
+url.workspace = true
 tokio-stream.workspace = true
 async-nats = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }

@@ -54,7 +54,7 @@ pub(super) async fn get_by_name(
 ) -> Result<Option<SequenceDefinition>, StorageError> {
     let row = if let Some(v) = version {
         sqlx::query_as::<_, SequenceRow>(
-            r"SELECT id, tenant_id, namespace, name, definition, version, created_at
+            r"SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at
                FROM sequences
                WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND version = $4",
         )
@@ -66,9 +66,9 @@ pub(super) async fn get_by_name(
         .await?
     } else {
         sqlx::query_as::<_, SequenceRow>(
-            r"SELECT id, tenant_id, namespace, name, definition, version, created_at
+            r"SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at
                FROM sequences
-               WHERE tenant_id = $1 AND namespace = $2 AND name = $3
+               WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND deprecated = false
                ORDER BY version DESC
                LIMIT 1",
         )

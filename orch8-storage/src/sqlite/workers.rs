@@ -190,6 +190,13 @@ pub(super) async fn list(
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut sql = String::from("SELECT * FROM worker_tasks WHERE 1=1");
     let mut args: Vec<String> = Vec::new();
+    if let Some(ref tid) = filter.tenant_id {
+        args.push(tid.0.clone());
+        sql.push_str(&format!(
+            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id=?{})",
+            args.len()
+        ));
+    }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
             let placeholders: Vec<String> = states.iter().map(|s| format!("'{s}'")).collect();
@@ -229,13 +236,26 @@ pub(super) async fn list(
 
 pub(super) async fn stats(
     storage: &SqliteStorage,
+    tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-    let counts: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks GROUP BY state, handler_name",
-    )
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(|e| StorageError::Query(e.to_string()))?;
+    let tenant_clause = if tenant_id.is_some() {
+        " WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id=?1)"
+    } else {
+        ""
+    };
+
+    let count_sql = format!(
+        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{} GROUP BY state, handler_name",
+        tenant_clause
+    );
+    let mut q = sqlx::query_as::<_, (String, String, i64)>(&count_sql);
+    if let Some(tid) = tenant_id {
+        q = q.bind(&tid.0);
+    }
+    let counts = q
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
 
     let mut by_state = HashMap::<String, u64>::new();
     let mut by_handler = HashMap::<String, HashMap<String, u64>>::new();
@@ -250,12 +270,22 @@ pub(super) async fn stats(
             .or_default() += cnt;
     }
 
-    let workers: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
-    )
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(|e| StorageError::Query(e.to_string()))?;
+    let workers_sql = format!(
+        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{}",
+        if tenant_id.is_some() {
+            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id=?1)"
+        } else {
+            ""
+        }
+    );
+    let mut wq = sqlx::query_as::<_, (String,)>(&workers_sql);
+    if let Some(tid) = tenant_id {
+        wq = wq.bind(&tid.0);
+    }
+    let workers = wq
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
 
     let active_workers = workers.into_iter().map(|(w,)| w).collect();
 

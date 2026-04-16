@@ -216,4 +216,16 @@ CREATE TABLE IF NOT EXISTS triggers (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_task_instances_state_fire ON task_instances(state, next_fire_at);
+CREATE INDEX IF NOT EXISTS idx_task_instances_tenant_idemp ON task_instances(tenant_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_task_instances_concurrency ON task_instances(concurrency_key, state);
+CREATE INDEX IF NOT EXISTS idx_task_instances_parent ON task_instances(parent_instance_id);
+CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
+CREATE INDEX IF NOT EXISTS idx_signal_inbox_instance ON signal_inbox(instance_id, delivered);
+CREATE INDEX IF NOT EXISTS idx_worker_tasks_handler ON worker_tasks(handler_name, state);
+CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_id);
+CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 ";

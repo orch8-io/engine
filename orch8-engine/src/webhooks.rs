@@ -118,7 +118,7 @@ async fn send_request(url: &str, body: &[u8], timeout: Duration) -> Result<u16, 
 
 /// Compute exponential backoff delay for a given attempt.
 pub(crate) fn backoff_duration(attempt: u32) -> Duration {
-    Duration::from_millis(500 * u64::from(2_u32.pow(attempt)))
+    Duration::from_millis(500_u64.saturating_mul(2_u64.saturating_pow(attempt)))
 }
 
 /// Helper to create common webhook events.

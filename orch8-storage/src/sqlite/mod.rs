@@ -519,8 +519,9 @@ impl StorageBackend for SqliteStorage {
 
     async fn worker_task_stats(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-        workers::stats(self).await
+        workers::stats(self, tenant_id).await
     }
 
     // === Resource Pools ===

@@ -36,7 +36,7 @@ pub(super) async fn get(
     task_id: Uuid,
 ) -> Result<Option<WorkerTask>, StorageError> {
     let row = sqlx::query_as::<_, WorkerTaskRow>(
-        r"SELECT id, instance_id, block_id, handler_name, params, context,
+        r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                  completed_at, output, error_message, error_retryable, created_at
           FROM worker_tasks WHERE id = $1",
@@ -63,7 +63,7 @@ pub(super) async fn claim(
               LIMIT $3
               FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, params, context,
+          RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
                     completed_at, output, error_message, error_retryable, created_at",
     )
@@ -198,13 +198,24 @@ pub(super) async fn list(
 
 pub(super) async fn stats(
     store: &PostgresStorage,
+    tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
+    let tenant_clause = if tenant_id.is_some() {
+        " WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
+    } else {
+        ""
+    };
+
     // Count by state + handler_name
-    let counts: Vec<(String, String, i64)> = sqlx::query_as(
-        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks GROUP BY state, handler_name",
-    )
-    .fetch_all(&store.pool)
-    .await?;
+    let count_sql = format!(
+        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{} GROUP BY state, handler_name",
+        tenant_clause
+    );
+    let mut q = sqlx::query_as::<_, (String, String, i64)>(&count_sql);
+    if let Some(tid) = tenant_id {
+        q = q.bind(&tid.0);
+    }
+    let counts = q.fetch_all(&store.pool).await?;
 
     let mut by_state = std::collections::HashMap::<String, u64>::new();
     let mut by_handler =
@@ -221,11 +232,19 @@ pub(super) async fn stats(
     }
 
     // Active workers
-    let workers: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
-    )
-    .fetch_all(&store.pool)
-    .await?;
+    let workers_sql = format!(
+        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{}",
+        if tenant_id.is_some() {
+            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
+        } else {
+            ""
+        }
+    );
+    let mut wq = sqlx::query_as::<_, (String,)>(&workers_sql);
+    if let Some(tid) = tenant_id {
+        wq = wq.bind(&tid.0);
+    }
+    let workers = wq.fetch_all(&store.pool).await?;
 
     let active_workers = workers.into_iter().map(|(w,)| w).collect();
 
@@ -241,6 +260,11 @@ fn apply_worker_task_filter(
     qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     filter: &orch8_types::worker_filter::WorkerTaskFilter,
 ) {
+    if let Some(ref tid) = filter.tenant_id {
+        qb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+            .push_bind(tid.0.clone())
+            .push(")");
+    }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
             let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();

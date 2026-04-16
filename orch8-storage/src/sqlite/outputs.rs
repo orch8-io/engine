@@ -71,9 +71,33 @@ pub(super) async fn get_completed_ids_batch(
     storage: &SqliteStorage,
     instance_ids: &[InstanceId],
 ) -> Result<HashMap<InstanceId, Vec<BlockId>>, StorageError> {
-    let mut result = HashMap::new();
+    if instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<String> = (1..=instance_ids.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!(
+        "SELECT DISTINCT instance_id, block_id FROM block_outputs WHERE instance_id IN ({})",
+        placeholders.join(",")
+    );
+    let mut query = sqlx::query(&sql);
     for id in instance_ids {
-        result.insert(*id, get_completed_ids(storage, *id).await?);
+        query = query.bind(id.0.to_string());
+    }
+    let rows = query
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    let mut result: HashMap<InstanceId, Vec<BlockId>> = instance_ids
+        .iter()
+        .map(|id| (*id, Vec::new()))
+        .collect();
+    for row in &rows {
+        let iid_str: String = row.get("instance_id");
+        let block_id = BlockId(row.get::<String, _>("block_id"));
+        if let Ok(uuid) = iid_str.parse::<uuid::Uuid>() {
+            let iid = InstanceId(uuid);
+            result.entry(iid).or_default().push(block_id);
+        }
     }
     Ok(result)
 }

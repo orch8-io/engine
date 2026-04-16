@@ -52,7 +52,13 @@ impl IntoResponse for ApiError {
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         };
-        let body = serde_json::json!({ "error": self.to_string() });
+        let body = match &self {
+            ApiError::Internal(msg) => {
+                tracing::error!(error = %msg, "internal server error");
+                serde_json::json!({ "error": "internal server error" })
+            }
+            _ => serde_json::json!({ "error": self.to_string() }),
+        };
         (status, axum::Json(body)).into_response()
     }
 }

@@ -13,6 +13,10 @@ import type {
   ClusterNode,
   CircuitBreaker,
   AuditEntry,
+  FireTriggerResponse,
+  BulkResponse,
+  BatchCreateResponse,
+  HealthResponse,
 } from "./types.js";
 
 export class Orch8Error extends Error {
@@ -145,8 +149,8 @@ export class Orch8Client {
 
   batchCreateInstances(
     body: Record<string, unknown>[],
-  ): Promise<TaskInstance[]> {
-    return this.post<TaskInstance[]>("/instances/batch", body);
+  ): Promise<BatchCreateResponse> {
+    return this.post<BatchCreateResponse>("/instances/batch", body);
   }
 
   getInstance(id: string): Promise<TaskInstance> {
@@ -214,12 +218,12 @@ export class Orch8Client {
     return this.get<AuditEntry[]>(`/instances/${id}/audit`);
   }
 
-  bulkUpdateState(body: Record<string, unknown>): Promise<unknown> {
-    return this.patch("/instances/bulk/state", body);
+  bulkUpdateState(body: Record<string, unknown>): Promise<BulkResponse> {
+    return this.patch<BulkResponse>("/instances/bulk/state", body);
   }
 
-  bulkReschedule(body: Record<string, unknown>): Promise<unknown> {
-    return this.patch("/instances/bulk/reschedule", body);
+  bulkReschedule(body: Record<string, unknown>): Promise<BulkResponse> {
+    return this.patch<BulkResponse>("/instances/bulk/reschedule", body);
   }
 
   listDLQ(filter?: Record<string, string>): Promise<TaskInstance[]> {
@@ -283,8 +287,8 @@ export class Orch8Client {
   fireTrigger(
     slug: string,
     body?: Record<string, unknown>,
-  ): Promise<TaskInstance> {
-    return this.post<TaskInstance>(`/triggers/${slug}/fire`, body);
+  ): Promise<FireTriggerResponse> {
+    return this.post<FireTriggerResponse>(`/triggers/${slug}/fire`, body);
   }
 
   // ---------------------------------------------------------------------------
@@ -330,8 +334,7 @@ export class Orch8Client {
   }
 
   getSessionByKey(tenantId: string, key: string): Promise<Session> {
-    const params = new URLSearchParams({ tenant_id: tenantId, key });
-    return this.get<Session>(`/sessions/by-key?${params}`);
+    return this.get<Session>(`/sessions/by-key/${tenantId}/${key}`);
   }
 
   updateSessionData(
@@ -410,7 +413,7 @@ export class Orch8Client {
   // Health
   // ---------------------------------------------------------------------------
 
-  health(): Promise<unknown> {
-    return this.get("/health/ready");
+  health(): Promise<HealthResponse> {
+    return this.get<HealthResponse>("/health/ready");
   }
 }

@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to storage backend.
     let storage: Arc<dyn StorageBackend> = if config.database.backend == "sqlite" {
-        let url = &config.database.url;
+        let url = config.database.url.expose();
         let sqlite = if url == "sqlite::memory:" || url.is_empty() {
             SqliteStorage::in_memory()
                 .await
@@ -64,10 +64,10 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("Failed to open SQLite database")?
         };
-        tracing::info!("Connected to SQLite ({})", url);
+        tracing::info!("Connected to SQLite");
         Arc::new(sqlite)
     } else {
-        let pg = PostgresStorage::new(&config.database.url, config.database.max_connections)
+        let pg = PostgresStorage::new(config.database.url.expose(), config.database.max_connections)
             .await
             .context("Failed to connect to PostgreSQL")?;
 
@@ -84,15 +84,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Wrap storage with encryption layer if an encryption key is configured.
     let storage: Arc<dyn StorageBackend> = {
+        let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
         let key = if config.engine.encryption_key.is_empty() {
-            std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default()
+            &env_key
         } else {
-            config.engine.encryption_key.clone()
+            config.engine.encryption_key.expose()
         };
         if key.is_empty() {
             storage
         } else {
-            let encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(&key)
+            let encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(key)
                 .context("Invalid encryption key (expected 64 hex chars for AES-256-GCM)")?;
             tracing::info!("Encryption at rest enabled for context.data");
             Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
@@ -116,7 +117,12 @@ async fn main() -> anyhow::Result<()> {
         registry: cb_registry,
     };
     let cors = build_cors_layer(&config.api.cors_origins);
-    let api_key = config.api.api_key.clone();
+    let api_key = config.api.api_key.expose().to_string();
+    if api_key.is_empty() {
+        tracing::warn!("No API key configured — all endpoints are unauthenticated. Set ORCH8_API_KEY to enable auth.");
+    } else if config.api.cors_origins.trim() == "*" {
+        tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
+    }
     let require_tenant = config.api.require_tenant_header;
     let mut app = build_router(app_state)
         .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
@@ -130,12 +136,12 @@ async fn main() -> anyhow::Result<()> {
         }))
         .layer(cors);
 
-    // Apply global rate limit if configured.
+    // Apply global concurrency limit if configured (caps in-flight requests).
     if config.api.rate_limit_rps > 0 {
-        let rps = config.api.rate_limit_rps;
-        tracing::info!(rps, "API rate limiting enabled");
+        let limit = config.api.rate_limit_rps;
+        tracing::info!(max_concurrent = limit, "API concurrency limiting enabled");
         #[allow(clippy::cast_possible_truncation)]
-        let concurrency_limit = rps.min(usize::MAX as u64) as usize;
+        let concurrency_limit = limit.min(usize::MAX as u64) as usize;
         app = app.layer(tower::limit::ConcurrencyLimitLayer::new(concurrency_limit));
     }
 
@@ -258,7 +264,7 @@ fn apply_env_overrides(config: &mut EngineConfig) {
         config.database.backend = val;
     }
     if let Ok(url) = std::env::var("ORCH8_DATABASE_URL") {
-        config.database.url = url;
+        config.database.url = url.into();
     }
     if let Ok(val) = std::env::var("ORCH8_DATABASE_MAX_CONNECTIONS") {
         if let Ok(n) = val.parse() {
@@ -304,7 +310,7 @@ fn apply_env_overrides(config: &mut EngineConfig) {
         config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
     }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
-        config.api.api_key = val;
+        config.api.api_key = val.into();
     }
     if let Ok(val) = std::env::var("ORCH8_RATE_LIMIT_RPS") {
         if let Ok(n) = val.parse() {

@@ -67,6 +67,7 @@ base64 = "0.22"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+url = "2"
 
 # Streaming
 tokio-stream = "0.1"

@@ -14,39 +14,84 @@ pub(super) async fn check_rate_limit(
     resource_key: &ResourceKey,
     now: DateTime<Utc>,
 ) -> Result<RateLimitCheck, StorageError> {
-    let row = sqlx::query("SELECT * FROM rate_limits WHERE tenant_id=?1 AND resource_key=?2")
-        .bind(&tenant_id.0)
-        .bind(&resource_key.0)
-        .fetch_optional(&storage.pool)
+    // Atomic check-and-increment inside a serialised transaction.
+    //
+    // `BEGIN IMMEDIATE` acquires a RESERVED lock up-front, preventing
+    // concurrent writers from interleaving between our SELECT and UPDATE.
+    let mut tx = storage
+        .pool
+        .begin()
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
 
-    if let Some(row) = row {
-        let max_count: i64 = row.get("max_count");
-        let window_seconds: i64 = row.get("window_seconds");
-        let current: i64 = row.get("current_count");
-        let window_start = parse_ts(row.get::<&str, _>("window_start"));
+    // Upgrade to an immediate (write) lock so no other connection can
+    // modify rate_limits between our read and write.
+    sqlx::query("SELECT 1 FROM rate_limits LIMIT 0")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
 
-        let window_elapsed = (now - window_start).num_seconds();
-        if window_elapsed >= window_seconds {
-            // Reset window
-            sqlx::query("UPDATE rate_limits SET current_count=1, window_start=?3 WHERE tenant_id=?1 AND resource_key=?2")
-                .bind(&tenant_id.0).bind(&resource_key.0).bind(ts(now))
-                .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
-            return Ok(RateLimitCheck::Allowed);
+    let now_str = ts(now);
+
+    // Atomic UPDATE: reset window if expired, otherwise increment if under limit.
+    let result = sqlx::query(
+        r"
+        UPDATE rate_limits
+        SET
+            current_count = CASE
+                WHEN (julianday(?3) - julianday(window_start)) * 86400 >= window_seconds
+                    THEN 1
+                ELSE current_count + 1
+            END,
+            window_start = CASE
+                WHEN (julianday(?3) - julianday(window_start)) * 86400 >= window_seconds
+                    THEN ?3
+                ELSE window_start
+            END
+        WHERE tenant_id = ?1
+          AND resource_key = ?2
+          AND (
+                (julianday(?3) - julianday(window_start)) * 86400 >= window_seconds
+                OR current_count < max_count
+              )
+        ",
+    )
+    .bind(&tenant_id.0)
+    .bind(&resource_key.0)
+    .bind(&now_str)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    if result.rows_affected() > 0 {
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        return Ok(RateLimitCheck::Allowed);
+    }
+
+    // UPDATE matched nothing — either no row exists or limit is reached.
+    let row = sqlx::query(
+        "SELECT window_start, window_seconds FROM rate_limits WHERE tenant_id=?1 AND resource_key=?2",
+    )
+    .bind(&tenant_id.0)
+    .bind(&resource_key.0)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    match row {
+        None => Ok(RateLimitCheck::Allowed),
+        Some(row) => {
+            let window_start = parse_ts(row.get::<&str, _>("window_start"));
+            let window_seconds: i64 = row.get("window_seconds");
+            let retry_after = window_start + chrono::Duration::seconds(window_seconds);
+            Ok(RateLimitCheck::Exceeded { retry_after })
         }
-
-        if current < max_count {
-            sqlx::query("UPDATE rate_limits SET current_count=current_count+1 WHERE tenant_id=?1 AND resource_key=?2")
-                .bind(&tenant_id.0).bind(&resource_key.0)
-                .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
-            return Ok(RateLimitCheck::Allowed);
-        }
-
-        let retry_after = window_start + chrono::Duration::seconds(window_seconds);
-        Ok(RateLimitCheck::Exceeded { retry_after })
-    } else {
-        Ok(RateLimitCheck::Allowed)
     }
 }
 

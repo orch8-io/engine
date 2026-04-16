@@ -24,7 +24,7 @@ pub mod worker;
 pub mod worker_filter;
 
 // Re-exports for convenience.
-pub use config::EngineConfig;
+pub use config::{EngineConfig, SecretString};
 pub use error::{StepError, StorageError};
 pub use ids::*;
 pub use instance::{InstanceState, Priority, TaskInstance};

@@ -553,8 +553,9 @@ impl StorageBackend for EncryptingStorage {
 
     async fn worker_task_stats(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-        self.inner.worker_task_stats().await
+        self.inner.worker_task_stats(tenant_id).await
     }
 
     // === Resource Pools (pass-through) ===

@@ -8,7 +8,7 @@
 //! Trigger invocation: `POST /triggers/{slug}/fire`
 
 use axum::extract::{Json, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
@@ -53,6 +53,7 @@ pub struct TriggerQuery {
 
 async fn create_trigger(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreateTriggerRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.slug.is_empty() || body.sequence_name.is_empty() {
@@ -61,15 +62,17 @@ async fn create_trigger(
         ));
     }
 
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
+
     let now = chrono::Utc::now();
     let trigger = TriggerDef {
         slug: body.slug,
         sequence_name: body.sequence_name,
         version: body.version,
-        tenant_id: body.tenant_id,
+        tenant_id: tenant_id.0,
         namespace: body.namespace,
         enabled: true,
-        secret: body.secret,
+        secret: body.secret.map(orch8_types::config::SecretString::new),
         trigger_type: body.trigger_type,
         config: body.config,
         created_at: now,
@@ -87,9 +90,10 @@ async fn create_trigger(
 
 async fn list_triggers(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TriggerQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let tenant_ref = query.tenant_id.as_ref().map(|t| TenantId(t.clone()));
+    let tenant_ref = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref());
     let triggers = state
         .storage
         .list_triggers(tenant_ref.as_ref())
@@ -100,6 +104,7 @@ async fn list_triggers(
 
 async fn get_trigger(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let trigger = state
@@ -108,20 +113,23 @@ async fn get_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
     Ok(Json(trigger))
 }
 
 async fn delete_trigger(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Verify it exists first.
-    state
+    let trigger = state
         .storage
         .get_trigger(&slug)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
 
     state
         .storage
@@ -137,7 +145,9 @@ async fn delete_trigger(
 /// The request body becomes the initial `context.data` for the instance.
 async fn fire_trigger(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, ApiError> {
     let trigger = state
@@ -146,11 +156,23 @@ async fn fire_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
 
     if !trigger.enabled {
         return Err(ApiError::InvalidArgument(format!(
             "trigger '{slug}' is disabled"
         )));
+    }
+
+    // Validate trigger secret if configured.
+    if let Some(ref secret) = trigger.secret {
+        let provided = headers
+            .get("x-trigger-secret")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if provided != secret.expose() {
+            return Err(ApiError::Unauthorized);
+        }
     }
 
     let meta = serde_json::json!({ "source": "http_fire" });

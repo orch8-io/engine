@@ -169,7 +169,7 @@ mod tests {
         for _ in 0..100 {
             let result = calculate_next_fire_at(from, &delay, "UTC", None);
             let diff = (result - from).num_seconds();
-            assert!(diff >= 3540 && diff <= 3660, "diff was {diff}");
+            assert!((3540..=3660).contains(&diff), "diff was {diff}");
         }
     }
 

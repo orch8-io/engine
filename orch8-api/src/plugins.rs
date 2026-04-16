@@ -61,6 +61,7 @@ pub struct PluginQuery {
 
 async fn create_plugin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreatePluginRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.is_empty() || body.source.is_empty() {
@@ -69,12 +70,14 @@ async fn create_plugin(
         ));
     }
 
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
+
     let now = chrono::Utc::now();
     let plugin = PluginDef {
         name: body.name,
         plugin_type: body.plugin_type,
         source: body.source,
-        tenant_id: body.tenant_id,
+        tenant_id: tenant_id.0,
         enabled: true,
         config: body.config,
         description: body.description,
@@ -93,9 +96,10 @@ async fn create_plugin(
 
 async fn list_plugins(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<PluginQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let tenant_ref = query.tenant_id.as_ref().map(|t| TenantId(t.clone()));
+    let tenant_ref = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref());
     let plugins = state
         .storage
         .list_plugins(tenant_ref.as_ref())
@@ -106,6 +110,7 @@ async fn list_plugins(
 
 async fn get_plugin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let plugin = state
@@ -114,11 +119,13 @@ async fn get_plugin(
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
     Ok(Json(plugin))
 }
 
 async fn update_plugin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(name): Path<String>,
     Json(body): Json<UpdatePluginRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -128,6 +135,7 @@ async fn update_plugin(
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
 
     if let Some(source) = body.source {
         plugin.source = source;
@@ -154,14 +162,16 @@ async fn update_plugin(
 
 async fn delete_plugin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(name): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state
+    let plugin = state
         .storage
         .get_plugin(&name)
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
 
     state
         .storage

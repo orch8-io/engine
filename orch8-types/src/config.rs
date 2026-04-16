@@ -1,4 +1,52 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// A wrapper for sensitive strings that redacts the value in Debug and Serialize output.
+/// Use `.expose()` to access the inner value when you actually need it.
+#[derive(Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(s: String) -> Self {
+        Self(s)
+    }
+
+    /// Access the actual secret value.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.write_str("SecretString(\"\")")
+        } else {
+            f.write_str("SecretString(\"***\")")
+        }
+    }
+}
+
+impl Serialize for SecretString {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.0.is_empty() {
+            s.serialize_str("")
+        } else {
+            s.serialize_str("***")
+        }
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
 
 /// Top-level configuration. Layered: TOML file -> env vars -> CLI flags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -18,8 +66,9 @@ pub struct DatabaseConfig {
     /// Storage backend: "postgres" (default) or "sqlite".
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Connection URL (may contain credentials — redacted in logs).
     #[serde(default = "default_database_url")]
-    pub url: String,
+    pub url: SecretString,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
     #[serde(default = "default_true")]
@@ -41,8 +90,8 @@ fn default_backend() -> String {
     "postgres".to_string()
 }
 
-fn default_database_url() -> String {
-    "postgres://orch8:orch8@localhost:5432/orch8".to_string()
+fn default_database_url() -> SecretString {
+    SecretString::new("postgres://orch8:orch8@localhost:5432/orch8".to_string())
 }
 
 fn default_max_connections() -> u32 {
@@ -80,7 +129,7 @@ pub struct SchedulerConfig {
     /// fields at rest. If empty, no encryption is applied.
     /// Can also be set via `ORCH8_ENCRYPTION_KEY` env var.
     #[serde(default)]
-    pub encryption_key: String,
+    pub encryption_key: SecretString,
 }
 
 impl Default for SchedulerConfig {
@@ -94,7 +143,7 @@ impl Default for SchedulerConfig {
             max_instances_per_tenant: 0,
             webhooks: WebhookConfig::default(),
             externalize_output_threshold: 0,
-            encryption_key: String::new(),
+            encryption_key: SecretString::default(),
         }
     }
 }
@@ -158,7 +207,7 @@ pub struct ApiConfig {
     pub cors_origins: String,
     /// Optional API key for authenticating requests. Empty means no auth.
     #[serde(default)]
-    pub api_key: String,
+    pub api_key: SecretString,
     /// If true, require `X-Tenant-Id` header on all requests and enforce
     /// tenant isolation. Requests without the header get `400 Bad Request`.
     #[serde(default)]
@@ -174,7 +223,7 @@ impl Default for ApiConfig {
             grpc_addr: default_grpc_addr(),
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
-            api_key: String::new(),
+            api_key: SecretString::default(),
             require_tenant_header: false,
             rate_limit_rps: 0,
         }

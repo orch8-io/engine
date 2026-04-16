@@ -33,6 +33,13 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
             details: None,
         })?;
 
+    if !super::builtin::is_url_safe(url) {
+        return Err(StepError::Permanent {
+            message: "blocked: URL targets a private/internal network address".into(),
+            details: None,
+        });
+    }
+
     let tool_name = ctx
         .params
         .get("tool_name")

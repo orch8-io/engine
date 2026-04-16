@@ -203,19 +203,6 @@ impl BlockOutputRow {
 }
 
 #[derive(sqlx::FromRow)]
-pub(super) struct RateLimitRow {
-    pub id: Uuid,
-    #[allow(dead_code)]
-    pub tenant_id: String,
-    #[allow(dead_code)]
-    pub resource_key: String,
-    pub max_count: i32,
-    pub window_seconds: i32,
-    pub current_count: i32,
-    pub window_start: DateTime<Utc>,
-}
-
-#[derive(sqlx::FromRow)]
 pub(super) struct SignalRow {
     pub id: Uuid,
     pub instance_id: Uuid,

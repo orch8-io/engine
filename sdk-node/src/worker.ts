@@ -127,12 +127,15 @@ export class Orch8Worker {
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number | null): Promise<T> {
     if (!timeoutMs) return promise;
-    return Promise.race([
-      promise,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("task timed out")), timeoutMs)
-      ),
-    ]);
+    let timer: NodeJS.Timeout;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("task timed out")), timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
   }
 
   private async completeTask(taskId: string, output: unknown): Promise<void> {

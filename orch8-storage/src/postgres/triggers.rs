@@ -18,7 +18,7 @@ pub(super) async fn create(
     .bind(&trigger.tenant_id)
     .bind(&trigger.namespace)
     .bind(trigger.enabled)
-    .bind(&trigger.secret)
+    .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
     .bind(trigger.trigger_type.to_string())
     .bind(&trigger.config)
     .bind(trigger.created_at)
@@ -83,7 +83,7 @@ pub(super) async fn update(
     .bind(&trigger.tenant_id)
     .bind(&trigger.namespace)
     .bind(trigger.enabled)
-    .bind(&trigger.secret)
+    .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
     .bind(trigger.trigger_type.to_string())
     .bind(&trigger.config)
     .execute(&store.pool)
@@ -123,7 +123,7 @@ impl TriggerRow {
             tenant_id: self.tenant_id,
             namespace: self.namespace,
             enabled: self.enabled,
-            secret: self.secret,
+            secret: self.secret.map(orch8_types::config::SecretString::new),
             trigger_type: TriggerType::from_str_loose(&self.trigger_type)
                 .unwrap_or_default(),
             config: self.config,

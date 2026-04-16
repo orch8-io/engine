@@ -44,12 +44,14 @@ pub(crate) struct CreateSessionRequest {
 )]
 async fn create_session(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     let now = chrono::Utc::now();
     let session = Session {
         id: Uuid::new_v4(),
-        tenant_id: body.tenant_id,
+        tenant_id,
         session_key: body.session_key,
         data: body.data,
         state: SessionState::Active,
@@ -73,6 +75,7 @@ async fn create_session(
 )]
 async fn get_session(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = state
@@ -81,6 +84,7 @@ async fn get_session(
         .await
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
     Ok(Json(session))
 }
 
@@ -95,6 +99,7 @@ async fn get_session(
 )]
 async fn get_session_by_key(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path((tenant_id, key)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = state
@@ -103,6 +108,7 @@ async fn get_session_by_key(
         .await
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session by key {}", session.id))?;
     Ok(Json(session))
 }
 
@@ -120,9 +126,17 @@ pub(crate) struct UpdateSessionDataRequest {
 )]
 async fn update_session_data(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateSessionDataRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let session = state
+        .storage
+        .get_session(id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "session"))?
+        .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
     state
         .storage
         .update_session_data(id, &body.data)
@@ -145,9 +159,17 @@ pub(crate) struct UpdateSessionStateRequest {
 )]
 async fn update_session_state(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateSessionStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let session = state
+        .storage
+        .get_session(id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "session"))?
+        .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
     state
         .storage
         .update_session_state(id, body.state)
@@ -164,8 +186,16 @@ async fn update_session_state(
 )]
 async fn list_session_instances(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let session = state
+        .storage
+        .get_session(id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "session"))?
+        .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
     let instances = state
         .storage
         .list_session_instances(id)

@@ -66,6 +66,13 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
 
     // Send notification if configured.
     if let Some(notify_url) = ctx.params.get("notify_url").and_then(Value::as_str) {
+        if !super::builtin::is_url_safe(notify_url) {
+            return Err(StepError::Permanent {
+                message: "blocked: URL targets a private/internal network address".into(),
+                details: None,
+            });
+        }
+
         let payload = json!({
             "type": "human_review_pending",
             "instance_id": ctx.instance_id.0.to_string(),

@@ -23,7 +23,7 @@
 ## High: Missing Features That Should Exist
 
 ### 4. ~~Zero Engine Unit Tests~~ PARTIALLY FIXED
-- **Fixed:** Added unit tests for webhooks (backoff, event serialization, emit skip) and scheduler (prefetch map, drain). Core scheduling loop, step execution, crash recovery remain untested at the Rust level.
+- **Fixed:** Added unit tests for webhooks (backoff, event serialization, emit skip) and scheduler (prefetch map, drain). Added 47 unit tests across `orch8-types` (trigger, context, sequence, execution, lib serde helpers) and `orch8-engine` (gRPC plugin, WASM plugin edge cases). Core scheduling loop, step execution, crash recovery remain untested at the Rust level.
 
 ### 5. No Dockerfile
 - No Dockerfile exists anywhere. Only `docker-compose.yml` for Postgres dev container.
@@ -54,24 +54,22 @@
 ### 11. ~~Cancellation Scopes — Per-Step Only~~ FIXED
 - **Fixed:** Added `CancellationScope` block type (`CancellationScopeDef` struct, `BlockDefinition::CancellationScope` variant, `BlockType::CancellationScope`). Sequential child execution handler. `cancel_scoped()` now walks ancestry to detect nodes inside a scope and treats them as non-cancellable.
 
-### 12. Node.js SDK — Worker Only
-- `worker-sdk-node/` is a polling SDK only: poll, claim, heartbeat, complete/fail.
-- No methods for: creating sequences, launching instances, querying state, sending signals.
-- No tests, no npm publish config.
+### 12. ~~Node.js SDK — Worker Only~~ FIXED
+- **Fixed:** Created `sdk-node/` — full management SDK (`Orch8Client`) with typed methods for all API resources (sequences, instances, cron, triggers, plugins, sessions, workers, cluster, circuit breakers). Includes `Orch8Worker` (polling worker with per-handler heartbeats, timeout support, timer-leak-free). 16 typed response interfaces (`FireTriggerResponse`, `BulkResponse`, `BatchCreateResponse`, `HealthResponse`, etc.). 12 unit tests with vitest.
 
 ### 13. Dashboard — No Auth
 - `dashboard/` is a minimal React SPA (Vite + TypeScript).
 - Settings page stores API key in localStorage — no proper auth flow.
 - No tests.
 
-### 14. No Python or Go SDKs
-- Both listed as future stages. Zero code exists.
+### 14. ~~No Python or Go SDKs~~ FIXED
+- **Fixed:** Created `sdk-python/` (async httpx + pydantic, 18 typed models, polling worker with per-handler parallel polling and per-task heartbeats, 7 tests) and `sdk-go/` (net/http, zero external deps, idiomatic nil-on-error returns, polling worker with inflight tracking + heartbeats + logging, 5 tests). Both cover the full API surface. All SDK types verified against Rust source types (field names, defaults, response shapes).
 
-### 15. No Helm Chart
-- Listed in Stage 5 as deliverable. Nothing exists.
+### 15. ~~No Helm Chart~~ FIXED
+- **Fixed:** Created `helm/orch8/` — standard Helm 3 chart with deployment, service, configmap, secret, ingress (optional), serviceaccount. Configurable Postgres, env vars, autoscaling, resource limits.
 
-### 16. No Landing Pages
-- exists. under /web
+### 16. ~~No Landing Pages~~ FIXED
+- **Fixed:** Exists under `/web`.
 
 ---
 
@@ -84,7 +82,11 @@
 These features are NOT listed in any stage but should be:
 - ~~API rate limiting middleware~~ DONE
 - ~~Proper HTTP client for webhooks (reqwest)~~ DONE
-- ~~Engine Rust unit tests~~ PARTIALLY DONE
+- ~~Engine Rust unit tests~~ PARTIALLY DONE (47 new tests across types + engine crates)
+- ~~Node.js SDK~~ DONE (full management SDK + worker, 12 tests)
+- ~~Python SDK~~ DONE (async httpx + pydantic, 7 tests)
+- ~~Go SDK~~ DONE (net/http, zero deps, 5 tests)
+- ~~Helm chart~~ DONE (standard Helm 3)
 - E2E test CI integration
 - Binary distribution (curl install script)
 - `orch8 init` scaffolding command

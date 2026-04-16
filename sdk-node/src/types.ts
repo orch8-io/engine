@@ -71,16 +71,17 @@ export interface StepOutput {
   id: string;
   instance_id: string;
   block_id: string;
-  node_id: string;
   output: unknown;
-  error_message: string | null;
+  output_ref: string | null;
+  output_size: number;
+  attempt: number;
   created_at: string;
 }
 
 export interface Checkpoint {
   id: string;
   instance_id: string;
-  data: unknown;
+  checkpoint_data: unknown;
   created_at: string;
 }
 
@@ -88,12 +89,14 @@ export interface CronSchedule {
   id: string;
   tenant_id: string;
   namespace: string;
-  sequence_name: string;
+  sequence_id: string;
   version: number | null;
   cron_expr: string;
   timezone: string;
   enabled: boolean;
-  input_data: unknown;
+  metadata: unknown;
+  last_triggered_at: string | null;
+  next_fire_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -127,7 +130,7 @@ export interface PluginDef {
 export interface Session {
   id: string;
   tenant_id: string;
-  key: string;
+  session_key: string;
   state: string;
   data: unknown;
   created_at: string;
@@ -166,4 +169,22 @@ export interface CircuitBreaker {
   state: string;
   failure_count: number;
   last_failure: string | null;
+}
+
+export interface FireTriggerResponse {
+  instance_id: string;
+  trigger: string;
+  sequence_name: string;
+}
+
+export interface BulkResponse {
+  updated: number;
+}
+
+export interface BatchCreateResponse {
+  created: number;
+}
+
+export interface HealthResponse {
+  status: string;
 }

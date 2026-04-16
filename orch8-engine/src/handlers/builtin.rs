@@ -5,12 +5,72 @@
 //! - `sleep` — sleeps for a configured duration
 //! - `http_request` — makes an HTTP request (minimal TCP-based)
 
+use std::net::ToSocketAddrs;
+
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
 use orch8_types::error::StepError;
 
 use super::{HandlerRegistry, StepContext};
+
+/// Check whether a URL is safe to request (not targeting private/internal networks).
+///
+/// Returns `true` if the URL uses http/https and resolves to a public IP address.
+/// Returns `false` for private, loopback, link-local, and cloud metadata addresses.
+pub(crate) fn is_url_safe(url: &str) -> bool {
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return false,
+    }
+
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => return false,
+    };
+
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addr_str = format!("{host}:{port}");
+
+    let addrs = match addr_str.to_socket_addrs() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    for addr in addrs {
+        let ip = addr.ip();
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                if v4.is_loopback()          // 127.0.0.0/8
+                    || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || v4.is_link_local()     // 169.254.0.0/16 (includes 169.254.169.254)
+                    || v4.is_unspecified()
+                {
+                    return false;
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback()  // ::1
+                    || v6.is_unspecified()
+                {
+                    return false;
+                }
+                // fc00::/7 — unique local addresses
+                let segments = v6.segments();
+                if segments[0] & 0xfe00 == 0xfc00 {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
 
 /// Register all built-in handlers on the given registry.
 pub fn register_builtins(registry: &mut HandlerRegistry) {
@@ -116,6 +176,13 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
             message: "missing required param: url".into(),
             details: None,
         })?;
+
+    if !is_url_safe(url) {
+        return Err(StepError::Permanent {
+            message: "blocked: URL targets a private/internal network address".into(),
+            details: None,
+        });
+    }
 
     let method = ctx
         .params

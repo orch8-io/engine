@@ -37,9 +37,29 @@ pub(super) async fn get_pending_batch(
     storage: &SqliteStorage,
     instance_ids: &[InstanceId],
 ) -> Result<HashMap<InstanceId, Vec<Signal>>, StorageError> {
-    let mut result = HashMap::new();
+    if instance_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<String> = (1..=instance_ids.len()).map(|i| format!("?{i}")).collect();
+    let sql = format!(
+        "SELECT * FROM signal_inbox WHERE instance_id IN ({}) AND delivered=0 ORDER BY created_at",
+        placeholders.join(",")
+    );
+    let mut query = sqlx::query(&sql);
     for id in instance_ids {
-        result.insert(*id, get_pending(storage, *id).await?);
+        query = query.bind(id.0.to_string());
+    }
+    let rows = query
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    let mut result: HashMap<InstanceId, Vec<Signal>> = instance_ids
+        .iter()
+        .map(|id| (*id, Vec::new()))
+        .collect();
+    for row in &rows {
+        let signal = row_to_signal(row)?;
+        result.entry(signal.instance_id).or_default().push(signal);
     }
     Ok(result)
 }

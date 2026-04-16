@@ -77,12 +77,14 @@ pub(crate) struct UpdateResourceRequest {
 )]
 pub(crate) async fn create_pool(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<CreatePoolRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ResourcePool>), ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(req.tenant_id))?;
     let now = Utc::now();
     let pool = ResourcePool {
         id: Uuid::new_v4(),
-        tenant_id: TenantId(req.tenant_id),
+        tenant_id,
         name: req.name,
         strategy: req.strategy,
         round_robin_index: 0,
@@ -101,9 +103,11 @@ pub(crate) async fn create_pool(
 )]
 pub(crate) async fn list_pools(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<ResourcePool>>, ApiError> {
-    let tenant_id = TenantId(params.get("tenant_id").cloned().unwrap_or_default());
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, params.get("tenant_id").map(|s| s.as_str()))
+        .unwrap_or_else(|| TenantId(String::new()));
     let pools = state.storage.list_resource_pools(&tenant_id).await?;
     Ok(Json(pools))
 }
@@ -115,6 +119,7 @@ pub(crate) async fn list_pools(
 )]
 pub(crate) async fn get_pool(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ResourcePool>, ApiError> {
     let pool = state
@@ -122,6 +127,7 @@ pub(crate) async fn get_pool(
         .get_resource_pool(id)
         .await?
         .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {id}"))?;
     Ok(Json(pool))
 }
 
@@ -132,8 +138,15 @@ pub(crate) async fn get_pool(
 )]
 pub(crate) async fn delete_pool(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let pool = state
+        .storage
+        .get_resource_pool(id)
+        .await?
+        .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {id}"))?;
     state.storage.delete_resource_pool(id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -145,8 +158,15 @@ pub(crate) async fn delete_pool(
 )]
 pub(crate) async fn list_resources(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(pool_id): Path<Uuid>,
 ) -> Result<Json<Vec<PoolResource>>, ApiError> {
+    let pool = state
+        .storage
+        .get_resource_pool(pool_id)
+        .await?
+        .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let resources = state.storage.list_pool_resources(pool_id).await?;
     Ok(Json(resources))
 }
@@ -159,9 +179,16 @@ pub(crate) async fn list_resources(
 )]
 pub(crate) async fn add_resource(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(pool_id): Path<Uuid>,
     Json(req): Json<AddResourceRequest>,
 ) -> Result<(axum::http::StatusCode, Json<PoolResource>), ApiError> {
+    let pool = state
+        .storage
+        .get_resource_pool(pool_id)
+        .await?
+        .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let warmup_start = req
         .warmup_start
         .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
@@ -193,9 +220,16 @@ pub(crate) async fn add_resource(
 )]
 pub(crate) async fn update_resource(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path((pool_id, resource_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateResourceRequest>,
 ) -> Result<Json<PoolResource>, ApiError> {
+    let pool = state
+        .storage
+        .get_resource_pool(pool_id)
+        .await?
+        .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let resources = state.storage.list_pool_resources(pool_id).await?;
     let mut resource = resources
         .into_iter()
@@ -235,8 +269,15 @@ pub(crate) async fn update_resource(
 )]
 pub(crate) async fn delete_resource(
     State(state): State<AppState>,
-    Path((_pool_id, resource_id)): Path<(Uuid, Uuid)>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((pool_id, resource_id)): Path<(Uuid, Uuid)>,
 ) -> Result<axum::http::StatusCode, ApiError> {
+    let pool = state
+        .storage
+        .get_resource_pool(pool_id)
+        .await?
+        .ok_or(ApiError::NotFound("pool not found".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     state.storage.delete_pool_resource(resource_id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

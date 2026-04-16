@@ -346,8 +346,10 @@ pub trait StorageBackend: Send + Sync + 'static {
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
     /// Aggregate worker task statistics: counts by state, by handler, and active workers.
+    /// When `tenant_id` is provided, stats are scoped to tasks belonging to that tenant's instances.
     async fn worker_task_stats(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
     ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
 
     // === Resource Pools ===
