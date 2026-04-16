@@ -37,6 +37,11 @@ struct Cli {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = "orch8.toml")]
     config: String,
+
+    /// Acknowledge running without API-key auth. Without this flag, startup
+    /// fails when no API key is configured. Intended for local development only.
+    #[arg(long)]
+    insecure: bool,
 }
 
 #[tokio::main]
@@ -67,9 +72,18 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Connected to SQLite");
         Arc::new(sqlite)
     } else {
-        let pg = PostgresStorage::new(config.database.url.expose(), config.database.max_connections)
-            .await
-            .context("Failed to connect to PostgreSQL")?;
+        if config.database.url.is_empty() {
+            anyhow::bail!(
+                "database.url is empty. Set ORCH8_DATABASE_URL (or database.url in the config \
+                 file) to a PostgreSQL connection string, or set backend=\"sqlite\" for local use."
+            );
+        }
+        let pg = PostgresStorage::new(
+            config.database.url.expose(),
+            config.database.max_connections,
+        )
+        .await
+        .context("Failed to connect to PostgreSQL")?;
 
         tracing::info!("Connected to PostgreSQL");
 
@@ -107,9 +121,14 @@ async fn main() -> anyhow::Result<()> {
     let handle = prometheus_handle.handle();
     metrics::set_global_recorder(prometheus_handle).expect("failed to install Prometheus recorder");
 
+    // Graceful shutdown token. Shared with HTTP, gRPC, engine, and any long-lived
+    // request handlers (SSE streams) via `AppState`.
+    let shutdown_token = CancellationToken::new();
+
     // Build HTTP router.
     let app_state = AppState {
         storage: storage.clone(),
+        shutdown: shutdown_token.clone(),
     };
     let metrics_state = MetricsState { handle };
     let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60));
@@ -119,7 +138,16 @@ async fn main() -> anyhow::Result<()> {
     let cors = build_cors_layer(&config.api.cors_origins);
     let api_key = config.api.api_key.expose().to_string();
     if api_key.is_empty() {
-        tracing::warn!("No API key configured — all endpoints are unauthenticated. Set ORCH8_API_KEY to enable auth.");
+        if !cli.insecure {
+            anyhow::bail!(
+                "No API key configured. Set ORCH8_API_KEY (or api.api_key in the config file) \
+                 to enable authentication, or pass --insecure to explicitly run without auth."
+            );
+        }
+        tracing::warn!(
+            "Running with --insecure: all endpoints are unauthenticated. \
+             Never use this flag in production."
+        );
     } else if config.api.cors_origins.trim() == "*" {
         tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
     }
@@ -161,8 +189,8 @@ async fn main() -> anyhow::Result<()> {
         http_addr
     );
 
-    // Graceful shutdown.
-    let shutdown_token = CancellationToken::new();
+    // Graceful shutdown — `shutdown_token` is the single cancellation source
+    // shared across HTTP, gRPC, engine, and long-lived handlers.
     let token = shutdown_token.clone();
     tokio::spawn(async move {
         let mut sigint =
@@ -341,7 +369,7 @@ fn init_logging(config: &orch8_types::config::LoggingConfig) {
 }
 
 fn build_cors_layer(origins: &str) -> CorsLayer {
-    use http::header::{AUTHORIZATION, CONTENT_TYPE};
+    use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE};
     use http::Method;
 
     let layer = CorsLayer::new()
@@ -353,7 +381,11 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([CONTENT_TYPE, AUTHORIZATION, "x-api-key".parse().unwrap()]);
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            HeaderName::from_static("x-api-key"),
+        ]);
 
     if origins.trim() == "*" {
         layer.allow_origin(AllowOrigin::any())

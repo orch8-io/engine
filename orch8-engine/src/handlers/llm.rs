@@ -51,7 +51,7 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_mins(5))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to build optimized HTTP client, using default");
@@ -161,11 +161,7 @@ async fn call_openai_compat(
 // Anthropic Messages API
 // ---------------------------------------------------------------------------
 
-async fn call_anthropic(
-    params: &Value,
-    api_key: &str,
-    base_url: &str,
-) -> Result<Value, StepError> {
+async fn call_anthropic(params: &Value, api_key: &str, base_url: &str) -> Result<Value, StepError> {
     let url = format!("{base_url}/messages");
 
     let model = params
@@ -308,10 +304,7 @@ fn extract_system_message(messages: &Value) -> (Option<String>, Value) {
     for msg in arr {
         if msg.get("role").and_then(Value::as_str) == Some("system") {
             if system.is_none() {
-                system = msg
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(String::from);
+                system = msg.get("content").and_then(Value::as_str).map(String::from);
             }
         } else {
             filtered.push(msg.clone());
@@ -328,9 +321,8 @@ fn resolve_api_key(params: &Value, provider: &str) -> Result<String, StepError> 
     }
 
     if let Some(env_var) = params.get("api_key_env").and_then(Value::as_str) {
-        return std::env::var(env_var).map_err(|_| {
-            permanent(format!("env var '{env_var}' not set"))
-        });
+        return std::env::var(env_var)
+            .map_err(|_| permanent(format!("env var '{env_var}' not set")));
     }
 
     let env_var = default_env_var(provider);

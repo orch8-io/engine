@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn context_access_defaults() {
-        let ca: ContextAccess = serde_json::from_str(r#"{}"#).unwrap();
+        let ca: ContextAccess = serde_json::from_str("{}").unwrap();
         assert!(ca.data);
         assert!(ca.config);
         assert!(!ca.audit);
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn send_window_defaults() {
-        let sw: SendWindow = serde_json::from_str(r#"{}"#).unwrap();
+        let sw: SendWindow = serde_json::from_str("{}").unwrap();
         assert_eq!(sw.start_hour, 9);
         assert_eq!(sw.end_hour, 17);
         assert!(sw.days.is_empty());
@@ -396,7 +396,10 @@ mod tests {
 
     #[test]
     fn race_semantics_default() {
-        assert!(matches!(RaceSemantics::default(), RaceSemantics::FirstToResolve));
+        assert!(matches!(
+            RaceSemantics::default(),
+            RaceSemantics::FirstToResolve
+        ));
     }
 
     #[test]

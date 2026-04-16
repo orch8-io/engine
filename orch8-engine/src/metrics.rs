@@ -14,6 +14,8 @@ pub const RECOVERY_STALE: &str = "orch8_recovery_stale_instances_total";
 pub const WEBHOOKS_SENT: &str = "orch8_webhooks_sent_total";
 pub const WEBHOOKS_FAILED: &str = "orch8_webhooks_failed_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
+pub const CACHE_HITS: &str = "orch8_cache_hits_total";
+pub const CACHE_MISSES: &str = "orch8_cache_misses_total";
 
 // === Histogram names ===
 pub const TICK_DURATION: &str = "orch8_tick_duration_seconds";

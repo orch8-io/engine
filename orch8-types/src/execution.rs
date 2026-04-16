@@ -106,7 +106,10 @@ mod tests {
         assert_eq!(BlockType::TryCatch.to_string(), "try_catch");
         assert_eq!(BlockType::SubSequence.to_string(), "sub_sequence");
         assert_eq!(BlockType::ABSplit.to_string(), "ab_split");
-        assert_eq!(BlockType::CancellationScope.to_string(), "cancellation_scope");
+        assert_eq!(
+            BlockType::CancellationScope.to_string(),
+            "cancellation_scope"
+        );
     }
 
     #[test]

@@ -50,9 +50,10 @@ pub(crate) async fn poll_tasks(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<PollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let limit = req.limit.min(1000);
     let tasks = state
         .storage
-        .claim_worker_tasks(&req.handler_name, &req.worker_id, req.limit)
+        .claim_worker_tasks(&req.handler_name, &req.worker_id, limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
@@ -91,14 +92,10 @@ pub(crate) async fn poll_tasks_from_queue(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<QueuePollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let limit = req.limit.min(1000);
     let tasks = state
         .storage
-        .claim_worker_tasks_from_queue(
-            &req.queue_name,
-            &req.handler_name,
-            &req.worker_id,
-            req.limit,
-        )
+        .claim_worker_tasks_from_queue(&req.queue_name, &req.handler_name, &req.worker_id, limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
@@ -147,7 +144,11 @@ pub(crate) async fn complete_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
     if let Ok(Some(inst)) = state.storage.get_instance(pre_task.instance_id).await {
-        crate::auth::enforce_tenant_access(&tenant_ctx, &inst.tenant_id, &format!("worker_task {task_id}"))?;
+        crate::auth::enforce_tenant_access(
+            &tenant_ctx,
+            &inst.tenant_id,
+            &format!("worker_task {task_id}"),
+        )?;
     }
 
     let updated = state
@@ -239,7 +240,11 @@ pub(crate) async fn fail_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
     if let Ok(Some(inst)) = state.storage.get_instance(pre_task.instance_id).await {
-        crate::auth::enforce_tenant_access(&tenant_ctx, &inst.tenant_id, &format!("worker_task {task_id}"))?;
+        crate::auth::enforce_tenant_access(
+            &tenant_ctx,
+            &inst.tenant_id,
+            &format!("worker_task {task_id}"),
+        )?;
     }
 
     let updated = state
@@ -340,7 +345,11 @@ pub(crate) async fn heartbeat_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
     if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await {
-        crate::auth::enforce_tenant_access(&tenant_ctx, &inst.tenant_id, &format!("worker_task {task_id}"))?;
+        crate::auth::enforce_tenant_access(
+            &tenant_ctx,
+            &inst.tenant_id,
+            &format!("worker_task {task_id}"),
+        )?;
     }
 
     let updated = state

@@ -70,13 +70,18 @@ async fn create_plugin(
         ));
     }
     if body.name.len() > 255 {
-        return Err(ApiError::InvalidArgument("name must not exceed 255 characters".into()));
+        return Err(ApiError::InvalidArgument(
+            "name must not exceed 255 characters".into(),
+        ));
     }
     if body.source.len() > 2048 {
-        return Err(ApiError::InvalidArgument("source must not exceed 2048 characters".into()));
+        return Err(ApiError::InvalidArgument(
+            "source must not exceed 2048 characters".into(),
+        ));
     }
 
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
+    let tenant_id =
+        crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
 
     let now = chrono::Utc::now();
     let plugin = PluginDef {
@@ -125,7 +130,11 @@ async fn get_plugin(
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(plugin.tenant_id.clone()),
+        &format!("plugin '{name}'"),
+    )?;
     Ok(Json(plugin))
 }
 
@@ -141,7 +150,11 @@ async fn update_plugin(
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(plugin.tenant_id.clone()),
+        &format!("plugin '{name}'"),
+    )?;
 
     if let Some(source) = body.source {
         plugin.source = source;
@@ -177,7 +190,11 @@ async fn delete_plugin(
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(plugin.tenant_id.clone()), &format!("plugin '{name}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(plugin.tenant_id.clone()),
+        &format!("plugin '{name}'"),
+    )?;
 
     state
         .storage

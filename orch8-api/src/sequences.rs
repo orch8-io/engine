@@ -110,7 +110,11 @@ pub(crate) async fn get_sequence_by_name(
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
         .ok_or_else(|| ApiError::NotFound(format!("sequence {}", q.name)))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &seq.tenant_id, &format!("sequence {}", q.name))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &seq.tenant_id,
+        &format!("sequence {}", q.name),
+    )?;
 
     Ok(Json(seq))
 }
@@ -203,7 +207,11 @@ pub(crate) async fn migrate_instance(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {}", req.instance_id)))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {}", req.instance_id))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {}", req.instance_id),
+    )?;
 
     if instance.state.is_terminal() {
         return Err(ApiError::InvalidArgument(format!(

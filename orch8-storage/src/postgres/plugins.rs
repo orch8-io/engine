@@ -112,8 +112,7 @@ impl PluginRow {
     fn into_plugin(self) -> PluginDef {
         PluginDef {
             name: self.name,
-            plugin_type: PluginType::from_str_loose(&self.plugin_type)
-                .unwrap_or(PluginType::Wasm),
+            plugin_type: PluginType::from_str_loose(&self.plugin_type).unwrap_or(PluginType::Wasm),
             source: self.source,
             tenant_id: self.tenant_id,
             enabled: self.enabled,

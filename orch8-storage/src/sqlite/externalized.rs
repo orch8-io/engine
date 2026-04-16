@@ -33,7 +33,8 @@ pub(super) async fn get(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("payload")))
+    Ok(row
+        .map(|r| serde_json::from_str(r.get::<&str, _>("payload")))
         .transpose()?)
 }
 

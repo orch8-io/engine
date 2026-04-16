@@ -23,6 +23,7 @@ utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 subtle.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true

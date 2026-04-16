@@ -35,7 +35,6 @@ impl TriggerType {
     }
 }
 
-
 /// A persisted trigger definition that maps an event source to a sequence.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TriggerDef {
@@ -87,9 +86,15 @@ mod tests {
 
     #[test]
     fn trigger_type_from_str_loose() {
-        assert_eq!(TriggerType::from_str_loose("webhook"), Some(TriggerType::Webhook));
+        assert_eq!(
+            TriggerType::from_str_loose("webhook"),
+            Some(TriggerType::Webhook)
+        );
         assert_eq!(TriggerType::from_str_loose("nats"), Some(TriggerType::Nats));
-        assert_eq!(TriggerType::from_str_loose("file_watch"), Some(TriggerType::FileWatch));
+        assert_eq!(
+            TriggerType::from_str_loose("file_watch"),
+            Some(TriggerType::FileWatch)
+        );
         assert_eq!(TriggerType::from_str_loose("unknown"), None);
         assert_eq!(TriggerType::from_str_loose(""), None);
         assert_eq!(TriggerType::from_str_loose("WEBHOOK"), None);
@@ -149,16 +154,24 @@ mod tests {
             updated_at: now,
         };
         // Verify secret is accessible before serialization.
-        assert_eq!(def.secret.as_ref().map(|s| s.expose()), Some("s3cret"));
+        assert_eq!(
+            def.secret.as_ref().map(crate::config::SecretString::expose),
+            Some("s3cret")
+        );
         let json = serde_json::to_string(&def).unwrap();
-        // SecretString serializes as "***" — round-trip produces the redacted value.
-        assert!(json.contains("\"***\""));
+        // SecretString serializes as "[REDACTED]" — round-trip produces the redacted value.
+        assert!(json.contains("\"[REDACTED]\""));
         let back: TriggerDef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.slug, "on-push");
         assert_eq!(back.trigger_type, TriggerType::Nats);
         assert!(!back.enabled);
         assert_eq!(back.version, Some(3));
-        assert_eq!(back.secret.as_ref().map(|s| s.expose()), Some("***"));
+        assert_eq!(
+            back.secret
+                .as_ref()
+                .map(crate::config::SecretString::expose),
+            Some("[REDACTED]")
+        );
     }
 
     #[test]
@@ -168,7 +181,7 @@ mod tests {
             slug: "t".into(),
             sequence_name: "s".into(),
             version: None,
-            tenant_id: "".into(),
+            tenant_id: String::new(),
             namespace: "default".into(),
             enabled: true,
             secret: None,

@@ -1,5 +1,5 @@
 # ── Stage 1: Builder ─────────────────────────────────────────────────────────
-FROM rust:1.83-bookworm AS builder
+FROM rust:bookworm AS builder
 
 RUN apt-get update && apt-get install -y protobuf-compiler && rm -rf /var/lib/apt/lists/*
 

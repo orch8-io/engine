@@ -114,8 +114,8 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
         });
     }
 
-    let output: Value = serde_json::from_str(&body).unwrap_or_else(|_| {
-        warn!("grpc plugin: response is not valid JSON, wrapping as string");
+    let output: Value = serde_json::from_str(&body).unwrap_or_else(|e| {
+        warn!(error = %e, "grpc plugin: response is not valid JSON, wrapping as string");
         json!({ "raw": body })
     });
 

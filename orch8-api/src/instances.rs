@@ -377,7 +377,11 @@ pub(crate) async fn update_state(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     if !instance.state.can_transition_to(req.state) {
         return Err(ApiError::InvalidArgument(format!(
@@ -418,7 +422,11 @@ pub(crate) async fn update_context(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     state
         .storage
@@ -453,7 +461,11 @@ pub(crate) async fn send_signal(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     if instance.state.is_terminal() {
         return Err(ApiError::InvalidArgument(format!(
@@ -500,7 +512,11 @@ pub(crate) async fn get_outputs(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let outputs = state
         .storage
@@ -532,7 +548,11 @@ pub(crate) async fn get_execution_tree(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let tree = state
         .storage
@@ -662,7 +682,11 @@ pub(crate) async fn retry_instance(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     if instance.state != InstanceState::Failed {
         return Err(ApiError::InvalidArgument(format!(
@@ -719,7 +743,11 @@ pub(crate) async fn save_checkpoint(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let checkpoint = orch8_types::checkpoint::Checkpoint {
         id: Uuid::new_v4(),
@@ -756,7 +784,11 @@ pub(crate) async fn list_checkpoints(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let checkpoints = state
         .storage
@@ -786,7 +818,11 @@ pub(crate) async fn get_latest_checkpoint(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let checkpoint = state
         .storage
@@ -816,7 +852,11 @@ pub(crate) async fn prune_checkpoints(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let count = state
         .storage
@@ -848,7 +888,11 @@ async fn list_audit_log(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let entries = state
         .storage
@@ -870,9 +914,7 @@ pub(crate) struct InjectBlocksRequest {
 }
 
 /// Validate injected blocks and return their IDs.
-fn validate_injected_blocks(
-    blocks: &serde_json::Value,
-) -> Result<Vec<String>, ApiError> {
+fn validate_injected_blocks(blocks: &serde_json::Value) -> Result<Vec<String>, ApiError> {
     let arr = blocks
         .as_array()
         .ok_or_else(|| ApiError::InvalidArgument("blocks must be a JSON array".into()))?;
@@ -885,8 +927,8 @@ fn validate_injected_blocks(
     for (i, block) in arr.iter().enumerate() {
         let def = serde_json::from_value::<orch8_types::sequence::BlockDefinition>(block.clone())
             .map_err(|_| {
-                ApiError::InvalidArgument(format!("blocks[{i}] is not a valid BlockDefinition"))
-            })?;
+            ApiError::InvalidArgument(format!("blocks[{i}] is not a valid BlockDefinition"))
+        })?;
         ids.push(block_def_id(&def));
     }
     Ok(ids)
@@ -929,7 +971,11 @@ async fn inject_blocks(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let block_ids = validate_injected_blocks(&body.blocks)?;
 

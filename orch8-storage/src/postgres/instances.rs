@@ -67,7 +67,8 @@ pub(super) async fn create_batch(
                  created_at, updated_at) ",
         );
         qb.push_values(chunk, |mut b, inst| {
-            let context = serde_json::to_value(&inst.context).unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
+            let context = serde_json::to_value(&inst.context)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
             b.push_bind(inst.id.0)
                 .push_bind(inst.sequence_id.0)
                 .push_bind(&inst.tenant_id.0)

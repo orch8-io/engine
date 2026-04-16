@@ -44,16 +44,14 @@ pub fn select_resource(
                 pick -= r.weight;
             }
             // Fallback (shouldn't reach, but avoid panic)
-            available
-                .first()
-                .map_or(PoolAssignment::Empty, |r| {
-                    PoolAssignment::Assigned(r.resource_key.clone())
-                })
+            available.first().map_or(PoolAssignment::Empty, |r| {
+                PoolAssignment::Assigned(r.resource_key.clone())
+            })
         }
         RotationStrategy::Random => match available.choose(&mut rand::thread_rng()) {
             Some(r) => PoolAssignment::Assigned(r.resource_key.clone()),
             None => PoolAssignment::Empty,
-        }
+        },
     }
 }
 

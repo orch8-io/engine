@@ -43,9 +43,11 @@ impl Engine {
         cancel: CancellationToken,
     ) -> Self {
         let node_id = Uuid::new_v4();
-        let id_str = node_id.to_string();
-        let short_id = id_str.get(..8).unwrap_or(&id_str);
-        let node_name = hostname().unwrap_or_else(|| format!("node-{short_id}"));
+        let node_name = hostname().unwrap_or_else(|| {
+            // UUID hyphen-form is always ≥ 8 chars, so slicing is safe.
+            let id_str = node_id.to_string();
+            format!("node-{}", &id_str[..8])
+        });
         Self {
             storage,
             config,
@@ -130,13 +132,13 @@ impl Engine {
         let node_reaper_storage = Arc::clone(&self.storage);
         let node_reaper_cancel = self.cancel.clone();
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut ticker = tokio::time::interval(std::time::Duration::from_mins(1));
             loop {
                 tokio::select! {
                     () = node_reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
                         match node_reaper_storage
-                            .reap_stale_nodes(std::time::Duration::from_secs(120))
+                            .reap_stale_nodes(std::time::Duration::from_mins(2))
                             .await
                         {
                             Ok(0) => {}
@@ -158,7 +160,7 @@ impl Engine {
                     () = reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
                         match reaper_storage
-                            .reap_stale_worker_tasks(std::time::Duration::from_secs(60))
+                            .reap_stale_worker_tasks(std::time::Duration::from_mins(1))
                             .await
                         {
                             Ok(0) => {}

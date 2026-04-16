@@ -85,10 +85,7 @@ pub async fn api_key_middleware(
     match provided {
         Some(key)
             if key.len() == expected_key.len()
-                && key
-                    .as_bytes()
-                    .ct_eq(expected_key.as_bytes())
-                    .into() =>
+                && key.as_bytes().ct_eq(expected_key.as_bytes()).into() =>
         {
             Ok(next.run(request).await)
         }

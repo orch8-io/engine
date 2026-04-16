@@ -133,7 +133,11 @@ pub(crate) async fn get_cron(
         .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
         .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &schedule.tenant_id, &format!("cron_schedule {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &schedule.tenant_id,
+        &format!("cron_schedule {id}"),
+    )?;
 
     Ok(Json(schedule))
 }
@@ -179,7 +183,11 @@ pub(crate) async fn update_cron(
         .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
         .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &schedule.tenant_id, &format!("cron_schedule {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &schedule.tenant_id,
+        &format!("cron_schedule {id}"),
+    )?;
 
     if let Some(expr) = req.cron_expr {
         orch8_engine::cron::validate_cron_expr(&expr)
@@ -223,7 +231,11 @@ pub(crate) async fn delete_cron(
         .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
         .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
 
-    crate::auth::enforce_tenant_access(&tenant_ctx, &schedule.tenant_id, &format!("cron_schedule {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &schedule.tenant_id,
+        &format!("cron_schedule {id}"),
+    )?;
 
     state
         .storage

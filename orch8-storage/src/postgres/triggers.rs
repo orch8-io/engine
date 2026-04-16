@@ -124,8 +124,7 @@ impl TriggerRow {
             namespace: self.namespace,
             enabled: self.enabled,
             secret: self.secret.map(orch8_types::config::SecretString::new),
-            trigger_type: TriggerType::from_str_loose(&self.trigger_type)
-                .unwrap_or_default(),
+            trigger_type: TriggerType::from_str_loose(&self.trigger_type).unwrap_or_default(),
             config: self.config,
             created_at: self.created_at,
             updated_at: self.updated_at,

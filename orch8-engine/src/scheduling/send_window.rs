@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
+use tracing::warn;
 
 use orch8_types::sequence::SendWindow;
 
@@ -9,7 +10,10 @@ pub fn check_window(
     window: &SendWindow,
     timezone: &str,
 ) -> Option<DateTime<Utc>> {
-    let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+    let tz: chrono_tz::Tz = timezone.parse().unwrap_or_else(|_| {
+        warn!(timezone = %timezone, "invalid timezone, falling back to UTC");
+        chrono_tz::UTC
+    });
     let local = now.with_timezone(&tz);
 
     #[allow(clippy::cast_possible_truncation)]

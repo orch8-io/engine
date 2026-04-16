@@ -83,8 +83,7 @@ pub async fn execute_step_dry(
     match result {
         Ok(output) => {
             let output_size = serde_json::to_vec(&output)
-                .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
-                .unwrap_or(0);
+                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
 
             let block_output = maybe_externalize(
                 storage,
@@ -179,8 +178,7 @@ pub async fn execute_step(
     match result {
         Ok(output) => {
             let output_size = serde_json::to_vec(&output)
-                .map(|v| i32::try_from(v.len()).unwrap_or(i32::MAX))
-                .unwrap_or(0);
+                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
 
             let block_output = maybe_externalize(
                 storage,

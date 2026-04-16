@@ -53,10 +53,8 @@ pub(super) async fn get_pending_batch(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    let mut result: HashMap<InstanceId, Vec<Signal>> = instance_ids
-        .iter()
-        .map(|id| (*id, Vec::new()))
-        .collect();
+    let mut result: HashMap<InstanceId, Vec<Signal>> =
+        instance_ids.iter().map(|id| (*id, Vec::new())).collect();
     for row in &rows {
         let signal = row_to_signal(row)?;
         result.entry(signal.instance_id).or_default().push(signal);

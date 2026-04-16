@@ -45,7 +45,11 @@ use orch8_types::error::StepError;
 use super::StepContext;
 
 pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
-    let review_data = ctx.params.get("review_data").cloned().unwrap_or(Value::Null);
+    let review_data = ctx
+        .params
+        .get("review_data")
+        .cloned()
+        .unwrap_or(Value::Null);
     let instructions = ctx
         .params
         .get("instructions")

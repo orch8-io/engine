@@ -188,13 +188,12 @@ async fn cancel_scoped(
         let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
 
         // Check per-step cancellable flag.
-        let step_cancellable =
-            crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
-                .and_then(|block| match block {
-                    BlockDefinition::Step(step) => Some(step.cancellable),
-                    _ => None,
-                })
-                .unwrap_or(true);
+        let step_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
+            .and_then(|block| match block {
+                BlockDefinition::Step(step) => Some(step.cancellable),
+                _ => None,
+            })
+            .unwrap_or(true);
 
         let is_cancellable = step_cancellable && !inside_scope;
 

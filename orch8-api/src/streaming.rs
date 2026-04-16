@@ -36,9 +36,7 @@ fn default_poll_ms() -> u64 {
 fn is_terminal(state: InstanceState) -> bool {
     matches!(
         state,
-        InstanceState::Completed
-            | InstanceState::Failed
-            | InstanceState::Cancelled
+        InstanceState::Completed | InstanceState::Failed | InstanceState::Cancelled
     )
 }
 
@@ -58,21 +56,38 @@ pub(crate) async fn stream_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let poll_interval = Duration::from_millis(query.poll_ms.clamp(100, 5000));
 
+    // Channel depth: one slot per event type we may emit per tick (state, outputs batch, done).
+    // Small buffer ensures a slow client applies backpressure to the producer.
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+    let shutdown = state.shutdown.clone();
+    let storage = state.storage.clone();
 
     tokio::spawn(async move {
         let mut last_output_count: usize = 0;
-        let mut last_state: Option<String> = None;
+        let mut last_state: Option<InstanceState> = None;
+        let mut ticker = tokio::time::interval(poll_interval);
+        // Skip the immediate first tick so we don't double-query right after the prefetch above.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
 
         loop {
-            tokio::time::sleep(poll_interval).await;
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => break,
+                () = tx.closed() => break,
+                _ = ticker.tick() => {}
+            }
 
             // Fetch instance.
-            let instance = match state.storage.get_instance(instance_id).await {
+            let instance = match storage.get_instance(instance_id).await {
                 Ok(Some(inst)) => inst,
                 Ok(None) => {
                     let _ = tx
@@ -82,38 +97,47 @@ pub(crate) async fn stream_instance(
                         .await;
                     break;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, instance_id = %instance_id.0, "stream: get_instance failed, will retry");
+                    continue;
+                }
             };
 
             // Emit state change.
-            let current_state = instance.state.to_string();
-            if last_state.as_deref() != Some(&current_state) {
+            if last_state != Some(instance.state) {
                 let event = Event::default().event("state").data(
                     serde_json::json!({
-                        "instance_id": instance_id.0.to_string(),
-                        "state": &current_state,
+                        "instance_id": instance_id.0,
+                        "state": instance.state.to_string(),
                     })
                     .to_string(),
                 );
                 if tx.send(Ok(event)).await.is_err() {
                     break;
                 }
-                last_state = Some(current_state);
+                last_state = Some(instance.state);
             }
 
             // Emit new block outputs.
-            if let Ok(outputs) = state.storage.get_all_outputs(instance_id).await {
-                let new_count = outputs.len();
-                if new_count > last_output_count {
-                    for output in outputs.iter().skip(last_output_count) {
-                        let event = Event::default()
-                            .event("output")
-                            .data(serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string()));
-                        if tx.send(Ok(event)).await.is_err() {
-                            return;
+            match storage.get_all_outputs(instance_id).await {
+                Ok(outputs) => {
+                    let new_count = outputs.len();
+                    if new_count > last_output_count {
+                        for output in outputs.iter().skip(last_output_count) {
+                            // Serialisation of owned `BlockOutput` is infallible in practice —
+                            // if it ever fails, drop the payload but keep the stream alive.
+                            let payload =
+                                serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string());
+                            let event = Event::default().event("output").data(payload);
+                            if tx.send(Ok(event)).await.is_err() {
+                                return;
+                            }
                         }
+                        last_output_count = new_count;
                     }
-                    last_output_count = new_count;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, instance_id = %instance_id.0, "stream: get_all_outputs failed, will retry");
                 }
             }
 

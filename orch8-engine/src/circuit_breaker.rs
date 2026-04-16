@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use chrono::Utc;
+use tracing::warn;
 
 use orch8_types::circuit_breaker::{BreakerState, CircuitBreakerState};
 
@@ -24,7 +25,7 @@ impl CircuitBreakerRegistry {
     /// Check if a handler is allowed to execute. Returns `Ok(())` if allowed,
     /// or `Err(remaining_cooldown_secs)` if the circuit is open.
     pub fn check(&self, handler: &str) -> Result<(), u64> {
-        let mut map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self.lock_breakers();
         let breaker = map
             .entry(handler.to_string())
             .or_insert_with(|| self.default_breaker(handler));
@@ -53,7 +54,7 @@ impl CircuitBreakerRegistry {
 
     /// Record a successful execution for a handler.
     pub fn record_success(&self, handler: &str) {
-        let mut map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self.lock_breakers();
         if let Some(breaker) = map.get_mut(handler) {
             breaker.failure_count = 0;
             breaker.state = BreakerState::Closed;
@@ -63,7 +64,7 @@ impl CircuitBreakerRegistry {
 
     /// Record a failure for a handler. May trip the circuit to Open.
     pub fn record_failure(&self, handler: &str) {
-        let mut map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self.lock_breakers();
         let breaker = map
             .entry(handler.to_string())
             .or_insert_with(|| self.default_breaker(handler));
@@ -78,24 +79,31 @@ impl CircuitBreakerRegistry {
 
     /// Get the current state of all breakers.
     pub fn list_all(&self) -> Vec<CircuitBreakerState> {
-        let map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = self.lock_breakers();
         map.values().cloned().collect()
     }
 
     /// Get the current state of a specific handler's breaker.
     pub fn get(&self, handler: &str) -> Option<CircuitBreakerState> {
-        let map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = self.lock_breakers();
         map.get(handler).cloned()
     }
 
     /// Reset a handler's circuit breaker to Closed.
     pub fn reset(&self, handler: &str) {
-        let mut map = self.breakers.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut map = self.lock_breakers();
         if let Some(breaker) = map.get_mut(handler) {
             breaker.state = BreakerState::Closed;
             breaker.failure_count = 0;
             breaker.opened_at = None;
         }
+    }
+
+    fn lock_breakers(&self) -> MutexGuard<'_, HashMap<String, CircuitBreakerState>> {
+        self.breakers.lock().unwrap_or_else(|poisoned| {
+            warn!("circuit breaker mutex was poisoned, recovering");
+            poisoned.into_inner()
+        })
     }
 
     fn default_breaker(&self, handler: &str) -> CircuitBreakerState {

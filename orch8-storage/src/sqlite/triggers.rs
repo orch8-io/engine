@@ -131,8 +131,7 @@ impl TriggerRow {
             namespace: self.namespace,
             enabled: self.enabled,
             secret: self.secret.map(orch8_types::config::SecretString::new),
-            trigger_type: TriggerType::from_str_loose(&self.trigger_type)
-                .unwrap_or_default(),
+            trigger_type: TriggerType::from_str_loose(&self.trigger_type).unwrap_or_default(),
             config: serde_json::from_str(&self.config).unwrap_or_default(),
             created_at: parse_ts(&self.created_at),
             updated_at: parse_ts(&self.updated_at),

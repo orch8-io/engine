@@ -63,7 +63,10 @@ fn skip_non_business_days(
     timezone: &str,
     holidays: &[NaiveDate],
 ) -> DateTime<Utc> {
-    let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+    let tz: chrono_tz::Tz = timezone.parse().unwrap_or_else(|_| {
+        tracing::warn!(timezone = %timezone, "invalid timezone, falling back to UTC");
+        chrono_tz::UTC
+    });
     let mut current = dt;
 
     // Advance past weekends and holidays (max 30 days to avoid infinite loop).

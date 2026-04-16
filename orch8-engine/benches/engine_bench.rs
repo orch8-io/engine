@@ -32,7 +32,7 @@ fn make_context() -> ExecutionContext {
             "feature_flags": {"new_ui": true}
         }),
         audit: vec![],
-        runtime: Default::default(),
+        runtime: orch8_types::context::RuntimeContext::default(),
     }
 }
 

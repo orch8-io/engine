@@ -45,7 +45,8 @@ pub async fn execute_step_node(
 ) -> Result<bool, EngineError> {
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
     if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
-        let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc).await
+        let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc)
+            .await
             .unwrap_or_else(|| step_def.handler.clone());
         let mut params = step_def.params.clone();
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
@@ -58,13 +59,15 @@ pub async fn execute_step_node(
         };
         return dispatch_plugin(storage, node, || {
             super::grpc_plugin::handle_grpc_plugin(ctx)
-        }).await;
+        })
+        .await;
     }
 
     // If the handler is a WASM plugin, resolve via the plugin registry then dispatch.
     if super::wasm_plugin::is_wasm_handler(&step_def.handler) {
         if let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler) {
-            let wasm_path = resolve_plugin_source(storage, plugin_name, PluginType::Wasm).await
+            let wasm_path = resolve_plugin_source(storage, plugin_name, PluginType::Wasm)
+                .await
                 .unwrap_or_else(|| plugin_name.to_string());
             let ctx = super::StepContext {
                 instance_id: instance.id,
@@ -75,7 +78,8 @@ pub async fn execute_step_node(
             };
             return dispatch_plugin(storage, node, || {
                 super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
-            }).await;
+            })
+            .await;
         }
     }
 
@@ -98,7 +102,11 @@ pub async fn execute_step_node(
     match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
         Ok(output) => {
             // Check for self-modify output: inject blocks into the instance.
-            if output.get("_self_modify").and_then(serde_json::Value::as_bool) == Some(true) {
+            if output
+                .get("_self_modify")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
                 if let Some(blocks) = output.get("blocks").filter(|v| v.is_array()) {
                     let position = output.get("position").and_then(serde_json::Value::as_u64);
                     let final_blocks = if let Some(pos) = position {

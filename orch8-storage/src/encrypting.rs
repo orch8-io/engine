@@ -296,9 +296,7 @@ impl StorageBackend for EncryptingStorage {
         instance_ids: &[InstanceId],
     ) -> Result<std::collections::HashMap<InstanceId, Vec<orch8_types::ids::BlockId>>, StorageError>
     {
-        self.inner
-            .get_completed_block_ids_batch(instance_ids)
-            .await
+        self.inner.get_completed_block_ids_batch(instance_ids).await
     }
 
     async fn save_output_and_transition(
@@ -707,9 +705,7 @@ impl StorageBackend for EncryptingStorage {
         tenant_id: &orch8_types::ids::TenantId,
         limit: u32,
     ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
-        self.inner
-            .list_audit_log_by_tenant(tenant_id, limit)
-            .await
+        self.inner.list_audit_log_by_tenant(tenant_id, limit).await
     }
 
     // === Sessions ===
@@ -767,10 +763,7 @@ impl StorageBackend for EncryptingStorage {
         &self,
         parent_instance_id: InstanceId,
     ) -> Result<Vec<TaskInstance>, StorageError> {
-        let mut instances = self
-            .inner
-            .get_child_instances(parent_instance_id)
-            .await?;
+        let mut instances = self.inner.get_child_instances(parent_instance_id).await?;
         self.decrypt_instances(&mut instances)?;
         Ok(instances)
     }
@@ -827,9 +820,7 @@ impl StorageBackend for EncryptingStorage {
         self.inner.deregister_node(node_id).await
     }
 
-    async fn list_nodes(
-        &self,
-    ) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError> {
+    async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError> {
         self.inner.list_nodes().await
     }
 

@@ -47,7 +47,7 @@ pub async fn run_tick_loop(
     let sequence_cache: Arc<Cache<SequenceId, Arc<SequenceDefinition>>> = Arc::new(
         Cache::builder()
             .max_capacity(1_000)
-            .time_to_live(Duration::from_secs(300))
+            .time_to_live(Duration::from_mins(5))
             .build(),
     );
 
@@ -95,18 +95,23 @@ pub async fn run_tick_loop(
     }
 }
 
-/// Wait until all semaphore permits are available (all tasks drained).
+/// Wait until all semaphore permits are available (all in-flight tasks drained).
+///
+/// Uses `acquire_many` which blocks until `max_permits` are free — no polling.
 async fn wait_for_drain(semaphore: &Semaphore, max_permits: usize) {
-    loop {
-        if semaphore.available_permits() == max_permits {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Saturating cast: `max_concurrent_steps` is `u32` at the config layer, so
+    // values above `u32::MAX` cannot occur in practice. Clamp defensively.
+    let permits = u32::try_from(max_permits).unwrap_or(u32::MAX);
+    // If acquire_many errors, the semaphore was closed — drain is trivially complete.
+    if let Ok(permit) = semaphore.acquire_many(permits).await {
+        // Immediately release: we only care that all in-flight tasks returned their permits.
+        drop(permit);
     }
 }
 
 /// Process a single tick: claim due instances and spawn processing tasks.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(batch_size = batch_size, claimed = tracing::field::Empty))]
 async fn process_tick(
     storage: &Arc<dyn StorageBackend>,
     handlers: &Arc<HandlerRegistry>,
@@ -130,6 +135,7 @@ async fn process_tick(
     }
 
     let count = instances.len();
+    tracing::Span::current().record("claimed", count);
     debug!(count = count, "claimed instances for processing");
     #[allow(clippy::cast_precision_loss)]
     crate::metrics::set_gauge(crate::metrics::QUEUE_DEPTH, count as f64);
@@ -213,27 +219,42 @@ async fn process_tick(
 }
 
 /// Build a map from `instance_id` to `PrefetchedData` from the batch query results.
+///
+/// Consumes both inputs and merges them in place — no intermediate `HashSet`
+/// allocation, no redundant lookups.
 fn build_prefetch_map(
-    mut signals_map: HashMap<InstanceId, Vec<Signal>>,
+    signals_map: HashMap<InstanceId, Vec<Signal>>,
     mut completed_map: HashMap<InstanceId, Vec<BlockId>>,
 ) -> HashMap<InstanceId, PrefetchedData> {
-    // Merge both maps into a single PrefetchedData per instance.
-    let all_ids: std::collections::HashSet<InstanceId> = signals_map
-        .keys()
-        .chain(completed_map.keys())
-        .copied()
-        .collect();
+    // Pre-size for the worst case (no key overlap). Sparse overlap is the common case.
+    let mut result: HashMap<InstanceId, PrefetchedData> =
+        HashMap::with_capacity(signals_map.len() + completed_map.len());
 
-    let mut result = HashMap::with_capacity(all_ids.len());
-    for id in all_ids {
+    // Drain the signals map first — every signal owner definitely needs an entry,
+    // and we opportunistically drain its matching completed-blocks entry in the
+    // same pass.
+    for (id, signals) in signals_map {
+        let completed_block_ids = completed_map.remove(&id).unwrap_or_default();
         result.insert(
             id,
             PrefetchedData {
-                signals: signals_map.remove(&id).unwrap_or_default(),
-                completed_block_ids: completed_map.remove(&id).unwrap_or_default(),
+                signals,
+                completed_block_ids,
             },
         );
     }
+
+    // Anything left in `completed_map` had no signals — insert with an empty signal list.
+    for (id, completed_block_ids) in completed_map {
+        result.insert(
+            id,
+            PrefetchedData {
+                signals: Vec::new(),
+                completed_block_ids,
+            },
+        );
+    }
+
     result
 }
 
@@ -300,8 +321,7 @@ async fn process_instance(
     }
 
     // Merge dynamically injected blocks with the sequence definition.
-    let blocks =
-        crate::evaluator::merged_blocks(storage, instance.id, &sequence).await?;
+    let blocks = crate::evaluator::merged_blocks(storage, instance.id, &sequence).await?;
 
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
@@ -310,8 +330,15 @@ async fn process_instance(
         .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)));
 
     if has_composite {
-        return process_instance_tree(storage, handlers, webhook_config, &instance, &sequence, cancel)
-            .await;
+        return process_instance_tree(
+            storage,
+            handlers,
+            webhook_config,
+            &instance,
+            &sequence,
+            cancel,
+        )
+        .await;
     }
 
     // Fast path: all blocks are Steps. Execute multi-block per claim cycle.
@@ -482,14 +509,26 @@ async fn process_instance_tree(
 }
 
 /// Fetch a sequence definition, using the in-memory cache when available.
+///
+/// Emits `orch8_cache_hits_total` / `orch8_cache_misses_total` labelled with
+/// `cache="sequence"` so operators can monitor the hit ratio and tune `max_capacity` / TTL.
 async fn get_sequence_cached(
     storage: &dyn StorageBackend,
     cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
     sequence_id: SequenceId,
 ) -> Result<Arc<SequenceDefinition>, EngineError> {
     if let Some(seq) = cache.get(&sequence_id).await {
+        crate::metrics::inc_with(
+            crate::metrics::CACHE_HITS,
+            &[("cache", "sequence".to_string())],
+        );
         return Ok(seq);
     }
+
+    crate::metrics::inc_with(
+        crate::metrics::CACHE_MISSES,
+        &[("cache", "sequence".to_string())],
+    );
 
     let seq = storage
         .get_sequence(sequence_id)
@@ -542,9 +581,18 @@ async fn check_step_deadline(
             let mut params = escalation.params.clone();
             if let serde_json::Value::Object(ref mut map) = params {
                 map.insert("_breach_block_id".into(), serde_json::json!(step_def.id.0));
-                map.insert("_breach_instance_id".into(), serde_json::json!(instance_id.0));
-                map.insert("_breach_elapsed_ms".into(), serde_json::json!(elapsed.num_milliseconds()));
-                map.insert("_breach_deadline_ms".into(), serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)));
+                map.insert(
+                    "_breach_instance_id".into(),
+                    serde_json::json!(instance_id.0),
+                );
+                map.insert(
+                    "_breach_elapsed_ms".into(),
+                    serde_json::json!(elapsed.num_milliseconds()),
+                );
+                map.insert(
+                    "_breach_deadline_ms".into(),
+                    serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+                );
             }
             let step_ctx = crate::handlers::StepContext {
                 instance_id,
@@ -1148,10 +1196,64 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_drain_returns_when_all_permits_available() {
-        // When semaphore has all permits, wait_for_drain should return immediately.
-        // This is just a structural test of the semaphore check.
-        let sem = Semaphore::new(10);
-        assert_eq!(sem.available_permits(), 10);
+    fn build_prefetch_map_signals_only_instance() {
+        // An instance with signals but no completed blocks must still appear.
+        let id = InstanceId(Uuid::new_v4());
+        let mut signals = HashMap::new();
+        signals.insert(
+            id,
+            vec![Signal {
+                id: Uuid::new_v4(),
+                instance_id: id,
+                signal_type: SignalType::Resume,
+                payload: serde_json::Value::Null,
+                delivered: false,
+                created_at: Utc::now(),
+                delivered_at: None,
+            }],
+        );
+
+        let result = build_prefetch_map(signals, HashMap::new());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&id].signals.len(), 1);
+        assert!(result[&id].completed_block_ids.is_empty());
+    }
+
+    #[test]
+    fn build_prefetch_map_completed_only_instance() {
+        // An instance with only completed-block data must still appear with empty signals.
+        let id = InstanceId(Uuid::new_v4());
+        let mut completed = HashMap::new();
+        completed.insert(id, vec![BlockId("step-a".into()), BlockId("step-b".into())]);
+
+        let result = build_prefetch_map(HashMap::new(), completed);
+        assert_eq!(result.len(), 1);
+        assert!(result[&id].signals.is_empty());
+        assert_eq!(result[&id].completed_block_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn wait_for_drain_waits_for_permits_returned() {
+        // Acquire a permit, spawn a task that holds it briefly, then ensure drain waits.
+        let sem = Arc::new(Semaphore::new(2));
+        let held = Arc::clone(&sem).acquire_owned().await.unwrap();
+
+        // Drain future shouldn't complete while we're holding a permit.
+        let drain = {
+            let sem = Arc::clone(&sem);
+            tokio::spawn(async move { wait_for_drain(&sem, 2).await })
+        };
+
+        // Give the task a chance to start.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!drain.is_finished(), "drain should still be waiting");
+
+        drop(held);
+        // After releasing, drain must complete promptly.
+        tokio::time::timeout(Duration::from_millis(500), drain)
+            .await
+            .expect("drain timed out after permit released")
+            .expect("drain task panicked");
+        assert_eq!(sem.available_permits(), 2);
     }
 }

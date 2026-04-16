@@ -305,12 +305,11 @@ mod tests {
     async fn http_request_missing_url_fails() {
         let result = handle_http_request(test_ctx(json!({}))).await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            StepError::Permanent { message, .. } => {
-                assert!(message.contains("url"));
-            }
-            other => panic!("expected Permanent, got {other:?}"),
-        }
+        let err = result.unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("url"));
     }
 
     #[test]

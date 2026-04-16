@@ -143,7 +143,7 @@ mod tests {
             data: json!({"user": {"name": "Alice", "age": 30}}),
             config: json!({"api_key": "secret"}),
             audit: vec![],
-            runtime: Default::default(),
+            runtime: orch8_types::context::RuntimeContext::default(),
         }
     }
 

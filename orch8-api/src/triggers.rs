@@ -63,13 +63,18 @@ async fn create_trigger(
         ));
     }
     if body.slug.len() > 255 {
-        return Err(ApiError::InvalidArgument("slug must not exceed 255 characters".into()));
+        return Err(ApiError::InvalidArgument(
+            "slug must not exceed 255 characters".into(),
+        ));
     }
     if body.sequence_name.len() > 255 {
-        return Err(ApiError::InvalidArgument("sequence_name must not exceed 255 characters".into()));
+        return Err(ApiError::InvalidArgument(
+            "sequence_name must not exceed 255 characters".into(),
+        ));
     }
 
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
+    let tenant_id =
+        crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(body.tenant_id.clone()))?;
 
     let now = chrono::Utc::now();
     let trigger = TriggerDef {
@@ -120,7 +125,11 @@ async fn get_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(trigger.tenant_id.clone()),
+        &format!("trigger '{slug}'"),
+    )?;
     Ok(Json(trigger))
 }
 
@@ -136,7 +145,11 @@ async fn delete_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(trigger.tenant_id.clone()),
+        &format!("trigger '{slug}'"),
+    )?;
 
     state
         .storage
@@ -163,7 +176,11 @@ async fn fire_trigger(
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &TenantId(trigger.tenant_id.clone()), &format!("trigger '{slug}'"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId(trigger.tenant_id.clone()),
+        &format!("trigger '{slug}'"),
+    )?;
 
     if !trigger.enabled {
         return Err(ApiError::InvalidArgument(format!(
@@ -186,13 +203,9 @@ async fn fire_trigger(
     }
 
     let meta = serde_json::json!({ "source": "http_fire" });
-    let instance_id = orch8_engine::triggers::create_trigger_instance(
-        &*state.storage,
-        &trigger,
-        body,
-        meta,
-    )
-    .await?;
+    let instance_id =
+        orch8_engine::triggers::create_trigger_instance(&*state.storage, &trigger, body, meta)
+            .await?;
 
     Ok((
         StatusCode::CREATED,

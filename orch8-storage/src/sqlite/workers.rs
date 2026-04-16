@@ -87,10 +87,7 @@ pub(super) async fn claim(
         let sql = format!(
             "UPDATE worker_tasks SET state='claimed', worker_id=?1, claimed_at=?2, heartbeat_at=?3 WHERE id IN ({placeholders})"
         );
-        let mut q = sqlx::query(&sql)
-            .bind(worker_id)
-            .bind(&now)
-            .bind(&now);
+        let mut q = sqlx::query(&sql).bind(worker_id).bind(&now).bind(&now);
         for id in &ids {
             q = q.bind(id);
         }
@@ -147,14 +144,15 @@ pub(super) async fn heartbeat(
     task_id: Uuid,
     worker_id: &str,
 ) -> Result<bool, StorageError> {
-    let result =
-        sqlx::query("UPDATE worker_tasks SET heartbeat_at=?3 WHERE id=?1 AND worker_id=?2 AND state='claimed'")
-            .bind(task_id.to_string())
-            .bind(worker_id)
-            .bind(ts(Utc::now()))
-            .execute(&storage.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
+    let result = sqlx::query(
+        "UPDATE worker_tasks SET heartbeat_at=?3 WHERE id=?1 AND worker_id=?2 AND state='claimed'",
+    )
+    .bind(task_id.to_string())
+    .bind(worker_id)
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(result.rows_affected() > 0)
 }
 

@@ -87,10 +87,8 @@ pub(super) async fn get_completed_ids_batch(
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    let mut result: HashMap<InstanceId, Vec<BlockId>> = instance_ids
-        .iter()
-        .map(|id| (*id, Vec::new()))
-        .collect();
+    let mut result: HashMap<InstanceId, Vec<BlockId>> =
+        instance_ids.iter().map(|id| (*id, Vec::new())).collect();
     for row in &rows {
         let iid_str: String = row.get("instance_id");
         let block_id = BlockId(row.get::<String, _>("block_id"));

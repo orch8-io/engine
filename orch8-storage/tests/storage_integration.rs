@@ -1,4 +1,4 @@
-//! Comprehensive integration tests for `StorageBackend` via SQLite in-memory.
+//! Comprehensive integration tests for `StorageBackend` via `SQLite` in-memory.
 //!
 //! Tests complex scenarios, multi-domain interactions, and edge cases
 //! that unit tests inside individual modules don't cover.
@@ -719,7 +719,7 @@ async fn resource_pool_lifecycle() {
 async fn externalized_state_crud() {
     let s = store().await;
     let inst_id = InstanceId::new();
-    let ref_key = format!("ext_{}", inst_id);
+    let ref_key = format!("ext_{inst_id}");
     let payload = json!({"large": "data", "items": [1,2,3,4,5]});
 
     s.save_externalized_state(inst_id, &ref_key, &payload)
@@ -1393,10 +1393,9 @@ async fn perf_bulk_instance_creation_1000() {
     // Should complete in under 5 seconds even on slow CI.
     assert!(
         elapsed.as_secs() < 5,
-        "Bulk insert of 1000 took {:?}",
-        elapsed
+        "Bulk insert of 1000 took {elapsed:?}"
     );
-    eprintln!("perf_bulk_instance_creation_1000: {:?}", elapsed);
+    eprintln!("perf_bulk_instance_creation_1000: {elapsed:?}");
 }
 
 #[tokio::test]
@@ -1423,10 +1422,9 @@ async fn perf_claim_due_under_load() {
     assert_eq!(claimed.len(), 100);
     assert!(
         elapsed.as_millis() < 2000,
-        "Claim 100 from 500 took {:?}",
-        elapsed
+        "Claim 100 from 500 took {elapsed:?}"
     );
-    eprintln!("perf_claim_due_under_load (100/500): {:?}", elapsed);
+    eprintln!("perf_claim_due_under_load (100/500): {elapsed:?}");
 }
 
 #[tokio::test]
@@ -1462,10 +1460,7 @@ async fn perf_signal_batch_throughput() {
     let remaining = s.get_pending_signals(inst_id).await.unwrap();
     assert_eq!(remaining.len(), 0);
 
-    eprintln!(
-        "perf_signal_batch: fetch={:?}, deliver={:?}",
-        fetch_elapsed, deliver_elapsed
-    );
+    eprintln!("perf_signal_batch: fetch={fetch_elapsed:?}, deliver={deliver_elapsed:?}");
 }
 
 #[tokio::test]
@@ -1510,13 +1505,13 @@ async fn perf_execution_tree_deep() {
     let elapsed = start.elapsed();
 
     assert_eq!(tree.len(), 51);
-    eprintln!("perf_execution_tree_deep (51 nodes): {:?}", elapsed);
+    eprintln!("perf_execution_tree_deep (51 nodes): {elapsed:?}");
 
     let start2 = std::time::Instant::now();
     let children = s.get_children(root.id).await.unwrap();
     let elapsed2 = start2.elapsed();
     assert_eq!(children.len(), 50);
-    eprintln!("perf_get_children (50 children): {:?}", elapsed2);
+    eprintln!("perf_get_children (50 children): {elapsed2:?}");
 }
 
 #[tokio::test]
@@ -1562,8 +1557,5 @@ async fn perf_concurrent_worker_claims() {
     let elapsed = start.elapsed();
 
     assert_eq!(total_claimed, 100);
-    eprintln!(
-        "perf_concurrent_worker_claims (100 tasks, 5 workers): {:?}",
-        elapsed
-    );
+    eprintln!("perf_concurrent_worker_claims (100 tasks, 5 workers): {elapsed:?}");
 }

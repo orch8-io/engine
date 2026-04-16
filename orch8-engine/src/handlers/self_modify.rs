@@ -35,9 +35,9 @@ pub async fn handle_self_modify(ctx: StepContext) -> Result<Value, StepError> {
         .map(|p| p.min(usize::MAX as u64) as usize);
 
     // Validate blocks parse as BlockDefinition.
-    if let Err(e) = serde_json::from_value::<Vec<orch8_types::sequence::BlockDefinition>>(
-        blocks.clone(),
-    ) {
+    if let Err(e) =
+        serde_json::from_value::<Vec<orch8_types::sequence::BlockDefinition>>(blocks.clone())
+    {
         return Err(StepError::Permanent {
             message: format!("invalid blocks: {e}"),
             details: Some(blocks),

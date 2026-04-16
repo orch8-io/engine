@@ -143,8 +143,7 @@ fn write_if_absent(path: &Path, content: &str) -> Result<()> {
             path.file_name().unwrap_or_default().to_string_lossy()
         );
     } else {
-        fs::write(path, content)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
         println!(
             "  create {}",
             path.file_name().unwrap_or_default().to_string_lossy()

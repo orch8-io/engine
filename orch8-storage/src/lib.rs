@@ -17,11 +17,11 @@ use orch8_types::ids::{
 };
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::output::BlockOutput;
+use orch8_types::plugin::PluginDef;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::Session;
 use orch8_types::signal::Signal;
-use orch8_types::plugin::PluginDef;
 use orch8_types::trigger::TriggerDef;
 use orch8_types::worker::WorkerTask;
 

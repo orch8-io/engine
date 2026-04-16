@@ -113,7 +113,11 @@ async fn get_session_by_key(
         .await
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session by key {}", session.id))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &session.tenant_id,
+        &format!("session by key {}", session.id),
+    )?;
     Ok(Json(session))
 }
 

@@ -335,11 +335,9 @@ async fn run_file_watch_listener(
             crate::error::EngineError::InvalidConfig(format!("file watcher init failed: {e}"))
         })?;
 
-    watcher
-        .watch(&PathBuf::from(&path), mode)
-        .map_err(|e| {
-            crate::error::EngineError::InvalidConfig(format!("file watch start failed: {e}"))
-        })?;
+    watcher.watch(&PathBuf::from(&path), mode).map_err(|e| {
+        crate::error::EngineError::InvalidConfig(format!("file watch start failed: {e}"))
+    })?;
 
     loop {
         tokio::select! {

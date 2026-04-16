@@ -53,7 +53,12 @@ pub async fn ensure_execution_tree(
         for block in blocks {
             let (bid, _) = block_meta(block);
             if !existing_block_ids.contains(bid.0.as_str()) {
-                build_nodes(instance.id, None, std::slice::from_ref(block), &mut new_nodes);
+                build_nodes(
+                    instance.id,
+                    None,
+                    std::slice::from_ref(block),
+                    &mut new_nodes,
+                );
             }
         }
         if !new_nodes.is_empty() {
@@ -63,7 +68,10 @@ pub async fn ensure_execution_tree(
                 new_count = new_nodes.len(),
                 "injected blocks added to execution tree"
             );
-            return storage.get_execution_tree(instance.id).await.map_err(Into::into);
+            return storage
+                .get_execution_tree(instance.id)
+                .await
+                .map_err(Into::into);
         }
         return Ok(existing);
     }
@@ -258,12 +266,15 @@ pub async fn evaluate(
     let max_iterations = 200;
     for _ in 0..max_iterations {
         // Re-fetch tree to see latest state after each dispatch.
-        let tree = storage.get_execution_tree(instance.id).await?;
+        let mut tree = storage.get_execution_tree(instance.id).await?;
 
         // SLA deadline check: fail any step nodes that have breached their deadline.
-        check_sla_deadlines(storage, handlers, instance, &blocks, &tree).await?;
-        // Re-fetch tree if any deadlines were breached (state may have changed).
-        let tree = storage.get_execution_tree(instance.id).await?;
+        let deadlines_breached =
+            check_sla_deadlines(storage, handlers, instance, &blocks, &tree).await?;
+        // Re-fetch tree only if deadlines were breached (state may have changed).
+        if deadlines_breached {
+            tree = storage.get_execution_tree(instance.id).await?;
+        }
         let root_nodes: Vec<&ExecutionNode> =
             tree.iter().filter(|n| n.parent_id.is_none()).collect();
 
@@ -362,10 +373,8 @@ fn find_running_step<'a>(
 /// Count ancestors to determine tree depth.
 /// Uses a `HashMap` index for O(depth) lookup instead of O(n) per ancestor.
 fn count_ancestors(tree: &[ExecutionNode], mut node_id: ExecutionNodeId) -> usize {
-    let parent_map: std::collections::HashMap<ExecutionNodeId, Option<ExecutionNodeId>> = tree
-        .iter()
-        .map(|n| (n.id, n.parent_id))
-        .collect();
+    let parent_map: std::collections::HashMap<ExecutionNodeId, Option<ExecutionNodeId>> =
+        tree.iter().map(|n| (n.id, n.parent_id)).collect();
     let mut depth = 0;
     while let Some(Some(parent_id)) = parent_map.get(&node_id) {
         depth += 1;
@@ -455,14 +464,16 @@ pub fn find_block<'a>(
 
 /// Check all Running/Waiting step nodes for SLA deadline breaches.
 /// On breach: invoke escalation handler (if configured), then fail the node.
+/// Returns `true` if any deadline was breached (tree state was modified).
 async fn check_sla_deadlines(
     storage: &dyn StorageBackend,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     blocks: &[BlockDefinition],
     tree: &[ExecutionNode],
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     let now = chrono::Utc::now();
+    let mut breached = false;
     for node in tree {
         if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
             continue;
@@ -481,6 +492,7 @@ async fn check_sla_deadlines(
             continue;
         }
         // Deadline breached!
+        breached = true;
         warn!(
             instance_id = %instance.id,
             block_id = %node.block_id,
@@ -557,7 +569,7 @@ async fn check_sla_deadlines(
         };
         storage.save_block_output(&output).await?;
     }
-    Ok(())
+    Ok(breached)
 }
 
 /// Dispatch a single execution node to the appropriate block handler.
@@ -726,6 +738,7 @@ pub async fn complete_node(
     storage: &dyn StorageBackend,
     node_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    debug!(node_id = %node_id, "node → Completed");
     storage
         .update_node_state(node_id, NodeState::Completed)
         .await?;
@@ -737,6 +750,7 @@ pub async fn fail_node(
     storage: &dyn StorageBackend,
     node_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
+    debug!(node_id = %node_id, "node → Failed");
     storage
         .update_node_state(node_id, NodeState::Failed)
         .await?;

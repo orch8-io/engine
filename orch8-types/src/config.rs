@@ -7,14 +7,29 @@ use std::fmt;
 #[serde(transparent)]
 pub struct SecretString(String);
 
+/// Placeholder emitted by `Debug`, `Serialize`, and `redact()` for non-empty secrets.
+pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
+
 impl SecretString {
     pub fn new(s: String) -> Self {
         Self(s)
     }
 
-    /// Access the actual secret value.
+    /// Access the actual secret value. Call sites should keep the returned `&str`
+    /// out of logs, telemetry, and serialized output — use [`Self::redact`] instead.
+    #[must_use = "secret values must not be dropped silently; call .redact() for display"]
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// Return a safe-to-log placeholder (`""` when empty, `[REDACTED]` otherwise).
+    #[must_use]
+    pub fn redact(&self) -> &'static str {
+        if self.0.is_empty() {
+            ""
+        } else {
+            REDACTED_PLACEHOLDER
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -27,7 +42,7 @@ impl fmt::Debug for SecretString {
         if self.0.is_empty() {
             f.write_str("SecretString(\"\")")
         } else {
-            f.write_str("SecretString(\"***\")")
+            f.write_str("SecretString(\"[REDACTED]\")")
         }
     }
 }
@@ -37,7 +52,7 @@ impl Serialize for SecretString {
         if self.0.is_empty() {
             s.serialize_str("")
         } else {
-            s.serialize_str("***")
+            s.serialize_str(REDACTED_PLACEHOLDER)
         }
     }
 }
@@ -47,6 +62,28 @@ impl From<String> for SecretString {
         Self(s)
     }
 }
+
+impl From<&str> for SecretString {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl fmt::Display for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.redact())
+    }
+}
+
+impl PartialEq for SecretString {
+    /// Constant-time comparison to mitigate timing side channels on secrets.
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl Eq for SecretString {}
 
 /// Top-level configuration. Layered: TOML file -> env vars -> CLI flags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,7 +128,9 @@ fn default_backend() -> String {
 }
 
 fn default_database_url() -> SecretString {
-    SecretString::new("postgres://orch8:orch8@localhost:5432/orch8".to_string())
+    // Safe default: empty. Operators must provide a real URL via config/env.
+    // Avoids shipping hardcoded credentials (even dev ones) in the binary.
+    SecretString::default()
 }
 
 fn default_max_connections() -> u32 {
@@ -261,4 +300,129 @@ impl Default for LoggingConfig {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_string_debug_never_reveals_value() {
+        let s = SecretString::new("super-secret-token-123".into());
+        let debug_out = format!("{s:?}");
+        assert!(debug_out.contains("[REDACTED]"));
+        assert!(!debug_out.contains("super-secret-token-123"));
+    }
+
+    #[test]
+    fn secret_string_debug_shows_empty_distinctly() {
+        let s = SecretString::default();
+        let debug_out = format!("{s:?}");
+        assert_eq!(debug_out, "SecretString(\"\")");
+        assert!(!debug_out.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn secret_string_display_matches_redact() {
+        let empty = SecretString::default();
+        assert_eq!(format!("{empty}"), "");
+
+        let non_empty = SecretString::from("hunter2");
+        assert_eq!(format!("{non_empty}"), "[REDACTED]");
+    }
+
+    #[test]
+    fn secret_string_serialize_redacts_non_empty() {
+        let s = SecretString::from("api-key-xyz");
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"[REDACTED]\"");
+    }
+
+    #[test]
+    fn secret_string_serialize_preserves_empty() {
+        // Empty secrets must serialize as empty strings so round-tripping
+        // config with no api_key set doesn't accidentally promote "[REDACTED]"
+        // into the key slot.
+        let empty = SecretString::default();
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "\"\"");
+    }
+
+    #[test]
+    fn secret_string_deserialize_transparent() {
+        // Transparent deserialize reads the raw string back into the secret —
+        // this is how env/TOML values become SecretString at load time.
+        let s: SecretString = serde_json::from_str("\"abc123\"").unwrap();
+        assert_eq!(s.expose(), "abc123");
+    }
+
+    #[test]
+    fn secret_string_expose_returns_actual_value() {
+        let s = SecretString::from("real-value");
+        assert_eq!(s.expose(), "real-value");
+    }
+
+    #[test]
+    fn secret_string_eq_is_constant_time_equiv() {
+        let a = SecretString::from("hunter2");
+        let b = SecretString::from("hunter2");
+        let c = SecretString::from("hunter3");
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Different lengths must still return false, not panic.
+        assert_ne!(a, SecretString::from("hunter2-extra"));
+    }
+
+    #[test]
+    fn secret_string_redact_distinguishes_empty() {
+        assert_eq!(SecretString::default().redact(), "");
+        assert_eq!(SecretString::from("x").redact(), "[REDACTED]");
+    }
+
+    #[test]
+    fn secret_string_is_empty() {
+        assert!(SecretString::default().is_empty());
+        assert!(SecretString::from("").is_empty());
+        assert!(!SecretString::from("a").is_empty());
+    }
+
+    #[test]
+    fn default_database_url_is_empty_not_leaky() {
+        // Must not ship a default postgres URL with embedded credentials in the binary.
+        let url = default_database_url();
+        assert!(
+            url.is_empty(),
+            "default database URL must be empty — operators must supply a real value"
+        );
+    }
+
+    #[test]
+    fn engine_config_default_has_safe_values() {
+        let cfg = EngineConfig::default();
+        assert!(cfg.database.url.is_empty());
+        assert!(cfg.api.api_key.is_empty());
+        assert!(cfg.engine.encryption_key.is_empty());
+        // No tenant enforcement by default — opt-in.
+        assert!(!cfg.api.require_tenant_header);
+    }
+
+    #[test]
+    fn database_config_parses_from_json() {
+        // JSON shape mirrors the TOML layout at the field level (serde applies the
+        // same Deserialize impls) — good enough to verify the defaults-kick-in path
+        // without pulling `toml` into the types crate as a dev dep.
+        let json = r#"{
+            "database": {
+                "backend": "sqlite",
+                "url": "sqlite::memory:",
+                "max_connections": 4
+            }
+        }"#;
+        let cfg: EngineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.database.backend, "sqlite");
+        assert_eq!(cfg.database.url.expose(), "sqlite::memory:");
+        assert_eq!(cfg.database.max_connections, 4);
+        // run_migrations omitted — falls back to the default_true() default.
+        assert!(cfg.database.run_migrations);
+    }
 }

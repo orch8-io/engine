@@ -5,10 +5,7 @@ use orch8_types::plugin::{PluginDef, PluginType};
 use super::helpers::parse_ts;
 use super::SqliteStorage;
 
-pub(super) async fn create(
-    store: &SqliteStorage,
-    plugin: &PluginDef,
-) -> Result<(), StorageError> {
+pub(super) async fn create(store: &SqliteStorage, plugin: &PluginDef) -> Result<(), StorageError> {
     let config_str = plugin.config.to_string();
     let created = plugin.created_at.to_rfc3339();
     let updated = plugin.updated_at.to_rfc3339();
@@ -70,10 +67,7 @@ pub(super) async fn list(
     Ok(rows.into_iter().map(PluginRow::into_plugin).collect())
 }
 
-pub(super) async fn update(
-    store: &SqliteStorage,
-    plugin: &PluginDef,
-) -> Result<(), StorageError> {
+pub(super) async fn update(store: &SqliteStorage, plugin: &PluginDef) -> Result<(), StorageError> {
     let config_str = plugin.config.to_string();
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
@@ -119,8 +113,7 @@ impl PluginRow {
     fn into_plugin(self) -> PluginDef {
         PluginDef {
             name: self.name,
-            plugin_type: PluginType::from_str_loose(&self.plugin_type)
-                .unwrap_or(PluginType::Wasm),
+            plugin_type: PluginType::from_str_loose(&self.plugin_type).unwrap_or(PluginType::Wasm),
             source: self.source,
             tenant_id: self.tenant_id,
             enabled: self.enabled,

@@ -69,10 +69,9 @@ pub(super) async fn recover_stale_instances(
     storage: &SqliteStorage,
     stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
-    let cutoff =
-        chrono::Utc::now()
-            - chrono::Duration::from_std(stale_threshold)
-                .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::from_std(stale_threshold)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let result = sqlx::query(
         "UPDATE task_instances SET state='scheduled', updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
     )
@@ -90,11 +89,12 @@ pub(super) async fn get_child_instances(
     storage: &SqliteStorage,
     parent_instance_id: InstanceId,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM task_instances WHERE parent_instance_id=?1 ORDER BY created_at")
-        .bind(parent_instance_id.0.to_string())
-        .fetch_all(&storage.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
+    let rows =
+        sqlx::query("SELECT * FROM task_instances WHERE parent_instance_id=?1 ORDER BY created_at")
+            .bind(parent_instance_id.0.to_string())
+            .fetch_all(&storage.pool)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
     rows.iter().map(row_to_instance).collect()
 }
 
@@ -164,7 +164,8 @@ pub(super) async fn get_injected_blocks(
         .fetch_optional(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(row.map(|r| serde_json::from_str(r.get::<&str, _>("blocks")))
+    Ok(row
+        .map(|r| serde_json::from_str(r.get::<&str, _>("blocks")))
         .transpose()?)
 }
 

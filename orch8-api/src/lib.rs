@@ -20,11 +20,15 @@ use std::sync::Arc;
 
 use axum::Router;
 use orch8_storage::StorageBackend;
+use tokio_util::sync::CancellationToken;
 
 /// Shared application state injected into all handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Arc<dyn StorageBackend>,
+    /// Shutdown signal — long-lived handlers (SSE streams, polling loops) should
+    /// observe this to exit cleanly on graceful shutdown.
+    pub shutdown: CancellationToken,
 }
 
 /// Build the axum router with all routes.
