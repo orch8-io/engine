@@ -789,18 +789,42 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Record a dedupe key for `emit_event`. If `(parent, key)` already exists,
     /// returns the previously-recorded `child_instance_id` without modifying state.
     ///
-    /// Atomic per row. Default impl returns an unimplemented error so backends opt in.
+    /// Atomic per row. Every backend MUST implement this — there is deliberately
+    /// no default impl so that a new backend cannot silently fall back to a
+    /// broken stub at runtime (see architectural finding #8).
+    ///
+    /// Prefer [`StorageBackend::create_instance_with_dedupe`] in production code
+    /// paths: this method only records the dedupe row, so a crash between the
+    /// dedupe insert and the child `create_instance` would leave an orphan row.
+    /// This primitive is retained for GC tests and tools that intentionally
+    /// manipulate dedupe state without creating a child.
     async fn record_or_get_emit_dedupe(
         &self,
         parent: orch8_types::ids::InstanceId,
         key: &str,
         candidate_child: orch8_types::ids::InstanceId,
-    ) -> Result<EmitDedupeOutcome, StorageError> {
-        let _ = (parent, key, candidate_child);
-        Err(StorageError::Query(
-            "record_or_get_emit_dedupe not implemented for this backend".into(),
-        ))
-    }
+    ) -> Result<EmitDedupeOutcome, StorageError>;
+
+    /// Atomically record a dedupe row AND create the child `TaskInstance` in a
+    /// single transaction. Closes the orphan window described in architectural
+    /// finding #2: before this method existed, a crash between
+    /// [`StorageBackend::record_or_get_emit_dedupe`] and
+    /// [`StorageBackend::create_instance`] could leave a dedupe row pointing at
+    /// a non-existent child.
+    ///
+    /// Semantics:
+    /// - If `(parent, key)` is free: inserts the dedupe row AND the instance.
+    ///   Returns `Inserted`; `instance.id` is now present in `task_instances`.
+    /// - If `(parent, key)` already exists: returns `AlreadyExists(existing_id)`
+    ///   without creating the instance. The caller must NOT persist `instance`.
+    ///
+    /// Every backend MUST implement this — no default impl (finding #8).
+    async fn create_instance_with_dedupe(
+        &self,
+        parent: orch8_types::ids::InstanceId,
+        key: &str,
+        instance: &TaskInstance,
+    ) -> Result<EmitDedupeOutcome, StorageError>;
 
     /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
     /// than `older_than`. Returns the number of rows actually deleted.
@@ -814,15 +838,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// a single long transaction — same convention as
     /// [`StorageBackend::delete_expired_externalized_state`].
     ///
-    /// The default impl returns `Ok(0)` so test/memory backends remain
-    /// compilable without an implementation.
+    /// Every backend MUST implement this — there is deliberately no default
+    /// impl so a missing implementation fails at compile time rather than
+    /// silently returning `Ok(0)` (see architectural finding #8).
     async fn delete_expired_emit_event_dedupe(
         &self,
-        _older_than: chrono::DateTime<chrono::Utc>,
-        _limit: u32,
-    ) -> Result<u64, StorageError> {
-        Ok(0)
-    }
+        older_than: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError>;
 
     // === Health ===
 

@@ -962,6 +962,15 @@ impl StorageBackend for SqliteStorage {
         misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
     }
 
+    async fn create_instance_with_dedupe(
+        &self,
+        parent: InstanceId,
+        key: &str,
+        instance: &TaskInstance,
+    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+        misc::create_instance_with_dedupe(self, parent, key, instance).await
+    }
+
     async fn delete_expired_emit_event_dedupe(
         &self,
         older_than: chrono::DateTime<chrono::Utc>,
@@ -1251,5 +1260,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    // === R4 / finding #2: atomic dedupe + instance creation =================
+
+    fn mk_inst_for_dedupe(id: InstanceId) -> TaskInstance {
+        let now = Utc::now();
+        TaskInstance {
+            id,
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId("t1".into()),
+            namespace: Namespace("default".into()),
+            state: InstanceState::Scheduled,
+            next_fire_at: Some(now),
+            priority: Priority::Normal,
+            timezone: String::new(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_instance_with_dedupe_first_call_persists_instance() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let child_id = InstanceId::new();
+        let inst = mk_inst_for_dedupe(child_id);
+
+        let outcome = storage
+            .create_instance_with_dedupe(parent, "k1", &inst)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, EmitDedupeOutcome::Inserted);
+        // Storage invariant: Inserted implies the child instance is present.
+        let fetched = storage.get_instance(child_id).await.unwrap();
+        assert!(
+            fetched.is_some(),
+            "Inserted outcome must leave the child instance persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_instance_with_dedupe_second_call_skips_instance_insert() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let first_id = InstanceId::new();
+        let second_id = InstanceId::new();
+        let inst1 = mk_inst_for_dedupe(first_id);
+        let inst2 = mk_inst_for_dedupe(second_id);
+
+        let o1 = storage
+            .create_instance_with_dedupe(parent, "k", &inst1)
+            .await
+            .unwrap();
+        let o2 = storage
+            .create_instance_with_dedupe(parent, "k", &inst2)
+            .await
+            .unwrap();
+
+        assert_eq!(o1, EmitDedupeOutcome::Inserted);
+        assert_eq!(o2, EmitDedupeOutcome::AlreadyExists(first_id));
+
+        // First instance persisted, second NOT inserted (dedupe rejected it).
+        assert!(storage.get_instance(first_id).await.unwrap().is_some());
+        assert!(
+            storage.get_instance(second_id).await.unwrap().is_none(),
+            "AlreadyExists must NOT create the candidate instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_instance_with_dedupe_different_parents_both_insert() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let p1 = InstanceId::new();
+        let p2 = InstanceId::new();
+        let c1_id = InstanceId::new();
+        let c2_id = InstanceId::new();
+
+        let o1 = storage
+            .create_instance_with_dedupe(p1, "k", &mk_inst_for_dedupe(c1_id))
+            .await
+            .unwrap();
+        let o2 = storage
+            .create_instance_with_dedupe(p2, "k", &mk_inst_for_dedupe(c2_id))
+            .await
+            .unwrap();
+
+        assert_eq!(o1, EmitDedupeOutcome::Inserted);
+        assert_eq!(o2, EmitDedupeOutcome::Inserted);
+        assert!(storage.get_instance(c1_id).await.unwrap().is_some());
+        assert!(storage.get_instance(c2_id).await.unwrap().is_some());
+        assert_ne!(c1_id, c2_id);
     }
 }

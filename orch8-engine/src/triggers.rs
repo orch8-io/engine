@@ -11,9 +11,9 @@ use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
-use orch8_types::ids::{InstanceId, Namespace};
 #[cfg(test)]
 use orch8_types::ids::TenantId;
+use orch8_types::ids::{InstanceId, Namespace};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
@@ -143,36 +143,27 @@ async fn sync_triggers(
     Ok(())
 }
 
-/// Create an instance from a trigger event.
+/// Build an in-memory `TaskInstance` for a trigger firing. Pure function — no
+/// storage mutation. The caller is responsible for persisting it (either via
+/// `storage.create_instance` or, for dedupe paths, via
+/// `storage.create_instance_with_dedupe`).
 ///
-/// Resolves the sequence by name, builds a `TaskInstance` with trigger metadata,
-/// and persists it. Used by both the trigger processor and the HTTP fire endpoint.
-pub async fn create_trigger_instance(
-    storage: &dyn StorageBackend,
+/// Factored out of [`create_trigger_instance`] so `emit_event` can build the
+/// instance, then pass it to `StorageBackend::create_instance_with_dedupe` in
+/// a single transaction — see architectural finding #2 (close the dedupe
+/// orphan window).
+#[allow(clippy::needless_pass_by_value)] // `data` and `event_meta` are moved into the returned instance via json!/struct field init — taking by value matches `create_trigger_instance`'s signature.
+pub(crate) fn build_trigger_instance(
     trigger: &TriggerDef,
+    sequence_id: orch8_types::ids::SequenceId,
     data: serde_json::Value,
     event_meta: serde_json::Value,
     id: Option<InstanceId>,
-) -> Result<InstanceId, crate::error::EngineError> {
-    let sequence = storage
-        .get_sequence_by_name(
-            &trigger.tenant_id,
-            &Namespace(trigger.namespace.clone()),
-            &trigger.sequence_name,
-            trigger.version,
-        )
-        .await?
-        .ok_or_else(|| {
-            crate::error::EngineError::NotFound(format!(
-                "sequence '{}' for trigger '{}'",
-                trigger.sequence_name, trigger.slug
-            ))
-        })?;
-
+) -> TaskInstance {
     let now = chrono::Utc::now();
-    let instance = TaskInstance {
+    TaskInstance {
         id: id.unwrap_or_default(),
-        sequence_id: sequence.id,
+        sequence_id,
         tenant_id: trigger.tenant_id.clone(),
         namespace: Namespace(trigger.namespace.clone()),
         state: InstanceState::Scheduled,
@@ -195,8 +186,45 @@ pub async fn create_trigger_instance(
         parent_instance_id: None,
         created_at: now,
         updated_at: now,
-    };
+    }
+}
 
+/// Resolve a trigger's sequence by `(tenant, namespace, name, version)`,
+/// returning the `SequenceDefinition` or a `NotFound` error. Extracted so
+/// `emit_event` can look up the sequence independently of persistence.
+pub(crate) async fn resolve_trigger_sequence(
+    storage: &dyn StorageBackend,
+    trigger: &TriggerDef,
+) -> Result<orch8_types::sequence::SequenceDefinition, crate::error::EngineError> {
+    storage
+        .get_sequence_by_name(
+            &trigger.tenant_id,
+            &Namespace(trigger.namespace.clone()),
+            &trigger.sequence_name,
+            trigger.version,
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::error::EngineError::NotFound(format!(
+                "sequence '{}' for trigger '{}'",
+                trigger.sequence_name, trigger.slug
+            ))
+        })
+}
+
+/// Create an instance from a trigger event.
+///
+/// Resolves the sequence by name, builds a `TaskInstance` with trigger metadata,
+/// and persists it. Used by both the trigger processor and the HTTP fire endpoint.
+pub async fn create_trigger_instance(
+    storage: &dyn StorageBackend,
+    trigger: &TriggerDef,
+    data: serde_json::Value,
+    event_meta: serde_json::Value,
+    id: Option<InstanceId>,
+) -> Result<InstanceId, crate::error::EngineError> {
+    let sequence = resolve_trigger_sequence(storage, trigger).await?;
+    let instance = build_trigger_instance(trigger, sequence.id, data, event_meta, id);
     storage.create_instance(&instance).await?;
     info!(
         instance_id = %instance.id,

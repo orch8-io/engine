@@ -4,10 +4,13 @@
 //! instance id is captured in the child's metadata as `parent_instance_id`.
 //!
 //! Supports an optional `dedupe_key` param scoped per-parent. When present,
-//! `(parent_instance_id, dedupe_key)` is recorded atomically via
-//! `storage.record_or_get_emit_dedupe`: the first call creates the child; any
-//! subsequent call with the same key returns the existing child id and
-//! `deduped: true` without creating a new instance.
+//! `(parent_instance_id, dedupe_key)` and the child instance are written in a
+//! single transaction via `storage.create_instance_with_dedupe`: the first
+//! call creates both rows atomically; any subsequent call with the same key
+//! returns the existing child id and `deduped: true` without creating a new
+//! instance. This closes the orphan window described in architectural
+//! finding #2 — a crash mid-operation cannot leave a dedupe row pointing at
+//! a non-existent child.
 
 use serde_json::{json, Map, Value};
 
@@ -83,27 +86,41 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     let candidate_child_id = InstanceId::new();
     let sequence_name = trigger.sequence_name.clone();
 
-    // Dedupe branch: record (parent, key) atomically; if the key is already
-    // taken, skip creation and return the previously-recorded child id.
+    // Dedupe branch: record (parent, key) AND create the child instance in a
+    // single transaction via `create_instance_with_dedupe`. Closes the orphan
+    // window where the dedupe row and the child used to be separate writes
+    // (finding #2). The child is built in memory first so the storage layer
+    // can insert both rows atomically.
     if let Some(key) = dedupe_key.as_deref() {
+        let sequence = crate::triggers::resolve_trigger_sequence(storage, &trigger)
+            .await
+            .map_err(|e| permanent(format!("failed to resolve trigger sequence: {e}")))?;
+        let instance = crate::triggers::build_trigger_instance(
+            &trigger,
+            sequence.id,
+            data,
+            meta_with_source,
+            Some(candidate_child_id),
+        );
         let outcome = storage
-            .record_or_get_emit_dedupe(ctx.instance_id, key, candidate_child_id)
+            .create_instance_with_dedupe(ctx.instance_id, key, &instance)
             .await
             .map_err(|e| map_storage_err(&e))?;
-        match outcome {
-            EmitDedupeOutcome::AlreadyExists(existing_id) => {
-                return Ok(json!({
-                    "instance_id": existing_id.0.to_string(),
-                    "sequence_name": sequence_name,
-                    "deduped": true,
-                }));
-            }
-            EmitDedupeOutcome::Inserted => {
-                // Fall through to create the child with the candidate id.
-            }
-        }
+        return Ok(match outcome {
+            EmitDedupeOutcome::AlreadyExists(existing_id) => json!({
+                "instance_id": existing_id.0.to_string(),
+                "sequence_name": sequence_name,
+                "deduped": true,
+            }),
+            EmitDedupeOutcome::Inserted => json!({
+                "instance_id": candidate_child_id.0.to_string(),
+                "sequence_name": sequence_name,
+                "deduped": false,
+            }),
+        });
     }
 
+    // Non-dedupe path: unchanged single-insert create.
     crate::triggers::create_trigger_instance(
         storage,
         &trigger,
@@ -499,6 +516,50 @@ mod tests {
         let pagination = orch8_types::filter::Pagination::default();
         let instances = storage.list_instances(&filter, &pagination).await.unwrap();
         assert_eq!(instances.len(), 4);
+    }
+
+    /// R4 / finding #2: dedupe insert and child instance creation must be
+    /// atomic. Storage invariant: for every response carrying an
+    /// `instance_id` the corresponding row must exist in `task_instances`.
+    /// This is the observable consequence of
+    /// `StorageBackend::create_instance_with_dedupe` committing both rows in
+    /// one transaction (no orphan window).
+    #[tokio::test]
+    async fn emit_event_dedupe_atomic_instance_exists_after_insert() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "atomic-check",
+            }),
+        );
+
+        let result = handle_emit_event(ctx).await.unwrap();
+        assert_eq!(result.get("deduped"), Some(&json!(false)));
+        let child_id_str = result
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .expect("instance_id present");
+        let child_uuid = uuid::Uuid::parse_str(child_id_str).unwrap();
+
+        // Invariant: the returned child id MUST resolve in storage. Before
+        // the atomic method existed, a crash between the dedupe insert and
+        // the instance create could leave this lookup returning None while
+        // the dedupe row still pointed at the id.
+        let fetched = storage.get_instance(InstanceId(child_uuid)).await.unwrap();
+        assert!(
+            fetched.is_some(),
+            "dedupe Inserted must imply child instance persisted (finding #2)"
+        );
     }
 
     #[tokio::test]

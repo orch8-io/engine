@@ -944,6 +944,43 @@ impl StorageBackend for EncryptingStorage {
         self.inner.list_credentials_due_for_refresh(threshold).await
     }
 
+    // === Emit Event Dedupe (pass-through) ===
+
+    async fn record_or_get_emit_dedupe(
+        &self,
+        parent: InstanceId,
+        key: &str,
+        candidate_child: InstanceId,
+    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+        self.inner
+            .record_or_get_emit_dedupe(parent, key, candidate_child)
+            .await
+    }
+
+    async fn create_instance_with_dedupe(
+        &self,
+        parent: InstanceId,
+        key: &str,
+        instance: &TaskInstance,
+    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+        // Encrypt context.data before the inner backend commits the atomic
+        // (dedupe_row + instance_row) transaction — mirrors `create_instance`.
+        let encrypted = self.encrypt_instance(instance)?;
+        self.inner
+            .create_instance_with_dedupe(parent, key, &encrypted)
+            .await
+    }
+
+    async fn delete_expired_emit_event_dedupe(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        self.inner
+            .delete_expired_emit_event_dedupe(older_than, limit)
+            .await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {

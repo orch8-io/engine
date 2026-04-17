@@ -214,6 +214,99 @@ pub(super) async fn record_or_get_emit_dedupe(
     )))
 }
 
+/// Atomically record the dedupe row AND insert the child `TaskInstance` in a
+/// single transaction. See `StorageBackend::create_instance_with_dedupe`.
+///
+/// If `(parent, key)` is already taken we return `AlreadyExists` without
+/// touching `task_instances`. Otherwise both rows land in the same commit,
+/// so a crash between the two inserts is impossible.
+pub(super) async fn create_instance_with_dedupe(
+    storage: &SqliteStorage,
+    parent: InstanceId,
+    key: &str,
+    instance: &TaskInstance,
+) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    use super::helpers::ts;
+
+    let parent_str = parent.0.to_string();
+    let cand_str = instance.id.0.to_string();
+
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    let inserted = sqlx::query(
+        "INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(parent_instance_id, dedupe_key) DO NOTHING",
+    )
+    .bind(&parent_str)
+    .bind(key)
+    .bind(&cand_str)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?
+    .rows_affected();
+
+    if inserted == 0 {
+        // Key already taken — look up the existing child id and abort without
+        // creating an instance. Commit (a no-op read) and return AlreadyExists.
+        let row: (String,) = sqlx::query_as(
+            "SELECT child_instance_id FROM emit_event_dedupe
+             WHERE parent_instance_id = ?1 AND dedupe_key = ?2",
+        )
+        .bind(&parent_str)
+        .bind(key)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+
+        let existing = uuid::Uuid::parse_str(&row.0)
+            .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
+        return Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+            existing,
+        )));
+    }
+
+    // Inserted the dedupe row — now insert the instance in the SAME tx. If this
+    // fails the dedupe row is rolled back with it.
+    sqlx::query(
+        "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
+    )
+    .bind(&cand_str)
+    .bind(instance.sequence_id.0.to_string())
+    .bind(&instance.tenant_id.0)
+    .bind(&instance.namespace.0)
+    .bind(instance.state.to_string())
+    .bind(instance.next_fire_at.map(ts))
+    .bind(instance.priority as i16)
+    .bind(&instance.timezone)
+    .bind(serde_json::to_string(&instance.metadata)?)
+    .bind(serde_json::to_string(&instance.context)?)
+    .bind(&instance.concurrency_key)
+    .bind(instance.max_concurrency)
+    .bind(&instance.idempotency_key)
+    .bind(instance.session_id.map(|u| u.to_string()))
+    .bind(instance.parent_instance_id.map(|u| u.0.to_string()))
+    .bind(ts(instance.created_at))
+    .bind(ts(instance.updated_at))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    Ok(crate::EmitDedupeOutcome::Inserted)
+}
+
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
 /// than `older_than`. `created_at` is stored as ISO-8601 text; we normalize
 /// both sides through `datetime(...)` to avoid lexicographic byte comparison

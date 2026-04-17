@@ -208,6 +208,85 @@ pub(super) async fn record_or_get_emit_dedupe(
     )))
 }
 
+/// Atomically record the dedupe row AND insert the child `TaskInstance` in a
+/// single transaction. See `StorageBackend::create_instance_with_dedupe`.
+///
+/// Closes the orphan window between the dedupe insert and the instance insert
+/// — if either statement fails, both are rolled back so the caller never
+/// observes a dedupe row pointing at a non-existent instance.
+pub(super) async fn create_instance_with_dedupe(
+    store: &PostgresStorage,
+    parent: InstanceId,
+    key: &str,
+    instance: &TaskInstance,
+) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    let mut tx = store.pool.begin().await?;
+
+    let inserted: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r"INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (parent_instance_id, dedupe_key) DO NOTHING
+          RETURNING child_instance_id",
+    )
+    .bind(parent.0)
+    .bind(key)
+    .bind(instance.id.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if inserted.is_none() {
+        // Key already taken — load the existing child id, commit the read-only
+        // tx, and return AlreadyExists without creating an instance.
+        let (existing,): (uuid::Uuid,) = sqlx::query_as(
+            r"SELECT child_instance_id FROM emit_event_dedupe
+              WHERE parent_instance_id = $1 AND dedupe_key = $2",
+        )
+        .bind(parent.0)
+        .bind(key)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+            existing,
+        )));
+    }
+
+    let context = serde_json::to_value(&instance.context)?;
+    sqlx::query(
+        r"
+        INSERT INTO task_instances
+            (id, sequence_id, tenant_id, namespace, state, next_fire_at,
+             priority, timezone, metadata, context,
+             concurrency_key, max_concurrency, idempotency_key,
+             session_id, parent_instance_id,
+             created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ",
+    )
+    .bind(instance.id.0)
+    .bind(instance.sequence_id.0)
+    .bind(&instance.tenant_id.0)
+    .bind(&instance.namespace.0)
+    .bind(instance.state.to_string())
+    .bind(instance.next_fire_at)
+    .bind(instance.priority as i16)
+    .bind(&instance.timezone)
+    .bind(&instance.metadata)
+    .bind(&context)
+    .bind(&instance.concurrency_key)
+    .bind(instance.max_concurrency)
+    .bind(&instance.idempotency_key)
+    .bind(instance.session_id)
+    .bind(instance.parent_instance_id.map(|id| id.0))
+    .bind(instance.created_at)
+    .bind(instance.updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(crate::EmitDedupeOutcome::Inserted)
+}
+
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
 /// than `older_than`. Returns the affected row count.
 ///
