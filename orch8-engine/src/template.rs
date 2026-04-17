@@ -80,11 +80,12 @@ fn resolve_path(
         (path, None)
     };
 
-    let parts: Vec<&str> = path.split('.').collect();
-
-    let resolved = match parts.first().copied() {
+    // Walk the path as an iterator — avoids allocating a Vec<&str> per call,
+    // which matters on hot templating paths with many {{...}} expressions.
+    let mut parts = path.split('.');
+    let resolved = match parts.next() {
         Some("context") => {
-            let section = parts.get(1).copied().unwrap_or("");
+            let section = parts.next().unwrap_or("");
             let source = match section {
                 "data" => &context.data,
                 "config" => &context.config,
@@ -94,9 +95,9 @@ fn resolve_path(
                     )));
                 }
             };
-            navigate_json(source, &parts[2..])
+            navigate_json(source, parts)
         }
-        Some("outputs") => navigate_json(outputs, &parts[1..]),
+        Some("outputs") => navigate_json(outputs, parts),
         _ => {
             return Err(EngineError::TemplateError(format!(
                 "unknown template root: {path}"
@@ -116,9 +117,12 @@ fn resolve_path(
     }
 }
 
-fn navigate_json(value: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
+fn navigate_json<'a, I>(value: &serde_json::Value, path: I) -> Option<serde_json::Value>
+where
+    I: IntoIterator<Item = &'a str>,
+{
     let mut current = value;
-    for &segment in path {
+    for segment in path {
         match current {
             serde_json::Value::Object(map) => {
                 current = map.get(segment)?;

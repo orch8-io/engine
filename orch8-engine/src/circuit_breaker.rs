@@ -25,6 +25,8 @@ impl CircuitBreakerRegistry {
     /// Check if a handler is allowed to execute. Returns `Ok(())` if allowed,
     /// or `Err(remaining_cooldown_secs)` if the circuit is open.
     pub fn check(&self, handler: &str) -> Result<(), u64> {
+        // Capture timestamp before acquiring the lock to minimize critical section.
+        let now = Utc::now();
         let mut map = self.lock_breakers();
         let breaker = map
             .entry(handler.to_string())
@@ -36,7 +38,7 @@ impl CircuitBreakerRegistry {
                 // Check if cooldown has elapsed
                 if let Some(opened_at) = breaker.opened_at {
                     #[allow(clippy::cast_sign_loss)]
-                    let elapsed = (Utc::now() - opened_at).num_seconds().max(0) as u64;
+                    let elapsed = (now - opened_at).num_seconds().max(0) as u64;
                     if elapsed >= breaker.cooldown_secs {
                         breaker.state = BreakerState::HalfOpen;
                         Ok(())
@@ -45,7 +47,7 @@ impl CircuitBreakerRegistry {
                     }
                 } else {
                     // No opened_at means it was just set — cooldown starts now
-                    breaker.opened_at = Some(Utc::now());
+                    breaker.opened_at = Some(now);
                     Err(breaker.cooldown_secs)
                 }
             }
@@ -64,6 +66,9 @@ impl CircuitBreakerRegistry {
 
     /// Record a failure for a handler. May trip the circuit to Open.
     pub fn record_failure(&self, handler: &str) {
+        // Capture timestamp before acquiring the lock so we don't do syscalls
+        // inside the critical section.
+        let now = Utc::now();
         let mut map = self.lock_breakers();
         let breaker = map
             .entry(handler.to_string())
@@ -73,7 +78,7 @@ impl CircuitBreakerRegistry {
 
         if breaker.failure_count >= breaker.failure_threshold {
             breaker.state = BreakerState::Open;
-            breaker.opened_at = Some(Utc::now());
+            breaker.opened_at = Some(now);
         }
     }
 

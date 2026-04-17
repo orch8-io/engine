@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use cron::Schedule;
+use tokio::task::JoinSet;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -56,13 +57,26 @@ async fn process_cron_tick(storage: &Arc<dyn StorageBackend>) -> Result<(), Engi
 
     debug!(count = schedules.len(), "processing due cron schedules");
 
-    for schedule in &schedules {
-        if let Err(e) = trigger_cron_schedule(storage.as_ref(), schedule).await {
-            error!(
-                cron_id = %schedule.id,
-                error = %e,
-                "failed to trigger cron schedule"
-            );
+    // Each claimed schedule is independent: fire the instance and advance the
+    // schedule's fire times. Process them concurrently so a slow storage write
+    // on one schedule doesn't stall the rest of the tick.
+    let mut tasks: JoinSet<()> = JoinSet::new();
+    for schedule in schedules {
+        let storage = Arc::clone(storage);
+        tasks.spawn(async move {
+            let cron_id = schedule.id;
+            if let Err(e) = trigger_cron_schedule(storage.as_ref(), &schedule).await {
+                error!(
+                    cron_id = %cron_id,
+                    error = %e,
+                    "failed to trigger cron schedule"
+                );
+            }
+        });
+    }
+    while let Some(res) = tasks.join_next().await {
+        if let Err(e) = res {
+            error!(error = %e, "cron task panicked");
         }
     }
 
