@@ -11,7 +11,9 @@ use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
-use orch8_types::ids::{InstanceId, Namespace, TenantId};
+use orch8_types::ids::{InstanceId, Namespace};
+#[cfg(test)]
+use orch8_types::ids::TenantId;
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
@@ -154,7 +156,7 @@ pub async fn create_trigger_instance(
 ) -> Result<InstanceId, crate::error::EngineError> {
     let sequence = storage
         .get_sequence_by_name(
-            &TenantId(trigger.tenant_id.clone()),
+            &trigger.tenant_id,
             &Namespace(trigger.namespace.clone()),
             &trigger.sequence_name,
             trigger.version,
@@ -171,7 +173,7 @@ pub async fn create_trigger_instance(
     let instance = TaskInstance {
         id: id.unwrap_or_default(),
         sequence_id: sequence.id,
-        tenant_id: TenantId(trigger.tenant_id.clone()),
+        tenant_id: trigger.tenant_id.clone(),
         namespace: Namespace(trigger.namespace.clone()),
         state: InstanceState::Scheduled,
         next_fire_at: Some(now),
@@ -404,7 +406,7 @@ mod tests {
             slug: slug.into(),
             sequence_name: seq_name.into(),
             version: None,
-            tenant_id: "t1".into(),
+            tenant_id: TenantId("t1".into()),
             namespace: "default".into(),
             enabled: true,
             secret: None,
@@ -439,7 +441,7 @@ mod tests {
             slug: "test".into(),
             sequence_name: "seq".into(),
             version: None,
-            tenant_id: "t1".into(),
+            tenant_id: TenantId("t1".into()),
             namespace: "default".into(),
             enabled: true,
             secret: None,

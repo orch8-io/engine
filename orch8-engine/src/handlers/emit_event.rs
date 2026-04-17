@@ -12,10 +12,7 @@
 use serde_json::{json, Map, Value};
 
 use orch8_storage::EmitDedupeOutcome;
-use orch8_types::{
-    error::StepError,
-    ids::{InstanceId, TenantId},
-};
+use orch8_types::{error::StepError, ids::InstanceId};
 
 use super::util::{check_same_tenant, map_storage_err, permanent};
 use super::StepContext;
@@ -62,12 +59,8 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     }
 
     // Cross-tenant guard: caller's tenant comes from StepContext; the trigger's
-    // tenant is still a plain String until R2 migrates it to TenantId.
-    check_same_tenant(
-        &ctx.tenant_id,
-        &TenantId(trigger.tenant_id.clone()),
-        "emit_event",
-    )?;
+    // tenant is now a TenantId newtype — compare directly.
+    check_same_tenant(&ctx.tenant_id, &trigger.tenant_id, "emit_event")?;
 
     // Build meta: start from user-provided meta, then overwrite system-set
     // fields so callers can't spoof `source` / `parent_instance_id`.
@@ -135,7 +128,7 @@ mod tests {
     use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
-        ids::{BlockId, Namespace, SequenceId},
+        ids::{BlockId, Namespace, SequenceId, TenantId},
         instance::{InstanceState, Priority, TaskInstance},
         sequence::SequenceDefinition,
         trigger::{TriggerDef, TriggerType},
@@ -194,7 +187,7 @@ mod tests {
             slug: slug.into(),
             sequence_name: seq_name.into(),
             version: None,
-            tenant_id: tenant.into(),
+            tenant_id: TenantId(tenant.into()),
             namespace: "default".into(),
             enabled: true,
             secret: None,

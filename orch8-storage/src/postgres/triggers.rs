@@ -15,7 +15,7 @@ pub(super) async fn create(
     .bind(&trigger.slug)
     .bind(&trigger.sequence_name)
     .bind(trigger.version)
-    .bind(&trigger.tenant_id)
+    .bind(&trigger.tenant_id.0)
     .bind(&trigger.namespace)
     .bind(trigger.enabled)
     .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
@@ -82,7 +82,7 @@ pub(super) async fn update(
     .bind(&trigger.slug)
     .bind(&trigger.sequence_name)
     .bind(trigger.version)
-    .bind(&trigger.tenant_id)
+    .bind(&trigger.tenant_id.0)
     .bind(&trigger.namespace)
     .bind(trigger.enabled)
     .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
@@ -129,7 +129,7 @@ impl TriggerRow {
             slug: self.slug,
             sequence_name: self.sequence_name,
             version: self.version,
-            tenant_id: self.tenant_id,
+            tenant_id: TenantId(self.tenant_id),
             namespace: self.namespace,
             enabled: self.enabled,
             secret: self.secret.map(orch8_types::config::SecretString::new),

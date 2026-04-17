@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::ids::TenantId;
+
 /// The kind of event source that fires a trigger.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -53,7 +55,7 @@ pub struct TriggerDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i32>,
     /// Tenant ID for created instances.
-    pub tenant_id: String,
+    pub tenant_id: TenantId,
     /// Namespace for created instances.
     #[serde(default = "crate::serde_defaults::default_namespace")]
     pub namespace: String,
@@ -156,7 +158,7 @@ mod tests {
             slug: "on-push".into(),
             sequence_name: "ci-pipeline".into(),
             version: Some(3),
-            tenant_id: "t1".into(),
+            tenant_id: TenantId("t1".into()),
             namespace: "prod".into(),
             enabled: false,
             secret: Some(crate::config::SecretString::new("s3cret".into())),
@@ -193,7 +195,7 @@ mod tests {
             slug: "t".into(),
             sequence_name: "s".into(),
             version: None,
-            tenant_id: String::new(),
+            tenant_id: TenantId(String::new()),
             namespace: "default".into(),
             enabled: true,
             secret: None,

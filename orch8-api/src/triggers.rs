@@ -81,7 +81,7 @@ async fn create_trigger(
         slug: body.slug,
         sequence_name: body.sequence_name,
         version: body.version,
-        tenant_id: tenant_id.0,
+        tenant_id,
         namespace: body.namespace,
         enabled: true,
         secret: body.secret.map(orch8_types::config::SecretString::new),
@@ -127,7 +127,7 @@ async fn get_trigger(
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
     crate::auth::enforce_tenant_access(
         &tenant_ctx,
-        &TenantId(trigger.tenant_id.clone()),
+        &trigger.tenant_id,
         &format!("trigger '{slug}'"),
     )?;
     Ok(Json(trigger))
@@ -147,7 +147,7 @@ async fn delete_trigger(
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
     crate::auth::enforce_tenant_access(
         &tenant_ctx,
-        &TenantId(trigger.tenant_id.clone()),
+        &trigger.tenant_id,
         &format!("trigger '{slug}'"),
     )?;
 
@@ -178,7 +178,7 @@ async fn fire_trigger(
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
     crate::auth::enforce_tenant_access(
         &tenant_ctx,
-        &TenantId(trigger.tenant_id.clone()),
+        &trigger.tenant_id,
         &format!("trigger '{slug}'"),
     )?;
 
