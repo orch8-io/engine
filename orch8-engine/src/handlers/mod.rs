@@ -12,6 +12,7 @@ pub mod query_instance;
 pub mod race;
 pub mod router;
 pub mod self_modify;
+pub mod send_signal;
 pub mod step;
 pub mod step_block;
 pub mod tool_call;
