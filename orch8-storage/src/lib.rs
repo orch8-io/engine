@@ -28,6 +28,15 @@ use orch8_types::signal::Signal;
 use orch8_types::trigger::TriggerDef;
 use orch8_types::worker::WorkerTask;
 
+/// Outcome of a dedupe insert attempt for `emit_event`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmitDedupeOutcome {
+    /// First call for (parent, key) — caller proceeds with `candidate_child`.
+    Inserted,
+    /// Key already used; caller should reuse the existing child instance ID.
+    AlreadyExists(orch8_types::ids::InstanceId),
+}
+
 /// The core storage abstraction.
 ///
 /// Object-safe for `dyn StorageBackend` dispatch.
@@ -774,6 +783,24 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         threshold: std::time::Duration,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
+
+    // === Emit Event Dedupe ===
+
+    /// Record a dedupe key for `emit_event`. If `(parent, key)` already exists,
+    /// returns the previously-recorded `child_instance_id` without modifying state.
+    ///
+    /// Atomic per row. Default impl returns an unimplemented error so backends opt in.
+    async fn record_or_get_emit_dedupe(
+        &self,
+        parent: orch8_types::ids::InstanceId,
+        key: &str,
+        candidate_child: orch8_types::ids::InstanceId,
+    ) -> Result<EmitDedupeOutcome, StorageError> {
+        let _ = (parent, key, candidate_child);
+        Err(StorageError::Query(
+            "record_or_get_emit_dedupe not implemented for this backend".into(),
+        ))
+    }
 
     // === Health ===
 
