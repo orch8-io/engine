@@ -4,6 +4,7 @@
 //! cross-tenant attempts return `Permanent` (does not leak existence).
 
 use serde_json::{json, Value};
+use tracing::warn;
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
@@ -50,6 +51,13 @@ pub(crate) async fn handle_query_instance(
     };
 
     if target.tenant_id != caller.tenant_id {
+        warn!(
+            caller_tenant = %caller.tenant_id.0,
+            target_tenant = %target.tenant_id.0,
+            caller_instance_id = %ctx.instance_id.0,
+            target_instance_id = %target_id.0,
+            "query_instance: cross-tenant query denied"
+        );
         return Err(StepError::Permanent {
             message: "cross-tenant query denied".into(),
             details: Some(json!({
