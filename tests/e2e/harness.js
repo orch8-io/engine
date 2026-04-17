@@ -101,7 +101,7 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
 
   const httpAddr = `0.0.0.0:${port}`;
 
-  const child = spawn(binaryPath, [], {
+  const child = spawn(binaryPath, ["--insecure"], {
     cwd: PROJECT_ROOT,
     env: {
       ...process.env,
