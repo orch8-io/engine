@@ -733,6 +733,32 @@ async fn externalized_state_crud() {
     assert!(s.get_externalized_state(&ref_key).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn externalized_state_roundtrip_across_compression_threshold() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    // Small payload (<1 KiB): written uncompressed, returned verbatim.
+    let small = json!({"k": "v"});
+    s.save_externalized_state(inst_id, "ext_small", &small)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_externalized_state("ext_small").await.unwrap(),
+        Some(small)
+    );
+
+    // Large payload (>1 KiB): written zstd-compressed, inflated on read.
+    let big = json!({"blob": "x".repeat(5_000)});
+    s.save_externalized_state(inst_id, "ext_big", &big)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_externalized_state("ext_big").await.unwrap(),
+        Some(big)
+    );
+}
+
 // ===========================================================================
 // Cluster Nodes
 // ===========================================================================
