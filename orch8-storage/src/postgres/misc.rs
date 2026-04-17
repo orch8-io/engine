@@ -170,6 +170,42 @@ pub(super) async fn get_injected_blocks(
         .and_then(|v| if v.is_null() { None } else { Some(v) }))
 }
 
+// === Emit Event Dedupe ===
+
+pub(super) async fn record_or_get_emit_dedupe(
+    store: &PostgresStorage,
+    parent: InstanceId,
+    key: &str,
+    candidate_child: InstanceId,
+) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    let inserted: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r"INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (parent_instance_id, dedupe_key) DO NOTHING
+          RETURNING child_instance_id",
+    )
+    .bind(parent.0)
+    .bind(key)
+    .bind(candidate_child.0)
+    .fetch_optional(&store.pool)
+    .await?;
+
+    if inserted.is_some() {
+        return Ok(crate::EmitDedupeOutcome::Inserted);
+    }
+
+    let (existing,): (uuid::Uuid,) = sqlx::query_as(
+        r"SELECT child_instance_id FROM emit_event_dedupe
+          WHERE parent_instance_id = $1 AND dedupe_key = $2",
+    )
+    .bind(parent.0)
+    .bind(key)
+    .fetch_one(&store.pool)
+    .await?;
+
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(existing)))
+}
+
 // === Health ===
 
 pub(super) async fn ping(store: &PostgresStorage) -> Result<(), StorageError> {

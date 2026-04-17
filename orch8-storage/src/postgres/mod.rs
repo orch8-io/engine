@@ -898,6 +898,17 @@ impl StorageBackend for PostgresStorage {
         credentials::list_due_for_refresh(self, threshold).await
     }
 
+    // === Emit Event Dedupe ===
+
+    async fn record_or_get_emit_dedupe(
+        &self,
+        parent: InstanceId,
+        key: &str,
+        candidate_child: InstanceId,
+    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+        misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
