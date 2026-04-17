@@ -8,41 +8,55 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use super::rows::InstanceRow;
 use super::PostgresStorage;
 
+/// Canonical `task_instances` INSERT statement. Kept as a single string so
+/// that adding a column requires editing exactly one place per backend. All
+/// per-row insert sites (`create`, `create_externalized`,
+/// `create_instance_with_dedupe`) bind via [`bind_instance_insert`].
+pub(super) const INSTANCE_INSERT_SQL: &str = r"
+    INSERT INTO task_instances
+        (id, sequence_id, tenant_id, namespace, state, next_fire_at,
+         priority, timezone, metadata, context,
+         concurrency_key, max_concurrency, idempotency_key,
+         session_id, parent_instance_id,
+         created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+";
+
+/// Bind a `TaskInstance` to an already-prepared query in the canonical column
+/// order used by [`INSTANCE_INSERT_SQL`]. Serializes `context` up front so the
+/// returned `Query` is `'q`-bound to owned data.
+pub(super) fn bind_instance_insert<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    inst: &'q TaskInstance,
+    context_json: &'q serde_json::Value,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    q.bind(inst.id.0)
+        .bind(inst.sequence_id.0)
+        .bind(&inst.tenant_id.0)
+        .bind(&inst.namespace.0)
+        .bind(inst.state.to_string())
+        .bind(inst.next_fire_at)
+        .bind(inst.priority as i16)
+        .bind(&inst.timezone)
+        .bind(&inst.metadata)
+        .bind(context_json)
+        .bind(&inst.concurrency_key)
+        .bind(inst.max_concurrency)
+        .bind(&inst.idempotency_key)
+        .bind(inst.session_id)
+        .bind(inst.parent_instance_id.map(|id| id.0))
+        .bind(inst.created_at)
+        .bind(inst.updated_at)
+}
+
 pub(super) async fn create(
     store: &PostgresStorage,
     inst: &TaskInstance,
 ) -> Result<(), StorageError> {
     let context = serde_json::to_value(&inst.context)?;
-    sqlx::query(
-        r"
-        INSERT INTO task_instances
-            (id, sequence_id, tenant_id, namespace, state, next_fire_at,
-             priority, timezone, metadata, context,
-             concurrency_key, max_concurrency, idempotency_key,
-             session_id, parent_instance_id,
-             created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        ",
-    )
-    .bind(inst.id.0)
-    .bind(inst.sequence_id.0)
-    .bind(&inst.tenant_id.0)
-    .bind(&inst.namespace.0)
-    .bind(inst.state.to_string())
-    .bind(inst.next_fire_at)
-    .bind(inst.priority as i16)
-    .bind(&inst.timezone)
-    .bind(&inst.metadata)
-    .bind(&context)
-    .bind(&inst.concurrency_key)
-    .bind(inst.max_concurrency)
-    .bind(&inst.idempotency_key)
-    .bind(inst.session_id)
-    .bind(inst.parent_instance_id.map(|id| id.0))
-    .bind(inst.created_at)
-    .bind(inst.updated_at)
-    .execute(&store.pool)
-    .await?;
+    bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst, &context)
+        .execute(&store.pool)
+        .await?;
     Ok(())
 }
 
@@ -279,36 +293,9 @@ pub(super) async fn create_externalized(
 
     // Parent first: the FK on externalized_state.instance_id is IMMEDIATE in
     // Postgres, so the task_instances row must exist before its children.
-    sqlx::query(
-        r"
-        INSERT INTO task_instances
-            (id, sequence_id, tenant_id, namespace, state, next_fire_at,
-             priority, timezone, metadata, context,
-             concurrency_key, max_concurrency, idempotency_key,
-             session_id, parent_instance_id,
-             created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        ",
-    )
-    .bind(inst_clone.id.0)
-    .bind(inst_clone.sequence_id.0)
-    .bind(&inst_clone.tenant_id.0)
-    .bind(&inst_clone.namespace.0)
-    .bind(inst_clone.state.to_string())
-    .bind(inst_clone.next_fire_at)
-    .bind(inst_clone.priority as i16)
-    .bind(&inst_clone.timezone)
-    .bind(&inst_clone.metadata)
-    .bind(&context_json)
-    .bind(&inst_clone.concurrency_key)
-    .bind(inst_clone.max_concurrency)
-    .bind(&inst_clone.idempotency_key)
-    .bind(inst_clone.session_id)
-    .bind(inst_clone.parent_instance_id.map(|id| id.0))
-    .bind(inst_clone.created_at)
-    .bind(inst_clone.updated_at)
-    .execute(&mut *tx)
-    .await?;
+    bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), &inst_clone, &context_json)
+        .execute(&mut *tx)
+        .await?;
 
     for (ref_key, payload) in &refs {
         insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;

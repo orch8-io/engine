@@ -226,16 +226,13 @@ pub(super) async fn create_instance_with_dedupe(
     key: &str,
     instance: &TaskInstance,
 ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-    use super::helpers::ts;
-
     let parent_str = parent.0.to_string();
     let cand_str = instance.id.0.to_string();
 
-    let mut tx = storage
-        .pool
-        .begin()
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
+    // `?` leans on the `From<sqlx::Error> for StorageError` impl so each
+    // failure surfaces with its real variant (PoolTimedOut → PoolExhausted,
+    // etc.) instead of being flattened to `Query`.
+    let mut tx = storage.pool.begin().await?;
 
     let inserted = sqlx::query(
         "INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
@@ -246,8 +243,7 @@ pub(super) async fn create_instance_with_dedupe(
     .bind(key)
     .bind(&cand_str)
     .execute(&mut *tx)
-    .await
-    .map_err(|e| StorageError::Query(e.to_string()))?
+    .await?
     .rows_affected();
 
     if inserted == 0 {
@@ -260,12 +256,9 @@ pub(super) async fn create_instance_with_dedupe(
         .bind(&parent_str)
         .bind(key)
         .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
+        .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
+        tx.commit().await?;
 
         let existing = uuid::Uuid::parse_str(&row.0)
             .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
@@ -275,34 +268,16 @@ pub(super) async fn create_instance_with_dedupe(
     }
 
     // Inserted the dedupe row — now insert the instance in the SAME tx. If this
-    // fails the dedupe row is rolled back with it.
-    sqlx::query(
-        "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
-    )
-    .bind(&cand_str)
-    .bind(instance.sequence_id.0.to_string())
-    .bind(&instance.tenant_id.0)
-    .bind(&instance.namespace.0)
-    .bind(instance.state.to_string())
-    .bind(instance.next_fire_at.map(ts))
-    .bind(instance.priority as i16)
-    .bind(&instance.timezone)
-    .bind(serde_json::to_string(&instance.metadata)?)
-    .bind(serde_json::to_string(&instance.context)?)
-    .bind(&instance.concurrency_key)
-    .bind(instance.max_concurrency)
-    .bind(&instance.idempotency_key)
-    .bind(instance.session_id.map(|u| u.to_string()))
-    .bind(instance.parent_instance_id.map(|u| u.0.to_string()))
-    .bind(ts(instance.created_at))
-    .bind(ts(instance.updated_at))
+    // fails the dedupe row is rolled back with it. The insert SQL + bindings
+    // live in `super::instances` so a schema change touches exactly one place.
+    super::instances::bind_instance_insert(
+        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+        instance,
+    )?
     .execute(&mut *tx)
-    .await
-    .map_err(|e| StorageError::Query(e.to_string()))?;
+    .await?;
 
-    tx.commit()
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
+    tx.commit().await?;
 
     Ok(crate::EmitDedupeOutcome::Inserted)
 }

@@ -11,46 +11,22 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use super::helpers::{apply_filter_sql, row_to_instance, ts};
 use super::SqliteStorage;
 
-#[instrument(skip(storage, i), fields(instance_id = %i.id, tenant = %i.tenant_id))]
-pub(super) async fn create(storage: &SqliteStorage, i: &TaskInstance) -> Result<(), StorageError> {
-    sqlx::query(
-        "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
-    )
-    .bind(i.id.0.to_string())
-    .bind(i.sequence_id.0.to_string())
-    .bind(&i.tenant_id.0)
-    .bind(&i.namespace.0)
-    .bind(i.state.to_string())
-    .bind(i.next_fire_at.map(ts))
-    .bind(i.priority as i16)
-    .bind(&i.timezone)
-    .bind(serde_json::to_string(&i.metadata)?)
-    .bind(serde_json::to_string(&i.context)?)
-    .bind(&i.concurrency_key)
-    .bind(i.max_concurrency)
-    .bind(&i.idempotency_key)
-    .bind(i.session_id.map(|u| u.to_string()))
-    .bind(i.parent_instance_id.map(|u| u.0.to_string()))
-    .bind(ts(i.created_at))
-    .bind(ts(i.updated_at))
-    .execute(&storage.pool).await.map_err(|e| StorageError::Query(e.to_string()))?;
-    Ok(())
-}
+/// SQL for a full `task_instances` insert. Kept as a single canonical string so
+/// that adding a column requires editing exactly one place per backend. All
+/// insert sites (`create`, `create_batch`, `create_externalized`,
+/// `create_batch_externalized`, `create_instance_with_dedupe`) bind against
+/// this string via [`bind_instance_insert`].
+pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)";
 
-pub(super) async fn create_batch(
-    storage: &SqliteStorage,
-    instances: &[TaskInstance],
-) -> Result<u64, StorageError> {
-    let mut tx = storage
-        .pool
-        .begin()
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-    for i in instances {
-        sqlx::query(
-            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
-        )
-        .bind(i.id.0.to_string())
+/// Bind a `TaskInstance` to an already-prepared query in the canonical column
+/// order used by [`INSTANCE_INSERT_SQL`]. Kept out of `sqlx::query(...)` so
+/// that callers can `.execute(...)` against either a pool or a transaction
+/// without duplicating the bind sequence.
+pub(super) fn bind_instance_insert<'q>(
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    i: &'q TaskInstance,
+) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>, StorageError> {
+    Ok(q.bind(i.id.0.to_string())
         .bind(i.sequence_id.0.to_string())
         .bind(&i.tenant_id.0)
         .bind(&i.namespace.0)
@@ -66,8 +42,32 @@ pub(super) async fn create_batch(
         .bind(i.session_id.map(|u| u.to_string()))
         .bind(i.parent_instance_id.map(|u| u.0.to_string()))
         .bind(ts(i.created_at))
-        .bind(ts(i.updated_at))
-        .execute(&mut *tx).await.map_err(|e| StorageError::Query(e.to_string()))?;
+        .bind(ts(i.updated_at)))
+}
+
+#[instrument(skip(storage, i), fields(instance_id = %i.id, tenant = %i.tenant_id))]
+pub(super) async fn create(storage: &SqliteStorage, i: &TaskInstance) -> Result<(), StorageError> {
+    bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), i)?
+        .execute(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn create_batch(
+    storage: &SqliteStorage,
+    instances: &[TaskInstance],
+) -> Result<u64, StorageError> {
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    for i in instances {
+        bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), i)?
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
     }
     tx.commit()
         .await
@@ -256,29 +256,10 @@ pub(super) async fn create_externalized(
 
     // Parent row must exist before children so the FK
     // (externalized_state.instance_id -> task_instances.id) is satisfied.
-    sqlx::query(
-        "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
-    )
-    .bind(inst_clone.id.0.to_string())
-    .bind(inst_clone.sequence_id.0.to_string())
-    .bind(&inst_clone.tenant_id.0)
-    .bind(&inst_clone.namespace.0)
-    .bind(inst_clone.state.to_string())
-    .bind(inst_clone.next_fire_at.map(ts))
-    .bind(inst_clone.priority as i16)
-    .bind(&inst_clone.timezone)
-    .bind(serde_json::to_string(&inst_clone.metadata)?)
-    .bind(serde_json::to_string(&inst_clone.context)?)
-    .bind(&inst_clone.concurrency_key)
-    .bind(inst_clone.max_concurrency)
-    .bind(&inst_clone.idempotency_key)
-    .bind(inst_clone.session_id.map(|u| u.to_string()))
-    .bind(inst_clone.parent_instance_id.map(|u| u.0.to_string()))
-    .bind(ts(inst_clone.created_at))
-    .bind(ts(inst_clone.updated_at))
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| StorageError::Query(e.to_string()))?;
+    bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), &inst_clone)?
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
 
     for (ref_key, payload) in &refs {
         insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
@@ -323,29 +304,10 @@ pub(super) async fn create_batch_externalized(
     // Step 1: insert marker-swapped task_instances rows first so the FK
     // on externalized_state.instance_id is satisfied when children land.
     for (inst, _) in &prepared {
-        sqlx::query(
-            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
-        )
-        .bind(inst.id.0.to_string())
-        .bind(inst.sequence_id.0.to_string())
-        .bind(&inst.tenant_id.0)
-        .bind(&inst.namespace.0)
-        .bind(inst.state.to_string())
-        .bind(inst.next_fire_at.map(ts))
-        .bind(inst.priority as i16)
-        .bind(&inst.timezone)
-        .bind(serde_json::to_string(&inst.metadata)?)
-        .bind(serde_json::to_string(&inst.context)?)
-        .bind(&inst.concurrency_key)
-        .bind(inst.max_concurrency)
-        .bind(&inst.idempotency_key)
-        .bind(inst.session_id.map(|u| u.to_string()))
-        .bind(inst.parent_instance_id.map(|u| u.0.to_string()))
-        .bind(ts(inst.created_at))
-        .bind(ts(inst.updated_at))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
+        bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst)?
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
     }
 
     // Step 2: externalized rows (per-instance keyed).

@@ -252,34 +252,13 @@ pub(super) async fn create_instance_with_dedupe(
     }
 
     let context = serde_json::to_value(&instance.context)?;
-    sqlx::query(
-        r"
-        INSERT INTO task_instances
-            (id, sequence_id, tenant_id, namespace, state, next_fire_at,
-             priority, timezone, metadata, context,
-             concurrency_key, max_concurrency, idempotency_key,
-             session_id, parent_instance_id,
-             created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        ",
+    // Insert SQL + bindings live in `super::instances` so a schema change
+    // touches exactly one place per backend.
+    super::instances::bind_instance_insert(
+        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+        instance,
+        &context,
     )
-    .bind(instance.id.0)
-    .bind(instance.sequence_id.0)
-    .bind(&instance.tenant_id.0)
-    .bind(&instance.namespace.0)
-    .bind(instance.state.to_string())
-    .bind(instance.next_fire_at)
-    .bind(instance.priority as i16)
-    .bind(&instance.timezone)
-    .bind(&instance.metadata)
-    .bind(&context)
-    .bind(&instance.concurrency_key)
-    .bind(instance.max_concurrency)
-    .bind(&instance.idempotency_key)
-    .bind(instance.session_id)
-    .bind(instance.parent_instance_id.map(|id| id.0))
-    .bind(instance.created_at)
-    .bind(instance.updated_at)
     .execute(&mut *tx)
     .await?;
 

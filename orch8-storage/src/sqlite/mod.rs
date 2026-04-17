@@ -1363,4 +1363,61 @@ mod tests {
         assert!(storage.get_instance(c2_id).await.unwrap().is_some());
         assert_ne!(c1_id, c2_id);
     }
+
+    /// R4 atomicity guarantee: if the instance INSERT fails AFTER the dedupe
+    /// row has been inserted inside the same transaction, the dedupe row must
+    /// be rolled back too. Otherwise a crashed/failed create would leave a
+    /// stale `(parent, key)` row pointing at a non-existent instance, and a
+    /// subsequent retry would be wrongly deduped to a ghost id.
+    ///
+    /// We force the failure via a duplicate `task_instances.id` (PK conflict)
+    /// — independent of FK enforcement, which is off by default in SQLite.
+    #[tokio::test]
+    async fn create_instance_with_dedupe_rolls_back_dedupe_on_insert_failure() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let colliding_id = InstanceId::new();
+
+        // Pre-seed a row with the same id so the second insert hits a PK
+        // conflict, forcing the instance INSERT inside the dedupe tx to fail.
+        let pre = mk_inst_for_dedupe(colliding_id);
+        storage.create_instance(&pre).await.unwrap();
+
+        // Build a distinct instance with the SAME id (collides on PK) but a
+        // fresh sequence so there's no doubt about why the insert fails.
+        let colliding = mk_inst_for_dedupe(colliding_id);
+
+        let result = storage
+            .create_instance_with_dedupe(parent, "k1", &colliding)
+            .await;
+        assert!(
+            result.is_err(),
+            "instance insert must fail on duplicate PK, but got {result:?}"
+        );
+
+        // Key claim: the dedupe row was rolled back with the failed insert.
+        // A fresh candidate under the same (parent, key) must be accepted as
+        // Inserted, not returned as AlreadyExists.
+        let fresh_candidate = InstanceId::new();
+        let retry = storage
+            .record_or_get_emit_dedupe(parent, "k1", fresh_candidate)
+            .await
+            .unwrap();
+        assert_eq!(
+            retry,
+            EmitDedupeOutcome::Inserted,
+            "failed create_instance_with_dedupe must NOT leave a dedupe row \
+             behind — retry should see a fresh slot"
+        );
+
+        // And the instance that failed to insert must be absent. Only the
+        // pre-seeded row with `colliding_id` exists, so the contract here is
+        // simply: neither insert from the failing call survived as a new row.
+        let still_pre = storage.get_instance(colliding_id).await.unwrap();
+        assert!(
+            still_pre.is_some(),
+            "pre-seeded row must still be present (it was never part of the tx)"
+        );
+    }
 }
