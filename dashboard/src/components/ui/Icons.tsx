@@ -112,3 +112,14 @@ export const IconSearch = (p: P) => (
     <path d="m20 20-4-4" />
   </SVG>
 );
+export const IconCopy = (p: P) => (
+  <SVG {...p}>
+    <rect x="9" y="9" width="11" height="11" rx="1.5" />
+    <path d="M5 15V5a1 1 0 0 1 1-1h10" />
+  </SVG>
+);
+export const IconCheck = (p: P) => (
+  <SVG {...p}>
+    <path d="m5 12 5 5 9-11" />
+  </SVG>
+);

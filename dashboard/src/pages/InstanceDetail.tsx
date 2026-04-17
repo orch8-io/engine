@@ -261,7 +261,7 @@ export default function InstanceDetail() {
       </div>
     );
 
-  const terminal = instance && ["completed", "cancelled", "failed"].includes(instance.state);
+  const terminal = !!instance && ["completed", "cancelled", "failed"].includes(instance.state);
 
   return (
     <div className="space-y-6">

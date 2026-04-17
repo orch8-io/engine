@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 function relative(iso: string | null): string {
   if (!iso) return "—";
   const ms = Date.now() - new Date(iso).getTime();
@@ -12,6 +14,39 @@ function relative(iso: string | null): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/**
+ * Shared 1Hz ticker. A single interval drives every <Relative/> on screen
+ * so they stay in lockstep and we don't pay N setInterval handlers. The
+ * hook returns a number that bumps once per second → consumers re-render.
+ */
+let subscribers = 0;
+let tickId: number | null = null;
+const listeners = new Set<() => void>();
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  subscribers++;
+  if (tickId === null) {
+    tickId = window.setInterval(() => {
+      listeners.forEach((fn) => fn());
+    }, 1000);
+  }
+  return () => {
+    listeners.delete(cb);
+    subscribers--;
+    if (subscribers === 0 && tickId !== null) {
+      clearInterval(tickId);
+      tickId = null;
+    }
+  };
+}
+
+function useNow(): number {
+  const [, setN] = useState(0);
+  useEffect(() => subscribe(() => setN((n) => n + 1)), []);
+  return Date.now();
+}
+
 export function Relative({
   at,
   className = "",
@@ -19,6 +54,7 @@ export function Relative({
   at: string | null;
   className?: string;
 }) {
+  useNow();
   return (
     <span
       title={at ? new Date(at).toLocaleString() : ""}

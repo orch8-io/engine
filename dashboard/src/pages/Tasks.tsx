@@ -2,11 +2,15 @@ import { useState, useCallback } from "react";
 import { usePolling } from "../hooks/usePolling";
 import { listWorkerTasks, type WorkerTask } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
+import { PageMeta } from "../components/ui/PageMeta";
 import { Panel, PanelBody, PanelHeader } from "../components/ui/Panel";
 import { Badge, TASK_TONE } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input, Select } from "../components/ui/Input";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
+import { Id } from "../components/ui/Mono";
+import { Relative } from "../components/ui/Relative";
+import { SkeletonTable } from "../components/ui/Skeleton";
 
 export default function Tasks() {
   const [stateFilter, setStateFilter] = useState("");
@@ -22,7 +26,10 @@ export default function Tasks() {
       }),
     [stateFilter, handlerFilter],
   );
-  const { data: tasks, loading } = usePolling<WorkerTask[]>(fetcher);
+  const { data: tasks, loading, updatedAt, refresh } =
+    usePolling<WorkerTask[]>(fetcher);
+
+  const hasFilters = Boolean(stateFilter || handlerFilter);
 
   return (
     <div className="space-y-6">
@@ -30,34 +37,30 @@ export default function Tasks() {
         eyebrow="Operator"
         title="Worker Tasks"
         description="Every unit of work dispatched to a handler. Click a row for detail."
+        actions={<PageMeta updatedAt={updatedAt} onRefresh={refresh} />}
       />
 
-      <Panel>
-        <PanelBody>
-          <div className="grid grid-cols-1 md:grid-cols-[160px_1fr] gap-3">
-            <Select
-              value={stateFilter}
-              onChange={(e) => setStateFilter(e.target.value)}
-            >
-              <option value="">All states</option>
-              <option value="pending">Pending</option>
-              <option value="claimed">Claimed</option>
-              <option value="completed">Completed</option>
-              <option value="failed">Failed</option>
-            </Select>
-            <Input
-              type="text"
-              placeholder="Filter by handler…"
-              value={handlerFilter}
-              onChange={(e) => setHandlerFilter(e.target.value)}
-            />
-          </div>
-        </PanelBody>
-      </Panel>
+      {/* Flat filter strip */}
+      <div className="grid grid-cols-1 md:grid-cols-[160px_1fr] gap-3">
+        <Select
+          value={stateFilter}
+          onChange={(e) => setStateFilter(e.target.value)}
+        >
+          <option value="">All states</option>
+          <option value="pending">Pending</option>
+          <option value="claimed">Claimed</option>
+          <option value="completed">Completed</option>
+          <option value="failed">Failed</option>
+        </Select>
+        <Input
+          type="text"
+          placeholder="Filter by handler…"
+          value={handlerFilter}
+          onChange={(e) => setHandlerFilter(e.target.value)}
+        />
+      </div>
 
-      {loading && !tasks && (
-        <div className="text-muted text-sm">Loading tasks…</div>
-      )}
+      {loading && !tasks && <SkeletonTable rows={8} cols={6} />}
 
       {tasks && (
         <Panel>
@@ -79,6 +82,7 @@ export default function Tasks() {
                       setSelected(selected?.id === t.id ? null : t)
                     }
                     active={selected?.id === t.id}
+                    className="cursor-pointer"
                   >
                     <TD className="pl-4">
                       <Badge
@@ -97,12 +101,18 @@ export default function Tasks() {
                       {t.worker_id ?? "—"}
                     </TD>
                     <TD className="text-right tabular">{t.attempt}</TD>
-                    <TD className="text-muted tabular pr-4">
-                      {new Date(t.created_at).toLocaleString()}
+                    <TD className="pr-4">
+                      <Relative at={t.created_at} />
                     </TD>
                   </TR>
                 ))}
-                {tasks.length === 0 && <Empty>No tasks found.</Empty>}
+                {tasks.length === 0 && (
+                  <Empty>
+                    {hasFilters
+                      ? "No tasks match these filters — try clearing one."
+                      : "No tasks yet."}
+                  </Empty>
+                )}
               </tbody>
             </Table>
           </PanelBody>
@@ -113,8 +123,8 @@ export default function Tasks() {
         <Panel elevated>
           <PanelHeader>
             <span className="eyebrow">Task detail</span>
-            <span className="ml-auto font-mono text-[11px] text-faint">
-              {selected.id}
+            <span className="ml-auto">
+              <Id value={selected.id} short={false} copy />
             </span>
             <Button
               variant="ghost"
@@ -126,7 +136,7 @@ export default function Tasks() {
           </PanelHeader>
           <PanelBody>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <Field label="Instance" value={selected.instance_id} mono />
+              <Field label="Instance" value={selected.instance_id} mono copy />
               <Field label="Handler" value={selected.handler_name} mono />
               <Field label="Block" value={selected.block_id} mono />
               <Field label="State" value={selected.state} />
@@ -189,20 +199,26 @@ function Field({
   label,
   value,
   mono,
+  copy,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  copy?: boolean;
 }) {
   return (
     <div className="min-w-0">
       <div className="eyebrow mb-1">{label}</div>
-      <div
-        className={`truncate text-[13px] ${mono ? "font-mono text-[12px]" : ""}`}
-        title={value}
-      >
-        {value}
-      </div>
+      {copy && value !== "—" ? (
+        <Id value={value} short={false} copy className="!text-[12px]" />
+      ) : (
+        <div
+          className={`truncate text-[13px] ${mono ? "font-mono text-[12px]" : ""}`}
+          title={value}
+        >
+          {value}
+        </div>
+      )}
     </div>
   );
 }

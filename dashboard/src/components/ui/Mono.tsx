@@ -1,26 +1,63 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
+import { IconCheck, IconCopy } from "./Icons";
 
 /**
- * Monospaced identifier. Truncates mid-string to keep prefix + suffix visible —
- * e.g. `a8f3c…9b21` so the eye can disambiguate without full UUID width.
+ * Monospaced identifier. Truncates to prefix + ellipsis.
+ * If `copy` is enabled, the element becomes a button that copies the full
+ * value to the clipboard on click and flashes a check glyph for 1.2s.
+ * Truncation must always be recoverable — either by click-to-copy or tooltip.
  */
 export function Id({
   value,
   short = true,
+  copy = false,
   className = "",
 }: {
   value: string;
   short?: boolean;
+  copy?: boolean;
   className?: string;
 }) {
+  const [copied, setCopied] = useState(false);
   const display = short && value.length > 14 ? `${value.slice(0, 8)}…` : value;
+
+  if (!copy) {
+    return (
+      <span
+        title={value}
+        className={`font-mono text-[12px] text-fg-dim ${className}`}
+      >
+        {display}
+      </span>
+    );
+  }
+
+  const onClick = async (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* clipboard blocked — title still reveals full value */
+    }
+  };
+
   return (
-    <span
-      title={value}
-      className={`font-mono text-[12px] text-fg-dim ${className}`}
+    <button
+      type="button"
+      onClick={onClick}
+      title={copied ? "Copied" : `${value} — click to copy`}
+      aria-label={copied ? "Copied" : `Copy ${value}`}
+      className={`inline-flex items-center gap-1.5 font-mono text-[12px] text-fg-dim hover:text-fg transition-colors cursor-copy ${className}`}
     >
-      {display}
-    </span>
+      <span>{display}</span>
+      {copied ? (
+        <IconCheck size={11} className="text-ok" />
+      ) : (
+        <IconCopy size={11} className="text-faint" />
+      )}
+    </button>
   );
 }
 

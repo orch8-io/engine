@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { listSequenceVersions, type SequenceDefinition } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Panel, PanelBody } from "../components/ui/Panel";
@@ -7,8 +7,12 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Input, FieldLabel } from "../components/ui/Input";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
+import { Id } from "../components/ui/Mono";
+import { Relative } from "../components/ui/Relative";
+import { SkeletonTable } from "../components/ui/Skeleton";
 
 export default function Sequences() {
+  const navigate = useNavigate();
   const [tenant, setTenant] = useState("");
   const [namespace, setNamespace] = useState("default");
   const [name, setName] = useState("");
@@ -94,8 +98,20 @@ export default function Sequences() {
         </div>
       )}
 
-      {versions && versions.length === 0 && (
-        <div className="text-muted text-sm">No versions found.</div>
+      {loading && <SkeletonTable rows={4} cols={5} />}
+
+      {versions && versions.length === 0 && !loading && (
+        <Panel>
+          <PanelBody>
+            <div className="py-6 text-center text-muted text-[13px]">
+              No versions found for{" "}
+              <span className="font-mono text-fg-dim">
+                {tenant}/{namespace}/{name}
+              </span>
+              .
+            </div>
+          </PanelBody>
+        </Panel>
       )}
 
       {versions && versions.length > 0 && (
@@ -111,17 +127,16 @@ export default function Sequences() {
               </THead>
               <tbody>
                 {versions.map((v) => (
-                  <TR key={v.id}>
+                  <TR
+                    key={v.id}
+                    onClick={() => navigate(`/sequences/${v.id}`)}
+                    className="cursor-pointer"
+                  >
                     <TD className="pl-4 font-mono text-[12px] tabular">
                       v{v.version}
                     </TD>
-                    <TD className="font-mono text-[12px]">
-                      <Link
-                        to={`/sequences/${v.id}`}
-                        className="text-signal hover:underline"
-                      >
-                        {v.id.slice(0, 8)}…
-                      </Link>
+                    <TD>
+                      <Id value={v.id} copy />
                     </TD>
                     <TD className="text-right tabular">{v.blocks.length}</TD>
                     <TD>
@@ -131,8 +146,8 @@ export default function Sequences() {
                         <Badge tone="ok">active</Badge>
                       )}
                     </TD>
-                    <TD className="text-muted tabular pr-4">
-                      {new Date(v.created_at).toLocaleString()}
+                    <TD className="pr-4">
+                      <Relative at={v.created_at} />
                     </TD>
                   </TR>
                 ))}
