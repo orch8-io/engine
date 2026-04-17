@@ -22,7 +22,51 @@ pub struct ExecutionContext {
     pub runtime: RuntimeContext,
 }
 
+/// Default ceiling for a single instance's serialized `ExecutionContext`.
+/// Picked to keep scheduler claim latency healthy — the whole context
+/// travels on every tick. See `docs/CONTEXT_MANAGEMENT.md` §9.
+pub const DEFAULT_MAX_CONTEXT_BYTES: u32 = 256 * 1024;
+
+/// Returned when a write would make the instance context exceed its size ceiling.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "context too large: {actual} bytes exceeds configured max of {max} bytes \
+     (see ORCH8_SCHEDULER__MAX_CONTEXT_BYTES)"
+)]
+pub struct ContextTooLarge {
+    pub actual: usize,
+    pub max: usize,
+}
+
 impl ExecutionContext {
+    /// Serialized byte size of this context when written to JSON. Cheap — just
+    /// walks the value, doesn't allocate the full string.
+    #[must_use]
+    pub fn serialized_size(&self) -> usize {
+        // `serde_json::to_vec` is the simplest reliable way; value is small
+        // enough that we don't need a streaming byte counter.
+        serde_json::to_vec(self).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Reject contexts whose serialized form exceeds `max_bytes`.
+    /// `max_bytes == 0` disables the check (escape hatch for tests/tools).
+    ///
+    /// # Errors
+    /// Returns `ContextTooLarge` when serialization exceeds the ceiling.
+    pub fn check_size(&self, max_bytes: u32) -> Result<(), ContextTooLarge> {
+        if max_bytes == 0 {
+            return Ok(());
+        }
+        let actual = self.serialized_size();
+        if actual > max_bytes as usize {
+            return Err(ContextTooLarge {
+                actual,
+                max: max_bytes as usize,
+            });
+        }
+        Ok(())
+    }
+
     /// Return a filtered copy of the context based on section-level permissions.
     /// Denied sections are replaced with their default (empty) values.
     #[must_use]
@@ -156,6 +200,43 @@ mod tests {
         assert_eq!(rt.attempt, 0);
         assert!(rt.started_at.is_none());
         assert!(rt.resource_key.is_none());
+    }
+
+    #[test]
+    fn check_size_allows_small_context() {
+        let ctx = sample_context();
+        // 256 KiB — comfortably over the sample size.
+        ctx.check_size(256 * 1024).unwrap();
+    }
+
+    #[test]
+    fn check_size_rejects_oversize() {
+        let mut ctx = ExecutionContext::default();
+        // ~1 KiB of payload in `data`.
+        ctx.data = serde_json::json!({ "blob": "x".repeat(1024) });
+        let err = ctx.check_size(128).unwrap_err();
+        assert!(err.actual > 128);
+        assert_eq!(err.max, 128);
+        // Surface the env var hint in the error message so operators know
+        // which knob to turn.
+        assert!(err.to_string().contains("ORCH8_SCHEDULER__MAX_CONTEXT_BYTES"));
+    }
+
+    #[test]
+    fn check_size_zero_disables_check() {
+        // Large context — 10 KiB — passes when the limit is 0.
+        let mut ctx = ExecutionContext::default();
+        ctx.data = serde_json::json!({ "blob": "x".repeat(10_000) });
+        ctx.check_size(0).unwrap();
+    }
+
+    #[test]
+    fn serialized_size_tracks_payload_growth() {
+        let empty = ExecutionContext::default().serialized_size();
+        let mut ctx = ExecutionContext::default();
+        ctx.data = serde_json::json!({ "blob": "y".repeat(512) });
+        let grown = ctx.serialized_size();
+        assert!(grown > empty + 500, "payload growth should dominate envelope");
     }
 
     #[test]

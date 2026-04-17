@@ -167,6 +167,9 @@ pub(crate) async fn create_instance(
         req.tenant_id.clone()
     };
 
+    // Reject oversized contexts before they hit the DB.
+    req.context.check_size(state.max_context_bytes)?;
+
     // Idempotency check: if key exists, return existing instance id.
     if let Some(ref idem_key) = req.idempotency_key {
         if !idem_key.is_empty() {
@@ -239,9 +242,12 @@ pub(crate) async fn create_instances_batch(
         ));
     }
 
-    // Enforce tenant isolation for each item in the batch
-    for r in &req.instances {
+    // Enforce tenant isolation and context size for each item in the batch.
+    for (i, r) in req.instances.iter().enumerate() {
         crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
+        r.context.check_size(state.max_context_bytes).map_err(|e| {
+            ApiError::PayloadTooLarge(format!("instances[{i}]: {e}"))
+        })?;
     }
 
     let now = Utc::now();
@@ -427,6 +433,8 @@ pub(crate) async fn update_context(
         &instance.tenant_id,
         &format!("instance {id}"),
     )?;
+
+    req.context.check_size(state.max_context_bytes)?;
 
     state
         .storage

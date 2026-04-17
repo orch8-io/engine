@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use orch8_storage::StorageBackend;
+use orch8_types::context::ExecutionContext;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::plugin::PluginType;
@@ -10,6 +11,16 @@ use crate::error::EngineError;
 use crate::evaluator;
 use crate::handlers::step::StepExecParams;
 use crate::handlers::HandlerRegistry;
+
+/// Build the context snapshot a step will see, honouring its
+/// `context_access` declaration. Mirrors the fast-path logic in
+/// `scheduler.rs` so both dispatch paths enforce the same policy.
+fn context_for_step(instance: &TaskInstance, step_def: &StepDef) -> ExecutionContext {
+    match &step_def.context_access {
+        Some(access) => instance.context.filtered(access),
+        None => instance.context.clone(),
+    }
+}
 
 /// Dispatch a plugin handler and map the `StepError` result to node state transitions.
 async fn dispatch_plugin<F, Fut>(
@@ -73,7 +84,7 @@ pub async fn execute_step_node(
             instance_id: instance.id,
             block_id: step_def.id.clone(),
             params: resolved_params.clone(),
-            context: instance.context.clone(),
+            context: context_for_step(instance, step_def),
             attempt: 0,
         };
         return dispatch_plugin(storage, node, move || async move {
@@ -93,7 +104,7 @@ pub async fn execute_step_node(
             instance_id: instance.id,
             block_id: step_def.id.clone(),
             params,
-            context: instance.context.clone(),
+            context: context_for_step(instance, step_def),
             attempt: 0,
         };
         return dispatch_plugin(storage, node, || {
@@ -112,7 +123,7 @@ pub async fn execute_step_node(
                 instance_id: instance.id,
                 block_id: step_def.id.clone(),
                 params: resolved_params.clone(),
-                context: instance.context.clone(),
+                context: context_for_step(instance, step_def),
                 attempt: 0,
             };
             return dispatch_plugin(storage, node, || {
@@ -132,7 +143,7 @@ pub async fn execute_step_node(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: resolved_params,
-        context: instance.context.clone(),
+        context: context_for_step(instance, step_def),
         attempt: 0,
         timeout: step_def.timeout,
         externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
@@ -208,7 +219,10 @@ async fn dispatch_step_to_external_worker(
         handler_name: step_def.handler.clone(),
         queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
-        context: serde_json::to_value(&instance.context)
+        // Apply the step's context_access policy before handing the context
+        // off to an external worker. The remote process can't be trusted to
+        // filter on its own.
+        context: serde_json::to_value(context_for_step(instance, step_def))
             .map_err(orch8_types::error::StorageError::Serialization)?,
         attempt: 0,
         timeout_ms: step_def

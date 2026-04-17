@@ -31,6 +31,11 @@ pub struct AppState {
     /// Shutdown signal — long-lived handlers (SSE streams, polling loops) should
     /// observe this to exit cleanly on graceful shutdown.
     pub shutdown: CancellationToken,
+    /// Maximum serialized bytes accepted for an instance `ExecutionContext`
+    /// on write paths (`POST /instances`, `PATCH /instances/{id}/context`).
+    /// `0` disables the check. Mirrors `SchedulerConfig::max_context_bytes`
+    /// so the API rejects oversized contexts before they hit the DB.
+    pub max_context_bytes: u32,
 }
 
 /// Build the axum router with all routes.

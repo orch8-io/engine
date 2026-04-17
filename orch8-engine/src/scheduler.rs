@@ -1110,7 +1110,16 @@ async fn dispatch_to_external_worker(
         handler_name: step_def.handler.clone(),
         queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
-        context: serde_json::to_value(&instance.context).unwrap_or_default(),
+        // Apply `context_access` before handing off to an external worker —
+        // mirrors the in-process path at L.930. The remote process cannot
+        // be trusted to filter on its own.
+        context: {
+            let filtered = match &step_def.context_access {
+                Some(access) => instance.context.filtered(access),
+                None => instance.context.clone(),
+            };
+            serde_json::to_value(&filtered).unwrap_or_default()
+        },
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
         timeout_ms: step_def
             .timeout

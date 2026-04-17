@@ -2,6 +2,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use orch8_engine::error::EngineError;
+use orch8_types::context::ContextTooLarge;
 use orch8_types::error::StorageError;
 
 /// API-level errors mapped to HTTP status codes.
@@ -27,6 +28,9 @@ pub enum ApiError {
 
     #[error("unavailable: {0}")]
     Unavailable(String),
+
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
 }
 
 impl ApiError {
@@ -51,6 +55,7 @@ impl IntoResponse for ApiError {
             ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
         };
         let body = match &self {
             ApiError::Internal(msg) => {
@@ -66,6 +71,12 @@ impl IntoResponse for ApiError {
 impl From<StorageError> for ApiError {
     fn from(err: StorageError) -> Self {
         Self::from_storage(err, "resource")
+    }
+}
+
+impl From<ContextTooLarge> for ApiError {
+    fn from(err: ContextTooLarge) -> Self {
+        Self::PayloadTooLarge(err.to_string())
     }
 }
 

@@ -169,6 +169,14 @@ pub struct SchedulerConfig {
     /// Can also be set via `ORCH8_ENCRYPTION_KEY` env var.
     #[serde(default)]
     pub encryption_key: SecretString,
+    /// Maximum serialized size of a single instance's `ExecutionContext`
+    /// in bytes. Writes exceeding this limit are rejected with 413. The
+    /// whole context travels on every scheduler claim, so keeping it small
+    /// matters for tick latency.
+    ///
+    /// Default: `DEFAULT_MAX_CONTEXT_BYTES` (256 KiB). `0` disables the check.
+    #[serde(default = "default_max_context_bytes")]
+    pub max_context_bytes: u32,
 }
 
 impl Default for SchedulerConfig {
@@ -183,8 +191,13 @@ impl Default for SchedulerConfig {
             webhooks: WebhookConfig::default(),
             externalize_output_threshold: 0,
             encryption_key: SecretString::default(),
+            max_context_bytes: default_max_context_bytes(),
         }
     }
+}
+
+fn default_max_context_bytes() -> u32 {
+    crate::context::DEFAULT_MAX_CONTEXT_BYTES
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
