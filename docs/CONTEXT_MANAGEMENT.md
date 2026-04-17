@@ -257,12 +257,33 @@ built from `SubSequenceDef.input`; the parent's `config` and `audit` sections ar
 dropped. Workflows that rely on shared `config` between parent and child must re-pass
 it through `input`.
 
-### 8.5 Externalized large outputs are not auto-dereferenced in templates
+### 8.5 Externalized large outputs are not auto-dereferenced — FIXED in 0.1.x
 
 When a block output exceeds `externalize_threshold` bytes, it is stored externally
-and `block_outputs.output` contains a reference. Templates `{{outputs.X.field}}`
-today resolve against the reference, not the dereferenced value. Workarounds:
-lower the threshold, or `merge_context_data` the specific field you need.
+and `block_outputs.output` contains a reference of the form
+`{"_externalized": true, "_ref": "<key>"}`.
+
+**Resolution:** the marker is now transparently inflated at every read site a
+consumer can observe:
+
+- **API path (`GET /instances/{id}/outputs`):** `orch8-api/src/instances.rs`
+  scans each output and calls `storage.get_externalized_state(ref_key)` when a
+  marker is detected, replacing the envelope with the real payload before the
+  JSON response is serialized.
+- **Engine dispatch path:** `orch8-engine/src/handlers/step_block.rs::context_for_step`
+  walks the filtered `ExecutionContext.data` object and inflates any top-level
+  marker before handing the context to either an in-process handler or an
+  external worker. Both the in-process fast path (`scheduler.rs`) and the
+  external-worker dispatch path share this helper, so every handler sees a
+  fully resolved context.
+
+Broken references (payload missing from `externalized_state`) are left in place
+so callers can detect the dangling pointer. Template resolution
+(`{{outputs.X.field}}`) builds on the dispatch-path context, so it also sees
+inflated values — no separate fix needed there.
+
+Only top-level `context.data` fields are scanned; nested objects are not
+recursed into, consistent with the write side in `handlers/step.rs::maybe_externalize`.
 
 ---
 
