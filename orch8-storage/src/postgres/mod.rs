@@ -906,20 +906,20 @@ impl StorageBackend for PostgresStorage {
 
     async fn record_or_get_emit_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         candidate_child: InstanceId,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-        misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
+        misc::record_or_get_emit_dedupe(self, scope, key, candidate_child).await
     }
 
     async fn create_instance_with_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         instance: &TaskInstance,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-        misc::create_instance_with_dedupe(self, parent, key, instance).await
+        misc::create_instance_with_dedupe(self, scope, key, instance).await
     }
 
     async fn delete_expired_emit_event_dedupe(

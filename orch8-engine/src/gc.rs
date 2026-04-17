@@ -246,7 +246,7 @@ mod tests {
     /// only proves that the loop wires `sweep_emit_dedupe` in.
     #[tokio::test]
     async fn gc_loop_sweeps_emit_event_dedupe() {
-        use orch8_storage::EmitDedupeOutcome;
+        use orch8_storage::{DedupeScope, EmitDedupeOutcome};
         use orch8_types::ids::InstanceId;
 
         let storage: Arc<dyn StorageBackend> = Arc::new(
@@ -258,7 +258,7 @@ mod tests {
         let parent = InstanceId::new();
         let child = InstanceId::new();
         storage
-            .record_or_get_emit_dedupe(parent, "k", child)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k", child)
             .await
             .unwrap();
 
@@ -292,7 +292,7 @@ mod tests {
 
         // Second call should now insert fresh because the prior row was swept.
         let outcome = storage
-            .record_or_get_emit_dedupe(parent, "k", InstanceId::new())
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k", InstanceId::new())
             .await
             .unwrap();
         assert_eq!(

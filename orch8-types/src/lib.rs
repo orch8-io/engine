@@ -6,6 +6,7 @@ pub mod config;
 pub mod context;
 pub mod credential;
 pub mod cron;
+pub mod dedupe;
 pub mod encryption;
 pub mod error;
 pub mod execution;

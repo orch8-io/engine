@@ -3,10 +3,18 @@
 //! Same-tenant only. Cross-tenant attempts return `Permanent`. The caller's
 //! instance id is captured in the child's metadata as `parent_instance_id`.
 //!
-//! Supports an optional `dedupe_key` param scoped per-parent. When present,
-//! `(parent_instance_id, dedupe_key)` and the child instance are written in a
-//! single transaction via `storage.create_instance_with_dedupe`: the first
-//! call creates both rows atomically; any subsequent call with the same key
+//! Supports an optional `dedupe_key` param with a selectable `dedupe_scope`
+//! (R7). Scope options:
+//! - `"parent"` (default) — dedupe identity is `(parent_instance_id,
+//!   dedupe_key)`. Idempotent retry within a single workflow run.
+//! - `"tenant"` — dedupe identity is `(tenant_id, dedupe_key)`. Tenant-wide
+//!   "at-most-once" fan-out across every caller in the tenant. The tenant is
+//!   always the caller's own (`ctx.tenant_id`); cross-tenant dedupe is not
+//!   representable.
+//!
+//! When present, the dedupe row and child instance are written in a single
+//! transaction via `storage.create_instance_with_dedupe`: the first call
+//! creates both rows atomically; any subsequent call with the same scope+key
 //! returns the existing child id and `deduped: true` without creating a new
 //! instance. This closes the orphan window described in architectural
 //! finding #2 — a crash mid-operation cannot leave a dedupe row pointing at
@@ -14,11 +22,20 @@
 
 use serde_json::{json, Map, Value};
 
-use orch8_storage::EmitDedupeOutcome;
+use orch8_storage::{DedupeScope, EmitDedupeOutcome};
 use orch8_types::{error::StepError, ids::InstanceId};
 
 use super::util::{check_same_tenant, map_storage_err, permanent};
 use super::StepContext;
+
+/// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
+/// we parse exactly twice (match on string, then build `DedupeScope` once we
+/// also have the `tenant_id` / `instance_id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DedupeScopeKind {
+    Parent,
+    Tenant,
+}
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepError> {
@@ -34,7 +51,7 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     let user_meta = ctx.params.get("meta").cloned().unwrap_or_else(|| json!({}));
 
     // Optional dedupe key. If the caller passes the key at all, it must be a
-    // non-empty string — an empty key would create a per-parent global lock
+    // non-empty string — an empty key would create a scope-wide global lock
     // which is almost certainly a bug, so reject explicitly as Permanent.
     let dedupe_key: Option<String> = match ctx.params.get("dedupe_key") {
         None | Some(Value::Null) => None,
@@ -46,6 +63,29 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
         }
         Some(_) => {
             return Err(permanent("'dedupe_key' must be a string"));
+        }
+    };
+
+    // Optional dedupe scope — selects the key's namespace. Defaults to
+    // "parent" so pre-R7 callers keep their existing per-parent behavior.
+    // We reject unknown scope strings as Permanent (typo in the workflow
+    // config should fail loudly, not silently fall back to a different
+    // namespace). Only matters when a dedupe_key is present; we still parse
+    // so a bare `dedupe_scope` without `dedupe_key` surfaces a config error.
+    let dedupe_scope_str: &str = match ctx.params.get("dedupe_scope") {
+        None | Some(Value::Null) => "parent",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => {
+            return Err(permanent("'dedupe_scope' must be a string"));
+        }
+    };
+    let dedupe_scope_kind = match dedupe_scope_str {
+        "parent" => DedupeScopeKind::Parent,
+        "tenant" => DedupeScopeKind::Tenant,
+        other => {
+            return Err(permanent(format!(
+                "invalid dedupe_scope: '{other}' (expected 'parent' or 'tenant')"
+            )));
         }
     };
 
@@ -86,7 +126,7 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     let candidate_child_id = InstanceId::new();
     let sequence_name = trigger.sequence_name.clone();
 
-    // Dedupe branch: record (parent, key) AND create the child instance in a
+    // Dedupe branch: record (scope, key) AND create the child instance in a
     // single transaction via `create_instance_with_dedupe`. Closes the orphan
     // window where the dedupe row and the child used to be separate writes
     // (finding #2). The child is built in memory first so the storage layer
@@ -102,8 +142,15 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
             meta_with_source,
             Some(candidate_child_id),
         );
+        // Tenant scope always derives from the caller's own tenant
+        // (StepContext); a workflow cannot punch into another tenant's
+        // dedupe namespace by design.
+        let scope = match dedupe_scope_kind {
+            DedupeScopeKind::Parent => DedupeScope::Parent(ctx.instance_id),
+            DedupeScopeKind::Tenant => DedupeScope::Tenant(ctx.tenant_id.clone()),
+        };
         let outcome = storage
-            .create_instance_with_dedupe(ctx.instance_id, key, &instance)
+            .create_instance_with_dedupe(&scope, key, &instance)
             .await
             .map_err(|e| map_storage_err(&e))?;
         return Ok(match outcome {
@@ -572,5 +619,231 @@ mod tests {
         let ctx = mk_ctx(&caller, storage_dyn, json!({}));
         let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    // === R7: dedupe_scope param ============================================
+
+    /// Tenant scope: two DIFFERENT parents in the SAME tenant using the same
+    /// dedupe key → second call is deduped to the first child. Proves
+    /// tenant-wide at-most-once.
+    #[tokio::test]
+    async fn emit_event_dedupe_tenant_scope_dedupes_across_parents() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller_a = mk_instance("T1", InstanceState::Running);
+        let caller_b = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller_a).await.unwrap();
+        storage.create_instance(&caller_b).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let make = |caller: &TaskInstance| {
+            mk_ctx(
+                caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "dedupe_key": "welcome-1",
+                    "dedupe_scope": "tenant",
+                }),
+            )
+        };
+
+        let ra = handle_emit_event(make(&caller_a)).await.unwrap();
+        let rb = handle_emit_event(make(&caller_b)).await.unwrap();
+
+        assert_eq!(ra.get("deduped"), Some(&json!(false)));
+        assert_eq!(rb.get("deduped"), Some(&json!(true)));
+        assert_eq!(
+            ra.get("instance_id"),
+            rb.get("instance_id"),
+            "tenant-scope dedupe must return the same child id across parents"
+        );
+
+        // Two callers + exactly one child = 3 instances in T1.
+        let filter = orch8_types::filter::InstanceFilter {
+            tenant_id: Some(TenantId("T1".into())),
+            ..Default::default()
+        };
+        let pagination = orch8_types::filter::Pagination::default();
+        let instances = storage.list_instances(&filter, &pagination).await.unwrap();
+        assert_eq!(instances.len(), 3);
+    }
+
+    /// Tenant scope across TWO tenants with the same key → both succeed
+    /// independently. Proves tenant isolation at the handler layer.
+    #[tokio::test]
+    async fn emit_event_dedupe_tenant_scope_isolates_tenants() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller_a = mk_instance("T1", InstanceState::Running);
+        let caller_b = mk_instance("T2", InstanceState::Running);
+        storage.create_instance(&caller_a).await.unwrap();
+        storage.create_instance(&caller_b).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        seed_sequence(&storage, "T2", "child_seq").await;
+        let trigger_a = mk_trigger("on-order", "T1", "child_seq");
+        let trigger_b = mk_trigger("on-order-b", "T2", "child_seq");
+        storage.create_trigger(&trigger_a).await.unwrap();
+        storage.create_trigger(&trigger_b).await.unwrap();
+
+        let ra = handle_emit_event(mk_ctx(
+            &caller_a,
+            storage_dyn.clone(),
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "shared",
+                "dedupe_scope": "tenant",
+            }),
+        ))
+        .await
+        .unwrap();
+        let rb = handle_emit_event(mk_ctx(
+            &caller_b,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order-b",
+                "dedupe_key": "shared",
+                "dedupe_scope": "tenant",
+            }),
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(ra.get("deduped"), Some(&json!(false)));
+        assert_eq!(rb.get("deduped"), Some(&json!(false)));
+        assert_ne!(
+            ra.get("instance_id"),
+            rb.get("instance_id"),
+            "same key in two tenants must NOT collide"
+        );
+    }
+
+    /// Parent scope and tenant scope with the same (caller, key) are
+    /// independent namespaces — both succeed.
+    #[tokio::test]
+    async fn emit_event_dedupe_parent_and_tenant_scopes_are_independent() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let make_parent = || {
+            mk_ctx(
+                &caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "dedupe_key": "k",
+                    "dedupe_scope": "parent",
+                }),
+            )
+        };
+        let make_tenant = || {
+            mk_ctx(
+                &caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "dedupe_key": "k",
+                    "dedupe_scope": "tenant",
+                }),
+            )
+        };
+
+        let rp = handle_emit_event(make_parent()).await.unwrap();
+        let rt = handle_emit_event(make_tenant()).await.unwrap();
+
+        assert_eq!(rp.get("deduped"), Some(&json!(false)));
+        assert_eq!(rt.get("deduped"), Some(&json!(false)));
+        assert_ne!(rp.get("instance_id"), rt.get("instance_id"));
+    }
+
+    #[tokio::test]
+    async fn emit_event_rejects_invalid_dedupe_scope() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "k",
+                "dedupe_scope": "global",
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("invalid dedupe_scope"),
+                    "expected 'invalid dedupe_scope' in message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_event_rejects_non_string_dedupe_scope() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "k",
+                "dedupe_scope": 42,
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    /// Absence of `dedupe_scope` must not change pre-R7 per-parent behavior.
+    /// Two different parents with the same key → both create distinct
+    /// children (regression guard for the default).
+    #[tokio::test]
+    async fn emit_event_default_scope_is_parent() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller_a = mk_instance("T1", InstanceState::Running);
+        let caller_b = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller_a).await.unwrap();
+        storage.create_instance(&caller_b).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let make = |caller: &TaskInstance| {
+            mk_ctx(
+                caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "dedupe_key": "k",
+                    // No dedupe_scope; handler must default to "parent".
+                }),
+            )
+        };
+
+        let ra = handle_emit_event(make(&caller_a)).await.unwrap();
+        let rb = handle_emit_event(make(&caller_b)).await.unwrap();
+        assert_eq!(ra.get("deduped"), Some(&json!(false)));
+        assert_eq!(rb.get("deduped"), Some(&json!(false)));
+        assert_ne!(ra.get("instance_id"), rb.get("instance_id"));
     }
 }

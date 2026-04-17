@@ -257,12 +257,18 @@ CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instanc
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 
+-- R7: scope_kind + scope_value columns replace the old parent_instance_id
+-- so the handler can pick per-parent or per-tenant dedupe at call time.
+-- Both scopes live in one table → one GC sweeper covers both. scope_kind
+-- is part of the PK so a 'parent' and a 'tenant' row with the same
+-- scope_value and dedupe_key are distinct namespaces.
 CREATE TABLE IF NOT EXISTS emit_event_dedupe (
-    parent_instance_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
     dedupe_key TEXT NOT NULL,
     child_instance_id TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (parent_instance_id, dedupe_key)
+    PRIMARY KEY (scope_kind, scope_value, dedupe_key)
 );
 CREATE INDEX IF NOT EXISTS idx_emit_event_dedupe_created_at
     ON emit_event_dedupe(created_at);

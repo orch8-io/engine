@@ -173,19 +173,21 @@ pub(super) async fn get_injected_blocks(
 
 pub(super) async fn record_or_get_emit_dedupe(
     storage: &SqliteStorage,
-    parent: InstanceId,
+    scope: &crate::DedupeScope,
     key: &str,
     candidate_child: InstanceId,
 ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-    let parent_str = parent.0.to_string();
+    let scope_kind = scope.kind();
+    let scope_value = scope.value();
     let cand_str = candidate_child.0.to_string();
 
     let inserted = sqlx::query(
-        "INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(parent_instance_id, dedupe_key) DO NOTHING",
+        "INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(scope_kind, scope_value, dedupe_key) DO NOTHING",
     )
-    .bind(&parent_str)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .bind(&cand_str)
     .execute(&storage.pool)
@@ -199,9 +201,10 @@ pub(super) async fn record_or_get_emit_dedupe(
 
     let row: (String,) = sqlx::query_as(
         "SELECT child_instance_id FROM emit_event_dedupe
-         WHERE parent_instance_id = ?1 AND dedupe_key = ?2",
+         WHERE scope_kind = ?1 AND scope_value = ?2 AND dedupe_key = ?3",
     )
-    .bind(&parent_str)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .fetch_one(&storage.pool)
     .await
@@ -222,11 +225,12 @@ pub(super) async fn record_or_get_emit_dedupe(
 /// so a crash between the two inserts is impossible.
 pub(super) async fn create_instance_with_dedupe(
     storage: &SqliteStorage,
-    parent: InstanceId,
+    scope: &crate::DedupeScope,
     key: &str,
     instance: &TaskInstance,
 ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-    let parent_str = parent.0.to_string();
+    let scope_kind = scope.kind();
+    let scope_value = scope.value();
     let cand_str = instance.id.0.to_string();
 
     // `?` leans on the `From<sqlx::Error> for StorageError` impl so each
@@ -235,11 +239,12 @@ pub(super) async fn create_instance_with_dedupe(
     let mut tx = storage.pool.begin().await?;
 
     let inserted = sqlx::query(
-        "INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(parent_instance_id, dedupe_key) DO NOTHING",
+        "INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(scope_kind, scope_value, dedupe_key) DO NOTHING",
     )
-    .bind(&parent_str)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .bind(&cand_str)
     .execute(&mut *tx)
@@ -251,9 +256,10 @@ pub(super) async fn create_instance_with_dedupe(
         // creating an instance. Commit (a no-op read) and return AlreadyExists.
         let row: (String,) = sqlx::query_as(
             "SELECT child_instance_id FROM emit_event_dedupe
-             WHERE parent_instance_id = ?1 AND dedupe_key = ?2",
+             WHERE scope_kind = ?1 AND scope_value = ?2 AND dedupe_key = ?3",
         )
-        .bind(&parent_str)
+        .bind(scope_kind)
+        .bind(&scope_value)
         .bind(key)
         .fetch_one(&mut *tx)
         .await?;

@@ -955,18 +955,18 @@ impl StorageBackend for EncryptingStorage {
 
     async fn record_or_get_emit_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         candidate_child: InstanceId,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
         self.inner
-            .record_or_get_emit_dedupe(parent, key, candidate_child)
+            .record_or_get_emit_dedupe(scope, key, candidate_child)
             .await
     }
 
     async fn create_instance_with_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         instance: &TaskInstance,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
@@ -974,7 +974,7 @@ impl StorageBackend for EncryptingStorage {
         // (dedupe_row + instance_row) transaction — mirrors `create_instance`.
         let encrypted = self.encrypt_instance(instance)?;
         self.inner
-            .create_instance_with_dedupe(parent, key, &encrypted)
+            .create_instance_with_dedupe(scope, key, &encrypted)
             .await
     }
 

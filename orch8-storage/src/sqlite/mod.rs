@@ -959,20 +959,20 @@ impl StorageBackend for SqliteStorage {
 
     async fn record_or_get_emit_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         candidate_child: InstanceId,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-        misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
+        misc::record_or_get_emit_dedupe(self, scope, key, candidate_child).await
     }
 
     async fn create_instance_with_dedupe(
         &self,
-        parent: InstanceId,
+        scope: &crate::DedupeScope,
         key: &str,
         instance: &TaskInstance,
     ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-        misc::create_instance_with_dedupe(self, parent, key, instance).await
+        misc::create_instance_with_dedupe(self, scope, key, instance).await
     }
 
     async fn delete_expired_emit_event_dedupe(
@@ -1101,13 +1101,13 @@ mod tests {
 
     #[tokio::test]
     async fn record_or_get_emit_dedupe_first_call_inserts() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
         let candidate = InstanceId::new();
 
         let outcome = storage
-            .record_or_get_emit_dedupe(parent, "k1", candidate)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k1", candidate)
             .await
             .unwrap();
 
@@ -1116,18 +1116,18 @@ mod tests {
 
     #[tokio::test]
     async fn record_or_get_emit_dedupe_second_call_returns_existing() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
         let first = InstanceId::new();
         let second = InstanceId::new();
 
         let _ = storage
-            .record_or_get_emit_dedupe(parent, "k", first)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k", first)
             .await
             .unwrap();
         let outcome = storage
-            .record_or_get_emit_dedupe(parent, "k", second)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k", second)
             .await
             .unwrap();
 
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_or_get_emit_dedupe_per_parent_isolation() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let p1 = InstanceId::new();
         let p2 = InstanceId::new();
@@ -1144,11 +1144,11 @@ mod tests {
         let c2 = InstanceId::new();
 
         let o1 = storage
-            .record_or_get_emit_dedupe(p1, "k", c1)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(p1), "k", c1)
             .await
             .unwrap();
         let o2 = storage
-            .record_or_get_emit_dedupe(p2, "k", c2)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(p2), "k", c2)
             .await
             .unwrap();
 
@@ -1158,7 +1158,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_or_get_emit_dedupe_concurrent_one_winner() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
         let parent = InstanceId::new();
 
@@ -1167,7 +1167,7 @@ mod tests {
         for cand in candidates.iter().copied() {
             let s = storage.clone();
             handles.push(tokio::spawn(async move {
-                s.record_or_get_emit_dedupe(parent, "race", cand)
+                s.record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "race", cand)
                     .await
                     .unwrap()
             }));
@@ -1196,7 +1196,7 @@ mod tests {
     /// `created_at` is set by the default clause on insert.
     #[tokio::test]
     async fn delete_expired_emit_event_dedupe_removes_old_rows() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
 
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
@@ -1205,11 +1205,11 @@ mod tests {
 
         // Insert two dedupe rows with different keys under the same parent.
         storage
-            .record_or_get_emit_dedupe(parent, "old", old_child)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "old", old_child)
             .await
             .unwrap();
         storage
-            .record_or_get_emit_dedupe(parent, "fresh", fresh_child)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "fresh", fresh_child)
             .await
             .unwrap();
 
@@ -1217,7 +1217,7 @@ mod tests {
         let backdated = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
         sqlx::query(
             "UPDATE emit_event_dedupe SET created_at = ?1
-             WHERE parent_instance_id = ?2 AND dedupe_key = ?3",
+             WHERE scope_kind = 'parent' AND scope_value = ?2 AND dedupe_key = ?3",
         )
         .bind(&backdated)
         .bind(parent.0.to_string())
@@ -1237,13 +1237,13 @@ mod tests {
         // Fresh row still resolves (second call → AlreadyExists), old row was
         // removed (second call → Inserted, since the row is gone).
         let fresh_outcome = storage
-            .record_or_get_emit_dedupe(parent, "fresh", InstanceId::new())
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "fresh", InstanceId::new())
             .await
             .unwrap();
         assert_eq!(fresh_outcome, EmitDedupeOutcome::AlreadyExists(fresh_child));
 
         let old_outcome = storage
-            .record_or_get_emit_dedupe(parent, "old", InstanceId::new())
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "old", InstanceId::new())
             .await
             .unwrap();
         assert_eq!(
@@ -1293,14 +1293,14 @@ mod tests {
 
     #[tokio::test]
     async fn create_instance_with_dedupe_first_call_persists_instance() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
         let child_id = InstanceId::new();
         let inst = mk_inst_for_dedupe(child_id);
 
         let outcome = storage
-            .create_instance_with_dedupe(parent, "k1", &inst)
+            .create_instance_with_dedupe(&DedupeScope::Parent(parent), "k1", &inst)
             .await
             .unwrap();
 
@@ -1315,7 +1315,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_instance_with_dedupe_second_call_skips_instance_insert() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
         let first_id = InstanceId::new();
@@ -1324,11 +1324,11 @@ mod tests {
         let inst2 = mk_inst_for_dedupe(second_id);
 
         let o1 = storage
-            .create_instance_with_dedupe(parent, "k", &inst1)
+            .create_instance_with_dedupe(&DedupeScope::Parent(parent), "k", &inst1)
             .await
             .unwrap();
         let o2 = storage
-            .create_instance_with_dedupe(parent, "k", &inst2)
+            .create_instance_with_dedupe(&DedupeScope::Parent(parent), "k", &inst2)
             .await
             .unwrap();
 
@@ -1345,7 +1345,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_instance_with_dedupe_different_parents_both_insert() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let p1 = InstanceId::new();
         let p2 = InstanceId::new();
@@ -1353,11 +1353,11 @@ mod tests {
         let c2_id = InstanceId::new();
 
         let o1 = storage
-            .create_instance_with_dedupe(p1, "k", &mk_inst_for_dedupe(c1_id))
+            .create_instance_with_dedupe(&DedupeScope::Parent(p1), "k", &mk_inst_for_dedupe(c1_id))
             .await
             .unwrap();
         let o2 = storage
-            .create_instance_with_dedupe(p2, "k", &mk_inst_for_dedupe(c2_id))
+            .create_instance_with_dedupe(&DedupeScope::Parent(p2), "k", &mk_inst_for_dedupe(c2_id))
             .await
             .unwrap();
 
@@ -1366,6 +1366,103 @@ mod tests {
         assert!(storage.get_instance(c1_id).await.unwrap().is_some());
         assert!(storage.get_instance(c2_id).await.unwrap().is_some());
         assert_ne!(c1_id, c2_id);
+    }
+
+    // === R7: tenant-scope dedupe ===========================================
+
+    /// Two different parents in the SAME tenant, same dedupe key under
+    /// tenant scope → second call is deduped to the first child. Proves
+    /// tenant-wide at-most-once fan-out works.
+    #[tokio::test]
+    async fn create_instance_with_dedupe_tenant_scope_dedupes_across_parents() {
+        use crate::{DedupeScope, EmitDedupeOutcome};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let tenant = TenantId("acme".into());
+        let first_id = InstanceId::new();
+        let second_id = InstanceId::new();
+        let mut inst1 = mk_inst_for_dedupe(first_id);
+        inst1.tenant_id = tenant.clone();
+        let mut inst2 = mk_inst_for_dedupe(second_id);
+        inst2.tenant_id = tenant.clone();
+
+        let o1 = storage
+            .create_instance_with_dedupe(&DedupeScope::Tenant(tenant.clone()), "welcome", &inst1)
+            .await
+            .unwrap();
+        let o2 = storage
+            .create_instance_with_dedupe(&DedupeScope::Tenant(tenant.clone()), "welcome", &inst2)
+            .await
+            .unwrap();
+
+        assert_eq!(o1, EmitDedupeOutcome::Inserted);
+        assert_eq!(
+            o2,
+            EmitDedupeOutcome::AlreadyExists(first_id),
+            "second tenant-scope call must dedupe to the first child"
+        );
+        assert!(storage.get_instance(first_id).await.unwrap().is_some());
+        assert!(
+            storage.get_instance(second_id).await.unwrap().is_none(),
+            "tenant-scope AlreadyExists must NOT persist the second candidate"
+        );
+    }
+
+    /// Same dedupe key under tenant scope in TWO DIFFERENT tenants → both
+    /// succeed independently. Proves tenant isolation.
+    #[tokio::test]
+    async fn create_instance_with_dedupe_tenant_scope_isolates_tenants() {
+        use crate::{DedupeScope, EmitDedupeOutcome};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let t1 = TenantId("acme".into());
+        let t2 = TenantId("globex".into());
+        let c1 = InstanceId::new();
+        let c2 = InstanceId::new();
+        let mut i1 = mk_inst_for_dedupe(c1);
+        i1.tenant_id = t1.clone();
+        let mut i2 = mk_inst_for_dedupe(c2);
+        i2.tenant_id = t2.clone();
+
+        let o1 = storage
+            .create_instance_with_dedupe(&DedupeScope::Tenant(t1), "k", &i1)
+            .await
+            .unwrap();
+        let o2 = storage
+            .create_instance_with_dedupe(&DedupeScope::Tenant(t2), "k", &i2)
+            .await
+            .unwrap();
+
+        assert_eq!(o1, EmitDedupeOutcome::Inserted);
+        assert_eq!(o2, EmitDedupeOutcome::Inserted);
+        assert_ne!(c1, c2);
+    }
+
+    /// Parent scope and tenant scope share the same dedupe_key but land in
+    /// independent namespaces (scope_kind is part of the PK), so both insert.
+    #[tokio::test]
+    async fn create_instance_with_dedupe_parent_and_tenant_scopes_are_independent() {
+        use crate::{DedupeScope, EmitDedupeOutcome};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let tenant = TenantId("acme".into());
+        let cp = InstanceId::new();
+        let ct = InstanceId::new();
+        let mut ip = mk_inst_for_dedupe(cp);
+        ip.tenant_id = tenant.clone();
+        let mut it = mk_inst_for_dedupe(ct);
+        it.tenant_id = tenant.clone();
+
+        let op = storage
+            .create_instance_with_dedupe(&DedupeScope::Parent(parent), "k", &ip)
+            .await
+            .unwrap();
+        let ot = storage
+            .create_instance_with_dedupe(&DedupeScope::Tenant(tenant), "k", &it)
+            .await
+            .unwrap();
+
+        assert_eq!(op, EmitDedupeOutcome::Inserted);
+        assert_eq!(ot, EmitDedupeOutcome::Inserted);
+        assert_ne!(cp, ct);
     }
 
     /// R4 atomicity guarantee: if the instance INSERT fails AFTER the dedupe
@@ -1378,7 +1475,7 @@ mod tests {
     /// — independent of FK enforcement, which is off by default in SQLite.
     #[tokio::test]
     async fn create_instance_with_dedupe_rolls_back_dedupe_on_insert_failure() {
-        use crate::EmitDedupeOutcome;
+        use crate::{DedupeScope, EmitDedupeOutcome};
         let storage = SqliteStorage::in_memory().await.unwrap();
         let parent = InstanceId::new();
         let colliding_id = InstanceId::new();
@@ -1393,7 +1490,7 @@ mod tests {
         let colliding = mk_inst_for_dedupe(colliding_id);
 
         let result = storage
-            .create_instance_with_dedupe(parent, "k1", &colliding)
+            .create_instance_with_dedupe(&DedupeScope::Parent(parent), "k1", &colliding)
             .await;
         assert!(
             result.is_err(),
@@ -1405,7 +1502,7 @@ mod tests {
         // Inserted, not returned as AlreadyExists.
         let fresh_candidate = InstanceId::new();
         let retry = storage
-            .record_or_get_emit_dedupe(parent, "k1", fresh_candidate)
+            .record_or_get_emit_dedupe(&DedupeScope::Parent(parent), "k1", fresh_candidate)
             .await
             .unwrap();
         assert_eq!(

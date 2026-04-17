@@ -174,17 +174,21 @@ pub(super) async fn get_injected_blocks(
 
 pub(super) async fn record_or_get_emit_dedupe(
     store: &PostgresStorage,
-    parent: InstanceId,
+    scope: &crate::DedupeScope,
     key: &str,
     candidate_child: InstanceId,
 ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    let scope_kind = scope.kind();
+    let scope_value = scope.value();
+
     let inserted: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r"INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
-          VALUES ($1, $2, $3)
-          ON CONFLICT (parent_instance_id, dedupe_key) DO NOTHING
+        r"INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (scope_kind, scope_value, dedupe_key) DO NOTHING
           RETURNING child_instance_id",
     )
-    .bind(parent.0)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .bind(candidate_child.0)
     .fetch_optional(&store.pool)
@@ -196,9 +200,10 @@ pub(super) async fn record_or_get_emit_dedupe(
 
     let (existing,): (uuid::Uuid,) = sqlx::query_as(
         r"SELECT child_instance_id FROM emit_event_dedupe
-          WHERE parent_instance_id = $1 AND dedupe_key = $2",
+          WHERE scope_kind = $1 AND scope_value = $2 AND dedupe_key = $3",
     )
-    .bind(parent.0)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .fetch_one(&store.pool)
     .await?;
@@ -216,19 +221,23 @@ pub(super) async fn record_or_get_emit_dedupe(
 /// observes a dedupe row pointing at a non-existent instance.
 pub(super) async fn create_instance_with_dedupe(
     store: &PostgresStorage,
-    parent: InstanceId,
+    scope: &crate::DedupeScope,
     key: &str,
     instance: &TaskInstance,
 ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    let scope_kind = scope.kind();
+    let scope_value = scope.value();
+
     let mut tx = store.pool.begin().await?;
 
     let inserted: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r"INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
-          VALUES ($1, $2, $3)
-          ON CONFLICT (parent_instance_id, dedupe_key) DO NOTHING
+        r"INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (scope_kind, scope_value, dedupe_key) DO NOTHING
           RETURNING child_instance_id",
     )
-    .bind(parent.0)
+    .bind(scope_kind)
+    .bind(&scope_value)
     .bind(key)
     .bind(instance.id.0)
     .fetch_optional(&mut *tx)
@@ -239,9 +248,10 @@ pub(super) async fn create_instance_with_dedupe(
         // tx, and return AlreadyExists without creating an instance.
         let (existing,): (uuid::Uuid,) = sqlx::query_as(
             r"SELECT child_instance_id FROM emit_event_dedupe
-              WHERE parent_instance_id = $1 AND dedupe_key = $2",
+              WHERE scope_kind = $1 AND scope_value = $2 AND dedupe_key = $3",
         )
-        .bind(parent.0)
+        .bind(scope_kind)
+        .bind(&scope_value)
         .bind(key)
         .fetch_one(&mut *tx)
         .await?;
@@ -280,8 +290,8 @@ pub(super) async fn delete_expired_emit_event_dedupe(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(
         r"DELETE FROM emit_event_dedupe
-          WHERE (parent_instance_id, dedupe_key) IN (
-              SELECT parent_instance_id, dedupe_key FROM emit_event_dedupe
+          WHERE (scope_kind, scope_value, dedupe_key) IN (
+              SELECT scope_kind, scope_value, dedupe_key FROM emit_event_dedupe
               WHERE created_at < $1
               ORDER BY created_at ASC
               LIMIT $2

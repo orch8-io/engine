@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::cron::CronSchedule;
+pub use orch8_types::dedupe::DedupeScope;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -814,8 +815,11 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     // === Emit Event Dedupe ===
 
-    /// Record a dedupe key for `emit_event`. If `(parent, key)` already exists,
+    /// Record a dedupe key for `emit_event`. If `(scope, key)` already exists,
     /// returns the previously-recorded `child_instance_id` without modifying state.
+    ///
+    /// `scope` selects the dedupe namespace (see [`DedupeScope`]):
+    /// per-parent (retry idempotency) or per-tenant (tenant-wide at-most-once).
     ///
     /// Atomic per row. Every backend MUST implement this — there is deliberately
     /// no default impl so that a new backend cannot silently fall back to a
@@ -828,7 +832,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// manipulate dedupe state without creating a child.
     async fn record_or_get_emit_dedupe(
         &self,
-        parent: orch8_types::ids::InstanceId,
+        scope: &DedupeScope,
         key: &str,
         candidate_child: orch8_types::ids::InstanceId,
     ) -> Result<EmitDedupeOutcome, StorageError>;
@@ -841,15 +845,15 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// a non-existent child.
     ///
     /// Semantics:
-    /// - If `(parent, key)` is free: inserts the dedupe row AND the instance.
+    /// - If `(scope, key)` is free: inserts the dedupe row AND the instance.
     ///   Returns `Inserted`; `instance.id` is now present in `task_instances`.
-    /// - If `(parent, key)` already exists: returns `AlreadyExists(existing_id)`
+    /// - If `(scope, key)` already exists: returns `AlreadyExists(existing_id)`
     ///   without creating the instance. The caller must NOT persist `instance`.
     ///
     /// Every backend MUST implement this — no default impl (finding #8).
     async fn create_instance_with_dedupe(
         &self,
-        parent: orch8_types::ids::InstanceId,
+        scope: &DedupeScope,
         key: &str,
         instance: &TaskInstance,
     ) -> Result<EmitDedupeOutcome, StorageError>;
