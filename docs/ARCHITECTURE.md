@@ -115,8 +115,8 @@ Blocks are recursive — a Parallel can contain TryCatch, which can contain Step
 | `log` | Logs `params.message` at info level |
 | `sleep` | Sleeps for `params.duration_ms` milliseconds |
 | `http_request` | Makes an HTTP request (method, URL, headers, body) |
-| `emit_event` | Fire an event trigger → spawn a new workflow instance (same tenant only; supports per-parent dedupe via `dedupe_key`) |
-| `send_signal` | Enqueue a signal (`pause`/`resume`/`cancel`/`update_context`/custom) to another instance (same tenant only) |
+| `emit_event` | Fire an event trigger → spawn a new workflow instance (same tenant only; supports dedupe via `dedupe_key` + `dedupe_scope` = `parent` (default) or `tenant`) |
+| `send_signal` | Enqueue a signal (`pause`/`resume`/`cancel`/`update_context`/custom) to another instance (same tenant only; target terminal-state check and enqueue happen atomically in one storage transaction) |
 | `query_instance` | Read another instance's context + state (same tenant only; returns `{ found: false }` for missing target) |
 
 See [`API.md` — Workflow coordination handlers](API.md#workflow-coordination-handlers) for full param/return schemas and error semantics.
@@ -210,7 +210,18 @@ Write handlers in **any language**. Workers poll the engine for tasks via REST A
 | `update_context` | Replaces instance ExecutionContext |
 | `custom(name)` | Logged, for user handlers |
 
-Signals are stored in `signal_inbox` and processed at the start of each claim cycle.
+Signals are stored in `signal_inbox` and processed at the start of each claim cycle. At the handler boundary, `Signal::action()` lifts the `(signal_type, payload)` pair into a typed `SignalAction` variant — `UpdateContext` carries a validated `ExecutionContext`; decode failures are logged + marked delivered rather than re-tried, so malformed payloads cannot poison the queue.
+
+---
+
+## Background GC
+
+| Sweeper | Target table | Cadence | Bound per tick |
+|---------|-------------|---------|----------------|
+| `externalized_state` TTL | rows with elapsed `expires_at` | `GC_DEFAULT_INTERVAL` (5 min) | 1 000 rows |
+| `emit_event_dedupe` TTL | rows older than `EMIT_DEDUPE_DEFAULT_TTL` (30 days) | same tick | 1 000 rows |
+
+Both sweepers share one ticker and run **concurrently via `tokio::join!`** — they touch disjoint tables and contend for neither locks nor foreign keys, so tick latency is `max(sweep_a, sweep_b)` rather than their sum. Errors are logged independently per sweep and never propagated; a missed tick is picked up by the next one. Instance-scoped cleanup (deleting an instance) is handled by `ON DELETE CASCADE` on the FK — Postgres enforces this natively; SQLite additionally requires the `PRAGMA foreign_keys = ON` pool option (already wired). The GC loop only targets **TTL-expired rows**, not instance-deletion cleanup.
 
 ---
 
@@ -229,7 +240,8 @@ Signals are stored in `signal_inbox` and processed at the start of each claim cy
 | `cron_schedules` | Recurring workflow triggers |
 | `worker_tasks` | External handler task queue |
 | `resource_pools` | Resource rotation (round-robin, weighted, random) |
-| `externalized_state` | Large outputs stored separately |
+| `externalized_state` | Large outputs stored separately; TTL-swept by the GC loop |
+| `emit_event_dedupe` | `(scope_kind, scope_value, dedupe_key) → child_instance_id` — enforces at-most-once child spawn across parent or tenant scope; TTL-swept |
 | `audit_log` | Append-only state transition journal |
 | `sessions` | Session-scoped data tied to instances |
 | `checkpoints` | Periodic state snapshots |

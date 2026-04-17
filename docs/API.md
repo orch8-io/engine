@@ -780,7 +780,7 @@ Any handler name not registered as built-in is automatically dispatched to the e
 
 Three built-in handlers let one workflow coordinate with another **within the same tenant**. Cross-tenant targets always fail with `Permanent` — the engine reads the caller's `tenant_id` from its running instance and rejects mismatches.
 
-> **Known limitation:** step handler `params` currently do NOT flow through template resolution, so dynamic references like `{{ context.data.target_id }}` will be passed through as literal strings. Use literal values for now, or compute values into context and rework this when param templating lands. Tracked as follow-up.
+> **Template resolution:** step handler `params` are resolved through the template engine before dispatch. Both the in-process scheduler and the external-worker path receive already-resolved params, so `{{ context.data.target_id }}`, `{{ outputs.prev_step.id }}`, and `{{ foo | fallback }}` all work inside any handler's `params` block — including the coordination handlers below.
 
 #### `emit_event`
 
@@ -793,7 +793,8 @@ Fires an event trigger → spawns a new child workflow instance.
 | `trigger_slug` | string | yes | Slug of an enabled event trigger in the caller's tenant |
 | `data` | object | no | Event payload; becomes the child's `context.data` (default `{}`) |
 | `meta` | object | no | Extra metadata merged into the child's metadata. `source` and `parent_instance_id` are always set by the engine and cannot be spoofed |
-| `dedupe_key` | string | no | Non-empty string. When present, `(parent_instance_id, dedupe_key)` is recorded atomically — subsequent calls with the same key from the same parent return the existing child and set `deduped: true`. Empty string is rejected |
+| `dedupe_key` | string | no | Non-empty string. When present, dedupe is recorded atomically — subsequent calls with the same `(scope, key)` pair return the existing child and set `deduped: true`. Empty string is rejected |
+| `dedupe_scope` | string | no | `"parent"` (default) scopes dedupe to `(parent_instance_id, dedupe_key)`. `"tenant"` scopes it to `(tenant_id, dedupe_key)` so different parents in the same tenant cannot both spawn a child for the same key. Only meaningful when `dedupe_key` is present |
 
 **Returns:** `{ "instance_id": "<uuid>", "sequence_name": "<name>", "deduped": <bool> }`
 
@@ -802,12 +803,17 @@ Fires an event trigger → spawns a new child workflow instance.
 | Condition | Variant |
 |---|---|
 | Missing `trigger_slug`; `dedupe_key` empty or non-string | `Permanent` |
+| Invalid `dedupe_scope` (not `"parent"` or `"tenant"`) | `Permanent` |
 | Trigger not found, disabled, or in another tenant | `Permanent` |
 | Caller instance not found | `Permanent` |
 | Storage connection / pool / query failure | `Retryable` |
 | Other storage failure | `Permanent` |
 
-**Dedupe semantics:** scope is **per-parent** — the key is `(parent_instance_id, dedupe_key)`. Different parent instances can reuse the same key without colliding. Dedupe rows are swept by the TTL sweeper (default 30 days).
+**Dedupe semantics:**
+- `dedupe_scope: "parent"` (default) — key is `(parent_instance_id, dedupe_key)`. Different parent instances can reuse the same key without colliding. Use this for the common fan-out case (e.g. one parent fires-once per external event).
+- `dedupe_scope: "tenant"` — key is `(tenant_id, dedupe_key)`. All parents within the tenant share the namespace, so the child workflow fires at most once per key across the whole tenant. Use this when the dedupe identity is global (e.g. a webhook delivery id you refuse to process twice across the system).
+
+Dedupe rows are swept by the TTL sweeper (default 30 days).
 
 **Example:**
 
