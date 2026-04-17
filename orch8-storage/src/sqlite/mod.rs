@@ -962,6 +962,14 @@ impl StorageBackend for SqliteStorage {
         misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
     }
 
+    async fn delete_expired_emit_event_dedupe(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        misc::delete_expired_emit_event_dedupe(self, older_than, limit).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -1168,5 +1176,80 @@ mod tests {
             1,
             "all losers should observe the same winner id"
         );
+    }
+
+    /// T15: TTL sweep deletes dedupe rows older than the cutoff and leaves
+    /// recent rows in place. We backdate one row via a direct UPDATE since
+    /// `created_at` is set by the default clause on insert.
+    #[tokio::test]
+    async fn delete_expired_emit_event_dedupe_removes_old_rows() {
+        use crate::EmitDedupeOutcome;
+
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let old_child = InstanceId::new();
+        let fresh_child = InstanceId::new();
+
+        // Insert two dedupe rows with different keys under the same parent.
+        storage
+            .record_or_get_emit_dedupe(parent, "old", old_child)
+            .await
+            .unwrap();
+        storage
+            .record_or_get_emit_dedupe(parent, "fresh", fresh_child)
+            .await
+            .unwrap();
+
+        // Backdate the "old" row to 40 days ago (past the 30d TTL).
+        let backdated = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        sqlx::query(
+            "UPDATE emit_event_dedupe SET created_at = ?1
+             WHERE parent_instance_id = ?2 AND dedupe_key = ?3",
+        )
+        .bind(&backdated)
+        .bind(parent.0.to_string())
+        .bind("old")
+        .execute(&storage.pool)
+        .await
+        .unwrap();
+
+        // Sweep with cutoff = now - 30d.
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let deleted = storage
+            .delete_expired_emit_event_dedupe(cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the backdated row should be swept");
+
+        // Fresh row still resolves (second call → AlreadyExists), old row was
+        // removed (second call → Inserted, since the row is gone).
+        let fresh_outcome = storage
+            .record_or_get_emit_dedupe(parent, "fresh", InstanceId::new())
+            .await
+            .unwrap();
+        assert_eq!(fresh_outcome, EmitDedupeOutcome::AlreadyExists(fresh_child));
+
+        let old_outcome = storage
+            .record_or_get_emit_dedupe(parent, "old", InstanceId::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            old_outcome,
+            EmitDedupeOutcome::Inserted,
+            "old row should be gone, letting a fresh insert succeed"
+        );
+    }
+
+    /// Idempotent sweep — a second pass with an unchanged cutoff finds
+    /// nothing to delete. Guards against an accidental infinite-delete loop.
+    #[tokio::test]
+    async fn delete_expired_emit_event_dedupe_on_empty_store_is_zero() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let cutoff = chrono::Utc::now();
+        let deleted = storage
+            .delete_expired_emit_event_dedupe(cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0);
     }
 }

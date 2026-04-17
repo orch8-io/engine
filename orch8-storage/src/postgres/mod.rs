@@ -909,6 +909,14 @@ impl StorageBackend for PostgresStorage {
         misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
     }
 
+    async fn delete_expired_emit_event_dedupe(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        misc::delete_expired_emit_event_dedupe(self, older_than, limit).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {

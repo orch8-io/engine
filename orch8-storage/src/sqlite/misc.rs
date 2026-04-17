@@ -209,7 +209,36 @@ pub(super) async fn record_or_get_emit_dedupe(
 
     let existing = uuid::Uuid::parse_str(&row.0)
         .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(existing)))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+        existing,
+    )))
+}
+
+/// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
+/// than `older_than`. `created_at` is stored as ISO-8601 text; we normalize
+/// both sides through `datetime(...)` to avoid lexicographic byte comparison
+/// masking real timestamp ordering — same convention as `delete_expired` for
+/// externalized state.
+pub(super) async fn delete_expired_emit_event_dedupe(
+    storage: &SqliteStorage,
+    older_than: chrono::DateTime<chrono::Utc>,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let cutoff = older_than.to_rfc3339();
+    let result = sqlx::query(
+        r"DELETE FROM emit_event_dedupe
+          WHERE rowid IN (
+              SELECT rowid FROM emit_event_dedupe
+              WHERE datetime(created_at) < datetime(?1)
+              LIMIT ?2
+          )",
+    )
+    .bind(&cutoff)
+    .bind(i64::from(limit))
+    .execute(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(result.rows_affected())
 }
 
 // === Health ===

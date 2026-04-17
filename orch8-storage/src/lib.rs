@@ -802,6 +802,28 @@ pub trait StorageBackend: Send + Sync + 'static {
         ))
     }
 
+    /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
+    /// than `older_than`. Returns the number of rows actually deleted.
+    ///
+    /// This is the GC sweeper's storage primitive for dedupe TTL (default 30d).
+    /// Dedupe rows are idempotency records — once the configured TTL has
+    /// elapsed a retry of the same `(parent, key)` can safely create a fresh
+    /// child, because callers should not depend on dedupe beyond the window.
+    ///
+    /// Limit is bounded per call so a large backlog doesn't starve writers in
+    /// a single long transaction — same convention as
+    /// [`StorageBackend::delete_expired_externalized_state`].
+    ///
+    /// The default impl returns `Ok(0)` so test/memory backends remain
+    /// compilable without an implementation.
+    async fn delete_expired_emit_event_dedupe(
+        &self,
+        _older_than: chrono::DateTime<chrono::Utc>,
+        _limit: u32,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError>;

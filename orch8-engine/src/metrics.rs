@@ -27,6 +27,8 @@ pub const PRELOAD_SLOTS_HYDRATED: &str = "orch8_preload_slots_hydrated_total";
 pub const PRELOAD_ERRORS: &str = "orch8_preload_errors_total";
 pub const GC_EXTERNALIZED_DELETED: &str = "orch8_gc_externalized_deleted_total";
 pub const GC_EXTERNALIZED_ERRORS: &str = "orch8_gc_externalized_errors_total";
+pub const GC_EMIT_DEDUPE_DELETED: &str = "orch8_gc_emit_dedupe_deleted_total";
+pub const GC_EMIT_DEDUPE_ERRORS: &str = "orch8_gc_emit_dedupe_errors_total";
 
 // === Histogram names ===
 pub const TICK_DURATION: &str = "orch8_tick_duration_seconds";

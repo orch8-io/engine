@@ -203,7 +203,38 @@ pub(super) async fn record_or_get_emit_dedupe(
     .fetch_one(&store.pool)
     .await?;
 
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(existing)))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+        existing,
+    )))
+}
+
+/// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older
+/// than `older_than`. Returns the affected row count.
+///
+/// Postgres `DELETE` doesn't accept `LIMIT` directly, so we pre-select the
+/// primary-key tuples to bound sweep size. `FOR UPDATE SKIP LOCKED` lets
+/// multiple engine nodes sweep concurrently without contending — mirrors the
+/// externalized-state GC pattern.
+pub(super) async fn delete_expired_emit_event_dedupe(
+    store: &PostgresStorage,
+    older_than: chrono::DateTime<chrono::Utc>,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(
+        r"DELETE FROM emit_event_dedupe
+          WHERE (parent_instance_id, dedupe_key) IN (
+              SELECT parent_instance_id, dedupe_key FROM emit_event_dedupe
+              WHERE created_at < $1
+              ORDER BY created_at ASC
+              LIMIT $2
+              FOR UPDATE SKIP LOCKED
+          )",
+    )
+    .bind(older_than)
+    .bind(i64::from(limit))
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 // === Health ===
