@@ -256,4 +256,14 @@ CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
+
+CREATE TABLE IF NOT EXISTS emit_event_dedupe (
+    parent_instance_id TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    child_instance_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (parent_instance_id, dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS idx_emit_event_dedupe_created_at
+    ON emit_event_dedupe(created_at);
 ";

@@ -951,6 +951,17 @@ impl StorageBackend for SqliteStorage {
         credentials::list_due_for_refresh(self, threshold).await
     }
 
+    // === Emit Event Dedupe ===
+
+    async fn record_or_get_emit_dedupe(
+        &self,
+        parent: InstanceId,
+        key: &str,
+        candidate_child: InstanceId,
+    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
+        misc::record_or_get_emit_dedupe(self, parent, key, candidate_child).await
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -1065,5 +1076,20 @@ mod tests {
     async fn sqlite_ping() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         storage.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn record_or_get_emit_dedupe_first_call_inserts() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let candidate = InstanceId::new();
+
+        let outcome = storage
+            .record_or_get_emit_dedupe(parent, "k1", candidate)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, EmitDedupeOutcome::Inserted);
     }
 }

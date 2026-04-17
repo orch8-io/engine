@@ -169,6 +169,49 @@ pub(super) async fn get_injected_blocks(
         .transpose()?)
 }
 
+// === Emit Event Dedupe ===
+
+pub(super) async fn record_or_get_emit_dedupe(
+    storage: &SqliteStorage,
+    parent: InstanceId,
+    key: &str,
+    candidate_child: InstanceId,
+) -> Result<crate::EmitDedupeOutcome, StorageError> {
+    let parent_str = parent.0.to_string();
+    let cand_str = candidate_child.0.to_string();
+
+    let inserted = sqlx::query(
+        "INSERT INTO emit_event_dedupe (parent_instance_id, dedupe_key, child_instance_id)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(parent_instance_id, dedupe_key) DO NOTHING",
+    )
+    .bind(&parent_str)
+    .bind(key)
+    .bind(&cand_str)
+    .execute(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?
+    .rows_affected();
+
+    if inserted == 1 {
+        return Ok(crate::EmitDedupeOutcome::Inserted);
+    }
+
+    let row: (String,) = sqlx::query_as(
+        "SELECT child_instance_id FROM emit_event_dedupe
+         WHERE parent_instance_id = ?1 AND dedupe_key = ?2",
+    )
+    .bind(&parent_str)
+    .bind(key)
+    .fetch_one(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    let existing = uuid::Uuid::parse_str(&row.0)
+        .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(existing)))
+}
+
 // === Health ===
 
 pub(super) async fn ping(storage: &SqliteStorage) -> Result<(), StorageError> {
