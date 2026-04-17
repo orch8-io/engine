@@ -268,4 +268,114 @@ mod tests {
         // Payload preserved.
         assert_eq!(child.context.data, json!({"order_id": 42}));
     }
+
+    #[tokio::test]
+    async fn emit_event_rejects_when_trigger_not_found() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "does-not-exist",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[tokio::test]
+    async fn emit_event_rejects_when_trigger_disabled() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let mut trigger = mk_trigger("on-order", "T1", "child_seq");
+        trigger.enabled = false;
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "on-order",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[tokio::test]
+    async fn emit_event_denies_cross_tenant() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T2", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T2", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "on-order",
+                "data": {"order_id": 42},
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        match &err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("cross-tenant"),
+                    "expected 'cross-tenant' in message, got: {message}"
+                );
+            }
+            other => panic!("expected Permanent error, got: {other:?}"),
+        }
+
+        // Verify no child instance was created in either tenant (no leakage).
+        let filter_t1 = orch8_types::filter::InstanceFilter {
+            tenant_id: Some(TenantId("T1".into())),
+            ..Default::default()
+        };
+        let pagination = orch8_types::filter::Pagination::default();
+        let instances_t1 = storage.list_instances(&filter_t1, &pagination).await.unwrap();
+        // Only the caller should exist in T1.
+        assert_eq!(instances_t1.len(), 1);
+        assert_eq!(instances_t1[0].id, caller.id);
+        let filter_t2 = orch8_types::filter::InstanceFilter {
+            tenant_id: Some(TenantId("T2".into())),
+            ..Default::default()
+        };
+        let instances_t2 = storage.list_instances(&filter_t2, &pagination).await.unwrap();
+        assert!(
+            instances_t2.is_empty(),
+            "no child instance should exist in T2"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_event_rejects_missing_trigger_slug_param() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({}),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
 }
