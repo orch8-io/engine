@@ -82,44 +82,6 @@ where
     }
 }
 
-/// Build the `outputs` JSON shape expected by `template::resolve`:
-/// `{ "block_id_1": <output>, "block_id_2": <output>, ... }`.
-/// Fetches all prior block outputs for the instance from storage.
-async fn build_outputs_shape(
-    storage: &dyn StorageBackend,
-    instance_id: InstanceId,
-) -> Result<serde_json::Value, EngineError> {
-    let outputs = storage
-        .get_all_outputs(instance_id)
-        .await
-        .map_err(EngineError::Storage)?;
-    let mut map = serde_json::Map::with_capacity(outputs.len());
-    for o in outputs {
-        map.insert(o.block_id.0.clone(), o.output);
-    }
-    Ok(serde_json::Value::Object(map))
-}
-
-/// Resolve `{{path}}` template placeholders in `params`, using the step's
-/// context snapshot and all prior block outputs in the instance. Mutates
-/// `params` in place.
-///
-/// Runs BEFORE credential resolution so user templates can dynamically
-/// produce `credentials://…` refs (or any other value) that the credential
-/// pass then materialises. Template errors (unknown root/section) bubble up
-/// to the caller which fails the node.
-async fn resolve_templates_in_params(
-    storage: &dyn StorageBackend,
-    instance: &TaskInstance,
-    context: &ExecutionContext,
-    params: &mut serde_json::Value,
-) -> Result<(), EngineError> {
-    let outputs = build_outputs_shape(storage, instance.id).await?;
-    let resolved = crate::template::resolve(params, context, &outputs)?;
-    *params = resolved;
-    Ok(())
-}
-
 /// Execute a step node within the execution tree.
 /// Returns `true` if the instance has more work (should re-schedule).
 #[allow(clippy::too_many_lines)]
@@ -137,31 +99,32 @@ pub async fn execute_step_node(
     // safe and avoids duplicate work.
     let step_context = context_for_step(storage.as_ref(), instance, step_def).await?;
 
-    let mut resolved_params = step_def.params.clone();
-
     // Resolve `{{path}}` templates first. User templates should be fully
     // materialised before any further transformation — this lets an author
     // write `{{context.data.cred_id}}` that evaluates to a `credentials://…`
     // ref, which the following credential pass then substitutes. Template
     // errors (unknown context section, unknown root) fail the node the same
     // way credential errors do.
-    if let Err(tpl_err) = resolve_templates_in_params(
+    let mut resolved_params = match super::param_resolve::resolve_templates_in_params(
         storage.as_ref(),
         instance,
         &step_context,
-        &mut resolved_params,
+        step_def.params.clone(),
     )
     .await
     {
-        tracing::warn!(
-            instance_id = %instance.id,
-            block_id = %step_def.id,
-            error = ?tpl_err,
-            "failed to resolve templates for step"
-        );
-        evaluator::fail_node(storage.as_ref(), node.id).await?;
-        return Ok(false);
-    }
+        Ok(p) => p,
+        Err(tpl_err) => {
+            tracing::error!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %tpl_err,
+                "failed to resolve templates for step"
+            );
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        }
+    };
 
     // Resolve `credentials://` references in step params before handing off to
     // any handler. Resolving once up front means every dispatch target (AP,

@@ -9,6 +9,7 @@ pub mod human_review;
 pub mod llm;
 pub mod loop_block;
 pub mod parallel;
+pub mod param_resolve;
 pub mod query_instance;
 pub mod race;
 pub mod router;

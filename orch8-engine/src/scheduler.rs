@@ -923,9 +923,81 @@ async fn execute_step_block(
         0
     };
 
+    // Build the step's context snapshot once and reuse for both template
+    // resolution and handler dispatch. Mirrors the tree-evaluator path in
+    // `handlers::step_block::execute_step_node` so both dispatch sites apply
+    // the same `context_access` filtering and externalization-marker
+    // inflation before running user templates.
+    let step_context =
+        crate::handlers::step_block::context_for_step(storage.as_ref(), instance, step_def).await?;
+
+    // Resolve `{{path}}` templates first, then `credentials://` refs. Both
+    // dispatch branches below (external worker + in-process handler) must
+    // see fully materialised params — external workers have no access to
+    // the credential registry and raw `{{…}}` would leak to user handlers.
+    // Template errors (unknown root/section) fail the instance the same way
+    // credential errors do.
+    let mut resolved_params = match crate::handlers::param_resolve::resolve_templates_in_params(
+        storage.as_ref(),
+        instance,
+        &step_context,
+        step_def.params.clone(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(tpl_err) => {
+            tracing::error!(
+                instance_id = %instance_id,
+                block_id = %step_def.id,
+                error = %tpl_err,
+                "failed to resolve templates for step"
+            );
+            return fail_instance_with_error(
+                storage.as_ref(),
+                instance_id,
+                webhook_config,
+                cancel,
+                &tpl_err.to_string(),
+            )
+            .await;
+        }
+    };
+
+    if let Err(step_err) = crate::credentials::resolve_in_value(
+        storage.as_ref(),
+        &instance.tenant_id.0,
+        &mut resolved_params,
+    )
+    .await
+    {
+        tracing::warn!(
+            instance_id = %instance_id,
+            block_id = %step_def.id,
+            error = ?step_err,
+            "failed to resolve credentials for step"
+        );
+        return fail_instance_with_error(
+            storage.as_ref(),
+            instance_id,
+            webhook_config,
+            cancel,
+            &step_err.to_string(),
+        )
+        .await;
+    }
+
     // If the handler is not registered in-process, dispatch to external worker queue.
     if !handlers.contains(&step_def.handler) {
-        return dispatch_to_external_worker(storage.as_ref(), instance, step_def, attempt).await;
+        return dispatch_to_external_worker(
+            storage.as_ref(),
+            instance,
+            step_def,
+            attempt,
+            resolved_params,
+            step_context,
+        )
+        .await;
     }
 
     crate::metrics::inc(crate::metrics::STEPS_EXECUTED);
@@ -935,13 +1007,8 @@ async fn execute_step_block(
         tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
-        params: step_def.params.clone(),
-        context: crate::handlers::step_block::context_for_step(
-            storage.as_ref(),
-            instance,
-            step_def,
-        )
-        .await?,
+        params: resolved_params,
+        context: step_context,
         attempt,
         timeout: step_def.timeout,
         externalize_threshold,
@@ -1102,16 +1169,57 @@ async fn handle_retryable_failure(
     Ok(())
 }
 
+/// Transition the instance to `Failed` and emit an `instance.failed`
+/// webhook carrying the supplied error message. Used when step-param
+/// resolution (templates or credentials) fails before the handler is even
+/// invoked — there is no retry policy for these malformed-params errors,
+/// so the instance is failed immediately.
+async fn fail_instance_with_error(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+    webhook_config: &WebhookConfig,
+    cancel: &CancellationToken,
+    error: &str,
+) -> Result<StepOutcome, EngineError> {
+    crate::metrics::inc(crate::metrics::STEPS_FAILED);
+    crate::lifecycle::transition_instance(
+        storage,
+        instance_id,
+        InstanceState::Running,
+        InstanceState::Failed,
+        None,
+    )
+    .await?;
+
+    crate::webhooks::emit(
+        webhook_config,
+        &crate::webhooks::instance_event(
+            "instance.failed",
+            instance_id,
+            serde_json::json!({ "error": error }),
+        ),
+        cancel,
+    );
+
+    Ok(StepOutcome::Failed)
+}
+
 /// Dispatch a step to the external worker queue.
 ///
 /// Creates a `WorkerTask` row (idempotent via `ON CONFLICT DO NOTHING`)
 /// and transitions the instance to `Waiting`. The instance will be
 /// re-scheduled when the worker reports completion via the API.
+///
+/// `resolved_params` and `step_context` must already have been through
+/// template + credential resolution — external workers receive fully
+/// materialised values, not raw `{{…}}` or `credentials://…` strings.
 async fn dispatch_to_external_worker(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     attempt: u32,
+    resolved_params: serde_json::Value,
+    step_context: orch8_types::context::ExecutionContext,
 ) -> Result<StepOutcome, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
@@ -1121,15 +1229,12 @@ async fn dispatch_to_external_worker(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         queue_name: step_def.queue_name.clone(),
-        params: step_def.params.clone(),
-        // Apply `context_access` and inflate externalization markers before
-        // handing off to an external worker. Mirrors the in-process path.
-        // The remote process cannot be trusted to filter on its own.
-        context: {
-            let resolved =
-                crate::handlers::step_block::context_for_step(storage, instance, step_def).await?;
-            serde_json::to_value(&resolved).unwrap_or_default()
-        },
+        params: resolved_params,
+        // Context has already had `context_access` filtering and
+        // externalization-marker inflation applied upstream — the remote
+        // process cannot be trusted to filter on its own.
+        context: serde_json::to_value(&step_context)
+            .map_err(orch8_types::error::StorageError::Serialization)?,
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
         timeout_ms: step_def
             .timeout
@@ -1248,6 +1353,228 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[&id].signals.is_empty());
         assert_eq!(result[&id].completed_block_ids.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // R6 follow-up: template::resolve wiring into scheduler dispatch path
+    // ------------------------------------------------------------------
+
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::context::ExecutionContext;
+    use orch8_types::ids::{Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+    use orch8_types::sequence::StepDef;
+    use std::sync::Mutex;
+
+    async fn seed_instance_with_context(
+        storage: &dyn StorageBackend,
+        id: InstanceId,
+        context: ExecutionContext,
+    ) {
+        let now = Utc::now();
+        let inst = TaskInstance {
+            id,
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context,
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+    }
+
+    fn mk_step_def(id: &str, handler: &str, params: serde_json::Value) -> StepDef {
+        StepDef {
+            id: BlockId(id.into()),
+            handler: handler.into(),
+            params,
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
+            queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_execute_step_block_resolves_templates_for_inprocess_handler() {
+        // Regression: the fast-path scheduler loop (`execute_step_block`)
+        // must also run template + credential resolution before invoking
+        // the handler. Without this, `{{context.data.*}}` leaks through to
+        // any handler dispatched via the queue-driven path.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+        let instance_id = InstanceId::new();
+        let ctx = ExecutionContext {
+            data: serde_json::json!({"slug": "user.signed_up"}),
+            ..ExecutionContext::default()
+        };
+        seed_instance_with_context(storage.as_ref(), instance_id, ctx).await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+        let step_def = mk_step_def(
+            "fire",
+            "capture_params",
+            serde_json::json!({"trigger_slug": "{{context.data.slug}}"}),
+        );
+
+        let captured: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+
+        let mut registry = HandlerRegistry::new();
+        registry.register("capture_params", move |ctx| {
+            let captured = Arc::clone(&captured_clone);
+            async move {
+                *captured.lock().unwrap() = Some(ctx.params.clone());
+                Ok(serde_json::json!({"ok": true}))
+            }
+        });
+
+        let webhook_config = WebhookConfig::default();
+        let cancel = CancellationToken::new();
+
+        let outcome = execute_step_block(
+            &storage,
+            &registry,
+            &webhook_config,
+            0,
+            &instance,
+            &step_def,
+            &cancel,
+        )
+        .await
+        .expect("execute_step_block errored");
+
+        assert!(matches!(outcome, StepOutcome::Completed));
+        let seen = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("handler not called");
+        assert_eq!(seen["trigger_slug"], "user.signed_up");
+    }
+
+    #[tokio::test]
+    async fn scheduler_execute_step_block_template_failure_fails_instance() {
+        // An unknown template root (`{{nope.x}}`) must fail the instance
+        // before the handler runs — just like the tree-evaluator path does.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+        let instance_id = InstanceId::new();
+        seed_instance_with_context(storage.as_ref(), instance_id, ExecutionContext::default())
+            .await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+        let step_def = mk_step_def(
+            "bad",
+            "capture_params",
+            serde_json::json!({"x": "{{nope.x}}"}),
+        );
+
+        let handler_called = Arc::new(Mutex::new(false));
+        let handler_called_clone = Arc::clone(&handler_called);
+        let mut registry = HandlerRegistry::new();
+        registry.register("capture_params", move |_ctx| {
+            let flag = Arc::clone(&handler_called_clone);
+            async move {
+                *flag.lock().unwrap() = true;
+                Ok(serde_json::json!({}))
+            }
+        });
+
+        let webhook_config = WebhookConfig::default();
+        let cancel = CancellationToken::new();
+
+        let outcome = execute_step_block(
+            &storage,
+            &registry,
+            &webhook_config,
+            0,
+            &instance,
+            &step_def,
+            &cancel,
+        )
+        .await
+        .expect("execute_step_block errored");
+
+        assert!(matches!(outcome, StepOutcome::Failed));
+        assert!(
+            !*handler_called.lock().unwrap(),
+            "handler must not run when template resolution fails"
+        );
+
+        let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+        assert_eq!(refreshed.state, InstanceState::Failed);
+    }
+
+    #[tokio::test]
+    async fn scheduler_execute_step_block_resolves_params_for_external_worker() {
+        // When the handler is not registered in-process, the scheduler
+        // dispatches to the external-worker queue. The queued task must
+        // carry resolved params, not raw `{{…}}` strings.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+        let instance_id = InstanceId::new();
+        let ctx = ExecutionContext {
+            data: serde_json::json!({"slug": "user.signed_up"}),
+            ..ExecutionContext::default()
+        };
+        seed_instance_with_context(storage.as_ref(), instance_id, ctx).await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+        let step_def = mk_step_def(
+            "external",
+            "not_registered_handler",
+            serde_json::json!({"trigger_slug": "{{context.data.slug}}"}),
+        );
+
+        // Empty registry — forces the external-worker dispatch branch.
+        let registry = HandlerRegistry::new();
+        let webhook_config = WebhookConfig::default();
+        let cancel = CancellationToken::new();
+
+        let outcome = execute_step_block(
+            &storage,
+            &registry,
+            &webhook_config,
+            0,
+            &instance,
+            &step_def,
+            &cancel,
+        )
+        .await
+        .expect("execute_step_block errored");
+
+        assert!(matches!(outcome, StepOutcome::Deferred));
+
+        // Inspect the queued WorkerTask: its params must be resolved.
+        let tasks = storage
+            .claim_worker_tasks("not_registered_handler", "test-worker", 10)
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "exactly one worker task should be queued");
+        assert_eq!(tasks[0].instance_id, instance_id);
+        assert_eq!(
+            tasks[0].params["trigger_slug"], "user.signed_up",
+            "external worker must receive fully-resolved params"
+        );
     }
 
     #[tokio::test]
