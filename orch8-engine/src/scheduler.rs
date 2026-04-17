@@ -926,10 +926,8 @@ async fn execute_step_block(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: step_def.params.clone(),
-        context: match &step_def.context_access {
-            Some(access) => instance.context.filtered(access),
-            None => instance.context.clone(),
-        },
+        context: crate::handlers::step_block::context_for_step(storage, instance, step_def)
+            .await?,
         attempt,
         timeout: step_def.timeout,
         externalize_threshold,
@@ -1110,15 +1108,15 @@ async fn dispatch_to_external_worker(
         handler_name: step_def.handler.clone(),
         queue_name: step_def.queue_name.clone(),
         params: step_def.params.clone(),
-        // Apply `context_access` before handing off to an external worker —
-        // mirrors the in-process path at L.930. The remote process cannot
-        // be trusted to filter on its own.
+        // Apply `context_access` and inflate externalization markers before
+        // handing off to an external worker. Mirrors the in-process path.
+        // The remote process cannot be trusted to filter on its own.
         context: {
-            let filtered = match &step_def.context_access {
-                Some(access) => instance.context.filtered(access),
-                None => instance.context.clone(),
-            };
-            serde_json::to_value(&filtered).unwrap_or_default()
+            let resolved = crate::handlers::step_block::context_for_step(
+                storage, instance, step_def,
+            )
+            .await?;
+            serde_json::to_value(&resolved).unwrap_or_default()
         },
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
         timeout_ms: step_def

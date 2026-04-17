@@ -3,23 +3,59 @@ use std::future::Future;
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
 use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::ids::InstanceId;
 use orch8_types::instance::TaskInstance;
 use orch8_types::plugin::PluginType;
 use orch8_types::sequence::StepDef;
 
 use crate::error::EngineError;
 use crate::evaluator;
+use crate::externalized;
 use crate::handlers::step::StepExecParams;
 use crate::handlers::HandlerRegistry;
 
+/// Walk `context.data` top-level fields and inflate any externalization
+/// markers found. Does not recurse into nested objects — only top-level
+/// keys can be externalized. See `docs/CONTEXT_MANAGEMENT.md` §8.5.
+///
+/// If the referenced payload is missing, the marker is left in place so
+/// downstream code can detect the broken reference.
+async fn resolve_markers(
+    storage: &dyn StorageBackend,
+    _instance_id: InstanceId,
+    mut ctx: ExecutionContext,
+) -> Result<ExecutionContext, EngineError> {
+    let Some(obj) = ctx.data.as_object_mut() else {
+        return Ok(ctx);
+    };
+    for (_key, value) in obj.iter_mut() {
+        if let Some(ref_key) = externalized::extract_ref_key(value) {
+            if let Some(resolved) = storage
+                .get_externalized_state(ref_key)
+                .await
+                .map_err(EngineError::Storage)?
+            {
+                *value = resolved;
+            }
+        }
+    }
+    Ok(ctx)
+}
+
 /// Build the context snapshot a step will see, honouring its
-/// `context_access` declaration. Mirrors the fast-path logic in
-/// `scheduler.rs` so both dispatch paths enforce the same policy.
-fn context_for_step(instance: &TaskInstance, step_def: &StepDef) -> ExecutionContext {
-    match &step_def.context_access {
+/// `context_access` declaration and inflating externalization markers.
+/// Mirrors the fast-path logic in `scheduler.rs` so both dispatch paths
+/// enforce the same policy.
+pub(crate) async fn context_for_step(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+) -> Result<ExecutionContext, EngineError> {
+    let filtered = match &step_def.context_access {
         Some(access) => instance.context.filtered(access),
         None => instance.context.clone(),
-    }
+    };
+    resolve_markers(storage, instance.id, filtered).await
 }
 
 /// Dispatch a plugin handler and map the `StepError` result to node state transitions.
@@ -84,7 +120,7 @@ pub async fn execute_step_node(
             instance_id: instance.id,
             block_id: step_def.id.clone(),
             params: resolved_params.clone(),
-            context: context_for_step(instance, step_def),
+            context: context_for_step(storage, instance, step_def).await?,
             attempt: 0,
         };
         return dispatch_plugin(storage, node, move || async move {
@@ -104,7 +140,7 @@ pub async fn execute_step_node(
             instance_id: instance.id,
             block_id: step_def.id.clone(),
             params,
-            context: context_for_step(instance, step_def),
+            context: context_for_step(storage, instance, step_def).await?,
             attempt: 0,
         };
         return dispatch_plugin(storage, node, || {
@@ -123,7 +159,7 @@ pub async fn execute_step_node(
                 instance_id: instance.id,
                 block_id: step_def.id.clone(),
                 params: resolved_params.clone(),
-                context: context_for_step(instance, step_def),
+                context: context_for_step(storage, instance, step_def).await?,
                 attempt: 0,
             };
             return dispatch_plugin(storage, node, || {
@@ -143,7 +179,7 @@ pub async fn execute_step_node(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: resolved_params,
-        context: context_for_step(instance, step_def),
+        context: context_for_step(storage, instance, step_def).await?,
         attempt: 0,
         timeout: step_def.timeout,
         externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
@@ -222,7 +258,7 @@ async fn dispatch_step_to_external_worker(
         // Apply the step's context_access policy before handing the context
         // off to an external worker. The remote process can't be trusted to
         // filter on its own.
-        context: serde_json::to_value(context_for_step(instance, step_def))
+        context: serde_json::to_value(context_for_step(storage, instance, step_def).await?)
             .map_err(orch8_types::error::StorageError::Serialization)?,
         attempt: 0,
         timeout_ms: step_def
@@ -311,4 +347,66 @@ pub async fn fail_external_step_node(
         evaluator::fail_node(storage, node.id).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_types::ids::InstanceId;
+
+    #[tokio::test]
+    async fn resolve_markers_inflates_externalized_fields() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let instance_id = InstanceId::new();
+        let payload = serde_json::json!({"inflated": true, "n": 42});
+        storage
+            .save_externalized_state(instance_id, "inst:ctx:data:big", &payload)
+            .await
+            .unwrap();
+
+        let ctx = ExecutionContext {
+            data: serde_json::json!({
+                "small": "left-alone",
+                "big": {"_externalized": true, "_ref": "inst:ctx:data:big"}
+            }),
+            ..ExecutionContext::default()
+        };
+
+        let resolved = resolve_markers(&storage, instance_id, ctx).await.unwrap();
+        assert_eq!(resolved.data["small"], "left-alone");
+        assert_eq!(resolved.data["big"], payload);
+    }
+
+    #[tokio::test]
+    async fn resolve_markers_leaves_broken_ref_in_place() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let marker = serde_json::json!({"_externalized": true, "_ref": "missing:key"});
+        let ctx = ExecutionContext {
+            data: serde_json::json!({"broken": marker.clone()}),
+            ..ExecutionContext::default()
+        };
+        let resolved = resolve_markers(&storage, InstanceId::new(), ctx)
+            .await
+            .unwrap();
+        assert_eq!(resolved.data["broken"], marker);
+    }
+
+    #[tokio::test]
+    async fn resolve_markers_is_noop_for_non_object_data() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let ctx = ExecutionContext {
+            data: serde_json::json!("scalar"),
+            ..ExecutionContext::default()
+        };
+        let resolved = resolve_markers(&storage, InstanceId::new(), ctx)
+            .await
+            .unwrap();
+        assert_eq!(resolved.data, serde_json::json!("scalar"));
+    }
 }

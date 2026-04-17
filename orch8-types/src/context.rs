@@ -211,9 +211,11 @@ mod tests {
 
     #[test]
     fn check_size_rejects_oversize() {
-        let mut ctx = ExecutionContext::default();
         // ~1 KiB of payload in `data`.
-        ctx.data = serde_json::json!({ "blob": "x".repeat(1024) });
+        let ctx = ExecutionContext {
+            data: serde_json::json!({ "blob": "x".repeat(1024) }),
+            ..ExecutionContext::default()
+        };
         let err = ctx.check_size(128).unwrap_err();
         assert!(err.actual > 128);
         assert_eq!(err.max, 128);
@@ -225,16 +227,20 @@ mod tests {
     #[test]
     fn check_size_zero_disables_check() {
         // Large context — 10 KiB — passes when the limit is 0.
-        let mut ctx = ExecutionContext::default();
-        ctx.data = serde_json::json!({ "blob": "x".repeat(10_000) });
+        let ctx = ExecutionContext {
+            data: serde_json::json!({ "blob": "x".repeat(10_000) }),
+            ..ExecutionContext::default()
+        };
         ctx.check_size(0).unwrap();
     }
 
     #[test]
     fn serialized_size_tracks_payload_growth() {
         let empty = ExecutionContext::default().serialized_size();
-        let mut ctx = ExecutionContext::default();
-        ctx.data = serde_json::json!({ "blob": "y".repeat(512) });
+        let ctx = ExecutionContext {
+            data: serde_json::json!({ "blob": "y".repeat(512) }),
+            ..ExecutionContext::default()
+        };
         let grown = ctx.serialized_size();
         assert!(grown > empty + 500, "payload growth should dominate envelope");
     }
