@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::Utc;
 use sqlx::Row;
 
@@ -90,6 +92,77 @@ pub(super) async fn get(
             "unknown externalized_state compression codec: {other}"
         ))),
     }
+}
+
+/// Batched variant of [`get`]. SQLite has no native array binding, so we build
+/// an `IN (?,?,...)` clause dynamically. Missing keys are absent from the
+/// returned map — callers treat that as "nothing to hydrate".
+///
+/// SQLite caps a single statement at `SQLITE_MAX_VARIABLE_NUMBER` bound params
+/// (default 32766 in modern builds). The scheduler preload path only batches
+/// the fields of *one* dispatched step, so in practice `ref_keys` is tiny —
+/// no chunking needed here.
+pub(super) async fn batch_get(
+    storage: &SqliteStorage,
+    ref_keys: &[String],
+) -> Result<HashMap<String, serde_json::Value>, StorageError> {
+    if ref_keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build placeholder list: "?1,?2,?3" — 1-based for clarity, though sqlx
+    // accepts plain "?" too. Named indices keep behavior unambiguous.
+    let placeholders = (1..=ref_keys.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT ref_key, payload, payload_bytes, compression \
+         FROM externalized_state WHERE ref_key IN ({placeholders})"
+    );
+
+    let mut query = sqlx::query(&sql);
+    for key in ref_keys {
+        query = query.bind(key);
+    }
+    let rows = query
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    let mut out = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let ref_key: String = row
+            .try_get("ref_key")
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        let compression: Option<String> = row.try_get("compression").unwrap_or(None);
+        let value = match compression.as_deref() {
+            Some("zstd") => {
+                let bytes: Vec<u8> = row
+                    .try_get("payload_bytes")
+                    .map_err(|e| StorageError::Query(e.to_string()))?;
+                decompress(&bytes)?
+            }
+            None => {
+                let payload: Option<String> = row.try_get("payload").unwrap_or(None);
+                match payload {
+                    Some(s) => serde_json::from_str(&s).map_err(StorageError::Serialization)?,
+                    None => {
+                        return Err(StorageError::Query(
+                            "externalized_state row has compression=NULL and payload=NULL".into(),
+                        ));
+                    }
+                }
+            }
+            Some(other) => {
+                return Err(StorageError::Query(format!(
+                    "unknown externalized_state compression codec: {other}"
+                )));
+            }
+        };
+        out.insert(ref_key, value);
+    }
+    Ok(out)
 }
 
 pub(super) async fn delete(storage: &SqliteStorage, ref_key: &str) -> Result<(), StorageError> {

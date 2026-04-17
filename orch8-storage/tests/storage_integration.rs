@@ -734,6 +734,43 @@ async fn externalized_state_crud() {
 }
 
 #[tokio::test]
+async fn batch_get_externalized_state_fetches_multiple_keys() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    // Mix small (uncompressed) and large (zstd) payloads to prove the batch
+    // path handles both storage paths in a single query.
+    let small = json!({"k": "v"});
+    let big = json!({"blob": "y".repeat(5_000)});
+    s.save_externalized_state(inst_id, "batch_small", &small)
+        .await
+        .unwrap();
+    s.save_externalized_state(inst_id, "batch_big", &big)
+        .await
+        .unwrap();
+
+    let keys = vec![
+        "batch_small".to_string(),
+        "batch_big".to_string(),
+        "batch_missing".to_string(),
+    ];
+    let map = s.batch_get_externalized_state(&keys).await.unwrap();
+
+    // Missing keys are absent (not errors, not Some(Null)).
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get("batch_small"), Some(&small));
+    assert_eq!(map.get("batch_big"), Some(&big));
+    assert!(!map.contains_key("batch_missing"));
+}
+
+#[tokio::test]
+async fn batch_get_externalized_state_empty_input_returns_empty_map() {
+    let s = store().await;
+    let map = s.batch_get_externalized_state(&[]).await.unwrap();
+    assert!(map.is_empty());
+}
+
+#[tokio::test]
 async fn externalized_state_roundtrip_across_compression_threshold() {
     let s = store().await;
     let inst_id = InstanceId::new();

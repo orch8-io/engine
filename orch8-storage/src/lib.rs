@@ -6,6 +6,7 @@ pub mod sqlite;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -446,6 +447,29 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError>;
+
+    /// Retrieve multiple externalized payloads in one round-trip.
+    ///
+    /// Returns a map keyed by `ref_key`; absent entries mean the key did not
+    /// exist in `externalized_state` (missing keys are **not** errors — the
+    /// scheduler's preload path treats them as "nothing to hydrate").
+    ///
+    /// The default impl just loops over [`Self::get_externalized_state`] so
+    /// less-hot backends (memory/test) compile without extra work. Production
+    /// backends should override with a single batched query (e.g. `ANY($1)` on
+    /// Postgres, `IN (?,?,...)` on `SQLite`) to amortize round-trip cost.
+    async fn batch_get_externalized_state(
+        &self,
+        ref_keys: &[String],
+    ) -> Result<HashMap<String, serde_json::Value>, StorageError> {
+        let mut out = HashMap::with_capacity(ref_keys.len());
+        for key in ref_keys {
+            if let Some(v) = self.get_externalized_state(key).await? {
+                out.insert(key.clone(), v);
+            }
+        }
+        Ok(out)
+    }
 
     /// Delete externalized state by `ref_key`.
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;

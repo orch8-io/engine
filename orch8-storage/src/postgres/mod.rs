@@ -595,6 +595,13 @@ impl StorageBackend for PostgresStorage {
         externalized::get(self, ref_key).await
     }
 
+    async fn batch_get_externalized_state(
+        &self,
+        ref_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        externalized::batch_get(self, ref_keys).await
+    }
+
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {
         externalized::delete(self, ref_key).await
     }
