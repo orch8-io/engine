@@ -150,6 +150,7 @@ pub async fn create_trigger_instance(
     trigger: &TriggerDef,
     data: serde_json::Value,
     event_meta: serde_json::Value,
+    id: Option<InstanceId>,
 ) -> Result<InstanceId, crate::error::EngineError> {
     let sequence = storage
         .get_sequence_by_name(
@@ -168,7 +169,7 @@ pub async fn create_trigger_instance(
 
     let now = chrono::Utc::now();
     let instance = TaskInstance {
-        id: InstanceId::new(),
+        id: id.unwrap_or_default(),
         sequence_id: sequence.id,
         tenant_id: TenantId(trigger.tenant_id.clone()),
         namespace: Namespace(trigger.namespace.clone()),
@@ -270,7 +271,7 @@ async fn run_nats_listener(
                         "subject": msg.subject.as_str(),
                         "reply": reply_str,
                     });
-                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta).await {
+                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta, None).await {
                         error!(
                             slug = %trigger.slug,
                             error = %e,
@@ -374,7 +375,7 @@ async fn run_file_watch_listener(
                         "event_kind": format!("{:?}", event.kind),
                     });
 
-                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta).await {
+                    if let Err(e) = create_trigger_instance(&*storage, &trigger, data, meta, None).await {
                         error!(
                             slug = %trigger.slug,
                             error = %e,
@@ -460,7 +461,7 @@ mod tests {
         let data = serde_json::json!({"branch": "main"});
         let meta = serde_json::json!({"subject": "deploy"});
 
-        let id = create_trigger_instance(&storage, &trigger, data.clone(), meta.clone())
+        let id = create_trigger_instance(&storage, &trigger, data.clone(), meta.clone(), None)
             .await
             .unwrap();
 
@@ -485,6 +486,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap_err();
@@ -501,6 +503,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
@@ -519,6 +522,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
@@ -538,6 +542,7 @@ mod tests {
             &trigger,
             serde_json::json!({}),
             serde_json::json!({}),
+            None,
         )
         .await
         .unwrap();
@@ -546,6 +551,7 @@ mod tests {
             &trigger,
             serde_json::json!({}),
             serde_json::json!({}),
+            None,
         )
         .await
         .unwrap();
@@ -561,7 +567,7 @@ mod tests {
             "deep": {"nested": {"arr": [1,2,3], "null": null, "flag": true}}
         });
         let id =
-            create_trigger_instance(&storage, &trigger, data.clone(), serde_json::Value::Null)
+            create_trigger_instance(&storage, &trigger, data.clone(), serde_json::Value::Null, None)
                 .await
                 .unwrap();
         let stored = storage.get_instance(id).await.unwrap().unwrap();
@@ -596,6 +602,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
@@ -614,6 +621,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
@@ -631,6 +639,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
@@ -667,6 +676,7 @@ mod tests {
             &trigger,
             serde_json::Value::Null,
             serde_json::Value::Null,
+            None,
         )
         .await
         .unwrap();
