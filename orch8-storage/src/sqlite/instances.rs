@@ -254,10 +254,8 @@ pub(super) async fn create_externalized(
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
 
-    for (ref_key, payload) in &refs {
-        insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
-    }
-
+    // Parent row must exist before children so the FK
+    // (externalized_state.instance_id -> task_instances.id) is satisfied.
     sqlx::query(
         "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
     )
@@ -281,6 +279,10 @@ pub(super) async fn create_externalized(
     .execute(&mut *tx)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    for (ref_key, payload) in &refs {
+        insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
+    }
 
     tx.commit()
         .await
@@ -318,14 +320,8 @@ pub(super) async fn create_batch_externalized(
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
 
-    // Step 1: externalized rows (per-instance keyed).
-    for (inst, refs) in &prepared {
-        for (ref_key, payload) in refs {
-            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
-        }
-    }
-
-    // Step 2: insert marker-swapped task_instances rows.
+    // Step 1: insert marker-swapped task_instances rows first so the FK
+    // on externalized_state.instance_id is satisfied when children land.
     for (inst, _) in &prepared {
         sqlx::query(
             "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
@@ -350,6 +346,13 @@ pub(super) async fn create_batch_externalized(
         .execute(&mut *tx)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
+    }
+
+    // Step 2: externalized rows (per-instance keyed).
+    for (inst, refs) in &prepared {
+        for (ref_key, payload) in refs {
+            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
+        }
     }
 
     tx.commit()

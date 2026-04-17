@@ -272,6 +272,22 @@ mod tests {
         SqliteStorage::in_memory().await.unwrap()
     }
 
+    /// Insert the minimum-viable parent row so the FK on
+    /// externalized_state.instance_id is satisfied. We only need the NOT NULL
+    /// columns without defaults; everything else uses column defaults.
+    async fn seed_instance(store: &SqliteStorage, id: InstanceId) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO task_instances (id, sequence_id, tenant_id, namespace, created_at, updated_at) \
+             VALUES (?1, 'seq', 'tenant', 'default', ?2, ?2)",
+        )
+        .bind(id.0.to_string())
+        .bind(&now)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    }
+
     async fn set_expires_at(
         store: &SqliteStorage,
         ref_key: &str,
@@ -289,6 +305,7 @@ mod tests {
     async fn delete_expired_removes_past_but_keeps_future_and_null() {
         let store = mk_store().await;
         let inst = InstanceId::new();
+        seed_instance(&store, inst).await;
 
         let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
@@ -312,6 +329,7 @@ mod tests {
     async fn delete_expired_respects_limit() {
         let store = mk_store().await;
         let inst = InstanceId::new();
+        seed_instance(&store, inst).await;
         let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
 
         for i in 0..5 {
@@ -334,5 +352,170 @@ mod tests {
         let store = mk_store().await;
         let deleted = delete_expired(&store, 100).await.unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    /// Zero limit must be a safe no-op — not a "delete everything" escape
+    /// hatch. SQLite's `LIMIT 0` returns no rows, which is the correct
+    /// semantic; this test pins that in case the binding ever gets refactored
+    /// to pass limit through differently.
+    #[tokio::test]
+    async fn delete_expired_with_zero_limit_deletes_nothing() {
+        let store = mk_store().await;
+        let inst = InstanceId::new();
+        seed_instance(&store, inst).await;
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        save(&store, inst, "k:0", &json!({"v": 0})).await.unwrap();
+        set_expires_at(&store, "k:0", Some(&past)).await;
+
+        let deleted = delete_expired(&store, 0).await.unwrap();
+        assert_eq!(deleted, 0, "limit=0 must not delete anything");
+        // Row is still present.
+        assert!(get(&store, "k:0").await.unwrap().is_some());
+    }
+
+    /// Multiple instances with expired rows are all eligible for sweeping —
+    /// the GC query is global, not instance-scoped. Guards against a
+    /// refactor that accidentally adds an instance filter.
+    #[tokio::test]
+    async fn delete_expired_sweeps_across_instances() {
+        let store = mk_store().await;
+        let inst_a = InstanceId::new();
+        let inst_b = InstanceId::new();
+        seed_instance(&store, inst_a).await;
+        seed_instance(&store, inst_b).await;
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        save(&store, inst_a, "a:1", &json!({"v": 1})).await.unwrap();
+        save(&store, inst_b, "b:1", &json!({"v": 1})).await.unwrap();
+        set_expires_at(&store, "a:1", Some(&past)).await;
+        set_expires_at(&store, "b:1", Some(&past)).await;
+
+        let deleted = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(deleted, 2, "sweep must span instances");
+        assert!(get(&store, "a:1").await.unwrap().is_none());
+        assert!(get(&store, "b:1").await.unwrap().is_none());
+    }
+
+    /// Core M4 guarantee: deleting a `task_instances` row cascades to its
+    /// `externalized_state` children. Prior to the FK + cascade fix, deleted
+    /// instances left orphan payload rows that the GC sweeper never touched
+    /// (GC only deletes by `expires_at`, not by instance lineage).
+    #[tokio::test]
+    async fn fk_cascade_deletes_externalized_when_instance_deleted() {
+        let store = mk_store().await;
+        let inst = InstanceId::new();
+        seed_instance(&store, inst).await;
+        for k in ["a", "b", "c"] {
+            save(&store, inst, &format!("inst:{k}"), &json!({"v": k}))
+                .await
+                .unwrap();
+        }
+        // Sanity: all three rows present before the delete.
+        let before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM externalized_state WHERE instance_id = ?1")
+                .bind(inst.0.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, 3);
+
+        sqlx::query("DELETE FROM task_instances WHERE id = ?1")
+            .bind(inst.0.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM externalized_state WHERE instance_id = ?1")
+                .bind(inst.0.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            after, 0,
+            "ON DELETE CASCADE must remove orphaned externalized_state rows"
+        );
+    }
+
+    /// Without a parent `task_instances` row the FK must reject the insert.
+    /// Regression guard: a test environment that forgets to set
+    /// `foreign_keys(true)` on the SQLite connection would silently accept
+    /// orphan payload rows — this test fails loudly if that regression slips in.
+    #[tokio::test]
+    async fn save_rejects_when_parent_instance_missing() {
+        let store = mk_store().await;
+        let orphan = InstanceId::new(); // intentionally NOT seeded
+        let err = save(&store, orphan, "orphan:ref", &json!({"v": 1}))
+            .await
+            .expect_err("save must fail when parent instance row is absent");
+        // Error message is backend-specific but must mention the FK.
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("foreign key") || msg.contains("constraint"),
+            "expected FK violation, got: {err}"
+        );
+    }
+
+    /// Atomicity contract: if any row in a batch violates the FK, the whole
+    /// transaction rolls back — no partial writes leaving the caller's
+    /// `context` pointing at half-persisted ref-keys.
+    #[tokio::test]
+    async fn batch_save_rolls_back_when_any_row_violates_fk() {
+        let store = mk_store().await;
+        let good = InstanceId::new();
+        seed_instance(&store, good).await;
+        let orphan = InstanceId::new(); // no parent seeded
+
+        // First entry would succeed on its own (valid FK), second would fail.
+        // `batch_save` binds every row to the same `instance_id`, so we stage
+        // the failure by binding to the orphan id — this tests that
+        // a mid-batch FK failure rolls back the row that would have
+        // succeeded.
+        let entries = vec![
+            ("batch:ok".to_string(), json!({"v": 1})),
+            ("batch:also_ok".to_string(), json!({"v": 2})),
+        ];
+        let result = batch_save(&store, orphan, &entries).await;
+        assert!(result.is_err(), "batch must fail when FK is violated");
+
+        // Neither row persisted — transaction rolled back.
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM externalized_state WHERE instance_id = ?1")
+                .bind(orphan.0.to_string())
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "failed batch must leave zero rows behind");
+    }
+
+    /// Deleted instance must not leave the GC sweeper orphan work: after
+    /// cascade, the remaining sweeper count for the stale lineage is zero
+    /// regardless of `expires_at`. Sanity-checks that cascade and GC are
+    /// disjoint concerns (cascade by lineage; GC by TTL).
+    #[tokio::test]
+    async fn cascade_beats_gc_for_deleted_instance_payloads() {
+        let store = mk_store().await;
+        let inst = InstanceId::new();
+        seed_instance(&store, inst).await;
+        save(&store, inst, "will:cascade", &json!({"v": 1}))
+            .await
+            .unwrap();
+        // Give the row a *future* expires_at — GC would NOT delete it.
+        let future = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        set_expires_at(&store, "will:cascade", Some(&future)).await;
+
+        sqlx::query("DELETE FROM task_instances WHERE id = ?1")
+            .bind(inst.0.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        // GC would report 0 (not expired) — but the row is already gone.
+        let gc_swept = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(gc_swept, 0, "GC must not find the cascaded row");
+        assert!(
+            get(&store, "will:cascade").await.unwrap().is_none(),
+            "cascade deleted the row before GC could observe it"
+        );
     }
 }

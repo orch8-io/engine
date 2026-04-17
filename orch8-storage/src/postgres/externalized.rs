@@ -227,9 +227,18 @@ pub(super) async fn delete(store: &PostgresStorage, ref_key: &str) -> Result<(),
 }
 
 /// Delete up to `limit` rows whose `expires_at` has elapsed. Returns the
-/// affected row count. Uses a CTE because Postgres `DELETE` does not accept a
-/// `LIMIT` clause directly — we pre-select the `ref_key` values to bound sweep size,
-/// then delete the matching rows in one round-trip.
+/// affected row count.
+///
+/// Postgres `DELETE` does not accept a `LIMIT` clause directly, so we pre-select
+/// the `ref_key` values to bound sweep size, then delete the matching rows.
+///
+/// Multi-node safety: several engine nodes run the GC loop concurrently.
+/// `FOR UPDATE SKIP LOCKED` makes each node's sub-query claim its own slice of
+/// expired rows without blocking the others (two sweepers no longer fight over
+/// the same rows and neither waits on the other's transaction). `ORDER BY
+/// expires_at` makes the selection deterministic and biases toward the oldest
+/// debt first — important when a backlog builds up and we want bounded tail
+/// latency on cleanup.
 pub(super) async fn delete_expired(
     store: &PostgresStorage,
     limit: u32,
@@ -239,7 +248,9 @@ pub(super) async fn delete_expired(
           WHERE ref_key IN (
               SELECT ref_key FROM externalized_state
               WHERE expires_at IS NOT NULL AND expires_at <= NOW()
+              ORDER BY expires_at ASC
               LIMIT $1
+              FOR UPDATE SKIP LOCKED
           )",
     )
     .bind(i64::from(limit))

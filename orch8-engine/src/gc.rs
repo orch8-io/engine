@@ -10,10 +10,12 @@
 //! - Errors are logged but never propagated — GC is a best-effort
 //!   background maintenance task; a missed sweep just means the next one
 //!   picks up the slack.
-//! - The FK between `externalized_state` and `task_instances` uses
-//!   `ON DELETE CASCADE` (migration 024) so instance deletion handles its
-//!   own payload cleanup atomically; this loop only targets TTL-expired
-//!   rows.
+//! - Instance-scoped cleanup is handled separately via FK cascade
+//!   (`ON DELETE CASCADE` on `externalized_state.instance_id` → `task_instances.id`).
+//!   `Postgres` enforces this natively; `SQLite` requires both the FK declaration
+//!   and a connection-level `PRAGMA foreign_keys = ON` (set in the `SQLite`
+//!   pool options). This loop only targets TTL-expired rows, not
+//!   instance-deletion cleanup.
 //!
 //! See `docs/CONTEXT_MANAGEMENT.md` §8.5 for the lifecycle contract.
 
@@ -21,9 +23,27 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use orch8_storage::StorageBackend;
+use orch8_types::error::StorageError;
 use tokio_util::sync::CancellationToken;
 
 use crate::metrics;
+
+/// Collapse a [`StorageError`] into a low-cardinality label so the
+/// `GC_EXTERNALIZED_ERRORS` counter distinguishes transient issues
+/// (pool exhaustion, connection drops) from structural ones (bad query,
+/// migration skew). The set is intentionally small — high-cardinality
+/// error labels break Prometheus.
+fn error_kind(err: &StorageError) -> &'static str {
+    match err {
+        StorageError::Connection(_) => "connection",
+        StorageError::Query(_) => "query",
+        StorageError::NotFound { .. } => "not_found",
+        StorageError::Conflict(_) => "conflict",
+        StorageError::Migration(_) => "migration",
+        StorageError::Serialization(_) => "serialization",
+        StorageError::PoolExhausted => "pool_exhausted",
+    }
+}
 
 /// Maximum rows deleted per sweep. Sized so a single sweep completes well
 /// under one second on typical row counts, leaving the storage backend
@@ -56,8 +76,12 @@ pub async fn run_gc_loop(
                         metrics::inc_by(metrics::GC_EXTERNALIZED_DELETED, n);
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "externalized gc sweep failed");
-                        metrics::inc(metrics::GC_EXTERNALIZED_ERRORS);
+                        let kind = error_kind(&e);
+                        tracing::error!(error = %e, kind, "externalized gc sweep failed");
+                        metrics::inc_with(
+                            metrics::GC_EXTERNALIZED_ERRORS,
+                            &[("kind", kind.to_string())],
+                        );
                     }
                 }
             }
@@ -72,6 +96,61 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    /// Table-test `error_kind` exhaustively so a new `StorageError` variant
+    /// forces a deliberate label choice (rather than silently mapping to
+    /// `"query"` by accident). Prometheus label cardinality is the invariant
+    /// this guards — adding an unchecked variant would break it.
+    #[test]
+    fn error_kind_maps_every_storage_error_variant() {
+        use orch8_types::error::StorageError;
+
+        let cases = [
+            (StorageError::Connection("down".into()), "connection"),
+            (StorageError::Query("bad".into()), "query"),
+            (
+                StorageError::NotFound {
+                    entity: "row",
+                    id: "x".into(),
+                },
+                "not_found",
+            ),
+            (StorageError::Conflict("dup".into()), "conflict"),
+            (StorageError::Migration("skew".into()), "migration"),
+            (StorageError::PoolExhausted, "pool_exhausted"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(error_kind(&err), expected, "mismatch for {err:?}");
+        }
+
+        // Serialization needs its own case because it holds a
+        // `serde_json::Error` which can't be cheaply constructed inline.
+        let ser_err: StorageError =
+            serde_json::from_str::<serde_json::Value>("{invalid")
+                .unwrap_err()
+                .into();
+        assert_eq!(error_kind(&ser_err), "serialization");
+    }
+
+    /// Labels returned by `error_kind` must be stable identifiers (not error
+    /// messages containing user data) — the whole point of the `kind` label
+    /// is low, bounded cardinality for Prometheus.
+    #[test]
+    fn error_kind_labels_are_low_cardinality() {
+        use orch8_types::error::StorageError;
+        let samples = [
+            StorageError::Connection("secret-host:5432".into()),
+            StorageError::Query("user-supplied-id-42".into()),
+            StorageError::Conflict("tenant-42".into()),
+        ];
+        for err in samples {
+            let kind = error_kind(&err);
+            assert!(
+                !kind.contains(':') && !kind.contains('-') && kind.len() < 32,
+                "label '{kind}' leaked variable data from {err:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn gc_loop_exits_on_cancel() {

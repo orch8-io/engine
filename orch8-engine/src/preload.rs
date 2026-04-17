@@ -71,15 +71,21 @@ pub async fn preload_externalized_markers(
     // logged; per-step resolution will see un-hydrated markers and either
     // succeed via the fallback single-fetch path or surface the error
     // contextually.
-    let _timer = metrics::Timer::start(metrics::PRELOAD_BATCH_DURATION);
+    //
+    // Timer records only on the success path. On failure we `mem::forget`
+    // it so error-path durations don't pollute the success histogram's
+    // p50/p99 — error count lives on its own counter.
+    let timer = metrics::Timer::start(metrics::PRELOAD_BATCH_DURATION);
     let resolved = match storage.batch_get_externalized_state(&ref_keys).await {
         Ok(map) => map,
         Err(e) => {
+            std::mem::forget(timer);
             tracing::warn!(error = %e, "preload batch fetch failed; markers left un-hydrated");
             metrics::inc(metrics::PRELOAD_ERRORS);
             return;
         }
     };
+    drop(timer);
 
     if resolved.is_empty() {
         return;
@@ -87,21 +93,35 @@ pub async fn preload_externalized_markers(
 
     // Phase 3: hydrate in place. Walks the same top-level keys the scan
     // visited; markers whose ref_key is absent from `resolved` stay intact.
-    let mut hydrated: u64 = 0;
+    //
+    // Two distinct metrics:
+    //   - REFS_HYDRATED: unique refs resolved (comparable against REFS_SCANNED
+    //     for a hit-rate ratio).
+    //   - SLOTS_HYDRATED: total marker slots mutated (fan-in patterns inflate
+    //     this relative to REFS_HYDRATED; useful for measuring work done).
+    let mut slots_hydrated: u64 = 0;
     for inst in instances.iter_mut() {
         let Some(obj) = inst.context.data.as_object_mut() else {
             continue;
         };
         for value in obj.values_mut() {
-            if let Some(k) = extract_ref_key(value) {
-                if let Some(payload) = resolved.get(k) {
-                    *value = payload.clone();
-                    hydrated += 1;
-                }
+            // Resolve the payload first — `extract_ref_key` returns `&str`
+            // borrowed from `value`, so the whole lookup must complete
+            // (and the borrow must end) before `*value = ...` can execute.
+            // Cloning into an `Option<Value>` severs the borrow explicitly
+            // so the mutation below cannot accidentally grow a dependency
+            // on `extract_ref_key`'s return lifetime.
+            let payload = extract_ref_key(value)
+                .and_then(|k| resolved.get(k))
+                .cloned();
+            if let Some(payload) = payload {
+                *value = payload;
+                slots_hydrated += 1;
             }
         }
     }
-    metrics::inc_by(metrics::PRELOAD_REFS_HYDRATED, hydrated);
+    metrics::inc_by(metrics::PRELOAD_REFS_HYDRATED, resolved.len() as u64);
+    metrics::inc_by(metrics::PRELOAD_SLOTS_HYDRATED, slots_hydrated);
 }
 
 #[cfg(test)]
@@ -147,12 +167,21 @@ mod tests {
         json!({ "_externalized": true, "_ref": ref_key })
     }
 
+    /// Seed the parent `task_instances` row required by the FK on
+    /// `externalized_state.instance_id` (enforced in `SQLite` since M4).
+    async fn seed_instance<S: StorageBackend>(storage: &S, id: InstanceId) {
+        let mut inst = mk_instance(json!({}));
+        inst.id = id;
+        storage.create_instance(&inst).await.unwrap();
+    }
+
     #[tokio::test]
     async fn preload_hydrates_top_level_markers_in_place() {
         let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
             .await
             .unwrap();
         let inst_id = InstanceId::new();
+        seed_instance(&storage, inst_id).await;
         let ref_k = format!("{}:ctx:data:big", inst_id.0);
         let payload = json!({ "huge": "x".repeat(100) });
         storage
@@ -218,8 +247,10 @@ mod tests {
             .unwrap();
         let shared_ref = "shared:ctx:data:payload";
         let shared_payload = json!({ "shared": true });
+        let owner = InstanceId::new();
+        seed_instance(&storage, owner).await;
         storage
-            .save_externalized_state(InstanceId::new(), shared_ref, &shared_payload)
+            .save_externalized_state(owner, shared_ref, &shared_payload)
             .await
             .unwrap();
 
@@ -246,5 +277,153 @@ mod tests {
         preload_externalized_markers(&storage, &mut batch).await;
 
         assert_eq!(batch[0].context.data, json!("scalar_data"));
+    }
+
+    /// Top-level-only invariant: nested markers (one level inside a plain
+    /// object field) MUST NOT be hydrated — the save site never produces
+    /// them, and the preload scan deliberately walks only top-level keys.
+    /// If this test ever hydrates the nested marker, the hydration scope
+    /// has silently grown and the documented §8.5 contract is broken.
+    #[tokio::test]
+    async fn preload_does_not_hydrate_nested_markers() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let inst_id = InstanceId::new();
+        seed_instance(&storage, inst_id).await;
+        let ref_k = format!("{}:ctx:data:nested", inst_id.0);
+        let payload = json!({ "secret": "should_not_appear" });
+        storage
+            .save_externalized_state(inst_id, &ref_k, &payload)
+            .await
+            .unwrap();
+
+        let nested_marker = marker(&ref_k);
+        let mut inst = mk_instance(json!({
+            "outer": {
+                "inner": nested_marker.clone(),
+            },
+        }));
+        inst.id = inst_id;
+
+        let mut batch = vec![inst];
+        preload_externalized_markers(&storage, &mut batch).await;
+
+        // The nested marker must remain untouched — preload only walks
+        // the top level. The payload from storage must NOT leak through.
+        assert_eq!(
+            batch[0].context.data["outer"]["inner"], nested_marker,
+            "nested marker must not be hydrated; only top-level keys are externalizable"
+        );
+    }
+
+    /// Partial-hit scenario: one marker resolves, one doesn't. Verifies the
+    /// hydration loop continues past a missing key and mutates only the
+    /// keys it can satisfy. This is the path the `SLOTS_HYDRATED` vs
+    /// `REFS_HYDRATED` split metric distinguishes — if the loop ever
+    /// short-circuited on first miss, the slot count would be wrong.
+    #[tokio::test]
+    async fn preload_partial_hit_hydrates_resolvable_leaves_others() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let inst_id = InstanceId::new();
+        seed_instance(&storage, inst_id).await;
+        let ref_ok = format!("{}:ctx:data:ok", inst_id.0);
+        let payload = json!({"data": "resolved"});
+        storage
+            .save_externalized_state(inst_id, &ref_ok, &payload)
+            .await
+            .unwrap();
+
+        let missing_marker = marker("nonexistent:missing");
+        let mut inst = mk_instance(json!({
+            "ok": marker(&ref_ok),
+            "missing": missing_marker.clone(),
+            "plain": "untouched",
+        }));
+        inst.id = inst_id;
+
+        let mut batch = vec![inst];
+        preload_externalized_markers(&storage, &mut batch).await;
+
+        assert_eq!(batch[0].context.data["ok"], payload, "resolvable marker should hydrate");
+        assert_eq!(
+            batch[0].context.data["missing"], missing_marker,
+            "unresolvable marker must stay intact for downstream error reporting"
+        );
+        assert_eq!(batch[0].context.data["plain"], json!("untouched"));
+    }
+
+    /// Multiple top-level markers in one instance: every top-level key that
+    /// carries a marker must be hydrated in the same pass. Regression guard
+    /// for a future refactor that accidentally breaks out of the inner loop
+    /// after the first hit.
+    #[tokio::test]
+    async fn preload_hydrates_multiple_top_level_markers() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let inst_id = InstanceId::new();
+        seed_instance(&storage, inst_id).await;
+        let ref_a = format!("{}:ctx:data:a", inst_id.0);
+        let ref_b = format!("{}:ctx:data:b", inst_id.0);
+        let payload_a = json!({"id": "A"});
+        let payload_b = json!({"id": "B"});
+        storage
+            .save_externalized_state(inst_id, &ref_a, &payload_a)
+            .await
+            .unwrap();
+        storage
+            .save_externalized_state(inst_id, &ref_b, &payload_b)
+            .await
+            .unwrap();
+
+        let mut inst = mk_instance(json!({
+            "a": marker(&ref_a),
+            "b": marker(&ref_b),
+        }));
+        inst.id = inst_id;
+
+        let mut batch = vec![inst];
+        preload_externalized_markers(&storage, &mut batch).await;
+
+        assert_eq!(batch[0].context.data["a"], payload_a);
+        assert_eq!(batch[0].context.data["b"], payload_b);
+    }
+
+    /// After the hydration loop's borrow-pattern fix (MEDIUM #8), the
+    /// mutation path no longer depends on NLL extending the borrow of
+    /// `value`. This test exercises the exact shape — a marker at the same
+    /// key that is then mutated — to catch any regression that reintroduces
+    /// a borrow-over-mutation compile hazard.
+    #[tokio::test]
+    async fn preload_hydration_mutates_in_place_without_borrow_regression() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let inst_id = InstanceId::new();
+        seed_instance(&storage, inst_id).await;
+        let ref_k = format!("{}:ctx:data:field", inst_id.0);
+        let payload = json!({ "huge": "x".repeat(1024) });
+        storage
+            .save_externalized_state(inst_id, &ref_k, &payload)
+            .await
+            .unwrap();
+
+        let mut inst = mk_instance(json!({ "field": marker(&ref_k) }));
+        inst.id = inst_id;
+        let mut batch = vec![inst];
+        preload_externalized_markers(&storage, &mut batch).await;
+
+        // Value was replaced by the hydrated payload — not left as marker,
+        // not corrupted, not duplicated into a new key.
+        let obj = batch[0]
+            .context
+            .data
+            .as_object()
+            .expect("data must remain an object");
+        assert_eq!(obj.len(), 1, "hydration must not invent keys");
+        assert_eq!(obj["field"], payload);
     }
 }

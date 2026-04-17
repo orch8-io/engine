@@ -35,6 +35,16 @@ async fn store() -> SqliteStorage {
     SqliteStorage::in_memory().await.unwrap()
 }
 
+/// Create the parent `task_instances` row so the `externalized_state.instance_id`
+/// FK (`ON DELETE CASCADE`) is satisfied. Tests that exercise `externalized_state`
+/// directly (without going through `create_instance`) must seed the parent first
+/// now that `SQLite` has FK enforcement enabled.
+async fn seed_instance(s: &SqliteStorage, inst_id: InstanceId) {
+    let mut inst = make_instance("test", SequenceId::new());
+    inst.id = inst_id;
+    s.create_instance(&inst).await.unwrap();
+}
+
 fn make_sequence(tenant: &str) -> SequenceDefinition {
     SequenceDefinition {
         id: SequenceId::new(),
@@ -719,6 +729,7 @@ async fn resource_pool_lifecycle() {
 async fn externalized_state_crud() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
     let ref_key = format!("ext_{inst_id}");
     let payload = json!({"large": "data", "items": [1,2,3,4,5]});
 
@@ -737,6 +748,7 @@ async fn externalized_state_crud() {
 async fn batch_get_externalized_state_fetches_multiple_keys() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Mix small (uncompressed) and large (zstd) payloads to prove the batch
     // path handles both storage paths in a single query.
@@ -774,6 +786,7 @@ async fn batch_get_externalized_state_empty_input_returns_empty_map() {
 async fn batch_save_externalized_state_persists_all_entries() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
     let entries = vec![
         ("bs_a".to_string(), json!({"a": 1})),
         ("bs_b".to_string(), json!({"b": "x".repeat(5_000)})), // crosses zstd threshold
@@ -804,6 +817,7 @@ async fn batch_save_externalized_state_empty_input_is_noop() {
 async fn batch_save_externalized_state_upserts_existing_keys() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Seed.
     s.batch_save_externalized_state(
@@ -831,6 +845,7 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
 async fn externalized_state_roundtrip_across_compression_threshold() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Small payload (<1 KiB): written uncompressed, returned verbatim.
     let small = json!({"k": "v"});

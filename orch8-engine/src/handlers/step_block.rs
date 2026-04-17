@@ -352,14 +352,41 @@ pub async fn fail_external_step_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_types::ids::InstanceId;
+    use chrono::Utc;
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+
+    /// Seed parent `task_instances` row to satisfy the `externalized_state` FK.
+    async fn seed_instance(storage: &SqliteStorage, id: InstanceId) {
+        let now = Utc::now();
+        let inst = TaskInstance {
+            id,
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+    }
 
     #[tokio::test]
     async fn resolve_markers_inflates_externalized_fields() {
-        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
-            .await
-            .unwrap();
+        let storage = SqliteStorage::in_memory().await.unwrap();
         let instance_id = InstanceId::new();
+        seed_instance(&storage, instance_id).await;
         let payload = serde_json::json!({"inflated": true, "n": 42});
         storage
             .save_externalized_state(instance_id, "inst:ctx:data:big", &payload)

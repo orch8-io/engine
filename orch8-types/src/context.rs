@@ -45,7 +45,7 @@ impl ExecutionContext {
     pub fn serialized_size(&self) -> usize {
         // `serde_json::to_vec` is the simplest reliable way; value is small
         // enough that we don't need a streaming byte counter.
-        serde_json::to_vec(self).map(|v| v.len()).unwrap_or(0)
+        serde_json::to_vec(self).map_or(0, |v| v.len())
     }
 
     /// Reject contexts whose serialized form exceeds `max_bytes`.

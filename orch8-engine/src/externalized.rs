@@ -85,4 +85,59 @@ mod tests {
         assert_eq!(extract_ref_key(&json!({"other": 1})), None);
         assert_eq!(extract_ref_key(&json!("scalar")), None);
     }
+
+    #[test]
+    fn is_ref_marker_false_for_non_string_ref() {
+        // A user payload might happen to have `_externalized: true` and a
+        // numeric / null / array `_ref`. That is not a marker — the engine
+        // must leave it alone so the data survives the round-trip.
+        assert!(!is_ref_marker(
+            &json!({"_externalized": true, "_ref": 42})
+        ));
+        assert!(!is_ref_marker(
+            &json!({"_externalized": true, "_ref": null})
+        ));
+        assert!(!is_ref_marker(
+            &json!({"_externalized": true, "_ref": ["a"]})
+        ));
+        assert!(!is_ref_marker(
+            &json!({"_externalized": true, "_ref": {"nested": "k"}})
+        ));
+    }
+
+    #[test]
+    fn is_ref_marker_false_for_flag_not_bool() {
+        // `_externalized: "true"` (string) must not match. The flag is a bool
+        // by contract; tolerating coercion would create false positives on
+        // user payloads that happen to stringify a truthy marker field.
+        assert!(!is_ref_marker(
+            &json!({"_externalized": "true", "_ref": "k"})
+        ));
+        assert!(!is_ref_marker(&json!({"_externalized": 1, "_ref": "k"})));
+    }
+
+    #[test]
+    fn is_ref_marker_false_for_empty_object() {
+        // Zero keys fails the length check immediately.
+        assert!(!is_ref_marker(&json!({})));
+    }
+
+    #[test]
+    fn extract_ref_key_returns_empty_string_when_ref_is_empty() {
+        // An empty `_ref` is still a valid-shape marker — the engine
+        // will just fail the batch_get lookup. This test documents that
+        // extract_ref_key does not enforce non-empty refs itself; that
+        // validation lives in the storage layer.
+        let v = json!({"_externalized": true, "_ref": ""});
+        assert_eq!(extract_ref_key(&v), Some(""));
+    }
+
+    #[test]
+    fn extract_ref_key_unicode_key_preserved() {
+        // Ref keys are `{instance}:ctx:data:{field}` — ULIDs are ASCII in
+        // practice, but non-ASCII field names can leak through. The helper
+        // must return the bytes verbatim.
+        let v = json!({"_externalized": true, "_ref": "inst:ctx:data:日本語"});
+        assert_eq!(extract_ref_key(&v), Some("inst:ctx:data:日本語"));
+    }
 }

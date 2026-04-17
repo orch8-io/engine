@@ -17,7 +17,13 @@ pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
 pub const CACHE_HITS: &str = "orch8_cache_hits_total";
 pub const CACHE_MISSES: &str = "orch8_cache_misses_total";
 pub const PRELOAD_REFS_SCANNED: &str = "orch8_preload_refs_scanned_total";
+/// Unique refs hydrated by the preload batch (matches `PRELOAD_REFS_SCANNED`
+/// cardinality; useful for hit-rate ratios).
 pub const PRELOAD_REFS_HYDRATED: &str = "orch8_preload_refs_hydrated_total";
+/// Marker slots mutated during hydration — inflates vs. `PRELOAD_REFS_HYDRATED`
+/// under fan-in (one ref referenced by many instances). Useful for work-done
+/// measurement.
+pub const PRELOAD_SLOTS_HYDRATED: &str = "orch8_preload_slots_hydrated_total";
 pub const PRELOAD_ERRORS: &str = "orch8_preload_errors_total";
 pub const GC_EXTERNALIZED_DELETED: &str = "orch8_gc_externalized_deleted_total";
 pub const GC_EXTERNALIZED_ERRORS: &str = "orch8_gc_externalized_errors_total";

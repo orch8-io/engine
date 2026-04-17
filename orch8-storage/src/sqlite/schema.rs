@@ -154,7 +154,12 @@ CREATE TABLE IF NOT EXISTS externalized_state (
     compression TEXT,                -- NULL or 'zstd'
     size_bytes INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT
+    expires_at TEXT,
+    -- Cascade deletes so instance teardown atomically drops its payloads.
+    -- Only enforced when the connection has `PRAGMA foreign_keys = ON`
+    -- (set in SqliteConnectOptions; without it SQLite silently ignores the
+    -- constraint and we'd leak rows after instance deletion).
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_externalized_state_instance
     ON externalized_state(instance_id);

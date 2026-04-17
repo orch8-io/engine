@@ -277,10 +277,8 @@ pub(super) async fn create_externalized(
 
     let mut tx = store.pool.begin().await?;
 
-    for (ref_key, payload) in &refs {
-        insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
-    }
-
+    // Parent first: the FK on externalized_state.instance_id is IMMEDIATE in
+    // Postgres, so the task_instances row must exist before its children.
     sqlx::query(
         r"
         INSERT INTO task_instances
@@ -311,6 +309,10 @@ pub(super) async fn create_externalized(
     .bind(inst_clone.updated_at)
     .execute(&mut *tx)
     .await?;
+
+    for (ref_key, payload) in &refs {
+        insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
+    }
 
     tx.commit().await?;
     Ok(())
@@ -348,15 +350,8 @@ pub(super) async fn create_batch_externalized(
     let mut tx = store.pool.begin().await?;
     let mut count = 0u64;
 
-    // Step 1: persist every externalized payload across every instance.
-    for (inst, refs) in &prepared {
-        for (ref_key, payload) in refs {
-            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
-        }
-    }
-
-    // Step 2: bulk-insert task_instances (marker-swapped contexts), chunked
-    // like the plain `create_batch` path.
+    // Step 1: bulk-insert task_instances first so the FK on
+    // externalized_state.instance_id is satisfied before children land.
     for chunk in prepared.chunks(500) {
         let mut qb = sqlx::QueryBuilder::new(
             r"INSERT INTO task_instances
@@ -389,6 +384,13 @@ pub(super) async fn create_batch_externalized(
         });
         let result = qb.build().execute(&mut *tx).await?;
         count += result.rows_affected();
+    }
+
+    // Step 2: persist every externalized payload across every instance.
+    for (inst, refs) in &prepared {
+        for (ref_key, payload) in refs {
+            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
+        }
     }
 
     tx.commit().await?;

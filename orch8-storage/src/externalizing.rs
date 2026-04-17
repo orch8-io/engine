@@ -223,4 +223,92 @@ mod tests {
         assert!(!is_marker(&json!({"_ref": "k"})));
         assert!(!is_marker(&json!("scalar")));
     }
+
+    #[test]
+    fn externalize_fields_at_exact_threshold_boundary() {
+        // `encoded.len() < threshold` is the skip condition, so a value whose
+        // serialized size exactly equals the threshold MUST be externalized.
+        // This pins the boundary so a refactor to `<=` would immediately fail.
+        let payload = "x".repeat(10);
+        // serialized form is `"xxxxxxxxxx"` (12 bytes including quotes).
+        let encoded_len = serde_json::to_vec(&json!(payload)).unwrap().len();
+        let mut v = json!({ "k": payload.clone() });
+        #[allow(clippy::cast_possible_truncation)]
+        let refs = externalize_fields(&mut v, "inst1", encoded_len as u32);
+        assert_eq!(
+            refs.len(),
+            1,
+            "value at exact threshold must be externalized"
+        );
+        assert!(is_marker(&v["k"]));
+
+        // One byte above threshold — still not externalized.
+        let mut v = json!({ "k": payload });
+        #[allow(clippy::cast_possible_truncation)]
+        let refs = externalize_fields(&mut v, "inst1", (encoded_len + 1) as u32);
+        assert!(refs.is_empty(), "value one byte under threshold stays inline");
+    }
+
+    #[test]
+    fn externalize_fields_empty_object_is_no_op() {
+        // Empty input must not panic and must return no refs — belt-and-suspenders
+        // for the fast write path where zero-field contexts are common.
+        let mut v = json!({});
+        let refs = externalize_fields(&mut v, "inst1", 1);
+        assert!(refs.is_empty());
+        assert_eq!(v, json!({}));
+    }
+
+    #[test]
+    fn externalize_fields_handles_field_name_with_colon() {
+        // The ref-key format is `{instance}:ctx:data:{field}`. A field name
+        // containing a colon produces a ref-key that is still unique (the
+        // colon isn't a structural delimiter — we just format it in), but
+        // operators reading raw keys may be surprised. Pin the behavior so
+        // nobody "fixes" it by rejecting colons silently.
+        let big = "x".repeat(2048);
+        let mut v = json!({ "weird:field": big.clone() });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].0, "inst1:ctx:data:weird:field");
+        assert_eq!(v["weird:field"]["_ref"], json!("inst1:ctx:data:weird:field"));
+    }
+
+    #[test]
+    fn externalize_fields_handles_null_and_number_payloads() {
+        // Scalars below threshold stay inline regardless of type. This guards
+        // against any accidental special-casing of non-string values.
+        let mut v = json!({ "n": 42, "null": null, "bool": true });
+        let refs = externalize_fields(&mut v, "inst1", 1024);
+        assert!(refs.is_empty());
+        assert_eq!(v["n"], json!(42));
+        assert_eq!(v["null"], json!(null));
+        assert_eq!(v["bool"], json!(true));
+    }
+
+    #[test]
+    fn context_data_ref_key_format_is_stable() {
+        // The key format is a storage-layer contract — GC sweepers, debug
+        // tooling, and FK cascade all rely on it. Any format change is a
+        // breaking migration.
+        assert_eq!(
+            context_data_ref_key("01HXYZ", "user_payload"),
+            "01HXYZ:ctx:data:user_payload"
+        );
+        // Empty instance / field are not valid in practice but must not
+        // produce malformed keys that break parsers downstream.
+        assert_eq!(context_data_ref_key("", "field"), ":ctx:data:field");
+        assert_eq!(context_data_ref_key("inst", ""), "inst:ctx:data:");
+    }
+
+    #[test]
+    fn marker_roundtrips_through_is_marker_with_various_keys() {
+        // Ref-key content should not matter for marker recognition — only
+        // the two-key shape and value types do.
+        for key in ["", "simple", "with:colons", "with spaces", "日本語", "a".repeat(1024).as_str()] {
+            let m = marker(key);
+            assert!(is_marker(&m), "marker('{key}') not recognized as marker");
+            assert_eq!(m[REF_KEY], json!(key));
+        }
+    }
 }

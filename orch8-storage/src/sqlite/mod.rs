@@ -77,7 +77,11 @@ impl SqliteStorage {
     pub async fn in_memory() -> Result<Self, StorageError> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| StorageError::Connection(e.to_string()))?
-            .create_if_missing(true);
+            .create_if_missing(true)
+            // FK enforcement is off by default in SQLite. We need it on so
+            // `ON DELETE CASCADE` on externalized_state.instance_id actually
+            // fires when a task_instances row is deleted. Must match file mode.
+            .foreign_keys(true);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1) // SQLite in-memory requires single connection
@@ -96,7 +100,9 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Connection(e.to_string()))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(Duration::from_secs(5))
+            // FK enforcement is off by default in SQLite. Mirror in_memory().
+            .foreign_keys(true);
 
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
