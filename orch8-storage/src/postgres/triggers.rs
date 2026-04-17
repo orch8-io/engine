@@ -20,7 +20,9 @@ pub(super) async fn create(
     .bind(trigger.enabled)
     .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
     .bind(trigger.trigger_type.to_string())
-    .bind(&trigger.config)
+    // `config` column is TEXT — bind the JSON value serialized as a string
+    // rather than relying on sqlx's JSONB encoder.
+    .bind(trigger.config.to_string())
     .bind(trigger.created_at)
     .bind(trigger.updated_at)
     .execute(&store.pool)
@@ -85,7 +87,7 @@ pub(super) async fn update(
     .bind(trigger.enabled)
     .bind(trigger.secret.as_ref().map(|s| s.expose().to_string()))
     .bind(trigger.trigger_type.to_string())
-    .bind(&trigger.config)
+    .bind(trigger.config.to_string())
     .execute(&store.pool)
     .await?;
     Ok(())
@@ -109,13 +111,20 @@ struct TriggerRow {
     enabled: bool,
     secret: Option<String>,
     trigger_type: String,
-    config: serde_json::Value,
+    // `config` column is `TEXT` in migration 020 (not JSONB), so decode as
+    // String then parse. Empty/invalid strings fall back to `Value::Null`.
+    config: String,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl TriggerRow {
     fn into_trigger(self) -> TriggerDef {
+        let config = if self.config.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&self.config).unwrap_or(serde_json::Value::Null)
+        };
         TriggerDef {
             slug: self.slug,
             sequence_name: self.sequence_name,
@@ -125,7 +134,7 @@ impl TriggerRow {
             enabled: self.enabled,
             secret: self.secret.map(orch8_types::config::SecretString::new),
             trigger_type: TriggerType::from_str_loose(&self.trigger_type).unwrap_or_default(),
-            config: self.config,
+            config,
             created_at: self.created_at,
             updated_at: self.updated_at,
         }
