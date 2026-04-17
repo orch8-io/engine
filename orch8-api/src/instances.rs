@@ -526,11 +526,27 @@ pub(crate) async fn get_outputs(
         &format!("instance {id}"),
     )?;
 
-    let outputs = state
+    let mut outputs = state
         .storage
         .get_all_outputs(InstanceId(id))
         .await
         .map_err(|e| ApiError::from_storage(e, "outputs"))?;
+
+    // Inflate externalization markers in-place so API consumers see real data.
+    // See `docs/CONTEXT_MANAGEMENT.md` §8.5.
+    for out in &mut outputs {
+        if let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) {
+            if let Some(resolved) = state
+                .storage
+                .get_externalized_state(ref_key)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "externalized_state"))?
+            {
+                out.output = resolved;
+            }
+            // Missing payload: leave marker visible so callers can detect.
+        }
+    }
 
     Ok(Json(outputs))
 }
