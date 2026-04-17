@@ -4,3 +4,5 @@
 *.db-shm
 *.db-wal
 .worktrees/
+node_modules/
+dist/
