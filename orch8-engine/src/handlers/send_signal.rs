@@ -211,4 +211,139 @@ mod tests {
         assert_eq!(pending[0].signal_type, SignalType::Cancel);
         assert_eq!(pending[0].instance_id, target.id);
     }
+
+    #[tokio::test]
+    async fn send_signal_rejects_when_target_missing() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let missing_target = InstanceId::new();
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("s".into()),
+            params: json!({
+                "instance_id": missing_target.0.to_string(),
+                "signal_type": "cancel",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        assert!(
+            matches!(err, StepError::Permanent { .. }),
+            "expected Permanent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_signal_rejects_when_target_in_terminal_state() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        let target = mk_instance("T1", InstanceState::Completed);
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("s".into()),
+            params: json!({
+                "instance_id": target.id.0.to_string(),
+                "signal_type": "cancel",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        assert!(
+            matches!(err, StepError::Permanent { .. }),
+            "expected Permanent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_signal_denies_cross_tenant() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        let target = mk_instance("T2", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("s".into()),
+            params: json!({
+                "instance_id": target.id.0.to_string(),
+                "signal_type": "cancel",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        if let StepError::Permanent { message, .. } = &err {
+            assert!(
+                message.contains("cross-tenant"),
+                "expected 'cross-tenant' in message, got: {message}"
+            );
+            assert!(
+                !message.to_lowercase().contains("terminal")
+                    && !message.to_lowercase().contains("state"),
+                "message should not leak target state info, got: {message}"
+            );
+        } else {
+            panic!("expected Permanent, got: {err:?}");
+        }
+
+        // verify no signal was enqueued
+        let pending = storage.get_pending_signals(target.id).await.unwrap();
+        assert!(pending.is_empty(), "no signals should be enqueued cross-tenant");
+    }
+
+    #[tokio::test]
+    async fn send_signal_rejects_invalid_uuid_param() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("s".into()),
+            params: json!({
+                "instance_id": "not-a-uuid",
+                "signal_type": "cancel",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        assert!(
+            matches!(err, StepError::Permanent { .. }),
+            "expected Permanent, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_signal_rejects_unknown_signal_type() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        let target = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("s".into()),
+            params: json!({
+                "instance_id": target.id.0.to_string(),
+                "signal_type": "bogus_signal",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        assert!(
+            matches!(err, StepError::Permanent { .. }),
+            "expected Permanent, got: {err:?}"
+        );
+    }
 }
