@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         storage: storage.clone(),
         shutdown: shutdown_token.clone(),
         max_context_bytes: config.engine.max_context_bytes,
+        externalization_mode: config.engine.externalization_mode,
     };
     let metrics_state = MetricsState { handle };
     let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60));

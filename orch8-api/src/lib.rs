@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use orch8_storage::StorageBackend;
+use orch8_types::config::ExternalizationMode;
 use tokio_util::sync::CancellationToken;
 
 /// Shared application state injected into all handlers.
@@ -36,6 +37,11 @@ pub struct AppState {
     /// `0` disables the check. Mirrors `SchedulerConfig::max_context_bytes`
     /// so the API rejects oversized contexts before they hit the DB.
     pub max_context_bytes: u32,
+    /// Policy controlling when context fields / block outputs are externalized
+    /// into `externalized_state` and replaced in the inline context by a
+    /// `{"_externalized": true, "_ref": "..."}` marker. Mirrors
+    /// `SchedulerConfig::externalization_mode`.
+    pub externalization_mode: ExternalizationMode,
 }
 
 /// Build the axum router with all routes.

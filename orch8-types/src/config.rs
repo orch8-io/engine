@@ -141,6 +141,50 @@ fn default_true() -> bool {
     true
 }
 
+/// How the engine decides which payloads leave the inline context and
+/// land in `externalized_state`. Ships as `Threshold { bytes: 65536 }`
+/// — oversized fields go external, everything smaller stays inline for
+/// zero-RTT reads.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExternalizationMode {
+    /// Never externalize — every payload stays inline. Small deployments,
+    /// tests, and benchmarks that want to measure the in-memory hot path.
+    Never,
+    /// Externalize top-level `context.data` keys whose serialized size
+    /// exceeds `bytes`. Also externalizes block outputs exceeding the
+    /// same threshold. This is the default.
+    Threshold { bytes: u32 },
+    /// Always externalize block outputs regardless of size, but keep
+    /// `context.data` inline unless a caller sets an additional per-field
+    /// override. Useful when outputs dominate state volume.
+    AlwaysOutputs,
+}
+
+impl Default for ExternalizationMode {
+    fn default() -> Self {
+        Self::Threshold { bytes: 64 * 1024 }
+    }
+}
+
+impl ExternalizationMode {
+    /// The size threshold for `context.data` fields (in bytes), or `None`
+    /// if this mode does not externalize context data.
+    #[must_use]
+    pub fn context_threshold(&self) -> Option<u32> {
+        match self {
+            Self::Never | Self::AlwaysOutputs => None,
+            Self::Threshold { bytes } => Some(*bytes),
+        }
+    }
+
+    /// Returns `true` iff block outputs should always be externalized.
+    #[must_use]
+    pub fn always_externalize_outputs(&self) -> bool {
+        matches!(self, Self::AlwaysOutputs)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulerConfig {
     #[serde(default = "default_tick_interval_ms")]
@@ -177,6 +221,10 @@ pub struct SchedulerConfig {
     /// Default: `DEFAULT_MAX_CONTEXT_BYTES` (256 KiB). `0` disables the check.
     #[serde(default = "default_max_context_bytes")]
     pub max_context_bytes: u32,
+    /// How the engine decides which payloads leave the inline context and
+    /// land in `externalized_state`. Default: `Threshold { bytes: 65536 }`.
+    #[serde(default)]
+    pub externalization_mode: ExternalizationMode,
 }
 
 impl Default for SchedulerConfig {
@@ -192,6 +240,7 @@ impl Default for SchedulerConfig {
             externalize_output_threshold: 0,
             encryption_key: SecretString::default(),
             max_context_bytes: default_max_context_bytes(),
+            externalization_mode: ExternalizationMode::default(),
         }
     }
 }
@@ -437,5 +486,45 @@ mod tests {
         assert_eq!(cfg.database.max_connections, 4);
         // run_migrations omitted — falls back to the default_true() default.
         assert!(cfg.database.run_migrations);
+    }
+
+    #[test]
+    fn externalization_mode_default_is_threshold_64k() {
+        let cfg = SchedulerConfig::default();
+        assert!(matches!(
+            cfg.externalization_mode,
+            ExternalizationMode::Threshold { bytes: 65536 }
+        ));
+    }
+
+    #[test]
+    fn externalization_mode_parses_tagged_json() {
+        let mode: ExternalizationMode =
+            serde_json::from_str(r#"{"type":"threshold","bytes":32768}"#).unwrap();
+        assert!(matches!(mode, ExternalizationMode::Threshold { bytes: 32768 }));
+
+        let mode: ExternalizationMode = serde_json::from_str(r#"{"type":"never"}"#).unwrap();
+        assert!(matches!(mode, ExternalizationMode::Never));
+
+        let mode: ExternalizationMode =
+            serde_json::from_str(r#"{"type":"always_outputs"}"#).unwrap();
+        assert!(matches!(mode, ExternalizationMode::AlwaysOutputs));
+    }
+
+    #[test]
+    fn externalization_mode_context_threshold_accessor() {
+        assert_eq!(
+            ExternalizationMode::Threshold { bytes: 4096 }.context_threshold(),
+            Some(4096)
+        );
+        assert_eq!(ExternalizationMode::Never.context_threshold(), None);
+        assert_eq!(ExternalizationMode::AlwaysOutputs.context_threshold(), None);
+    }
+
+    #[test]
+    fn externalization_mode_always_externalize_outputs_accessor() {
+        assert!(ExternalizationMode::AlwaysOutputs.always_externalize_outputs());
+        assert!(!ExternalizationMode::Never.always_externalize_outputs());
+        assert!(!ExternalizationMode::Threshold { bytes: 1024 }.always_externalize_outputs());
     }
 }
