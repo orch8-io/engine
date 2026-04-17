@@ -1804,7 +1804,7 @@ async fn context_filtered_helper_is_used_correctly() {
     // scheduler's fast path. We can't drive the scheduler from a storage
     // test, but we can at least verify the filter semantics hold with the
     // real struct layout the engine uses.
-    use orch8_types::sequence::ContextAccess;
+    use orch8_types::sequence::{ContextAccess, FieldAccess};
 
     let ctx = ExecutionContext {
         data: json!({"secret": "x"}),
@@ -1821,7 +1821,7 @@ async fn context_filtered_helper_is_used_correctly() {
     };
 
     let no_data = ContextAccess {
-        data: false,
+        data: FieldAccess::NONE,
         config: true,
         audit: true,
         runtime: true,
@@ -1833,7 +1833,7 @@ async fn context_filtered_helper_is_used_correctly() {
     assert_eq!(f.runtime.attempt, 7);
 
     let only_data = ContextAccess {
-        data: true,
+        data: FieldAccess::ALL,
         config: false,
         audit: false,
         runtime: false,

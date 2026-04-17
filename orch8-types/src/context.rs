@@ -69,14 +69,38 @@ impl ExecutionContext {
 
     /// Return a filtered copy of the context based on section-level permissions.
     /// Denied sections are replaced with their default (empty) values.
+    ///
+    /// For `data`, [`FieldAccess::Fields`] trims `context.data` (which must be
+    /// a JSON object) down to the listed top-level keys. Non-object `data`
+    /// falls back to "clone if any field allowed, else empty".
     #[must_use]
     pub fn filtered(&self, access: &ContextAccess) -> Self {
+        let data = match &access.data {
+            crate::sequence::FieldAccess::Fields { fields } => {
+                if let serde_json::Value::Object(map) = &self.data {
+                    let mut out = serde_json::Map::new();
+                    for field in fields {
+                        if let Some(v) = map.get(field) {
+                            out.insert(field.clone(), v.clone());
+                        }
+                    }
+                    serde_json::Value::Object(out)
+                } else if access.data.allows_any() && !fields.is_empty() {
+                    self.data.clone()
+                } else {
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+            }
+            _ => {
+                if access.data.allows_any() {
+                    self.data.clone()
+                } else {
+                    serde_json::Value::Object(serde_json::Map::new())
+                }
+            }
+        };
         Self {
-            data: if access.data {
-                self.data.clone()
-            } else {
-                serde_json::Value::Object(serde_json::Map::new())
-            },
+            data,
             config: if access.config {
                 self.config.clone()
             } else {
@@ -139,7 +163,7 @@ mod tests {
     fn filtered_all_allowed() {
         let ctx = sample_context();
         let access = ContextAccess {
-            data: true,
+            data: crate::sequence::FieldAccess::ALL,
             config: true,
             audit: true,
             runtime: true,
@@ -155,7 +179,7 @@ mod tests {
     fn filtered_all_denied() {
         let ctx = sample_context();
         let access = ContextAccess {
-            data: false,
+            data: crate::sequence::FieldAccess::NONE,
             config: false,
             audit: false,
             runtime: false,
@@ -172,7 +196,7 @@ mod tests {
     fn filtered_partial_access() {
         let ctx = sample_context();
         let access = ContextAccess {
-            data: true,
+            data: crate::sequence::FieldAccess::ALL,
             config: false,
             audit: false,
             runtime: true,
@@ -182,6 +206,42 @@ mod tests {
         assert_eq!(f.config, serde_json::json!({}));
         assert!(f.audit.is_empty());
         assert_eq!(f.runtime.attempt, 2);
+    }
+
+    #[test]
+    fn filtered_data_fields_trims_to_listed_keys() {
+        let mut ctx = sample_context();
+        ctx.data = serde_json::json!({
+            "user_id": "u1",
+            "order_id": "o1",
+            "secret": "s1",
+        });
+        let access = ContextAccess {
+            data: crate::sequence::FieldAccess::Fields {
+                fields: vec!["user_id".into(), "order_id".into()],
+            },
+            config: true,
+            audit: true,
+            runtime: true,
+        };
+        let f = ctx.filtered(&access);
+        assert_eq!(
+            f.data,
+            serde_json::json!({"user_id": "u1", "order_id": "o1"})
+        );
+    }
+
+    #[test]
+    fn filtered_data_fields_empty_yields_empty_object() {
+        let ctx = sample_context();
+        let access = ContextAccess {
+            data: crate::sequence::FieldAccess::Fields { fields: vec![] },
+            config: false,
+            audit: false,
+            runtime: false,
+        };
+        let f = ctx.filtered(&access);
+        assert_eq!(f.data, serde_json::json!({}));
     }
 
     #[test]

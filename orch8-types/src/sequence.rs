@@ -142,12 +142,17 @@ fn default_window_end() -> u8 {
 
 /// Controls which context sections a step handler can see.
 /// When set, only the listed sections are passed to the handler.
+///
+/// `data` supports field-level granularity via [`FieldAccess`]; other sections
+/// are all-or-nothing because they are small by design (`config`, `runtime`)
+/// or append-only streams (`audit`).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct ContextAccess {
-    /// Allow reading `context.data`.
-    #[serde(default = "default_true_seq")]
-    pub data: bool,
+    /// Controls read access to `context.data`. Accepts legacy `true`/`false`,
+    /// the keywords `"all"`/`"none"`, or an explicit `{"fields": [..]}` list.
+    #[serde(default)]
+    #[schema(value_type = serde_json::Value)]
+    pub data: FieldAccess,
     /// Allow reading `context.config`.
     #[serde(default = "default_true_seq")]
     pub config: bool,
@@ -161,6 +166,82 @@ pub struct ContextAccess {
 
 fn default_true_seq() -> bool {
     true
+}
+
+/// Field-level access control for a context section.
+///
+/// Backward-compatible with the legacy boolean form: pre-M3 sequence
+/// definitions wrote `{"data": true}` and are still accepted. New sequences
+/// can opt into selective fetch with `{"data": {"fields": ["user_id"]}}`,
+/// which lets the scheduler preload only the required fields and skip the
+/// rest when hydrating externalized context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FieldAccess {
+    /// Legacy boolean: `true` = all fields, `false` = no fields.
+    Bool(bool),
+    /// Explicit field list: only the listed top-level keys of `context.data`
+    /// are visible to the handler.
+    Fields {
+        fields: Vec<String>,
+    },
+    /// String keyword: `"all"` or `"none"`.
+    Keyword(AccessKeyword),
+}
+
+/// String form of [`FieldAccess`] for human-authored YAML/JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessKeyword {
+    All,
+    None,
+}
+
+impl Default for FieldAccess {
+    fn default() -> Self {
+        // Matches the old `default_true_seq` behavior for ContextAccess.data.
+        Self::Bool(true)
+    }
+}
+
+impl FieldAccess {
+    /// Canonical "grant everything" value.
+    pub const ALL: Self = Self::Bool(true);
+    /// Canonical "grant nothing" value.
+    pub const NONE: Self = Self::Bool(false);
+
+    /// Return `true` if access to `key` is permitted.
+    #[must_use]
+    pub fn allows(&self, key: &str) -> bool {
+        match self {
+            Self::Bool(b) => *b,
+            Self::Keyword(AccessKeyword::All) => true,
+            Self::Keyword(AccessKeyword::None) => false,
+            Self::Fields { fields } => fields.iter().any(|f| f == key),
+        }
+    }
+
+    /// Return `true` if _any_ field is permitted. Used by code paths that
+    /// want to skip work entirely when the handler cannot read the section.
+    #[must_use]
+    pub fn allows_any(&self) -> bool {
+        match self {
+            Self::Bool(b) => *b,
+            Self::Keyword(AccessKeyword::All) => true,
+            Self::Keyword(AccessKeyword::None) => false,
+            Self::Fields { fields } => !fields.is_empty(),
+        }
+    }
+
+    /// Return the explicit field list when this is a `Fields` variant; `None`
+    /// for `All`/`None` (caller must fall back to full fetch or skip).
+    #[must_use]
+    pub fn required_fields(&self) -> Option<&[String]> {
+        match self {
+            Self::Fields { fields } => Some(fields.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 /// Configuration for human-in-the-loop steps.
@@ -338,10 +419,98 @@ mod tests {
     #[test]
     fn context_access_defaults() {
         let ca: ContextAccess = serde_json::from_str("{}").unwrap();
-        assert!(ca.data);
+        assert!(ca.data.allows("anything"));
         assert!(ca.config);
         assert!(!ca.audit);
         assert!(!ca.runtime);
+    }
+
+    #[test]
+    fn field_access_parses_bool_true_as_all() {
+        let fa: FieldAccess = serde_json::from_str("true").unwrap();
+        assert_eq!(fa, FieldAccess::Bool(true));
+        assert!(fa.allows("anything"));
+    }
+
+    #[test]
+    fn field_access_parses_bool_false_as_none() {
+        let fa: FieldAccess = serde_json::from_str("false").unwrap();
+        assert_eq!(fa, FieldAccess::Bool(false));
+        assert!(!fa.allows("anything"));
+    }
+
+    #[test]
+    fn field_access_parses_field_list() {
+        let fa: FieldAccess = serde_json::from_str(r#"{"fields": ["a", "b"]}"#).unwrap();
+        assert_eq!(
+            fa,
+            FieldAccess::Fields {
+                fields: vec!["a".into(), "b".into()]
+            }
+        );
+        assert!(fa.allows("a"));
+        assert!(fa.allows("b"));
+        assert!(!fa.allows("c"));
+    }
+
+    #[test]
+    fn field_access_parses_keywords() {
+        let fa: FieldAccess = serde_json::from_str(r#""all""#).unwrap();
+        assert_eq!(fa, FieldAccess::Keyword(AccessKeyword::All));
+        assert!(fa.allows("anything"));
+
+        let fa: FieldAccess = serde_json::from_str(r#""none""#).unwrap();
+        assert_eq!(fa, FieldAccess::Keyword(AccessKeyword::None));
+        assert!(!fa.allows("anything"));
+    }
+
+    #[test]
+    fn field_access_required_fields() {
+        assert_eq!(
+            FieldAccess::Fields {
+                fields: vec!["user".into()]
+            }
+            .required_fields(),
+            Some(&["user".into()][..])
+        );
+        assert_eq!(FieldAccess::Bool(true).required_fields(), None);
+        assert_eq!(FieldAccess::Bool(false).required_fields(), None);
+        assert_eq!(
+            FieldAccess::Keyword(AccessKeyword::All).required_fields(),
+            None
+        );
+    }
+
+    #[test]
+    fn field_access_allows_any() {
+        assert!(FieldAccess::Bool(true).allows_any());
+        assert!(!FieldAccess::Bool(false).allows_any());
+        assert!(FieldAccess::Keyword(AccessKeyword::All).allows_any());
+        assert!(!FieldAccess::Keyword(AccessKeyword::None).allows_any());
+        assert!(FieldAccess::Fields {
+            fields: vec!["a".into()]
+        }
+        .allows_any());
+        assert!(!FieldAccess::Fields { fields: vec![] }.allows_any());
+    }
+
+    #[test]
+    fn context_access_accepts_legacy_bool_data() {
+        // Legacy payloads that predate M3.2 use `"data": true/false`. The
+        // untagged serde representation must still accept them.
+        let ca: ContextAccess = serde_json::from_str(r#"{"data": true}"#).unwrap();
+        assert!(ca.data.allows("anything"));
+        let ca: ContextAccess = serde_json::from_str(r#"{"data": false}"#).unwrap();
+        assert!(!ca.data.allows("anything"));
+    }
+
+    #[test]
+    fn context_access_accepts_field_list_data() {
+        let ca: ContextAccess =
+            serde_json::from_str(r#"{"data": {"fields": ["user_id"]}}"#).unwrap();
+        assert!(ca.data.allows("user_id"));
+        assert!(!ca.data.allows("other"));
+        assert_eq!(ca.data.required_fields(), Some(&["user_id".into()][..]));
     }
 
     #[test]
