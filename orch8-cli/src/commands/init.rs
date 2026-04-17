@@ -41,7 +41,7 @@ fn write_scaffolds(base: &Path) -> Result<()> {
 [database]
 backend = "sqlite"                         # "sqlite" or "postgres"
 url = "sqlite://orch8.db"                  # connection string
-# url = "postgres://orch8:orch8@localhost:5432/orch8"
+# url = "postgres://orch8:orch8@localhost:5434/orch8"
 run_migrations = true
 max_connections = 64
 
@@ -62,7 +62,7 @@ rate_limit_rps = 0                         # 0 = unlimited
 
 [logging]
 level = "info"                             # trace, debug, info, warn, error
-format = "json"                            # "json" or "pretty"
+json = true                                # true = JSON logs, false = pretty
 "#,
     )?;
 
@@ -107,7 +107,7 @@ format = "json"                            # "json" or "pretty"
       POSTGRES_USER: orch8
       POSTGRES_PASSWORD: orch8
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

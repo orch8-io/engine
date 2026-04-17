@@ -245,4 +245,85 @@ mod tests {
         let result = resolve(&input, &ctx, &outputs).unwrap();
         assert_eq!(result, json!("Hello stranger!"));
     }
+
+    #[test]
+    fn resolve_array_index_navigation() {
+        let ctx = ExecutionContext {
+            data: json!({"items": ["a", "b", "c"]}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let input = json!("{{context.data.items.1}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("b"));
+    }
+
+    #[test]
+    fn resolve_inside_array_elements() {
+        let ctx = test_context();
+        let outputs = test_outputs();
+        let input = json!(["literal", "{{context.data.user.name}}", 1]);
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!(["literal", "Alice", 1]));
+    }
+
+    #[test]
+    fn resolve_unknown_context_section_errors() {
+        let ctx = test_context();
+        let input = json!("{{context.bogus.x}}");
+        let err = resolve(&input, &ctx, &json!({})).unwrap_err();
+        assert!(
+            matches!(err, EngineError::TemplateError(ref m) if m.contains("bogus")),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_root_errors() {
+        let ctx = test_context();
+        let input = json!("{{something_random.x}}");
+        let err = resolve(&input, &ctx, &json!({})).unwrap_err();
+        assert!(matches!(err, EngineError::TemplateError(_)));
+    }
+
+    #[test]
+    fn resolve_null_value_with_fallback_uses_fallback() {
+        let ctx = ExecutionContext {
+            data: json!({"maybe": null}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let input = json!("{{context.data.maybe | default}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("default"));
+    }
+
+    #[test]
+    fn resolve_preserves_booleans_and_floats_in_single_expression() {
+        let ctx = ExecutionContext {
+            data: json!({"flag": true, "ratio": 3.14}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        assert_eq!(
+            resolve(&json!("{{context.data.flag}}"), &ctx, &json!({})).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            resolve(&json!("{{context.data.ratio}}"), &ctx, &json!({})).unwrap(),
+            json!(3.14)
+        );
+    }
+
+    #[test]
+    fn resolve_malformed_unclosed_template_preserved_literal() {
+        let ctx = test_context();
+        // No closing "}}" — leftover "{{" should be preserved as literal.
+        let input = json!("before {{ unclosed");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("before {{ unclosed"));
+    }
 }

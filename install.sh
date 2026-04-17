@@ -70,7 +70,45 @@ verify_checksum() {
     fi
 }
 
+parse_args() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir)
+                INSTALL_DIR="$2"
+                shift 2
+                ;;
+            --dir=*)
+                INSTALL_DIR="${1#--dir=}"
+                shift
+                ;;
+            --version)
+                VERSION="$2"
+                shift 2
+                ;;
+            --version=*)
+                VERSION="${1#--version=}"
+                shift
+                ;;
+            -h|--help)
+                cat <<EOF
+Usage: install.sh [--dir <path>] [--version <tag>]
+
+Options:
+  --dir <path>     Install binaries into <path> instead of auto-detecting a location.
+  --version <tag>  Install a specific release tag (default: latest).
+EOF
+                exit 0
+                ;;
+            *)
+                die "unknown argument: $1"
+                ;;
+        esac
+    done
+}
+
 main() {
+    parse_args "$@"
+
     OS="$(detect_os)"
     ARCH="$(detect_arch)"
     TARGET="$(build_target "$OS" "$ARCH")"
@@ -105,7 +143,9 @@ main() {
     echo "extracting..."
     tar -xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
 
-    INSTALL_DIR="$(pick_install_dir)"
+    if [ -z "$INSTALL_DIR" ]; then
+        INSTALL_DIR="$(pick_install_dir)"
+    fi
     mkdir -p "$INSTALL_DIR"
 
     for BIN in $BINARY_NAMES; do
@@ -151,4 +191,4 @@ main() {
     echo ""
 }
 
-main
+main "$@"

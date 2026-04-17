@@ -290,4 +290,129 @@ mod tests {
         assert_eq!(top_level_key("user.profile.avatar"), "user");
         assert_eq!(top_level_key(""), "");
     }
+
+    #[test]
+    fn rft_recurses_into_loop_body() {
+        use orch8_types::sequence::LoopDef;
+        let step = step_def(
+            "body-step",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["count".into()],
+            })),
+        );
+        let lp = LoopDef {
+            id: BlockId("lp".into()),
+            condition: "false".into(),
+            body: vec![BlockDefinition::Step(step)],
+            max_iterations: 10,
+        };
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Loop(lp)]));
+        assert_eq!(
+            rft.fields_for(&BlockId("body-step".into())),
+            Some(&["count".into()][..])
+        );
+        assert_eq!(rft.len(), 1, "Loop itself not recorded, only inner steps");
+    }
+
+    #[test]
+    fn rft_recurses_into_for_each_and_try_catch_and_finally() {
+        use orch8_types::sequence::{ForEachDef, TryCatchDef};
+        let fe_step = step_def(
+            "fe-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["items".into()],
+            })),
+        );
+        let try_step = step_def(
+            "try-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["a".into()],
+            })),
+        );
+        let catch_step = step_def(
+            "catch-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["b".into()],
+            })),
+        );
+        let finally_step = step_def(
+            "finally-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["c".into()],
+            })),
+        );
+        let fe = ForEachDef {
+            id: BlockId("fe".into()),
+            collection: "xs".into(),
+            item_var: "item".into(),
+            body: vec![BlockDefinition::Step(fe_step)],
+            max_iterations: 10,
+        };
+        let tc = TryCatchDef {
+            id: BlockId("tc".into()),
+            try_block: vec![BlockDefinition::Step(try_step)],
+            catch_block: vec![BlockDefinition::Step(catch_step)],
+            finally_block: Some(vec![BlockDefinition::Step(finally_step)]),
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::ForEach(fe),
+            BlockDefinition::TryCatch(tc),
+        ]));
+        assert_eq!(
+            rft.fields_for(&BlockId("fe-s".into())),
+            Some(&["items".into()][..])
+        );
+        assert_eq!(
+            rft.fields_for(&BlockId("try-s".into())),
+            Some(&["a".into()][..])
+        );
+        assert_eq!(
+            rft.fields_for(&BlockId("catch-s".into())),
+            Some(&["b".into()][..])
+        );
+        assert_eq!(
+            rft.fields_for(&BlockId("finally-s".into())),
+            Some(&["c".into()][..])
+        );
+    }
+
+    #[test]
+    fn rft_recurses_into_cancellation_scope() {
+        use orch8_types::sequence::CancellationScopeDef;
+        let step = step_def(
+            "in-scope",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["s".into()],
+            })),
+        );
+        let cs = CancellationScopeDef {
+            id: BlockId("cs".into()),
+            blocks: vec![BlockDefinition::Step(step)],
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::CancellationScope(cs),
+        ]));
+        assert_eq!(
+            rft.fields_for(&BlockId("in-scope".into())),
+            Some(&["s".into()][..])
+        );
+    }
+
+    #[test]
+    fn rft_sub_sequence_is_opaque_to_parent_tree() {
+        use orch8_types::sequence::SubSequenceDef;
+        // Sub-sequence steps belong to the CHILD's RFT, not the parent.
+        let sub = SubSequenceDef {
+            id: BlockId("sub".into()),
+            sequence_name: "child".into(),
+            version: None,
+            input: serde_json::Value::Null,
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::SubSequence(sub),
+        ]));
+        assert_eq!(rft.len(), 0, "SubSequence must not contribute to parent RFT");
+        assert!(rft.is_empty());
+    }
 }

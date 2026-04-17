@@ -35,3 +35,27 @@ pub async fn recover_stale_instances(
         Err(e) => Err(EngineError::Storage(e)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn noop_when_no_instances_exist() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let n = recover_stale_instances(&storage, 300).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn zero_threshold_still_safe_when_db_is_empty() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        // Edge case — extremely aggressive threshold must not panic or error.
+        let n = recover_stale_instances(&storage, 0).await.unwrap();
+        assert_eq!(n, 0);
+    }
+}

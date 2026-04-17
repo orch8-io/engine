@@ -183,4 +183,72 @@ mod tests {
         assert!(next.is_some());
         assert!(next.unwrap() > Utc::now());
     }
+
+    fn mk_schedule(expr: &str) -> CronSchedule {
+        CronSchedule {
+            id: uuid::Uuid::new_v4(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            sequence_id: SequenceId(uuid::Uuid::new_v4()),
+            cron_expr: expr.into(),
+            timezone: "UTC".into(),
+            enabled: true,
+            metadata: serde_json::json!({}),
+            last_triggered_at: None,
+            next_fire_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn valid_expr_with_weekday_and_seconds() {
+        assert!(validate_cron_expr("0 30 9 * * MON *").is_ok());
+        assert!(validate_cron_expr("0 0 12 * * SUN *").is_ok());
+    }
+
+    #[test]
+    fn invalid_expr_with_too_few_fields() {
+        // cron crate requires 6 or 7 fields; 5 (standard Unix) is rejected.
+        assert!(validate_cron_expr("* * * * *").is_err());
+    }
+
+    #[test]
+    fn invalid_expr_with_out_of_range_minute() {
+        assert!(validate_cron_expr("0 99 * * * * *").is_err());
+    }
+
+    #[test]
+    fn invalid_expr_with_gibberish_tokens() {
+        assert!(validate_cron_expr("banana * * * * * *").is_err());
+    }
+
+    #[test]
+    fn calculate_next_fire_returns_none_for_bad_expression() {
+        let schedule = mk_schedule("not a cron expr");
+        assert!(calculate_next_fire(&schedule).is_none());
+    }
+
+    #[test]
+    fn calculate_next_fire_every_second_is_within_two_seconds() {
+        // "* * * * * * *" = every second of every year
+        let schedule = mk_schedule("* * * * * * *");
+        let next = calculate_next_fire(&schedule).expect("next fire time");
+        let delta = (next - Utc::now()).num_milliseconds();
+        assert!(
+            (0..=2_000).contains(&delta),
+            "expected next fire within 2s, got {delta}ms",
+        );
+    }
+
+    #[test]
+    fn calculate_next_fire_daily_at_midnight() {
+        // Every day at 00:00:00 — next fire must be at a midnight in UTC.
+        let schedule = mk_schedule("0 0 0 * * * *");
+        let next = calculate_next_fire(&schedule).expect("next fire time");
+        use chrono::Timelike;
+        assert_eq!(next.hour(), 0);
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
+    }
 }

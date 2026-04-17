@@ -224,3 +224,457 @@ fn is_descendant_of_any(
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::context::{ExecutionContext, RuntimeContext};
+    use orch8_types::ids::{Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{Priority, TaskInstance};
+    use serde_json::json;
+
+    fn mk_signal(instance_id: InstanceId, st: SignalType, payload: serde_json::Value) -> Signal {
+        Signal {
+            id: uuid::Uuid::new_v4(),
+            instance_id,
+            signal_type: st,
+            payload,
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        }
+    }
+
+    fn mk_instance_with_state(state: InstanceState) -> TaskInstance {
+        let now = Utc::now();
+        TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state,
+            next_fire_at: Some(now),
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: json!({}),
+            context: ExecutionContext {
+                data: json!({}),
+                config: json!({}),
+                audit: vec![],
+                runtime: RuntimeContext::default(),
+            },
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_signal_list_returns_false() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            InstanceId::new(),
+            InstanceState::Running,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+    }
+
+    #[tokio::test]
+    async fn pause_signal_on_running_aborts_and_pauses() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        // Put it in Running state so pause is a valid transition.
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        inst.state = InstanceState::Running;
+
+        let sig = mk_signal(inst.id, SignalType::Pause, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Running, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(r, "pause must return true to abort execution");
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Paused);
+    }
+
+    #[tokio::test]
+    async fn pause_signal_on_completed_does_not_transition() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Completed, None)
+            .await
+            .unwrap();
+        inst.state = InstanceState::Completed;
+
+        let sig = mk_signal(inst.id, SignalType::Pause, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Completed,
+            vec![sig.clone()],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+        // Signal should have been marked delivered even though the transition was refused.
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Completed);
+    }
+
+    #[tokio::test]
+    async fn resume_signal_on_paused_reschedules() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Paused);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Resume, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Paused, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Scheduled);
+        assert!(stored.next_fire_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn resume_signal_on_running_is_noop_and_not_aborted() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Resume, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Running, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(!r, "resume on a non-paused instance must not abort execution");
+    }
+
+    #[tokio::test]
+    async fn cancel_signal_on_scheduled_cancels() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Scheduled,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_signal_on_completed_does_not_transition() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Completed, None)
+            .await
+            .unwrap();
+        inst.state = InstanceState::Completed;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Completed,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Completed);
+    }
+
+    #[tokio::test]
+    async fn update_context_signal_updates_instance_context() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let new_ctx = ExecutionContext {
+            data: json!({"answer": 42}),
+            config: json!({}),
+            audit: vec![],
+            runtime: RuntimeContext::default(),
+        };
+        let sig = mk_signal(
+            inst.id,
+            SignalType::UpdateContext,
+            serde_json::to_value(&new_ctx).unwrap(),
+        );
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Scheduled,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r, "UpdateContext must not abort execution");
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.context.data["answer"], 42);
+    }
+
+    #[tokio::test]
+    async fn update_context_signal_with_garbage_payload_is_swallowed() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        // payload is not a valid ExecutionContext JSON — should warn but not fail.
+        let sig = mk_signal(
+            inst.id,
+            SignalType::UpdateContext,
+            json!("not an object at all"),
+        );
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Scheduled,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+    }
+
+    #[tokio::test]
+    async fn custom_signal_is_logged_and_marked_delivered() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(
+            inst.id,
+            SignalType::Custom("my-event".into()),
+            json!({"ping": "pong"}),
+        );
+        let sig_id = sig.id;
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Scheduled,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r, "custom signals don't abort execution");
+        // Pending list must no longer include this signal.
+        let pending = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(pending.iter().all(|s| s.id != sig_id));
+    }
+
+    #[tokio::test]
+    async fn multiple_signals_processed_until_pause_wins() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        // Custom + UpdateContext + Pause — pause must win and abort.
+        let ctx = ExecutionContext {
+            data: json!({"x": 1}),
+            config: json!({}),
+            audit: vec![],
+            runtime: RuntimeContext::default(),
+        };
+        let s1 = mk_signal(inst.id, SignalType::Custom("a".into()), json!({}));
+        let s2 = mk_signal(
+            inst.id,
+            SignalType::UpdateContext,
+            serde_json::to_value(&ctx).unwrap(),
+        );
+        let s3 = mk_signal(inst.id, SignalType::Pause, json!({}));
+        storage.enqueue_signal(&s1).await.unwrap();
+        storage.enqueue_signal(&s2).await.unwrap();
+        storage.enqueue_signal(&s3).await.unwrap();
+
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![s1, s2, s3],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Paused);
+        // Context was also updated by s2 before pause fired.
+        assert_eq!(stored.context.data["x"], 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_on_paused_instance_cancels() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Paused);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Paused, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn process_signals_public_entry_delegates_to_prefetched() {
+        // Covers the public fn that fetches signals itself.
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+
+        let r = process_signals(&storage, inst.id, InstanceState::Scheduled)
+            .await
+            .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn delivered_signals_do_not_appear_in_pending_list_next_time() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Custom("n".into()), json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        process_signals(&storage, inst.id, InstanceState::Scheduled)
+            .await
+            .unwrap();
+        // Subsequent fetch must return empty.
+        let pending = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pause_on_paused_instance_is_ignored_but_delivered() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Paused);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Pause, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Paused, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(!r, "pause on already-paused instance must not abort");
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Paused);
+    }
+
+    #[tokio::test]
+    async fn is_descendant_of_any_detects_chain() {
+        use orch8_types::execution::{BlockType, ExecutionNode};
+        use orch8_types::ids::{BlockId, ExecutionNodeId};
+        let instance_id = InstanceId::new();
+        let root = ExecutionNode {
+            id: ExecutionNodeId::new(),
+            instance_id,
+            parent_id: None,
+            block_id: BlockId("root".into()),
+            block_type: BlockType::CancellationScope,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: None,
+            completed_at: None,
+        };
+        let child = ExecutionNode {
+            id: ExecutionNodeId::new(),
+            instance_id,
+            parent_id: Some(root.id),
+            block_id: BlockId("child".into()),
+            block_type: BlockType::Step,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: None,
+            completed_at: None,
+        };
+        let grandchild = ExecutionNode {
+            id: ExecutionNodeId::new(),
+            instance_id,
+            parent_id: Some(child.id),
+            block_id: BlockId("grandchild".into()),
+            block_type: BlockType::Step,
+            branch_index: None,
+            state: NodeState::Running,
+            started_at: None,
+            completed_at: None,
+        };
+        let tree = vec![root.clone(), child.clone(), grandchild.clone()];
+        assert!(is_descendant_of_any(&tree, &grandchild, &[root.id]));
+        assert!(is_descendant_of_any(&tree, &child, &[root.id]));
+        // Root is not a descendant of itself.
+        assert!(!is_descendant_of_any(&tree, &root, &[root.id]));
+        // Unknown ancestor — returns false.
+        assert!(!is_descendant_of_any(
+            &tree,
+            &grandchild,
+            &[ExecutionNodeId::new()]
+        ));
+    }
+}

@@ -393,6 +393,43 @@ async fn run_file_watch_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::ids::SequenceId;
+    use orch8_types::sequence::SequenceDefinition;
+
+    fn mk_trigger(slug: &str, seq_name: &str, tt: TriggerType) -> TriggerDef {
+        let now = chrono::Utc::now();
+        TriggerDef {
+            slug: slug.into(),
+            sequence_name: seq_name.into(),
+            version: None,
+            tenant_id: "t1".into(),
+            namespace: "default".into(),
+            enabled: true,
+            secret: None,
+            trigger_type: tt,
+            config: serde_json::Value::Null,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn seed_sequence(storage: &SqliteStorage, name: &str) -> SequenceId {
+        let id = SequenceId::new();
+        let seq = SequenceDefinition {
+            id,
+            tenant_id: TenantId("t1".into()),
+            namespace: Namespace("default".into()),
+            name: name.into(),
+            version: 1,
+            deprecated: false,
+            blocks: vec![],
+            interceptors: None,
+            created_at: chrono::Utc::now(),
+        };
+        storage.create_sequence(&seq).await.unwrap();
+        id
+    }
 
     #[test]
     fn trigger_type_matching() {
@@ -412,5 +449,229 @@ mod tests {
         };
         // Webhook should not be in the desired set for non-webhook processing.
         assert_eq!(t.trigger_type, TriggerType::Webhook);
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_persists_instance_with_trigger_metadata() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq_id = seed_sequence(&storage, "pipeline").await;
+
+        let trigger = mk_trigger("on-push", "pipeline", TriggerType::Nats);
+        let data = serde_json::json!({"branch": "main"});
+        let meta = serde_json::json!({"subject": "deploy"});
+
+        let id = create_trigger_instance(&storage, &trigger, data.clone(), meta.clone())
+            .await
+            .unwrap();
+
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.sequence_id, seq_id);
+        assert_eq!(stored.state, InstanceState::Scheduled);
+        assert_eq!(stored.tenant_id.0, "t1");
+        assert_eq!(stored.namespace.0, "default");
+        assert_eq!(stored.context.data, data);
+        assert_eq!(stored.metadata["_trigger"], "on-push");
+        assert_eq!(stored.metadata["_trigger_event"], meta);
+        // _trigger_type is serialized via serde (NATS → "nats").
+        assert_eq!(stored.metadata["_trigger_type"], "nats");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_errors_when_sequence_missing() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let trigger = mk_trigger("orphan", "no-such-seq", TriggerType::Webhook);
+        let err = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::error::EngineError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_uses_default_priority() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Event);
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.priority, Priority::Normal);
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_sets_next_fire_at_to_now() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        let before = chrono::Utc::now();
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let after = chrono::Utc::now();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        let nfa = stored.next_fire_at.expect("next_fire_at must be set");
+        assert!(nfa >= before && nfa <= after, "nfa must be within [before, after]");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_clone_independent_ids() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        let a = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let b = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::json!({}),
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(a, b, "each trigger firing must create a distinct instance");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_preserves_nested_data_payload() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        let data = serde_json::json!({
+            "deep": {"nested": {"arr": [1,2,3], "null": null, "flag": true}}
+        });
+        let id =
+            create_trigger_instance(&storage, &trigger, data.clone(), serde_json::Value::Null)
+                .await
+                .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.context.data, data);
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_uses_specific_version_when_specified() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        // Seed two versions of the same sequence name.
+        let v1_id = SequenceId::new();
+        let v2_id = SequenceId::new();
+        let now = chrono::Utc::now();
+        let mk_seq = |id: SequenceId, version: i32| SequenceDefinition {
+            id,
+            tenant_id: TenantId("t1".into()),
+            namespace: Namespace("default".into()),
+            name: "multi".into(),
+            version,
+            deprecated: false,
+            blocks: vec![],
+            interceptors: None,
+            created_at: now,
+        };
+        storage.create_sequence(&mk_seq(v1_id, 1)).await.unwrap();
+        storage.create_sequence(&mk_seq(v2_id, 2)).await.unwrap();
+
+        let mut trigger = mk_trigger("t", "multi", TriggerType::Webhook);
+        trigger.version = Some(1);
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.sequence_id, v1_id, "must bind to exact version 1");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_empty_timezone_string() {
+        // Trigger-fired instances have no bound timezone — assert contract.
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.timezone, "");
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_does_not_set_parent_or_session() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        seed_sequence(&storage, "seq").await;
+        let trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert!(stored.parent_instance_id.is_none());
+        assert!(stored.session_id.is_none());
+        assert!(stored.idempotency_key.is_none());
+        assert!(stored.concurrency_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_trigger_instance_namespace_isolation() {
+        // A trigger scoped to namespace "prod" creates an instance in namespace "prod".
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq_id = SequenceId::new();
+        storage
+            .create_sequence(&SequenceDefinition {
+                id: seq_id,
+                tenant_id: TenantId("t1".into()),
+                namespace: Namespace("prod".into()),
+                name: "seq".into(),
+                version: 1,
+                deprecated: false,
+                blocks: vec![],
+                interceptors: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let mut trigger = mk_trigger("t", "seq", TriggerType::Webhook);
+        trigger.namespace = "prod".into();
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        )
+        .await
+        .unwrap();
+        let stored = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stored.namespace.0, "prod");
+        assert_eq!(stored.sequence_id, seq_id);
     }
 }

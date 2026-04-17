@@ -70,11 +70,14 @@ curl -X POST http://localhost:8080/instances \
 
 ## SDKs
 
-| Language | Package | Repo |
-|----------|---------|------|
-| Node.js / TypeScript | `@orch8/sdk` | [orch8-io/sdk-node](https://github.com/orch8-io/sdk-node) |
-| Python | `orch8-sdk` | [orch8-io/sdk-python](https://github.com/orch8-io/sdk-python) |
-| Go | `github.com/orch8-io/sdk-go` | [orch8-io/sdk-go](https://github.com/orch8-io/sdk-go) |
+Two first-party TypeScript SDKs live in this repo:
+
+| Package | Purpose | Location |
+|---------|---------|----------|
+| `@orch8/workflow-sdk` | Author sequences in TypeScript, deploy via REST | [`workflow-sdk-node/`](workflow-sdk-node/) |
+| `@orch8/worker-sdk` | Build external workers that execute handlers | [`worker-sdk-node/`](worker-sdk-node/) |
+
+Both are pre-1.0. Node 18+ required.
 
 ## Architecture
 
@@ -140,13 +143,16 @@ for f in tests/e2e/*.test.js; do node --test "$f"; done
 
 ## Documentation
 
-- [API Reference](docs/API.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Project Status](docs/STATUS.md)
-- [Release Checklist](docs/RELEASE_CHECKLIST.md)
-- [Tooling & Distribution](docs/TOOLING.md)
-- [Product Overview](docs/PRODUCT.md)
-- [Roadmap](docs/ROADMAP.md)
+- [Quick Start](docs/QUICK_START.md) — zero to first completed instance in 5 minutes
+- [API Reference](docs/API.md) — REST endpoints, block types, error codes
+- [Architecture](docs/ARCHITECTURE.md) — execution model, schema, performance
+- [Configuration](docs/CONFIGURATION.md) — all config options and env vars
+- [Deployment](docs/DEPLOYMENT.md) — production deploys (Docker, Kubernetes, managed cloud)
+- [External Workers](docs/WORKERS.md) — writing handlers in any language
+- [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
+- [Externalized State](docs/EXTERNALIZATION.md) — how oversized payloads are offloaded
+- [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents
+- [Changelog](CHANGELOG.md)
 
 ## Deployment
 

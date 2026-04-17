@@ -109,6 +109,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  npm-publish:
+    name: Publish Node SDKs to npm
+    runs-on: ubuntu-latest
+    # Opt-in: set the NPM_PUBLISH_ENABLED repo variable to "true" (Settings →
+    # Variables) once NPM_TOKEN is configured. Until then this job is skipped,
+    # so release.yml stays green for the first engine-only releases.
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: Extract version (strip leading v)
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish @orch8/worker-sdk
+        working-directory: worker-sdk-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
+      - name: Publish @orch8/workflow-sdk
+        working-directory: workflow-sdk-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PKG_VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
@@ -126,3 +166,36 @@ jobs:
           files: |
             artifacts/orch8-*.tar.gz
             artifacts/orch8-*.tar.gz.sha256
+
+  install-sh-smoke:
+    name: install.sh Smoke Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [release]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run install.sh to a temp dir
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/orch8-bin
+        run: |
+          mkdir -p "$INSTALL_DIR"
+          # The release was just created — give GitHub's API a moment to surface it.
+          for i in 1 2 3 4 5; do
+            if curl -fsSL https://api.github.com/repos/orch8-io/engine/releases/latest \
+              | grep -q '"tag_name"'; then
+              break
+            fi
+            sleep 5
+          done
+          sh ./install.sh --dir "$INSTALL_DIR"
+
+      - name: Verify installed binaries
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/orch8-bin
+        run: |
+          "$INSTALL_DIR/orch8" --version
+          "$INSTALL_DIR/orch8-server" --help | head -5

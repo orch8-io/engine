@@ -146,90 +146,68 @@ Same commands as Option A, steps 4–6. The API surface is identical.
 
 ---
 
-## Option C: Node.js SDK
+## Option C: TypeScript SDK
 
-Use the `@orch8/sdk` package to interact with the engine from TypeScript or JavaScript.
+Use `@orch8/workflow-sdk` to author sequences in TypeScript with Zod-validated block shapes. See [workflow-sdk-node/README.md](../workflow-sdk-node/README.md) for the full surface.
 
 ### 1. Install
 
 ```bash
-npm install @orch8/sdk
+npm install @orch8/workflow-sdk
 ```
 
-### 2. Create a client
+Requires Node 18+ (uses the global `fetch`).
+
+### 2. Define a workflow and deploy it
 
 ```ts
-import { Orch8Client } from "@orch8/sdk";
+import { workflow, Orch8Client } from "@orch8/workflow-sdk";
+
+const hello = workflow("hello-world")
+  .step("greet", "noop", { message: "Hello!" })
+  .delay({ duration: 2_000 })
+  .step("finish", "noop");
 
 const client = new Orch8Client({
   baseUrl: "http://localhost:8080",
   tenantId: "demo",
   namespace: "default",
 });
+
+await client.createSequence(hello);
 ```
 
-### 3. Create a sequence
+### 3. Start an instance
 
 ```ts
-const seq = await client.sequences.create({
-  name: "hello-world",
-  version: 1,
-  blocks: [
-    {
-      type: "Step",
-      id: "greet",
-      handler: "noop",
-      params: { message: "Hello!" },
-    },
-    {
-      type: "Step",
-      id: "wait",
-      handler: "noop",
-      delay: "2s",
-    },
-    {
-      type: "Step",
-      id: "finish",
-      handler: "noop",
-    },
-  ],
+const { id } = await client.createInstance({
+  sequence_name: "hello-world",
+  context: { data: { user: "alice" } },
 });
 
-console.log("Sequence:", seq.id);
+console.log("Instance:", id);
 ```
 
-### 4. Start an instance
-
-```ts
-const instance = await client.instances.create({
-  sequenceId: seq.id,
-  context: {
-    data: { user: "alice" },
-  },
-});
-
-console.log("Instance:", instance.id);
-```
-
-### 5. Poll for completion
+### 4. Poll for completion
 
 ```ts
 async function waitForCompletion(instanceId: string, timeoutMs = 30_000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const inst = await client.instances.get(instanceId);
-    console.log("State:", inst.state);
+    const inst = await client.getInstance(instanceId);
     if (inst.state === "completed" || inst.state === "failed") {
       return inst;
     }
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 1_000));
   }
   throw new Error("Timed out waiting for instance to complete");
 }
 
-const result = await waitForCompletion(instance.id);
+const result = await waitForCompletion(id);
 console.log("Final state:", result.state);
 ```
+
+To run handlers in Node instead of built-ins, see [`@orch8/worker-sdk`](../worker-sdk-node/README.md) and [External Workers](WORKERS.md).
 
 ---
 
@@ -323,3 +301,6 @@ curl -s -X PATCH http://localhost:8080/instances/bulk/state \
 - [API Reference](API.md) — full endpoint documentation
 - [Architecture](ARCHITECTURE.md) — execution model, crate structure, performance
 - [Configuration](CONFIGURATION.md) — all config options and environment variables
+- [External Workers](WORKERS.md) — write handlers in Node, Python, Go, or anything that can POST JSON
+- [Webhooks](WEBHOOKS.md) — subscribe to `instance.completed` and `instance.failed` events
+- [Deployment](DEPLOYMENT.md) — Docker, Kubernetes, and managed-cloud setups

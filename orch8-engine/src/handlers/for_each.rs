@@ -110,4 +110,43 @@ mod tests {
         let ctx = ExecutionContext::default();
         assert!(resolve_collection("missing", &ctx).is_none());
     }
+
+    #[test]
+    fn resolve_collection_returns_none_when_value_is_not_array() {
+        let ctx = ExecutionContext {
+            data: json!({"users": "not-an-array"}),
+            ..Default::default()
+        };
+        assert!(resolve_collection("users", &ctx).is_none());
+    }
+
+    #[test]
+    fn resolve_collection_returns_empty_vec_for_empty_array() {
+        let ctx = ExecutionContext {
+            data: json!({"xs": []}),
+            ..Default::default()
+        };
+        let v = resolve_collection("xs", &ctx).expect("empty array must still resolve");
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn resolve_collection_stops_descending_on_non_object() {
+        // Path "a.b.c" where a is a primitive — must not panic.
+        let ctx = ExecutionContext {
+            data: json!({"a": 42}),
+            ..Default::default()
+        };
+        assert!(resolve_collection("a.b.c", &ctx).is_none());
+    }
+
+    #[test]
+    fn resolve_collection_deep_nested_array() {
+        let ctx = ExecutionContext {
+            data: json!({"l1": {"l2": {"l3": [10, 20]}}}),
+            ..Default::default()
+        };
+        let v = resolve_collection("l1.l2.l3", &ctx).unwrap();
+        assert_eq!(v, vec![json!(10), json!(20)]);
+    }
 }

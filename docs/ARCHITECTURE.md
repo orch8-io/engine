@@ -290,10 +290,10 @@ Benchmarked on Apple Silicon, single Postgres, single engine process:
 
 | Operation | Throughput |
 |-----------|-----------|
-| Batch INSERT 100K instances | ~47,000/sec |
-| Claim (SKIP LOCKED, batch=256) | ~50,000/sec |
-| E2E noop, 1-step sequences | ~900/sec |
-| E2E noop, 3-step sequences | ~600/sec |
+| Batch INSERT 100K instances | ~37,000/sec |
+| Claim (SKIP LOCKED, batch=256) | ~37,000/sec |
+| E2E noop, 1-step sequences | ~860/sec |
+| E2E noop, 3-step sequences | ~610/sec |
 
 **What makes it fast:** Postgres as scheduler (no in-memory queue), batch prefetch (2 queries not 2N), multi-block execution per claim, sequence LRU cache, jemalloc, semaphore-bounded concurrency, SKIP LOCKED (no lock contention).
 

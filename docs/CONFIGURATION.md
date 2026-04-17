@@ -126,7 +126,7 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORCH8_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
-| `ORCH8_LOG_FORMAT` | `pretty` | `json` for structured logs, `pretty` for human-readable |
+| `ORCH8_LOG_JSON` | `false` | Set to `true` or `1` for structured JSON logs; any other value (or unset) uses human-readable pretty logs |
 
 ---
 

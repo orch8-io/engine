@@ -171,4 +171,83 @@ mod tests {
         let state = cb.get("test_handler").unwrap();
         assert_eq!(state.state, BreakerState::HalfOpen);
     }
+
+    #[test]
+    fn check_is_noop_on_first_call_per_handler() {
+        let cb = CircuitBreakerRegistry::new(3, 30);
+        // Two different handlers — each gets its own breaker, neither trips.
+        assert!(cb.check("h1").is_ok());
+        assert!(cb.check("h2").is_ok());
+        assert_eq!(cb.list_all().len(), 2);
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown_handler() {
+        let cb = CircuitBreakerRegistry::new(3, 30);
+        assert!(cb.get("never_checked").is_none());
+    }
+
+    #[test]
+    fn breakers_are_isolated_per_handler() {
+        let cb = CircuitBreakerRegistry::new(2, 30);
+        cb.record_failure("h1");
+        cb.record_failure("h1");
+        assert!(cb.check("h1").is_err(), "h1 should be open");
+        assert!(cb.check("h2").is_ok(), "h2 must remain closed");
+    }
+
+    #[test]
+    fn record_success_on_untracked_handler_is_noop() {
+        let cb = CircuitBreakerRegistry::new(3, 30);
+        // No breaker exists yet — success must not panic or auto-create.
+        cb.record_success("ghost_handler");
+        assert!(cb.get("ghost_handler").is_none());
+    }
+
+    #[test]
+    fn reset_on_untracked_handler_is_noop() {
+        let cb = CircuitBreakerRegistry::new(3, 30);
+        cb.reset("ghost");
+        assert!(cb.get("ghost").is_none());
+    }
+
+    #[test]
+    fn half_open_success_fully_closes() {
+        let cb = CircuitBreakerRegistry::new(2, 0);
+        cb.record_failure("h");
+        cb.record_failure("h");
+        // Transition to half-open.
+        cb.check("h").unwrap();
+        assert_eq!(cb.get("h").unwrap().state, BreakerState::HalfOpen);
+        // Probe succeeds — breaker should fully close.
+        cb.record_success("h");
+        let s = cb.get("h").unwrap();
+        assert_eq!(s.state, BreakerState::Closed);
+        assert_eq!(s.failure_count, 0);
+        assert!(s.opened_at.is_none());
+    }
+
+    #[test]
+    fn failure_threshold_stored_from_defaults() {
+        let cb = CircuitBreakerRegistry::new(7, 120);
+        cb.record_failure("x");
+        let s = cb.get("x").unwrap();
+        assert_eq!(s.failure_threshold, 7);
+        assert_eq!(s.cooldown_secs, 120);
+        assert_eq!(s.failure_count, 1);
+        assert_eq!(s.state, BreakerState::Closed);
+    }
+
+    #[test]
+    fn list_all_reflects_cleared_state_after_reset() {
+        let cb = CircuitBreakerRegistry::new(2, 30);
+        cb.record_failure("a");
+        cb.record_failure("a");
+        assert!(cb.check("a").is_err());
+        cb.reset("a");
+        let all = cb.list_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].state, BreakerState::Closed);
+        assert_eq!(all[0].failure_count, 0);
+    }
 }

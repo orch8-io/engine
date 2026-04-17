@@ -883,4 +883,465 @@ mod tests {
         assert_eq!(id.0, "s");
         assert_eq!(bt, BlockType::Step);
     }
+
+    fn mk_step(id: &str) -> BlockDefinition {
+        BlockDefinition::Step(StepDef {
+            id: BlockId(id.into()),
+            handler: "h".into(),
+            params: serde_json::Value::Null,
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
+            queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
+        })
+    }
+
+    fn mk_node(
+        id: ExecutionNodeId,
+        parent: Option<ExecutionNodeId>,
+        block_id: &str,
+        bt: BlockType,
+        state: NodeState,
+        branch_index: Option<i16>,
+    ) -> ExecutionNode {
+        ExecutionNode {
+            id,
+            instance_id: orch8_types::ids::InstanceId::new(),
+            parent_id: parent,
+            block_id: BlockId(block_id.into()),
+            block_type: bt,
+            branch_index,
+            state,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn find_block_nested_in_loop_body() {
+        use orch8_types::sequence::LoopDef;
+        let loop_block = BlockDefinition::Loop(LoopDef {
+            id: BlockId("loop".into()),
+            condition: "true".into(),
+            body: vec![mk_step("inner")],
+            max_iterations: 5,
+        });
+        assert!(find_block(&[loop_block.clone()], &BlockId("inner".into())).is_some());
+        assert!(find_block(&[loop_block], &BlockId("loop".into())).is_some());
+    }
+
+    #[test]
+    fn find_block_nested_in_for_each_and_router() {
+        use orch8_types::sequence::{ForEachDef, Route, RouterDef};
+        let fe = BlockDefinition::ForEach(ForEachDef {
+            id: BlockId("fe".into()),
+            collection: "xs".into(),
+            item_var: "item".into(),
+            body: vec![mk_step("fe-child")],
+            max_iterations: 5,
+        });
+        let router = BlockDefinition::Router(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![Route {
+                condition: "true".into(),
+                blocks: vec![mk_step("route-child")],
+            }],
+            default: Some(vec![mk_step("default-child")]),
+        });
+        assert!(find_block(&[fe.clone()], &BlockId("fe-child".into())).is_some());
+        assert!(find_block(&[router.clone()], &BlockId("route-child".into())).is_some());
+        assert!(find_block(&[router], &BlockId("default-child".into())).is_some());
+    }
+
+    #[test]
+    fn find_block_nested_in_try_catch_finally() {
+        use orch8_types::sequence::TryCatchDef;
+        let tc = BlockDefinition::TryCatch(TryCatchDef {
+            id: BlockId("tc".into()),
+            try_block: vec![mk_step("t")],
+            catch_block: vec![mk_step("c")],
+            finally_block: Some(vec![mk_step("f")]),
+        });
+        assert!(find_block(&[tc.clone()], &BlockId("t".into())).is_some());
+        assert!(find_block(&[tc.clone()], &BlockId("c".into())).is_some());
+        assert!(find_block(&[tc], &BlockId("f".into())).is_some());
+    }
+
+    #[test]
+    fn find_block_nested_in_ab_split_and_cancellation_scope() {
+        use orch8_types::sequence::{ABSplitDef, ABVariant, CancellationScopeDef};
+        let ab = BlockDefinition::ABSplit(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![ABVariant {
+                name: "control".into(),
+                weight: 50,
+                blocks: vec![mk_step("ab-inner")],
+            }],
+        });
+        let cs = BlockDefinition::CancellationScope(CancellationScopeDef {
+            id: BlockId("cs".into()),
+            blocks: vec![mk_step("cs-inner")],
+        });
+        assert!(find_block(&[ab], &BlockId("ab-inner".into())).is_some());
+        assert!(find_block(&[cs], &BlockId("cs-inner".into())).is_some());
+    }
+
+    #[test]
+    fn find_block_sub_sequence_only_finds_root_not_internals() {
+        // SubSequence's child sequence lives in another definition; find_block
+        // inside the *parent* definition must not descend into it.
+        use orch8_types::sequence::SubSequenceDef;
+        let sub = BlockDefinition::SubSequence(SubSequenceDef {
+            id: BlockId("sub".into()),
+            sequence_name: "child".into(),
+            version: None,
+            input: serde_json::Value::Null,
+        });
+        assert!(find_block(&[sub.clone()], &BlockId("sub".into())).is_some());
+        assert!(find_block(&[sub], &BlockId("child-step".into())).is_none());
+    }
+
+    #[test]
+    fn find_block_returns_none_for_unknown_id() {
+        let blocks = vec![mk_step("a"), mk_step("b")];
+        assert!(find_block(&blocks, &BlockId("not-there".into())).is_none());
+    }
+
+    #[test]
+    fn all_terminal_true_for_mixed_terminal_states() {
+        let a = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "a",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        );
+        let b = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "b",
+            BlockType::Step,
+            NodeState::Failed,
+            None,
+        );
+        let c = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "c",
+            BlockType::Step,
+            NodeState::Skipped,
+            None,
+        );
+        let d = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "d",
+            BlockType::Step,
+            NodeState::Cancelled,
+            None,
+        );
+        let refs = vec![&a, &b, &c, &d];
+        assert!(all_terminal(&refs));
+    }
+
+    #[test]
+    fn all_terminal_false_when_any_running_or_waiting() {
+        let a = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "a",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        );
+        let b = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "b",
+            BlockType::Step,
+            NodeState::Running,
+            None,
+        );
+        assert!(!all_terminal(&[&a, &b]));
+        let c = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "c",
+            BlockType::Step,
+            NodeState::Waiting,
+            None,
+        );
+        assert!(!all_terminal(&[&a, &c]));
+        let d = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "d",
+            BlockType::Step,
+            NodeState::Pending,
+            None,
+        );
+        assert!(!all_terminal(&[&a, &d]));
+    }
+
+    #[test]
+    fn any_completed_and_all_completed_contract() {
+        let a = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "a",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        );
+        let b = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "b",
+            BlockType::Step,
+            NodeState::Failed,
+            None,
+        );
+        assert!(any_completed(&[&a, &b]));
+        assert!(!all_completed(&[&a, &b]));
+        assert!(all_completed(&[&a]));
+        assert!(!any_completed(&[&b]));
+        // empty slice — all_completed is vacuously true; any_completed is false.
+        assert!(all_completed(&[]));
+        assert!(!any_completed(&[]));
+    }
+
+    #[test]
+    fn any_failed_and_has_waiting_nodes() {
+        let ok = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "ok",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        );
+        let bad = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "bad",
+            BlockType::Step,
+            NodeState::Failed,
+            None,
+        );
+        let wait = mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "w",
+            BlockType::Step,
+            NodeState::Waiting,
+            None,
+        );
+        assert!(any_failed(&[&ok, &bad]));
+        assert!(!any_failed(&[&ok]));
+        let tree = vec![ok.clone(), wait.clone()];
+        assert!(has_waiting_nodes(&tree));
+        assert!(!has_waiting_nodes(&[ok]));
+    }
+
+    #[test]
+    fn children_of_filters_by_parent_and_branch() {
+        let parent_id = ExecutionNodeId::new();
+        let c1 = mk_node(
+            ExecutionNodeId::new(),
+            Some(parent_id),
+            "c1",
+            BlockType::Step,
+            NodeState::Pending,
+            Some(0),
+        );
+        let c2 = mk_node(
+            ExecutionNodeId::new(),
+            Some(parent_id),
+            "c2",
+            BlockType::Step,
+            NodeState::Pending,
+            Some(1),
+        );
+        let unrelated = mk_node(
+            ExecutionNodeId::new(),
+            Some(ExecutionNodeId::new()),
+            "u",
+            BlockType::Step,
+            NodeState::Pending,
+            None,
+        );
+        let tree = vec![c1.clone(), c2.clone(), unrelated.clone()];
+        assert_eq!(children_of(&tree, parent_id, None).len(), 2);
+        assert_eq!(children_of(&tree, parent_id, Some(0)).len(), 1);
+        assert_eq!(children_of(&tree, parent_id, Some(1)).len(), 1);
+        assert_eq!(children_of(&tree, parent_id, Some(2)).len(), 0);
+    }
+
+    #[test]
+    fn children_of_returns_empty_for_unknown_parent() {
+        let tree: Vec<ExecutionNode> = vec![];
+        assert!(children_of(&tree, ExecutionNodeId::new(), None).is_empty());
+    }
+
+    #[test]
+    fn count_ancestors_measures_depth() {
+        let root_id = ExecutionNodeId::new();
+        let mid_id = ExecutionNodeId::new();
+        let leaf_id = ExecutionNodeId::new();
+        let root = mk_node(
+            root_id,
+            None,
+            "r",
+            BlockType::Parallel,
+            NodeState::Running,
+            None,
+        );
+        let mid = mk_node(
+            mid_id,
+            Some(root_id),
+            "m",
+            BlockType::Parallel,
+            NodeState::Running,
+            None,
+        );
+        let leaf = mk_node(
+            leaf_id,
+            Some(mid_id),
+            "l",
+            BlockType::Step,
+            NodeState::Running,
+            None,
+        );
+        let tree = vec![root, mid, leaf];
+        assert_eq!(count_ancestors(&tree, root_id), 0);
+        assert_eq!(count_ancestors(&tree, mid_id), 1);
+        assert_eq!(count_ancestors(&tree, leaf_id), 2);
+        // Unknown id returns 0 (no parent found).
+        assert_eq!(count_ancestors(&tree, ExecutionNodeId::new()), 0);
+    }
+
+    #[test]
+    fn block_meta_recognizes_each_variant() {
+        use orch8_types::sequence::{
+            ABSplitDef, ABVariant, CancellationScopeDef, ForEachDef, LoopDef, ParallelDef, RaceDef,
+            RouterDef, SubSequenceDef, TryCatchDef,
+        };
+        let par = BlockDefinition::Parallel(ParallelDef {
+            id: BlockId("p".into()),
+            branches: vec![],
+        });
+        let race = BlockDefinition::Race(RaceDef {
+            id: BlockId("race".into()),
+            branches: vec![],
+            semantics: Default::default(),
+        });
+        let lp = BlockDefinition::Loop(LoopDef {
+            id: BlockId("lp".into()),
+            condition: "false".into(),
+            body: vec![],
+            max_iterations: 1,
+        });
+        let fe = BlockDefinition::ForEach(ForEachDef {
+            id: BlockId("fe".into()),
+            collection: "x".into(),
+            item_var: "i".into(),
+            body: vec![],
+            max_iterations: 1,
+        });
+        let router = BlockDefinition::Router(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![],
+            default: None,
+        });
+        let tc = BlockDefinition::TryCatch(TryCatchDef {
+            id: BlockId("tc".into()),
+            try_block: vec![],
+            catch_block: vec![],
+            finally_block: None,
+        });
+        let sub = BlockDefinition::SubSequence(SubSequenceDef {
+            id: BlockId("sub".into()),
+            sequence_name: "s".into(),
+            version: None,
+            input: serde_json::Value::Null,
+        });
+        let ab = BlockDefinition::ABSplit(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![ABVariant {
+                name: "a".into(),
+                weight: 1,
+                blocks: vec![],
+            }],
+        });
+        let cs = BlockDefinition::CancellationScope(CancellationScopeDef {
+            id: BlockId("cs".into()),
+            blocks: vec![],
+        });
+        assert_eq!(block_meta(&par).1, BlockType::Parallel);
+        assert_eq!(block_meta(&race).1, BlockType::Race);
+        assert_eq!(block_meta(&lp).1, BlockType::Loop);
+        assert_eq!(block_meta(&fe).1, BlockType::ForEach);
+        assert_eq!(block_meta(&router).1, BlockType::Router);
+        assert_eq!(block_meta(&tc).1, BlockType::TryCatch);
+        assert_eq!(block_meta(&sub).1, BlockType::SubSequence);
+        assert_eq!(block_meta(&ab).1, BlockType::ABSplit);
+        assert_eq!(block_meta(&cs).1, BlockType::CancellationScope);
+    }
+
+    #[test]
+    fn find_block_nested_in_race_branches() {
+        use orch8_types::sequence::RaceDef;
+        let race = BlockDefinition::Race(RaceDef {
+            id: BlockId("race".into()),
+            branches: vec![
+                vec![mk_step("fast")],
+                vec![mk_step("slow")],
+            ],
+            semantics: Default::default(),
+        });
+        assert!(find_block(&[race.clone()], &BlockId("fast".into())).is_some());
+        assert!(find_block(&[race], &BlockId("slow".into())).is_some());
+    }
+
+    #[test]
+    fn find_running_step_prefers_step_over_composite() {
+        use orch8_types::sequence::ParallelDef;
+        let par_node_id = ExecutionNodeId::new();
+        let step_node_id = ExecutionNodeId::new();
+        let par = BlockDefinition::Parallel(ParallelDef {
+            id: BlockId("p".into()),
+            branches: vec![vec![mk_step("s")]],
+        });
+        let blocks = vec![par];
+        let tree = vec![
+            mk_node(
+                par_node_id,
+                None,
+                "p",
+                BlockType::Parallel,
+                NodeState::Running,
+                None,
+            ),
+            mk_node(
+                step_node_id,
+                Some(par_node_id),
+                "s",
+                BlockType::Step,
+                NodeState::Running,
+                None,
+            ),
+        ];
+        let (found_node, found_block) =
+            find_running_step(&tree, &blocks).expect("should find the running step");
+        assert_eq!(found_node.block_id.0, "s");
+        assert!(matches!(found_block, BlockDefinition::Step(_)));
+    }
 }

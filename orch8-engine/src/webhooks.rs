@@ -203,4 +203,106 @@ mod tests {
         // Should not panic or spawn tasks.
         emit(&config, &event, &CancellationToken::new());
     }
+
+    #[test]
+    fn backoff_saturates_instead_of_overflowing() {
+        // At attempt=63, 2^63 would overflow u64; saturating_pow must cap it.
+        // The call must return *some* Duration and not panic.
+        let d = backoff_duration(100);
+        assert!(d.as_secs() > 0);
+    }
+
+    #[test]
+    fn backoff_matches_documented_formula_low_attempts() {
+        // Confirms contract: 500ms * 2^attempt for attempts 4 and 5.
+        assert_eq!(backoff_duration(4), Duration::from_secs(8));
+        assert_eq!(backoff_duration(5), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn webhook_event_with_instance_id_serializes_id_as_string() {
+        let id = InstanceId(uuid::Uuid::new_v4());
+        let event = WebhookEvent {
+            event_type: "instance.running".into(),
+            instance_id: Some(id),
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            data: serde_json::json!({"n": 1}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            json.contains(&id.0.to_string()),
+            "serialized JSON must contain UUID: {json}"
+        );
+        assert!(json.contains("\"instance_id\""));
+    }
+
+    #[test]
+    fn webhook_event_with_none_instance_id_serializes_as_null() {
+        let event = WebhookEvent {
+            event_type: "system.tick".into(),
+            instance_id: None,
+            timestamp: "t".into(),
+            data: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"instance_id\":null"));
+    }
+
+    #[test]
+    fn instance_event_timestamp_is_rfc3339_parseable() {
+        let id = InstanceId(uuid::Uuid::new_v4());
+        let event = instance_event("x", id, serde_json::json!({}));
+        // Must parse as a valid RFC 3339 timestamp.
+        let parsed = chrono::DateTime::parse_from_rfc3339(&event.timestamp);
+        assert!(
+            parsed.is_ok(),
+            "timestamp must be RFC 3339: {}",
+            event.timestamp
+        );
+    }
+
+    #[test]
+    fn instance_event_preserves_arbitrary_nested_data() {
+        let id = InstanceId(uuid::Uuid::new_v4());
+        let payload = serde_json::json!({
+            "nested": {"a": [1, 2, 3], "b": null},
+            "flag": true,
+        });
+        let event = instance_event("instance.completed", id, payload.clone());
+        assert_eq!(event.data, payload);
+    }
+
+    #[test]
+    fn webhook_event_is_cloneable() {
+        // Clone is derived; this test locks the derive in place.
+        let id = InstanceId(uuid::Uuid::new_v4());
+        let a = WebhookEvent {
+            event_type: "e".into(),
+            instance_id: Some(id),
+            timestamp: "t".into(),
+            data: serde_json::json!({"k": "v"}),
+        };
+        let b = a.clone();
+        assert_eq!(a.event_type, b.event_type);
+        assert_eq!(a.instance_id, b.instance_id);
+        assert_eq!(a.data, b.data);
+    }
+
+    #[tokio::test]
+    async fn emit_with_cancelled_token_does_not_panic() {
+        // Pre-cancelled token is a valid input — emit must not panic when urls are empty.
+        let config = WebhookConfig {
+            urls: vec![],
+            timeout_secs: 1,
+            max_retries: 0,
+        };
+        let event = instance_event(
+            "test",
+            InstanceId(uuid::Uuid::new_v4()),
+            serde_json::json!({}),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        emit(&config, &event, &cancel);
+    }
 }
