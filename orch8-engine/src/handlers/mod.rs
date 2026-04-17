@@ -2,6 +2,7 @@ pub mod ab_split;
 pub mod activepieces;
 pub mod builtin;
 pub mod cancellation_scope;
+pub mod emit_event;
 pub mod for_each;
 pub mod grpc_plugin;
 pub mod human_review;
