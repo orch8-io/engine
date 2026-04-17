@@ -442,6 +442,28 @@ pub trait StorageBackend: Send + Sync + 'static {
         payload: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Persist multiple externalized payloads atomically in one call.
+    ///
+    /// The write-path counterpart of [`Self::batch_get_externalized_state`].
+    /// Used when externalizing multiple context fields in the same scheduler
+    /// tick so that a partial failure can't leave the `task_instances.context`
+    /// markers pointing at ref-keys that don't exist.
+    ///
+    /// The default impl is a **non-atomic** sequential loop so test/memory
+    /// backends compile — production callers must use a backend that
+    /// overrides this with a real transaction (Postgres/SQLite below).
+    async fn batch_save_externalized_state(
+        &self,
+        instance_id: InstanceId,
+        entries: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        for (ref_key, payload) in entries {
+            self.save_externalized_state(instance_id, ref_key, payload)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Retrieve an externalized payload by `ref_key`.
     async fn get_externalized_state(
         &self,

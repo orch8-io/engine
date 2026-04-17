@@ -94,6 +94,66 @@ pub(super) async fn get(
     }
 }
 
+/// Atomic batched save. Wraps N inserts in a single transaction so partial
+/// failures never leave `task_instances.context` pointing at ref-keys that
+/// don't exist. Per-row compression branching mirrors [`save`].
+pub(super) async fn batch_save(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    entries: &[(String, serde_json::Value)],
+) -> Result<(), StorageError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    for (ref_key, payload) in entries {
+        let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+
+        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+            let compressed = compress(payload)?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO externalized_state \
+                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+                 VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
+            )
+            .bind(ref_key)
+            .bind(instance_id.0.to_string())
+            .bind(compressed)
+            .bind(raw_size)
+            .bind(ts(Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        } else {
+            sqlx::query(
+                "INSERT OR REPLACE INTO externalized_state \
+                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
+            )
+            .bind(ref_key)
+            .bind(instance_id.0.to_string())
+            .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
+            .bind(raw_size)
+            .bind(ts(Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
 /// Batched variant of [`get`]. SQLite has no native array binding, so we build
 /// an `IN (?,?,...)` clause dynamically. Missing keys are absent from the
 /// returned map — callers treat that as "nothing to hydrate".

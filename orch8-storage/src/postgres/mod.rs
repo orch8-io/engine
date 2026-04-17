@@ -588,6 +588,14 @@ impl StorageBackend for PostgresStorage {
         externalized::save(self, instance_id, ref_key, payload).await
     }
 
+    async fn batch_save_externalized_state(
+        &self,
+        instance_id: InstanceId,
+        entries: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        externalized::batch_save(self, instance_id, entries).await
+    }
+
     async fn get_externalized_state(
         &self,
         ref_key: &str,

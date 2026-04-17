@@ -771,6 +771,63 @@ async fn batch_get_externalized_state_empty_input_returns_empty_map() {
 }
 
 #[tokio::test]
+async fn batch_save_externalized_state_persists_all_entries() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    let entries = vec![
+        ("bs_a".to_string(), json!({"a": 1})),
+        ("bs_b".to_string(), json!({"b": "x".repeat(5_000)})), // crosses zstd threshold
+        ("bs_c".to_string(), json!([1, 2, 3])),
+    ];
+
+    s.batch_save_externalized_state(inst_id, &entries)
+        .await
+        .unwrap();
+
+    // Every entry should be readable; large one should roundtrip identically
+    // through the zstd path.
+    for (key, expected) in &entries {
+        let got = s.get_externalized_state(key).await.unwrap();
+        assert_eq!(got.as_ref(), Some(expected), "key {key} mismatch");
+    }
+}
+
+#[tokio::test]
+async fn batch_save_externalized_state_empty_input_is_noop() {
+    let s = store().await;
+    s.batch_save_externalized_state(InstanceId::new(), &[])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn batch_save_externalized_state_upserts_existing_keys() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    // Seed.
+    s.batch_save_externalized_state(
+        inst_id,
+        &[("bs_up".to_string(), json!({"v": 1}))],
+    )
+    .await
+    .unwrap();
+
+    // Re-save with a different value — ON CONFLICT DO UPDATE path.
+    s.batch_save_externalized_state(
+        inst_id,
+        &[("bs_up".to_string(), json!({"v": 2}))],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        s.get_externalized_state("bs_up").await.unwrap(),
+        Some(json!({"v": 2}))
+    );
+}
+
+#[tokio::test]
 async fn externalized_state_roundtrip_across_compression_threshold() {
     let s = store().await;
     let inst_id = InstanceId::new();

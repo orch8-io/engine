@@ -93,6 +93,74 @@ pub(super) async fn get(
     }
 }
 
+/// Atomic batched save. Opens a transaction, issues one INSERT per entry
+/// (each with the same `ON CONFLICT DO UPDATE` semantics as [`save`]), and
+/// commits. Per-row compression decisions are made in Rust because the
+/// zstd-vs-inline choice differs per payload — a single multi-row `VALUES`
+/// clause can't express both storage shapes cleanly.
+///
+/// Atomicity contract: if any single row fails to insert the transaction is
+/// rolled back so the caller's `task_instances.context` never references a
+/// ref-key that isn't persisted.
+pub(super) async fn batch_save(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    entries: &[(String, serde_json::Value)],
+) -> Result<(), StorageError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = store.pool.begin().await?;
+
+    for (ref_key, payload) in entries {
+        let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+
+        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+            let compressed = compress(payload)?;
+            sqlx::query(
+                r"INSERT INTO externalized_state
+                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+                  VALUES ($1, $2, $3, NULL, $4, 'zstd', $5, NOW())
+                  ON CONFLICT (ref_key) DO UPDATE
+                    SET payload = NULL,
+                        payload_bytes = EXCLUDED.payload_bytes,
+                        compression = 'zstd',
+                        size_bytes = EXCLUDED.size_bytes",
+            )
+            .bind(Uuid::new_v4())
+            .bind(instance_id.0)
+            .bind(ref_key)
+            .bind(&compressed)
+            .bind(raw_size)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r"INSERT INTO externalized_state
+                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+                  VALUES ($1, $2, $3, $4, NULL, NULL, $5, NOW())
+                  ON CONFLICT (ref_key) DO UPDATE
+                    SET payload = EXCLUDED.payload,
+                        payload_bytes = NULL,
+                        compression = NULL,
+                        size_bytes = EXCLUDED.size_bytes",
+            )
+            .bind(Uuid::new_v4())
+            .bind(instance_id.0)
+            .bind(ref_key)
+            .bind(payload)
+            .bind(raw_size)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 type BatchRow = (
     String,
     Option<serde_json::Value>,
