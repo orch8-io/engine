@@ -3,13 +3,16 @@
 //! Same-tenant only. Cross-tenant attempts return `Permanent`. The caller's
 //! instance id is captured in the child's metadata as `parent_instance_id`.
 //!
-//! NOTE: dedupe is NOT implemented yet (T13). The `dedupe_key` param is
-//! accepted but ignored in T11.
+//! Supports an optional `dedupe_key` param scoped per-parent. When present,
+//! `(parent_instance_id, dedupe_key)` is recorded atomically via
+//! `storage.record_or_get_emit_dedupe`: the first call creates the child; any
+//! subsequent call with the same key returns the existing child id and
+//! `deduped: true` without creating a new instance.
 
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
-use orch8_storage::StorageBackend;
+use orch8_storage::{EmitDedupeOutcome, StorageBackend};
 use orch8_types::{
     error::{StepError, StorageError},
     ids::InstanceId,
@@ -18,6 +21,7 @@ use orch8_types::{
 use super::StepContext;
 
 #[allow(dead_code)] // registered in register_builtins (T14)
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_emit_event(
     ctx: StepContext,
     storage: &dyn StorageBackend,
@@ -43,6 +47,28 @@ pub(crate) async fn handle_emit_event(
         .get("meta")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // Optional dedupe key. If the caller passes the key at all, it must be a
+    // non-empty string — an empty key would create a per-parent global lock
+    // which is almost certainly a bug, so reject explicitly as Permanent.
+    let dedupe_key: Option<String> = match ctx.params.get("dedupe_key") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => {
+            if s.is_empty() {
+                return Err(StepError::Permanent {
+                    message: "'dedupe_key' cannot be empty".into(),
+                    details: None,
+                });
+            }
+            Some(s.clone())
+        }
+        Some(_) => {
+            return Err(StepError::Permanent {
+                message: "'dedupe_key' must be a string".into(),
+                details: None,
+            });
+        }
+    };
 
     let trigger = storage
         .get_trigger(&trigger_slug)
@@ -104,15 +130,36 @@ pub(crate) async fn handle_emit_event(
     );
     let meta_with_source = Value::Object(meta_obj);
 
-    let child_id = InstanceId::new();
+    let candidate_child_id = InstanceId::new();
     let sequence_name = trigger.sequence_name.clone();
+
+    // Dedupe branch: record (parent, key) atomically; if the key is already
+    // taken, skip creation and return the previously-recorded child id.
+    if let Some(key) = dedupe_key.as_deref() {
+        let outcome = storage
+            .record_or_get_emit_dedupe(ctx.instance_id, key, candidate_child_id)
+            .await
+            .map_err(|e| map_storage_err(&e))?;
+        match outcome {
+            EmitDedupeOutcome::AlreadyExists(existing_id) => {
+                return Ok(json!({
+                    "instance_id": existing_id.0.to_string(),
+                    "sequence_name": sequence_name,
+                    "deduped": true,
+                }));
+            }
+            EmitDedupeOutcome::Inserted => {
+                // Fall through to create the child with the candidate id.
+            }
+        }
+    }
 
     crate::triggers::create_trigger_instance(
         storage,
         &trigger,
         data,
         meta_with_source,
-        Some(child_id),
+        Some(candidate_child_id),
     )
     .await
     .map_err(|e| StepError::Permanent {
@@ -121,8 +168,9 @@ pub(crate) async fn handle_emit_event(
     })?;
 
     Ok(json!({
-        "instance_id": child_id.0.to_string(),
+        "instance_id": candidate_child_id.0.to_string(),
         "sequence_name": sequence_name,
+        "deduped": false,
     }))
 }
 
@@ -248,6 +296,7 @@ mod tests {
             result.get("sequence_name").and_then(|v| v.as_str()),
             Some("child_seq")
         );
+        assert_eq!(result.get("deduped"), Some(&json!(false)));
 
         let child_uuid = uuid::Uuid::parse_str(child_id_str).unwrap();
         let child = storage
@@ -360,6 +409,147 @@ mod tests {
             instances_t2.is_empty(),
             "no child instance should exist in T2"
         );
+    }
+
+    #[tokio::test]
+    async fn emit_event_dedupe_first_call_creates_child() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "on-order",
+                "data": {"order_id": 1},
+                "dedupe_key": "order-1",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let result = handle_emit_event(ctx, &storage).await.unwrap();
+
+        assert_eq!(result.get("deduped"), Some(&json!(false)));
+        let child_id_str = result
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .expect("instance_id in response");
+        let child_uuid = uuid::Uuid::parse_str(child_id_str).unwrap();
+        let child = storage
+            .get_instance(InstanceId(child_uuid))
+            .await
+            .unwrap()
+            .expect("child instance exists");
+        assert_eq!(child.tenant_id.0, "T1");
+    }
+
+    #[tokio::test]
+    async fn emit_event_dedupe_second_call_returns_existing() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let mk_ctx = || StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "on-order",
+                "data": {"order_id": 1},
+                "dedupe_key": "order-1",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+
+        let first = handle_emit_event(mk_ctx(), &storage).await.unwrap();
+        assert_eq!(first.get("deduped"), Some(&json!(false)));
+        let first_id = first
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let second = handle_emit_event(mk_ctx(), &storage).await.unwrap();
+        assert_eq!(second.get("deduped"), Some(&json!(true)));
+        let second_id = second
+            .get("instance_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert_eq!(first_id, second_id, "second call should return same id");
+        assert_eq!(
+            second.get("sequence_name").and_then(|v| v.as_str()),
+            Some("child_seq")
+        );
+
+        // Only ONE child instance exists in storage (caller + one child = 2).
+        let filter = orch8_types::filter::InstanceFilter {
+            tenant_id: Some(TenantId("T1".into())),
+            ..Default::default()
+        };
+        let pagination = orch8_types::filter::Pagination::default();
+        let instances = storage.list_instances(&filter, &pagination).await.unwrap();
+        assert_eq!(
+            instances.len(),
+            2,
+            "expected caller + exactly one child instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_event_dedupe_isolates_by_parent() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller_a = mk_instance("T1", InstanceState::Running);
+        let caller_b = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller_a).await.unwrap();
+        storage.create_instance(&caller_b).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let mk_ctx = |caller_id: InstanceId| StepContext {
+            instance_id: caller_id,
+            block_id: BlockId("emit".into()),
+            params: json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "shared-key",
+            }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+
+        let ra = handle_emit_event(mk_ctx(caller_a.id), &storage)
+            .await
+            .unwrap();
+        let rb = handle_emit_event(mk_ctx(caller_b.id), &storage)
+            .await
+            .unwrap();
+
+        assert_eq!(ra.get("deduped"), Some(&json!(false)));
+        assert_eq!(rb.get("deduped"), Some(&json!(false)));
+
+        let id_a = ra.get("instance_id").and_then(|v| v.as_str()).unwrap();
+        let id_b = rb.get("instance_id").and_then(|v| v.as_str()).unwrap();
+        assert_ne!(
+            id_a, id_b,
+            "different parents with same key must produce distinct children"
+        );
+
+        // Two callers + two distinct children in T1 = 4 instances.
+        let filter = orch8_types::filter::InstanceFilter {
+            tenant_id: Some(TenantId("T1".into())),
+            ..Default::default()
+        };
+        let pagination = orch8_types::filter::Pagination::default();
+        let instances = storage.list_instances(&filter, &pagination).await.unwrap();
+        assert_eq!(instances.len(), 4);
     }
 
     #[tokio::test]
