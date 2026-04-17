@@ -6,12 +6,10 @@
 //! - `http_request` — makes an HTTP request (minimal TCP-based)
 
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
-use orch8_storage::StorageBackend;
 use orch8_types::error::StepError;
 
 use super::{HandlerRegistry, StepContext};
@@ -74,9 +72,9 @@ pub(crate) fn is_url_safe(url: &str) -> bool {
 /// Register all built-in handlers on the given registry.
 ///
 /// Handlers that need access to storage (`emit_event`, `send_signal`,
-/// `query_instance`) capture an `Arc<dyn StorageBackend>` via closure so the
-/// registry's `Fn(StepContext) -> Future` signature is preserved.
-pub fn register_builtins(registry: &mut HandlerRegistry, storage: &Arc<dyn StorageBackend>) {
+/// `query_instance`) read it from `StepContext::storage` — no per-handler
+/// closure capture needed.
+pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("noop", handle_noop);
     registry.register("log", handle_log);
     registry.register("sleep", handle_sleep);
@@ -85,25 +83,12 @@ pub fn register_builtins(registry: &mut HandlerRegistry, storage: &Arc<dyn Stora
     registry.register("tool_call", super::tool_call::handle_tool_call);
     registry.register("human_review", super::human_review::handle_human_review);
     registry.register("self_modify", super::self_modify::handle_self_modify);
-
-    // Handlers that need storage — capture via Arc::clone per handler.
-    let s = Arc::clone(storage);
-    registry.register("emit_event", move |ctx| {
-        let s = Arc::clone(&s);
-        async move { super::emit_event::handle_emit_event(ctx, s.as_ref()).await }
-    });
-
-    let s = Arc::clone(storage);
-    registry.register("send_signal", move |ctx| {
-        let s = Arc::clone(&s);
-        async move { super::send_signal::handle_send_signal(ctx, s.as_ref()).await }
-    });
-
-    let s = Arc::clone(storage);
-    registry.register("query_instance", move |ctx| {
-        let s = Arc::clone(&s);
-        async move { super::query_instance::handle_query_instance(ctx, s.as_ref()).await }
-    });
+    registry.register("emit_event", super::emit_event::handle_emit_event);
+    registry.register("send_signal", super::send_signal::handle_send_signal);
+    registry.register(
+        "query_instance",
+        super::query_instance::handle_query_instance,
+    );
 }
 
 /// No-op handler. Always succeeds with an empty result.
@@ -285,28 +270,37 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_storage::StorageBackend;
     use orch8_types::context::ExecutionContext;
-    use orch8_types::ids::{BlockId, InstanceId};
+    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+    use std::sync::Arc;
 
-    fn test_ctx(params: Value) -> StepContext {
+    async fn test_ctx(params: Value) -> StepContext {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
         StepContext {
             instance_id: InstanceId::new(),
+            tenant_id: TenantId("t".into()),
             block_id: BlockId("test".into()),
             params,
             context: ExecutionContext::default(),
             attempt: 0,
+            storage,
         }
     }
 
     #[tokio::test]
     async fn noop_returns_empty() {
-        let result = handle_noop(test_ctx(json!({}))).await.unwrap();
+        let result = handle_noop(test_ctx(json!({})).await).await.unwrap();
         assert_eq!(result, json!({}));
     }
 
     #[tokio::test]
     async fn log_returns_message() {
-        let result = handle_log(test_ctx(json!({"message": "hello"})))
+        let result = handle_log(test_ctx(json!({"message": "hello"})).await)
             .await
             .unwrap();
         assert_eq!(result, json!({"message": "hello"}));
@@ -314,13 +308,13 @@ mod tests {
 
     #[tokio::test]
     async fn log_default_message() {
-        let result = handle_log(test_ctx(json!({}))).await.unwrap();
+        let result = handle_log(test_ctx(json!({})).await).await.unwrap();
         assert_eq!(result, json!({"message": "no message"}));
     }
 
     #[tokio::test]
     async fn sleep_returns_duration() {
-        let result = handle_sleep(test_ctx(json!({"duration_ms": 10})))
+        let result = handle_sleep(test_ctx(json!({"duration_ms": 10})).await)
             .await
             .unwrap();
         assert_eq!(result, json!({"slept_ms": 10}));
@@ -328,7 +322,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_request_missing_url_fails() {
-        let result = handle_http_request(test_ctx(json!({}))).await;
+        let result = handle_http_request(test_ctx(json!({})).await).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         let StepError::Permanent { message, .. } = &err else {
@@ -339,13 +333,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_builtins_populates_registry() {
-        let storage: Arc<dyn StorageBackend> = Arc::new(
-            orch8_storage::sqlite::SqliteStorage::in_memory()
-                .await
-                .unwrap(),
-        );
         let mut registry = HandlerRegistry::new();
-        register_builtins(&mut registry, &storage);
+        register_builtins(&mut registry);
         assert!(registry.contains("noop"));
         assert!(registry.contains("log"));
         assert!(registry.contains("sleep"));

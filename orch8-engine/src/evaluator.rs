@@ -1301,10 +1301,7 @@ mod tests {
         use orch8_types::sequence::RaceDef;
         let race = BlockDefinition::Race(RaceDef {
             id: BlockId("race".into()),
-            branches: vec![
-                vec![mk_step("fast")],
-                vec![mk_step("slow")],
-            ],
+            branches: vec![vec![mk_step("fast")], vec![mk_step("slow")]],
             semantics: Default::default(),
         });
         assert!(find_block(&[race.clone()], &BlockId("fast".into())).is_some());

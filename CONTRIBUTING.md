@@ -30,6 +30,18 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
 
+### Git hooks
+
+A pre-push hook lives in `.githooks/pre-push` that runs the same
+`cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo check`
+steps as CI. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Use `git push --no-verify` to bypass in emergencies.
+
 ### E2E Tests
 
 ```bash

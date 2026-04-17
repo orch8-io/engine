@@ -135,7 +135,10 @@ mod tests {
             EngineError::TemplateError("bad expr".into()).to_string(),
             "template resolution failed: bad expr",
         );
-        assert_eq!(EngineError::ShuttingDown.to_string(), "shutdown in progress");
+        assert_eq!(
+            EngineError::ShuttingDown.to_string(),
+            "shutdown in progress"
+        );
     }
 
     #[test]

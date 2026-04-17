@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build and start the scheduling engine.
     let mut handlers = HandlerRegistry::new();
-    orch8_engine::handlers::builtin::register_builtins(&mut handlers, &storage);
+    orch8_engine::handlers::builtin::register_builtins(&mut handlers);
     let engine = Engine::new(
         storage.clone(),
         config.engine.clone(),

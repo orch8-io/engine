@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -6,7 +7,7 @@ use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
 use orch8_types::error::StepError;
-use orch8_types::ids::{BlockId, InstanceId};
+use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use orch8_types::output::BlockOutput;
 
 use crate::error::EngineError;
@@ -15,6 +16,7 @@ use crate::handlers::{HandlerRegistry, StepContext};
 /// Parameters for step execution, bundled to avoid too many function arguments.
 pub struct StepExecParams {
     pub instance_id: InstanceId,
+    pub tenant_id: TenantId,
     pub block_id: BlockId,
     pub handler_name: String,
     pub params: serde_json::Value,
@@ -28,7 +30,7 @@ pub struct StepExecParams {
 /// Execute a step without persisting the output — returns the `BlockOutput` for
 /// the caller to save (typically combined with a state transition in one transaction).
 pub async fn execute_step_dry(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     exec: StepExecParams,
 ) -> Result<BlockOutput, EngineError> {
@@ -60,10 +62,12 @@ pub async fn execute_step_dry(
 
     let step_ctx = StepContext {
         instance_id,
+        tenant_id: exec.tenant_id,
         block_id: exec.block_id,
         params: exec.params,
         context: exec.context,
         attempt,
+        storage: Arc::clone(storage),
     };
 
     let result = if let Some(dur) = timeout {
@@ -86,7 +90,7 @@ pub async fn execute_step_dry(
                 .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
 
             let block_output = maybe_externalize(
-                storage,
+                storage.as_ref(),
                 instance_id,
                 block_id,
                 output,
@@ -120,7 +124,7 @@ pub async fn execute_step_dry(
 /// Execute a step with memoization: check if output already exists (idempotency),
 /// invoke the handler if not, persist the result.
 pub async fn execute_step(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     exec: StepExecParams,
 ) -> Result<serde_json::Value, EngineError> {
@@ -154,10 +158,12 @@ pub async fn execute_step(
 
     let step_ctx = StepContext {
         instance_id,
+        tenant_id: exec.tenant_id,
         block_id: exec.block_id,
         params: exec.params,
         context: exec.context,
         attempt,
+        storage: Arc::clone(storage),
     };
 
     // Execute with optional timeout.
@@ -181,7 +187,7 @@ pub async fn execute_step(
                 .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
 
             let block_output = maybe_externalize(
-                storage,
+                storage.as_ref(),
                 instance_id,
                 block_id,
                 output,

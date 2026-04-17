@@ -409,10 +409,15 @@ mod tests {
             version: None,
             input: serde_json::Value::Null,
         };
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
-            BlockDefinition::SubSequence(sub),
-        ]));
-        assert_eq!(rft.len(), 0, "SubSequence must not contribute to parent RFT");
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::SubSequence(
+                sub,
+            )]));
+        assert_eq!(
+            rft.len(),
+            0,
+            "SubSequence must not contribute to parent RFT"
+        );
         assert!(rft.is_empty());
     }
 }

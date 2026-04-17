@@ -222,8 +222,7 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
     };
 
     let mut handlers = HandlerRegistry::new();
-    let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
-    orch8_engine::handlers::builtin::register_builtins(&mut handlers, &storage_dyn);
+    orch8_engine::handlers::builtin::register_builtins(&mut handlers);
 
     let engine = Engine::new(
         storage.clone() as Arc<dyn StorageBackend>,

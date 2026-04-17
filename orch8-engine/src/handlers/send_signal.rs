@@ -5,79 +5,38 @@
 
 use chrono::Utc;
 use serde_json::{json, Value};
-use tracing::warn;
 use uuid::Uuid;
 
-use orch8_storage::StorageBackend;
 use orch8_types::{
-    error::{StepError, StorageError},
-    ids::InstanceId,
+    error::StepError,
     signal::{Signal, SignalType},
 };
 
+use super::util::{check_same_tenant, map_storage_err, parse_instance_id, permanent};
 use super::StepContext;
 
-pub(crate) async fn handle_send_signal(
-    ctx: StepContext,
-    storage: &dyn StorageBackend,
-) -> Result<Value, StepError> {
-    let target_id = parse_instance_id(&ctx.params)?;
+pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepError> {
+    let target_id = parse_instance_id(&ctx.params, "instance_id")?;
 
-    let signal_type_val =
-        ctx.params
-            .get("signal_type")
-            .cloned()
-            .ok_or_else(|| StepError::Permanent {
-                message: "missing 'signal_type' param".into(),
-                details: None,
-            })?;
-    let signal_type: SignalType = serde_json::from_value(signal_type_val).map_err(|e| {
-        StepError::Permanent {
-            message: format!("invalid 'signal_type': {e}"),
-            details: None,
-        }
-    })?;
-
-    let payload = ctx
+    let signal_type_val = ctx
         .params
-        .get("payload")
+        .get("signal_type")
         .cloned()
-        .unwrap_or(Value::Null);
+        .ok_or_else(|| permanent("missing 'signal_type' param"))?;
+    let signal_type: SignalType = serde_json::from_value(signal_type_val)
+        .map_err(|e| permanent(format!("invalid 'signal_type': {e}")))?;
 
-    let caller = storage
-        .get_instance(ctx.instance_id)
-        .await
-        .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| StepError::Permanent {
-            message: "caller instance not found".into(),
-            details: None,
-        })?;
+    let payload = ctx.params.get("payload").cloned().unwrap_or(Value::Null);
+
+    let storage = ctx.storage.as_ref();
 
     let target = storage
         .get_instance(target_id)
         .await
         .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| StepError::Permanent {
-            message: "target instance not found".into(),
-            details: None,
-        })?;
+        .ok_or_else(|| permanent("target instance not found"))?;
 
-    if target.tenant_id != caller.tenant_id {
-        warn!(
-            caller_tenant = %caller.tenant_id.0,
-            target_tenant = %target.tenant_id.0,
-            caller_instance_id = %ctx.instance_id.0,
-            target_instance_id = %target_id.0,
-            "send_signal: cross-tenant send_signal denied"
-        );
-        return Err(StepError::Permanent {
-            message: "cross-tenant send_signal denied".into(),
-            details: Some(json!({
-                "caller_tenant": caller.tenant_id.0,
-                "target_tenant": target.tenant_id.0,
-            })),
-        });
-    }
+    check_same_tenant(&ctx.tenant_id, &target.tenant_id, "send_signal")?;
 
     if target.state.is_terminal() {
         return Err(StepError::Permanent {
@@ -107,50 +66,18 @@ pub(crate) async fn handle_send_signal(
     Ok(json!({ "signal_id": signal.id.to_string() }))
 }
 
-#[allow(dead_code)] // used by handle_send_signal (registered in T14)
-fn parse_instance_id(params: &Value) -> Result<InstanceId, StepError> {
-    let id_str = params
-        .get("instance_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| StepError::Permanent {
-            message: "missing 'instance_id' string param".into(),
-            details: None,
-        })?;
-    Ok(InstanceId(Uuid::parse_str(id_str).map_err(|e| {
-        StepError::Permanent {
-            message: format!("invalid 'instance_id' uuid: {e}"),
-            details: None,
-        }
-    })?))
-}
-
-#[allow(dead_code)] // used by handle_send_signal (registered in T14)
-fn map_storage_err(e: &StorageError) -> StepError {
-    match e {
-        StorageError::Connection(_) | StorageError::PoolExhausted | StorageError::Query(_) => {
-            StepError::Retryable {
-                message: format!("storage: {e}"),
-                details: None,
-            }
-        }
-        _ => StepError::Permanent {
-            message: format!("storage: {e}"),
-            details: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
-        ids::{BlockId, Namespace, SequenceId, TenantId},
+        ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId},
         instance::{InstanceState, Priority, TaskInstance},
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     fn mk_instance(tenant: &str, state: InstanceState) -> TaskInstance {
         let now = Utc::now();
@@ -180,25 +107,40 @@ mod tests {
         }
     }
 
+    fn mk_ctx(
+        caller: &TaskInstance,
+        storage: Arc<dyn StorageBackend>,
+        params: Value,
+    ) -> StepContext {
+        StepContext {
+            instance_id: caller.id,
+            tenant_id: caller.tenant_id.clone(),
+            block_id: BlockId("s".into()),
+            params,
+            context: ExecutionContext::default(),
+            attempt: 1,
+            storage,
+        }
+    }
+
     #[tokio::test]
     async fn send_signal_enqueues_signal_for_same_tenant_target() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         let target = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": target.id.0.to_string(),
                 "signal_type": "cancel",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let result = handle_send_signal(ctx, &storage).await.unwrap();
+        );
+        let result = handle_send_signal(ctx).await.unwrap();
 
         assert!(
             result.get("signal_id").and_then(|v| v.as_str()).is_some(),
@@ -213,22 +155,21 @@ mod tests {
 
     #[tokio::test]
     async fn send_signal_rejects_when_target_missing() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
 
         let missing_target = InstanceId::new();
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": missing_target.0.to_string(),
                 "signal_type": "cancel",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_send_signal(ctx).await.unwrap_err();
         assert!(
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"
@@ -237,23 +178,22 @@ mod tests {
 
     #[tokio::test]
     async fn send_signal_rejects_when_target_in_terminal_state() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         let target = mk_instance("T1", InstanceState::Completed);
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": target.id.0.to_string(),
                 "signal_type": "cancel",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_send_signal(ctx).await.unwrap_err();
         assert!(
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"
@@ -262,23 +202,22 @@ mod tests {
 
     #[tokio::test]
     async fn send_signal_denies_cross_tenant() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         let target = mk_instance("T2", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": target.id.0.to_string(),
                 "signal_type": "cancel",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_send_signal(ctx).await.unwrap_err();
         if let StepError::Permanent { message, .. } = &err {
             assert!(
                 message.contains("cross-tenant"),
@@ -295,26 +234,28 @@ mod tests {
 
         // verify no signal was enqueued
         let pending = storage.get_pending_signals(target.id).await.unwrap();
-        assert!(pending.is_empty(), "no signals should be enqueued cross-tenant");
+        assert!(
+            pending.is_empty(),
+            "no signals should be enqueued cross-tenant"
+        );
     }
 
     #[tokio::test]
     async fn send_signal_rejects_invalid_uuid_param() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": "not-a-uuid",
                 "signal_type": "cancel",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_send_signal(ctx).await.unwrap_err();
         assert!(
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"
@@ -323,23 +264,22 @@ mod tests {
 
     #[tokio::test]
     async fn send_signal_rejects_unknown_signal_type() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         let target = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("s".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "instance_id": target.id.0.to_string(),
                 "signal_type": "bogus_signal",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_send_signal(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_send_signal(ctx).await.unwrap_err();
         assert!(
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"

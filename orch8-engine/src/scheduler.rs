@@ -197,7 +197,7 @@ async fn process_tick(
                 });
 
             match process_instance(
-                storage.as_ref(),
+                &storage,
                 &handlers,
                 &webhooks,
                 &seq_cache,
@@ -277,7 +277,7 @@ enum StepOutcome {
 /// Process a single claimed instance: execute ALL pending steps in one go.
 #[allow(clippy::too_many_arguments)]
 async fn process_instance(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     webhook_config: &WebhookConfig,
     sequence_cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
@@ -289,13 +289,14 @@ async fn process_instance(
     let instance_id = instance.id;
 
     // Fetch sequence definition early — needed for cancellation scopes and evaluation.
-    let sequence = get_sequence_cached(storage, sequence_cache, instance.sequence_id).await?;
+    let sequence =
+        get_sequence_cached(storage.as_ref(), sequence_cache, instance.sequence_id).await?;
 
     // claim_due_instances already set state to Running.
     // Process any pending signals (using pre-fetched data).
     if !prefetched.signals.is_empty() {
         let abort = crate::signals::process_signals_prefetched(
-            storage,
+            storage.as_ref(),
             instance_id,
             InstanceState::Running,
             prefetched.signals,
@@ -327,7 +328,7 @@ async fn process_instance(
     }
 
     // Merge dynamically injected blocks with the sequence definition.
-    let blocks = crate::evaluator::merged_blocks(storage, instance.id, &sequence).await?;
+    let blocks = crate::evaluator::merged_blocks(storage.as_ref(), instance.id, &sequence).await?;
 
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
@@ -391,7 +392,7 @@ async fn process_instance(
 
     // All blocks completed.
     crate::lifecycle::transition_instance(
-        storage,
+        storage.as_ref(),
         instance_id,
         InstanceState::Running,
         InstanceState::Completed,
@@ -416,7 +417,7 @@ async fn process_instance(
 /// node to its block-type handler (`Parallel`, `Race`, `Loop`, `ForEach`, `Router`, `TryCatch`, `Step`).
 /// Returns `true` from `evaluate()` when more work remains (re-schedule), `false` when done.
 async fn process_instance_tree(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     webhook_config: &WebhookConfig,
     instance: &orch8_types::instance::TaskInstance,
@@ -433,7 +434,7 @@ async fn process_instance_tree(
             let tree = storage.get_execution_tree(instance_id).await?;
             if crate::evaluator::has_waiting_nodes(&tree) {
                 crate::lifecycle::transition_instance(
-                    storage,
+                    storage.as_ref(),
                     instance_id,
                     InstanceState::Running,
                     InstanceState::Waiting,
@@ -500,7 +501,7 @@ async fn process_instance_tree(
         Err(e) => {
             error!(instance_id = %instance_id, error = %e, "tree evaluation failed");
             crate::lifecycle::transition_instance(
-                storage,
+                storage.as_ref(),
                 instance_id,
                 InstanceState::Running,
                 InstanceState::Failed,
@@ -556,7 +557,7 @@ async fn get_sequence_cached(
 /// has elapsed, invokes the escalation handler, records the breach, and fails the instance.
 /// Returns `true` if the deadline was breached and the instance was failed.
 async fn check_step_deadline(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
@@ -602,10 +603,12 @@ async fn check_step_deadline(
             }
             let step_ctx = crate::handlers::StepContext {
                 instance_id,
+                tenant_id: instance.tenant_id.clone(),
                 block_id: step_def.id.clone(),
                 params,
                 context: instance.context.clone(),
                 attempt: 0,
+                storage: Arc::clone(storage),
             };
             if let Err(e) = handler(step_ctx).await {
                 warn!(
@@ -635,7 +638,7 @@ async fn check_step_deadline(
     };
     storage.save_block_output(&breach_output).await?;
     crate::lifecycle::transition_instance(
-        storage,
+        storage.as_ref(),
         instance_id,
         InstanceState::Running,
         InstanceState::Failed,
@@ -860,7 +863,7 @@ async fn check_human_input(
 /// whether to continue executing more blocks or stop.
 #[allow(clippy::too_many_lines)]
 async fn execute_step_block(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     webhook_config: &WebhookConfig,
     externalize_threshold: u32,
@@ -880,7 +883,7 @@ async fn execute_step_block(
                     "debug breakpoint hit, pausing instance"
                 );
                 crate::lifecycle::transition_instance(
-                    storage,
+                    storage.as_ref(),
                     instance_id,
                     InstanceState::Running,
                     InstanceState::Paused,
@@ -892,22 +895,22 @@ async fn execute_step_block(
         }
     }
 
-    if check_step_delay(storage, instance, step_def).await? {
+    if check_step_delay(storage.as_ref(), instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
     }
 
-    if check_send_window(storage, instance, step_def).await? {
+    if check_send_window(storage.as_ref(), instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
     }
 
-    if check_step_rate_limit(storage, instance, step_def).await? {
+    if check_step_rate_limit(storage.as_ref(), instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
     }
 
     // Human-in-the-loop: if this step waits for human input, check if a response
     // signal has been delivered. If not, pause the instance.
     if let Some(human_def) = &step_def.wait_for_input {
-        if check_human_input(storage, instance, step_def, human_def).await? {
+        if check_human_input(storage.as_ref(), instance, step_def, human_def).await? {
             return Ok(StepOutcome::Deferred);
         }
     }
@@ -922,17 +925,23 @@ async fn execute_step_block(
 
     // If the handler is not registered in-process, dispatch to external worker queue.
     if !handlers.contains(&step_def.handler) {
-        return dispatch_to_external_worker(storage, instance, step_def, attempt).await;
+        return dispatch_to_external_worker(storage.as_ref(), instance, step_def, attempt).await;
     }
 
     crate::metrics::inc(crate::metrics::STEPS_EXECUTED);
 
     let exec_params = crate::handlers::step::StepExecParams {
         instance_id,
+        tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: step_def.params.clone(),
-        context: crate::handlers::step_block::context_for_step(storage, instance, step_def).await?,
+        context: crate::handlers::step_block::context_for_step(
+            storage.as_ref(),
+            instance,
+            step_def,
+        )
+        .await?,
         attempt,
         timeout: step_def.timeout,
         externalize_threshold,
@@ -954,7 +963,7 @@ async fn execute_step_block(
         }) => {
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
             handle_retryable_failure(
-                storage,
+                storage.as_ref(),
                 instance_id,
                 step_def,
                 attempt,
@@ -969,7 +978,7 @@ async fn execute_step_block(
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
             // Permanent failure or timeout.
             crate::lifecycle::transition_instance(
-                storage,
+                storage.as_ref(),
                 instance_id,
                 InstanceState::Running,
                 InstanceState::Failed,

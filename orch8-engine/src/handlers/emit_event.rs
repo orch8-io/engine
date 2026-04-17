@@ -10,42 +10,28 @@
 //! `deduped: true` without creating a new instance.
 
 use serde_json::{json, Map, Value};
-use tracing::warn;
 
-use orch8_storage::{EmitDedupeOutcome, StorageBackend};
+use orch8_storage::EmitDedupeOutcome;
 use orch8_types::{
-    error::{StepError, StorageError},
-    ids::InstanceId,
+    error::StepError,
+    ids::{InstanceId, TenantId},
 };
 
+use super::util::{check_same_tenant, map_storage_err, permanent};
 use super::StepContext;
 
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn handle_emit_event(
-    ctx: StepContext,
-    storage: &dyn StorageBackend,
-) -> Result<Value, StepError> {
+pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepError> {
     let trigger_slug = ctx
         .params
         .get("trigger_slug")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| StepError::Permanent {
-            message: "missing 'trigger_slug' string param".into(),
-            details: None,
-        })?
+        .ok_or_else(|| permanent("missing 'trigger_slug' string param"))?
         .to_string();
 
-    let data = ctx
-        .params
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let data = ctx.params.get("data").cloned().unwrap_or_else(|| json!({}));
 
-    let user_meta = ctx
-        .params
-        .get("meta")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let user_meta = ctx.params.get("meta").cloned().unwrap_or_else(|| json!({}));
 
     // Optional dedupe key. If the caller passes the key at all, it must be a
     // non-empty string — an empty key would create a per-parent global lock
@@ -54,62 +40,34 @@ pub(crate) async fn handle_emit_event(
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => {
             if s.is_empty() {
-                return Err(StepError::Permanent {
-                    message: "'dedupe_key' cannot be empty".into(),
-                    details: None,
-                });
+                return Err(permanent("'dedupe_key' cannot be empty"));
             }
             Some(s.clone())
         }
         Some(_) => {
-            return Err(StepError::Permanent {
-                message: "'dedupe_key' must be a string".into(),
-                details: None,
-            });
+            return Err(permanent("'dedupe_key' must be a string"));
         }
     };
+
+    let storage = ctx.storage.as_ref();
 
     let trigger = storage
         .get_trigger(&trigger_slug)
         .await
         .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| StepError::Permanent {
-            message: format!("trigger '{trigger_slug}' not found"),
-            details: None,
-        })?;
+        .ok_or_else(|| permanent(format!("trigger '{trigger_slug}' not found")))?;
 
     if !trigger.enabled {
-        return Err(StepError::Permanent {
-            message: format!("trigger '{trigger_slug}' is disabled"),
-            details: None,
-        });
+        return Err(permanent(format!("trigger '{trigger_slug}' is disabled")));
     }
 
-    let caller = storage
-        .get_instance(ctx.instance_id)
-        .await
-        .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| StepError::Permanent {
-            message: "caller instance not found".into(),
-            details: None,
-        })?;
-
-    if caller.tenant_id.0 != trigger.tenant_id {
-        warn!(
-            caller_tenant = %caller.tenant_id.0,
-            trigger_tenant = %trigger.tenant_id,
-            caller_instance_id = %ctx.instance_id.0,
-            trigger_slug = %trigger_slug,
-            "emit_event: cross-tenant emit_event denied"
-        );
-        return Err(StepError::Permanent {
-            message: "cross-tenant emit_event denied".into(),
-            details: Some(json!({
-                "caller_tenant": caller.tenant_id.0,
-                "trigger_tenant": trigger.tenant_id,
-            })),
-        });
-    }
+    // Cross-tenant guard: caller's tenant comes from StepContext; the trigger's
+    // tenant is still a plain String until R2 migrates it to TenantId.
+    check_same_tenant(
+        &ctx.tenant_id,
+        &TenantId(trigger.tenant_id.clone()),
+        "emit_event",
+    )?;
 
     // Build meta: start from user-provided meta, then overwrite system-set
     // fields so callers can't spoof `source` / `parent_instance_id`.
@@ -161,10 +119,7 @@ pub(crate) async fn handle_emit_event(
         Some(candidate_child_id),
     )
     .await
-    .map_err(|e| StepError::Permanent {
-        message: format!("failed to create child instance: {e}"),
-        details: None,
-    })?;
+    .map_err(|e| permanent(format!("failed to create child instance: {e}")))?;
 
     Ok(json!({
         "instance_id": candidate_child_id.0.to_string(),
@@ -173,35 +128,20 @@ pub(crate) async fn handle_emit_event(
     }))
 }
 
-#[allow(dead_code)] // used by handle_emit_event (registered in T14)
-fn map_storage_err(e: &StorageError) -> StepError {
-    match e {
-        StorageError::Connection(_) | StorageError::PoolExhausted | StorageError::Query(_) => {
-            StepError::Retryable {
-                message: format!("storage: {e}"),
-                details: None,
-            }
-        }
-        _ => StepError::Permanent {
-            message: format!("storage: {e}"),
-            details: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
-        ids::{BlockId, Namespace, SequenceId, TenantId},
+        ids::{BlockId, Namespace, SequenceId},
         instance::{InstanceState, Priority, TaskInstance},
         sequence::SequenceDefinition,
         trigger::{TriggerDef, TriggerType},
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     fn mk_instance(tenant: &str, state: InstanceState) -> TaskInstance {
         let now = Utc::now();
@@ -265,27 +205,42 @@ mod tests {
         }
     }
 
+    fn mk_ctx(
+        caller: &TaskInstance,
+        storage: Arc<dyn StorageBackend>,
+        params: Value,
+    ) -> StepContext {
+        StepContext {
+            instance_id: caller.id,
+            tenant_id: caller.tenant_id.clone(),
+            block_id: BlockId("emit".into()),
+            params,
+            context: ExecutionContext::default(),
+            attempt: 1,
+            storage,
+        }
+    }
+
     #[tokio::test]
     async fn emit_event_creates_child_instance_for_same_tenant() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         seed_sequence(&storage, "T1", "child_seq").await;
         let trigger = mk_trigger("on-order", "T1", "child_seq");
         storage.create_trigger(&trigger).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "trigger_slug": "on-order",
                 "data": {"order_id": 42},
                 "meta": {"source": "spoofed", "custom": "value"},
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let result = handle_emit_event(ctx, &storage).await.unwrap();
+        );
+        let result = handle_emit_event(ctx).await.unwrap();
 
         let child_id_str = result
             .get("instance_id")
@@ -319,26 +274,26 @@ mod tests {
 
     #[tokio::test]
     async fn emit_event_rejects_when_trigger_not_found() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "trigger_slug": "does-not-exist",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
     }
 
     #[tokio::test]
     async fn emit_event_rejects_when_trigger_disabled() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         seed_sequence(&storage, "T1", "child_seq").await;
@@ -346,39 +301,36 @@ mod tests {
         trigger.enabled = false;
         storage.create_trigger(&trigger).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "trigger_slug": "on-order",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
     }
 
     #[tokio::test]
     async fn emit_event_denies_cross_tenant() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         seed_sequence(&storage, "T2", "child_seq").await;
         let trigger = mk_trigger("on-order", "T2", "child_seq");
         storage.create_trigger(&trigger).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "trigger_slug": "on-order",
                 "data": {"order_id": 42},
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
         match &err {
             StepError::Permanent { message, .. } => {
                 assert!(
@@ -395,7 +347,10 @@ mod tests {
             ..Default::default()
         };
         let pagination = orch8_types::filter::Pagination::default();
-        let instances_t1 = storage.list_instances(&filter_t1, &pagination).await.unwrap();
+        let instances_t1 = storage
+            .list_instances(&filter_t1, &pagination)
+            .await
+            .unwrap();
         // Only the caller should exist in T1.
         assert_eq!(instances_t1.len(), 1);
         assert_eq!(instances_t1[0].id, caller.id);
@@ -403,7 +358,10 @@ mod tests {
             tenant_id: Some(TenantId("T2".into())),
             ..Default::default()
         };
-        let instances_t2 = storage.list_instances(&filter_t2, &pagination).await.unwrap();
+        let instances_t2 = storage
+            .list_instances(&filter_t2, &pagination)
+            .await
+            .unwrap();
         assert!(
             instances_t2.is_empty(),
             "no child instance should exist in T2"
@@ -412,25 +370,24 @@ mod tests {
 
     #[tokio::test]
     async fn emit_event_dedupe_first_call_creates_child() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         seed_sequence(&storage, "T1", "child_seq").await;
         let trigger = mk_trigger("on-order", "T1", "child_seq");
         storage.create_trigger(&trigger).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
                 "trigger_slug": "on-order",
                 "data": {"order_id": 1},
                 "dedupe_key": "order-1",
             }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let result = handle_emit_event(ctx, &storage).await.unwrap();
+        );
+        let result = handle_emit_event(ctx).await.unwrap();
 
         assert_eq!(result.get("deduped"), Some(&json!(false)));
         let child_id_str = result
@@ -448,26 +405,27 @@ mod tests {
 
     #[tokio::test]
     async fn emit_event_dedupe_second_call_returns_existing() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         seed_sequence(&storage, "T1", "child_seq").await;
         let trigger = mk_trigger("on-order", "T1", "child_seq");
         storage.create_trigger(&trigger).await.unwrap();
 
-        let mk_ctx = || StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({
-                "trigger_slug": "on-order",
-                "data": {"order_id": 1},
-                "dedupe_key": "order-1",
-            }),
-            context: ExecutionContext::default(),
-            attempt: 1,
+        let make = || {
+            mk_ctx(
+                &caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "data": {"order_id": 1},
+                    "dedupe_key": "order-1",
+                }),
+            )
         };
 
-        let first = handle_emit_event(mk_ctx(), &storage).await.unwrap();
+        let first = handle_emit_event(make()).await.unwrap();
         assert_eq!(first.get("deduped"), Some(&json!(false)));
         let first_id = first
             .get("instance_id")
@@ -475,7 +433,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        let second = handle_emit_event(mk_ctx(), &storage).await.unwrap();
+        let second = handle_emit_event(make()).await.unwrap();
         assert_eq!(second.get("deduped"), Some(&json!(true)));
         let second_id = second
             .get("instance_id")
@@ -504,7 +462,8 @@ mod tests {
 
     #[tokio::test]
     async fn emit_event_dedupe_isolates_by_parent() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller_a = mk_instance("T1", InstanceState::Running);
         let caller_b = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller_a).await.unwrap();
@@ -513,23 +472,19 @@ mod tests {
         let trigger = mk_trigger("on-order", "T1", "child_seq");
         storage.create_trigger(&trigger).await.unwrap();
 
-        let mk_ctx = |caller_id: InstanceId| StepContext {
-            instance_id: caller_id,
-            block_id: BlockId("emit".into()),
-            params: json!({
-                "trigger_slug": "on-order",
-                "dedupe_key": "shared-key",
-            }),
-            context: ExecutionContext::default(),
-            attempt: 1,
+        let make = |caller: &TaskInstance| {
+            mk_ctx(
+                caller,
+                storage_dyn.clone(),
+                json!({
+                    "trigger_slug": "on-order",
+                    "dedupe_key": "shared-key",
+                }),
+            )
         };
 
-        let ra = handle_emit_event(mk_ctx(caller_a.id), &storage)
-            .await
-            .unwrap();
-        let rb = handle_emit_event(mk_ctx(caller_b.id), &storage)
-            .await
-            .unwrap();
+        let ra = handle_emit_event(make(&caller_a)).await.unwrap();
+        let rb = handle_emit_event(make(&caller_b)).await.unwrap();
 
         assert_eq!(ra.get("deduped"), Some(&json!(false)));
         assert_eq!(rb.get("deduped"), Some(&json!(false)));
@@ -553,18 +508,13 @@ mod tests {
 
     #[tokio::test]
     async fn emit_event_rejects_missing_trigger_slug_param() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("emit".into()),
-            params: json!({}),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_emit_event(ctx, &storage).await.unwrap_err();
+        let ctx = mk_ctx(&caller, storage_dyn, json!({}));
+        let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
     }
 }

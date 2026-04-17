@@ -203,9 +203,14 @@ async fn fire_trigger(
     }
 
     let meta = serde_json::json!({ "source": "http_fire" });
-    let instance_id =
-        orch8_engine::triggers::create_trigger_instance(&*state.storage, &trigger, body, meta, None)
-            .await?;
+    let instance_id = orch8_engine::triggers::create_trigger_instance(
+        &*state.storage,
+        &trigger,
+        body,
+        meta,
+        None,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,

@@ -529,7 +529,10 @@ mod tests {
         let after = chrono::Utc::now();
         let stored = storage.get_instance(id).await.unwrap().unwrap();
         let nfa = stored.next_fire_at.expect("next_fire_at must be set");
-        assert!(nfa >= before && nfa <= after, "nfa must be within [before, after]");
+        assert!(
+            nfa >= before && nfa <= after,
+            "nfa must be within [before, after]"
+        );
     }
 
     #[tokio::test]
@@ -566,10 +569,15 @@ mod tests {
         let data = serde_json::json!({
             "deep": {"nested": {"arr": [1,2,3], "null": null, "flag": true}}
         });
-        let id =
-            create_trigger_instance(&storage, &trigger, data.clone(), serde_json::Value::Null, None)
-                .await
-                .unwrap();
+        let id = create_trigger_instance(
+            &storage,
+            &trigger,
+            data.clone(),
+            serde_json::Value::Null,
+            None,
+        )
+        .await
+        .unwrap();
         let stored = storage.get_instance(id).await.unwrap().unwrap();
         assert_eq!(stored.context.data, data);
     }

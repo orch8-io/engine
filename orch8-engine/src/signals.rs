@@ -374,7 +374,10 @@ mod tests {
             process_signals_prefetched(&storage, inst.id, InstanceState::Running, vec![sig], None)
                 .await
                 .unwrap();
-        assert!(!r, "resume on a non-paused instance must not abort execution");
+        assert!(
+            !r,
+            "resume on a non-paused instance must not abort execution"
+        );
     }
 
     #[tokio::test]

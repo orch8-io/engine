@@ -4,42 +4,16 @@
 //! cross-tenant attempts return `Permanent` (does not leak existence).
 
 use serde_json::{json, Value};
-use tracing::warn;
-use uuid::Uuid;
 
-use orch8_storage::StorageBackend;
-use orch8_types::{
-    error::{StepError, StorageError},
-    ids::InstanceId,
-};
+use orch8_types::error::StepError;
 
+use super::util::{check_same_tenant, map_storage_err, parse_instance_id};
 use super::StepContext;
 
-pub(crate) async fn handle_query_instance(
-    ctx: StepContext,
-    storage: &dyn StorageBackend,
-) -> Result<Value, StepError> {
-    let id_str = ctx
-        .params
-        .get("instance_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| StepError::Permanent {
-            message: "missing 'instance_id' string param".into(),
-            details: None,
-        })?;
-    let target_id = InstanceId(Uuid::parse_str(id_str).map_err(|e| StepError::Permanent {
-        message: format!("invalid 'instance_id' uuid: {e}"),
-        details: None,
-    })?);
+pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, StepError> {
+    let target_id = parse_instance_id(&ctx.params, "instance_id")?;
 
-    let caller = storage
-        .get_instance(ctx.instance_id)
-        .await
-        .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| StepError::Permanent {
-            message: "caller instance not found".into(),
-            details: None,
-        })?;
+    let storage = ctx.storage.as_ref();
 
     let Some(target) = storage
         .get_instance(target_id)
@@ -49,22 +23,7 @@ pub(crate) async fn handle_query_instance(
         return Ok(json!({ "found": false }));
     };
 
-    if target.tenant_id != caller.tenant_id {
-        warn!(
-            caller_tenant = %caller.tenant_id.0,
-            target_tenant = %target.tenant_id.0,
-            caller_instance_id = %ctx.instance_id.0,
-            target_instance_id = %target_id.0,
-            "query_instance: cross-tenant query denied"
-        );
-        return Err(StepError::Permanent {
-            message: "cross-tenant query denied".into(),
-            details: Some(json!({
-                "caller_tenant": caller.tenant_id.0,
-                "target_tenant": target.tenant_id.0,
-            })),
-        });
-    }
+    check_same_tenant(&ctx.tenant_id, &target.tenant_id, "query_instance")?;
 
     Ok(json!({
         "found": true,
@@ -76,33 +35,18 @@ pub(crate) async fn handle_query_instance(
     }))
 }
 
-#[allow(dead_code)] // used by handle_query_instance (registered in T14)
-fn map_storage_err(e: &StorageError) -> StepError {
-    match e {
-        StorageError::Connection(_) | StorageError::PoolExhausted | StorageError::Query(_) => {
-            StepError::Retryable {
-                message: format!("storage: {e}"),
-                details: None,
-            }
-        }
-        _ => StepError::Permanent {
-            message: format!("storage: {e}"),
-            details: None,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
-        ids::{BlockId, Namespace, SequenceId, TenantId},
+        ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId},
         instance::{InstanceState, Priority, TaskInstance},
     };
     use serde_json::json;
+    use std::sync::Arc;
 
     fn mk_instance(tenant: &str) -> TaskInstance {
         let now = Utc::now();
@@ -132,62 +76,75 @@ mod tests {
         }
     }
 
+    fn mk_ctx(
+        caller: &TaskInstance,
+        storage: Arc<dyn StorageBackend>,
+        params: Value,
+    ) -> StepContext {
+        StepContext {
+            instance_id: caller.id,
+            tenant_id: caller.tenant_id.clone(),
+            block_id: BlockId("q".into()),
+            params,
+            context: ExecutionContext::default(),
+            attempt: 1,
+            storage,
+        }
+    }
+
     #[tokio::test]
     async fn query_instance_returns_context_for_same_tenant() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1");
         let target = mk_instance("T1");
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("q".into()),
-            params: serde_json::json!({ "instance_id": target.id.0.to_string() }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let result = handle_query_instance(ctx, &storage).await.unwrap();
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.0.to_string() }),
+        );
+        let result = handle_query_instance(ctx).await.unwrap();
 
-        assert_eq!(result["found"], serde_json::json!(true));
+        assert_eq!(result["found"], json!(true));
         assert!(result.get("state").is_some());
     }
 
     #[tokio::test]
     async fn query_instance_returns_found_false_for_missing_target() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1");
         storage.create_instance(&caller).await.unwrap();
 
         let missing_id = InstanceId::new();
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("q".into()),
-            params: serde_json::json!({ "instance_id": missing_id.0.to_string() }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let result = handle_query_instance(ctx, &storage).await.unwrap();
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": missing_id.0.to_string() }),
+        );
+        let result = handle_query_instance(ctx).await.unwrap();
 
-        assert_eq!(result["found"], serde_json::json!(false));
+        assert_eq!(result["found"], json!(false));
     }
 
     #[tokio::test]
     async fn query_instance_denies_cross_tenant_query() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1");
         let target = mk_instance("T2");
         storage.create_instance(&caller).await.unwrap();
         storage.create_instance(&target).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("q".into()),
-            params: serde_json::json!({ "instance_id": target.id.0.to_string() }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.0.to_string() }),
+        );
+        let err = handle_query_instance(ctx).await.unwrap_err();
 
         assert!(matches!(err, StepError::Permanent { .. }));
         if let StepError::Permanent { message, .. } = &err {
@@ -200,36 +157,26 @@ mod tests {
 
     #[tokio::test]
     async fn query_instance_rejects_missing_instance_id_param() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1");
         storage.create_instance(&caller).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("q".into()),
-            params: serde_json::json!({}),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+        let ctx = mk_ctx(&caller, storage_dyn, json!({}));
+        let err = handle_query_instance(ctx).await.unwrap_err();
 
         assert!(matches!(err, StepError::Permanent { .. }));
     }
 
     #[tokio::test]
     async fn query_instance_rejects_invalid_uuid_param() {
-        let storage = SqliteStorage::in_memory().await.unwrap();
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
         let caller = mk_instance("T1");
         storage.create_instance(&caller).await.unwrap();
 
-        let ctx = StepContext {
-            instance_id: caller.id,
-            block_id: BlockId("q".into()),
-            params: serde_json::json!({ "instance_id": "not-a-uuid" }),
-            context: ExecutionContext::default(),
-            attempt: 1,
-        };
-        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+        let ctx = mk_ctx(&caller, storage_dyn, json!({ "instance_id": "not-a-uuid" }));
+        let err = handle_query_instance(ctx).await.unwrap_err();
 
         assert!(matches!(err, StepError::Permanent { .. }));
     }

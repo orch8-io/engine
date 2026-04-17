@@ -91,9 +91,14 @@ async fn public_webhook(
         "source": "public_webhook",
         "user_agent": headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or(""),
     });
-    let instance_id =
-        orch8_engine::triggers::create_trigger_instance(&*state.storage, &trigger, body, meta, None)
-            .await?;
+    let instance_id = orch8_engine::triggers::create_trigger_instance(
+        &*state.storage,
+        &trigger,
+        body,
+        meta,
+        None,
+    )
+    .await?;
 
     Ok((
         StatusCode::ACCEPTED,

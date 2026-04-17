@@ -18,15 +18,18 @@ pub mod step;
 pub mod step_block;
 pub mod tool_call;
 pub mod try_catch;
+pub mod util;
 pub mod wasm_plugin;
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
+use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
 use orch8_types::error::StepError;
-use orch8_types::ids::{BlockId, InstanceId};
+use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
 /// Step handlers are plain async functions. No activity ceremony.
 pub type StepHandler = Box<
@@ -38,12 +41,21 @@ pub type StepHandler = Box<
 >;
 
 /// Context passed to step handlers during execution.
+///
+/// Cheaply cloneable — the `storage` handle is an `Arc`, and the other fields
+/// are newtype wrappers / JSON / small POD.
+#[derive(Clone)]
 pub struct StepContext {
     pub instance_id: InstanceId,
+    pub tenant_id: TenantId,
     pub block_id: BlockId,
     pub params: serde_json::Value,
     pub context: ExecutionContext,
     pub attempt: u32,
+    /// Storage handle for handlers that need direct storage access
+    /// (e.g. `emit_event`, `send_signal`, `query_instance`). Handlers that
+    /// don't need storage simply ignore this field.
+    pub storage: Arc<dyn StorageBackend>,
 }
 
 /// Registry of named step handlers.
@@ -159,6 +171,26 @@ impl Default for HandlerRegistry {
 mod tests {
     use super::*;
 
+    async fn mk_test_storage() -> Arc<dyn StorageBackend> {
+        Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        )
+    }
+
+    fn mk_ctx(storage: Arc<dyn StorageBackend>) -> StepContext {
+        StepContext {
+            instance_id: InstanceId::new(),
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("step_1".into()),
+            params: serde_json::Value::Null,
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage,
+        }
+    }
+
     #[tokio::test]
     async fn register_and_invoke_handler() {
         let mut registry = HandlerRegistry::new();
@@ -167,13 +199,7 @@ mod tests {
         });
 
         let handler = registry.get("test_step").unwrap();
-        let ctx = StepContext {
-            instance_id: InstanceId::new(),
-            block_id: BlockId("step_1".into()),
-            params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
-            attempt: 0,
-        };
+        let ctx = mk_ctx(mk_test_storage().await);
         let result = handler(ctx).await.unwrap();
         assert_eq!(result, serde_json::json!({"result": "ok"}));
     }
@@ -191,39 +217,26 @@ mod tests {
             Ok(serde_json::json!({"source": "real"}))
         });
 
+        let storage = mk_test_storage().await;
+
         // Without mock, real handler runs.
-        let ctx = StepContext {
-            instance_id: InstanceId::new(),
-            block_id: BlockId("s".into()),
-            params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
-            attempt: 0,
-        };
-        let result = registry.get("my_step").unwrap()(ctx).await.unwrap();
+        let result = registry.get("my_step").unwrap()(mk_ctx(Arc::clone(&storage)))
+            .await
+            .unwrap();
         assert_eq!(result["source"], "real");
 
         // Install mock.
         registry.set_mock("my_step", serde_json::json!({"source": "mock"}));
-        let ctx = StepContext {
-            instance_id: InstanceId::new(),
-            block_id: BlockId("s".into()),
-            params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
-            attempt: 0,
-        };
-        let result = registry.get("my_step").unwrap()(ctx).await.unwrap();
+        let result = registry.get("my_step").unwrap()(mk_ctx(Arc::clone(&storage)))
+            .await
+            .unwrap();
         assert_eq!(result["source"], "mock");
 
         // Clear mock, real handler restored.
         registry.clear_mock("my_step");
-        let ctx = StepContext {
-            instance_id: InstanceId::new(),
-            block_id: BlockId("s".into()),
-            params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
-            attempt: 0,
-        };
-        let result = registry.get("my_step").unwrap()(ctx).await.unwrap();
+        let result = registry.get("my_step").unwrap()(mk_ctx(Arc::clone(&storage)))
+            .await
+            .unwrap();
         assert_eq!(result["source"], "real");
     }
 
@@ -232,13 +245,7 @@ mod tests {
         let mut registry = HandlerRegistry::new();
         registry.set_mock_error("failing_step", "test error".into(), true);
 
-        let ctx = StepContext {
-            instance_id: InstanceId::new(),
-            block_id: BlockId("s".into()),
-            params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
-            attempt: 0,
-        };
+        let ctx = mk_ctx(mk_test_storage().await);
         let result = registry.get("failing_step").unwrap()(ctx).await;
         assert!(result.is_err());
     }
