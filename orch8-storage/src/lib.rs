@@ -585,6 +585,24 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Delete externalized state by `ref_key`.
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;
 
+    /// Delete up to `limit` `externalized_state` rows whose `expires_at` has
+    /// elapsed. Returns the number of rows actually deleted.
+    ///
+    /// This is the GC sweeper's storage primitive (M4). Limiting per-sweep
+    /// deletion prevents a single long transaction from blocking writers on a
+    /// backlog of stale rows. The sweeper calls this on a fixed interval and
+    /// logs the deletion count.
+    ///
+    /// Rows with `expires_at IS NULL` never expire and are never touched.
+    /// The default impl returns `Ok(0)` so test/memory backends remain
+    /// compilable without an implementation.
+    async fn delete_expired_externalized_state(
+        &self,
+        _limit: u32,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     // === Audit Log ===
 
     /// Append an audit log entry.

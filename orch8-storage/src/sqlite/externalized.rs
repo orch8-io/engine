@@ -233,3 +233,106 @@ pub(super) async fn delete(storage: &SqliteStorage, ref_key: &str) -> Result<(),
         .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }
+
+/// Delete up to `limit` rows whose `expires_at` has elapsed. `expires_at` is
+/// stored as ISO-8601 text in SQLite. Both sides of the comparison are
+/// normalized through `datetime(...)` so RFC 3339 strings (with a 'T'
+/// separator and timezone offset, e.g. `2026-04-16T10:00:00+00:00`) are
+/// compared as real timestamps rather than by lexicographic byte order,
+/// which would otherwise disagree with `datetime('now')`'s space-separated
+/// form and silently skip expired rows.
+pub(super) async fn delete_expired(
+    storage: &SqliteStorage,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(
+        r"DELETE FROM externalized_state
+          WHERE ref_key IN (
+              SELECT ref_key FROM externalized_state
+              WHERE expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now')
+              LIMIT ?1
+          )",
+    )
+    .bind(i64::from(limit))
+    .execute(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use orch8_types::ids::InstanceId;
+    use serde_json::json;
+
+    use super::*;
+
+    async fn mk_store() -> SqliteStorage {
+        SqliteStorage::in_memory().await.unwrap()
+    }
+
+    async fn set_expires_at(
+        store: &SqliteStorage,
+        ref_key: &str,
+        expires: Option<&str>,
+    ) {
+        sqlx::query("UPDATE externalized_state SET expires_at = ?1 WHERE ref_key = ?2")
+            .bind(expires)
+            .bind(ref_key)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_expired_removes_past_but_keeps_future_and_null() {
+        let store = mk_store().await;
+        let inst = InstanceId::new();
+
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let future = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+
+        for k in ["a:past", "b:future", "c:null"] {
+            save(&store, inst, k, &json!({"v": k})).await.unwrap();
+        }
+        set_expires_at(&store, "a:past", Some(&past)).await;
+        set_expires_at(&store, "b:future", Some(&future)).await;
+        // c:null keeps expires_at = NULL (never expires)
+
+        let deleted = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(deleted, 1, "only the past-expired row should be deleted");
+
+        assert!(get(&store, "a:past").await.unwrap().is_none());
+        assert!(get(&store, "b:future").await.unwrap().is_some());
+        assert!(get(&store, "c:null").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_expired_respects_limit() {
+        let store = mk_store().await;
+        let inst = InstanceId::new();
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+
+        for i in 0..5 {
+            let k = format!("k:{i}");
+            save(&store, inst, &k, &json!({"i": i})).await.unwrap();
+            set_expires_at(&store, &k, Some(&past)).await;
+        }
+
+        // Sweep in two bounded passes — confirms LIMIT is honored.
+        let first = delete_expired(&store, 2).await.unwrap();
+        assert_eq!(first, 2);
+        let second = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(second, 3);
+        let third = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(third, 0, "idempotent once backlog is drained");
+    }
+
+    #[tokio::test]
+    async fn delete_expired_on_empty_store_is_zero() {
+        let store = mk_store().await;
+        let deleted = delete_expired(&store, 100).await.unwrap();
+        assert_eq!(deleted, 0);
+    }
+}

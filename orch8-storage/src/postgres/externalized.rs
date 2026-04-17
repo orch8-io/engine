@@ -225,3 +225,25 @@ pub(super) async fn delete(store: &PostgresStorage, ref_key: &str) -> Result<(),
         .await?;
     Ok(())
 }
+
+/// Delete up to `limit` rows whose `expires_at` has elapsed. Returns the
+/// affected row count. Uses a CTE because Postgres `DELETE` does not accept a
+/// `LIMIT` clause directly — we pre-select the `ref_key` values to bound sweep size,
+/// then delete the matching rows in one round-trip.
+pub(super) async fn delete_expired(
+    store: &PostgresStorage,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(
+        r"DELETE FROM externalized_state
+          WHERE ref_key IN (
+              SELECT ref_key FROM externalized_state
+              WHERE expires_at IS NOT NULL AND expires_at <= NOW()
+              LIMIT $1
+          )",
+    )
+    .bind(i64::from(limit))
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected())
+}

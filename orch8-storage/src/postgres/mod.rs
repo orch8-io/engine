@@ -639,6 +639,10 @@ impl StorageBackend for PostgresStorage {
         externalized::delete(self, ref_key).await
     }
 
+    async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError> {
+        externalized::delete_expired(self, limit).await
+    }
+
     // === Audit Log ===
 
     async fn append_audit_log(

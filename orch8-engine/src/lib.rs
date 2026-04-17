@@ -5,6 +5,7 @@ pub mod error;
 pub mod evaluator;
 pub mod expression;
 pub mod externalized;
+pub mod gc;
 pub mod handlers;
 pub mod lifecycle;
 pub mod metrics;
@@ -205,6 +206,14 @@ impl Engine {
         });
 
         Self::spawn_credentials_refresh(Arc::clone(&self.storage), self.cancel.clone());
+
+        // Externalized-state GC sweeper (TTL-based cleanup, every 5 minutes).
+        let gc_storage = Arc::clone(&self.storage);
+        let gc_cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            gc::run_gc_loop(gc_storage, gc::GC_DEFAULT_INTERVAL, gc_cancel).await;
+            tracing::info!("externalized gc loop exited");
+        });
     }
 
     /// Spawn the `OAuth2` credential refresh loop.
