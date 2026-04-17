@@ -6,7 +6,7 @@ use orch8_types::execution::NodeState;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
-use orch8_types::signal::{Signal, SignalType};
+use orch8_types::signal::{Signal, SignalAction};
 
 use crate::error::EngineError;
 
@@ -52,8 +52,25 @@ async fn process_signals_inner(
             "processing signal"
         );
 
-        match &signal.signal_type {
-            SignalType::Pause => {
+        // Lift `(signal_type, payload)` into a typed variant once. Decode
+        // failures are non-fatal (malformed payloads must not poison the
+        // whole signal queue), so they mark the signal delivered and move on.
+        let action = match signal.action() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(
+                    instance_id = %instance_id,
+                    signal_type = %signal.signal_type,
+                    error = %e,
+                    "malformed signal payload — discarding"
+                );
+                storage.mark_signal_delivered(signal.id).await?;
+                continue;
+            }
+        };
+
+        match action {
+            SignalAction::Pause => {
                 if current_state.can_transition_to(InstanceState::Paused) {
                     crate::lifecycle::transition_instance(
                         storage,
@@ -72,7 +89,7 @@ async fn process_signals_inner(
                     "cannot pause instance in current state"
                 );
             }
-            SignalType::Resume => {
+            SignalAction::Resume => {
                 if current_state == InstanceState::Paused {
                     crate::lifecycle::transition_instance(
                         storage,
@@ -87,7 +104,7 @@ async fn process_signals_inner(
                 }
                 // If not paused, just mark delivered — already running.
             }
-            SignalType::Cancel => {
+            SignalAction::Cancel => {
                 if !current_state.can_transition_to(InstanceState::Cancelled) {
                     warn!(
                         instance_id = %instance_id,
@@ -127,21 +144,13 @@ async fn process_signals_inner(
                 storage.mark_signal_delivered(signal.id).await?;
                 return Ok(true);
             }
-            SignalType::UpdateContext => {
-                // Payload should be an ExecutionContext JSON.
-                if let Ok(ctx) = serde_json::from_value::<orch8_types::context::ExecutionContext>(
-                    signal.payload.clone(),
-                ) {
-                    storage.update_instance_context(instance_id, &ctx).await?;
-                    info!(instance_id = %instance_id, "context updated via signal");
-                } else {
-                    warn!(
-                        instance_id = %instance_id,
-                        "invalid context payload in UpdateContext signal"
-                    );
-                }
+            SignalAction::UpdateContext(ctx) => {
+                // Payload was validated by `Signal::action()` — no runtime
+                // decode fallback needed here.
+                storage.update_instance_context(instance_id, &ctx).await?;
+                info!(instance_id = %instance_id, "context updated via signal");
             }
-            SignalType::Custom(name) => {
+            SignalAction::Custom { name, .. } => {
                 info!(
                     instance_id = %instance_id,
                     signal_name = %name,
@@ -229,6 +238,7 @@ fn is_descendant_of_any(
 mod tests {
     use super::*;
     use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::signal::SignalType;
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{Namespace, SequenceId, TenantId};
     use orch8_types::instance::{Priority, TaskInstance};

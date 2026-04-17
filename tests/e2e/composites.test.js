@@ -201,11 +201,11 @@ describe("Composite Blocks", () => {
         "rt1",
         [
           {
-            condition: "mode == fast",
+            condition: 'mode == "fast"',
             blocks: [step("fast_step", "log", { message: "fast path" })],
           },
           {
-            condition: "mode == slow",
+            condition: 'mode == "slow"',
             blocks: [step("slow_step", "log", { message: "slow path" })],
           },
         ],
