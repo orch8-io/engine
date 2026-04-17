@@ -149,9 +149,15 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE TABLE IF NOT EXISTS externalized_state (
     ref_key TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    payload TEXT,                    -- raw JSON when compression IS NULL
+    payload_bytes BLOB,              -- zstd-compressed JSON when compression = 'zstd'
+    compression TEXT,                -- NULL or 'zstd'
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_externalized_state_instance
+    ON externalized_state(instance_id);
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id TEXT PRIMARY KEY,
