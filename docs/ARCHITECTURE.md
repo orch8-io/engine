@@ -115,6 +115,11 @@ Blocks are recursive — a Parallel can contain TryCatch, which can contain Step
 | `log` | Logs `params.message` at info level |
 | `sleep` | Sleeps for `params.duration_ms` milliseconds |
 | `http_request` | Makes an HTTP request (method, URL, headers, body) |
+| `emit_event` | Fire an event trigger → spawn a new workflow instance (same tenant only; supports per-parent dedupe via `dedupe_key`) |
+| `send_signal` | Enqueue a signal (`pause`/`resume`/`cancel`/`update_context`/custom) to another instance (same tenant only) |
+| `query_instance` | Read another instance's context + state (same tenant only; returns `{ found: false }` for missing target) |
+
+See [`API.md` — Workflow coordination handlers](API.md#workflow-coordination-handlers) for full param/return schemas and error semantics.
 
 Custom handlers: registered via `HandlerRegistry` (Rust functions), or dispatched to external workers.
 

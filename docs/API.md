@@ -768,8 +768,154 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `log` | `message` (string), `level` ("debug"/"info"/"warn") | `{ "message": "..." }` |
 | `sleep` | `duration_ms` (integer, default 100) | `{ "slept_ms": N }` |
 | `http_request` | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000) | `{ "status": 200, "body": "..." }` |
+| `emit_event` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ instance_id, sequence_name, deduped }` |
+| `send_signal` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ signal_id }` |
+| `query_instance` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ found, state?, context?, created_at?, updated_at? }` |
 
 Any handler name not registered as built-in is automatically dispatched to the external worker queue.
+
+---
+
+### Workflow coordination handlers
+
+Three built-in handlers let one workflow coordinate with another **within the same tenant**. Cross-tenant targets always fail with `Permanent` — the engine reads the caller's `tenant_id` from its running instance and rejects mismatches.
+
+> **Known limitation:** step handler `params` currently do NOT flow through template resolution, so dynamic references like `{{ context.data.target_id }}` will be passed through as literal strings. Use literal values for now, or compute values into context and rework this when param templating lands. Tracked as follow-up.
+
+#### `emit_event`
+
+Fires an event trigger → spawns a new child workflow instance.
+
+**Params:**
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `trigger_slug` | string | yes | Slug of an enabled event trigger in the caller's tenant |
+| `data` | object | no | Event payload; becomes the child's `context.data` (default `{}`) |
+| `meta` | object | no | Extra metadata merged into the child's metadata. `source` and `parent_instance_id` are always set by the engine and cannot be spoofed |
+| `dedupe_key` | string | no | Non-empty string. When present, `(parent_instance_id, dedupe_key)` is recorded atomically — subsequent calls with the same key from the same parent return the existing child and set `deduped: true`. Empty string is rejected |
+
+**Returns:** `{ "instance_id": "<uuid>", "sequence_name": "<name>", "deduped": <bool> }`
+
+**Errors:**
+
+| Condition | Variant |
+|---|---|
+| Missing `trigger_slug`; `dedupe_key` empty or non-string | `Permanent` |
+| Trigger not found, disabled, or in another tenant | `Permanent` |
+| Caller instance not found | `Permanent` |
+| Storage connection / pool / query failure | `Retryable` |
+| Other storage failure | `Permanent` |
+
+**Dedupe semantics:** scope is **per-parent** — the key is `(parent_instance_id, dedupe_key)`. Different parent instances can reuse the same key without colliding. Dedupe rows are swept by the TTL sweeper (default 30 days).
+
+**Example:**
+
+```json
+{
+  "type": "step",
+  "id": "fan_out_order",
+  "handler": "emit_event",
+  "params": {
+    "trigger_slug": "on-order-created",
+    "data": { "order_id": "ord_123", "total_cents": 4200 },
+    "dedupe_key": "ord_123"
+  }
+}
+```
+
+#### `send_signal`
+
+Enqueues a signal on an existing instance. Target must be non-terminal.
+
+**Params:**
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `instance_id` | string (UUID) | yes | Target instance |
+| `signal_type` | string \| object | yes | See variants below |
+| `payload` | any | no | Arbitrary JSON delivered with the signal (default `null`) |
+
+`signal_type` accepts all `SignalType` variants in snake_case:
+
+- `"pause"`, `"resume"`, `"cancel"`, `"update_context"`
+- custom signals use the tagged form: `{ "custom": "my_signal_name" }`
+
+**Returns:** `{ "signal_id": "<uuid>" }`
+
+**Errors:**
+
+| Condition | Variant |
+|---|---|
+| Missing / invalid `instance_id`; missing / invalid `signal_type` | `Permanent` |
+| Target not found; target in another tenant; target in terminal state | `Permanent` |
+| Enqueue conflict (UUID collision; indicates a bug) | `Permanent` |
+| Storage connection / pool / query failure | `Retryable` |
+
+**Example:**
+
+```json
+{
+  "type": "step",
+  "id": "cancel_child",
+  "handler": "send_signal",
+  "params": {
+    "instance_id": "0194d2e6-7f44-7e2a-9c3e-1a2b3c4d5e6f",
+    "signal_type": "cancel"
+  }
+}
+```
+
+Custom signal:
+
+```json
+{
+  "type": "step",
+  "id": "notify_child",
+  "handler": "send_signal",
+  "params": {
+    "instance_id": "0194d2e6-7f44-7e2a-9c3e-1a2b3c4d5e6f",
+    "signal_type": { "custom": "approval_granted" },
+    "payload": { "reviewer": "alice" }
+  }
+}
+```
+
+#### `query_instance`
+
+Reads another instance's context and state.
+
+**Params:**
+
+| Field | Type | Required |
+|-------|------|----------|
+| `instance_id` | string (UUID) | yes |
+
+**Returns (found):** `{ "found": true, "state": "<state>", "context": { ... }, "created_at": "<ts>", "updated_at": "<ts>" }`
+
+**Returns (missing):** `{ "found": false }` — note this is NOT an error.
+
+**Errors:**
+
+| Condition | Variant |
+|---|---|
+| Missing / invalid `instance_id` | `Permanent` |
+| Caller instance not found | `Permanent` |
+| Target in another tenant | `Permanent` (intentional — `query_instance` errors rather than masking cross-tenant as `{ found: false }`, so a missing target and a cross-tenant target are distinguishable) |
+| Storage connection / pool / query failure | `Retryable` |
+
+**Example:**
+
+```json
+{
+  "type": "step",
+  "id": "read_child",
+  "handler": "query_instance",
+  "params": {
+    "instance_id": "0194d2e6-7f44-7e2a-9c3e-1a2b3c4d5e6f"
+  }
+}
+```
 
 ---
 

@@ -169,7 +169,9 @@ Implemented as `INSERT … ON CONFLICT DO NOTHING RETURNING child_instance_id`; 
 - Define `producer` and `consumer` sequences; register an event trigger for `consumer`.
 - Run `producer` (which contains an `emit_event` step) → assert child reached terminal state.
 - `query_instance` returns child's context.
-- Run `producer` twice with same `dedupe_key` → assert only one child instance exists.
+- A single `producer` run that calls `emit_event` twice with the same `dedupe_key` → assert only one child instance exists.
+
+> **Correction (T16):** Dedupe scope is `(parent_instance_id, dedupe_key)` — per-parent. Running the producer sequence twice gives two distinct parent instance ids and therefore never collides, so "run producer twice with same dedupe_key" would NOT exercise dedupe. The E2E test issues two `emit_event` calls from a single producer run instead.
 
 ## Out of scope (future work)
 
