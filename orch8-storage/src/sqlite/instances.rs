@@ -217,40 +217,7 @@ pub(super) async fn update_context_externalized(
         .map_err(|e| StorageError::Query(e.to_string()))?;
 
     for (ref_key, payload) in &refs {
-        use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
-        let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
-        let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
-
-        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
-            let compressed = compress(payload)?;
-            sqlx::query(
-                "INSERT OR REPLACE INTO externalized_state \
-                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-                 VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
-            )
-            .bind(ref_key)
-            .bind(id.0.to_string())
-            .bind(compressed)
-            .bind(raw_size)
-            .bind(ts(Utc::now()))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        } else {
-            sqlx::query(
-                "INSERT OR REPLACE INTO externalized_state \
-                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
-            )
-            .bind(ref_key)
-            .bind(id.0.to_string())
-            .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
-            .bind(raw_size)
-            .bind(ts(Utc::now()))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        }
+        insert_externalized_row(&mut tx, id, ref_key, payload).await?;
     }
 
     sqlx::query("UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1")
@@ -264,6 +231,176 @@ pub(super) async fn update_context_externalized(
     tx.commit()
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
+/// Transactional single-instance create with externalization. SQLite twin of
+/// [`super::super::postgres::instances::create_externalized`].
+pub(super) async fn create_externalized(
+    storage: &SqliteStorage,
+    instance: &TaskInstance,
+    threshold_bytes: u32,
+) -> Result<(), StorageError> {
+    let mut inst_clone = instance.clone();
+    let refs = crate::externalizing::externalize_fields(
+        &mut inst_clone.context.data,
+        &instance.id.0.to_string(),
+        threshold_bytes,
+    );
+
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    for (ref_key, payload) in &refs {
+        insert_externalized_row(&mut tx, instance.id, ref_key, payload).await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
+    )
+    .bind(inst_clone.id.0.to_string())
+    .bind(inst_clone.sequence_id.0.to_string())
+    .bind(&inst_clone.tenant_id.0)
+    .bind(&inst_clone.namespace.0)
+    .bind(inst_clone.state.to_string())
+    .bind(inst_clone.next_fire_at.map(ts))
+    .bind(inst_clone.priority as i16)
+    .bind(&inst_clone.timezone)
+    .bind(serde_json::to_string(&inst_clone.metadata)?)
+    .bind(serde_json::to_string(&inst_clone.context)?)
+    .bind(&inst_clone.concurrency_key)
+    .bind(inst_clone.max_concurrency)
+    .bind(&inst_clone.idempotency_key)
+    .bind(inst_clone.session_id.map(|u| u.to_string()))
+    .bind(inst_clone.parent_instance_id.map(|u| u.0.to_string()))
+    .bind(ts(inst_clone.created_at))
+    .bind(ts(inst_clone.updated_at))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
+/// Transactional batched create with externalization. Each instance's
+/// `context.data` is externalized independently, then every externalized
+/// row plus every `task_instances` row commits in a single transaction.
+pub(super) async fn create_batch_externalized(
+    storage: &SqliteStorage,
+    instances: &[TaskInstance],
+    threshold_bytes: u32,
+) -> Result<u64, StorageError> {
+    if instances.is_empty() {
+        return Ok(0);
+    }
+
+    let mut prepared: Vec<(TaskInstance, Vec<(String, serde_json::Value)>)> =
+        Vec::with_capacity(instances.len());
+    for inst in instances {
+        let mut c = inst.clone();
+        let refs = crate::externalizing::externalize_fields(
+            &mut c.context.data,
+            &inst.id.0.to_string(),
+            threshold_bytes,
+        );
+        prepared.push((c, refs));
+    }
+
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    // Step 1: externalized rows (per-instance keyed).
+    for (inst, refs) in &prepared {
+        for (ref_key, payload) in refs {
+            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
+        }
+    }
+
+    // Step 2: insert marker-swapped task_instances rows.
+    for (inst, _) in &prepared {
+        sqlx::query(
+            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"
+        )
+        .bind(inst.id.0.to_string())
+        .bind(inst.sequence_id.0.to_string())
+        .bind(&inst.tenant_id.0)
+        .bind(&inst.namespace.0)
+        .bind(inst.state.to_string())
+        .bind(inst.next_fire_at.map(ts))
+        .bind(inst.priority as i16)
+        .bind(&inst.timezone)
+        .bind(serde_json::to_string(&inst.metadata)?)
+        .bind(serde_json::to_string(&inst.context)?)
+        .bind(&inst.concurrency_key)
+        .bind(inst.max_concurrency)
+        .bind(&inst.idempotency_key)
+        .bind(inst.session_id.map(|u| u.to_string()))
+        .bind(inst.parent_instance_id.map(|u| u.0.to_string()))
+        .bind(ts(inst.created_at))
+        .bind(ts(inst.updated_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(instances.len() as u64)
+}
+
+/// Insert (or upsert via INSERT OR REPLACE) one externalized_state row
+/// inside an existing transaction. Picks compressed or inline representation
+/// based on raw payload size.
+async fn insert_externalized_row(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    instance_id: InstanceId,
+    ref_key: &str,
+    payload: &serde_json::Value,
+) -> Result<(), StorageError> {
+    use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
+    let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+    let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+
+    if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+        let compressed = compress(payload)?;
+        sqlx::query(
+            "INSERT OR REPLACE INTO externalized_state \
+             (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+             VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
+        )
+        .bind(ref_key)
+        .bind(instance_id.0.to_string())
+        .bind(compressed)
+        .bind(raw_size)
+        .bind(ts(Utc::now()))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    } else {
+        sqlx::query(
+            "INSERT OR REPLACE INTO externalized_state \
+             (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
+        )
+        .bind(ref_key)
+        .bind(instance_id.0.to_string())
+        .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
+        .bind(raw_size)
+        .bind(ts(Utc::now()))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    }
     Ok(())
 }
 

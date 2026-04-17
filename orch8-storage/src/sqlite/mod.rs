@@ -169,6 +169,22 @@ impl StorageBackend for SqliteStorage {
         instances::create_batch(self, instances).await
     }
 
+    async fn create_instance_externalized(
+        &self,
+        instance: &TaskInstance,
+        threshold_bytes: u32,
+    ) -> Result<(), StorageError> {
+        instances::create_externalized(self, instance, threshold_bytes).await
+    }
+
+    async fn create_instances_batch_externalized(
+        &self,
+        instances: &[TaskInstance],
+        threshold_bytes: u32,
+    ) -> Result<u64, StorageError> {
+        instances::create_batch_externalized(self, instances, threshold_bytes).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         instances::get(self, id).await
     }

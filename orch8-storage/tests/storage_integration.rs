@@ -1831,6 +1831,104 @@ async fn update_instance_context_externalized_threshold_zero_is_passthrough() {
 }
 
 #[tokio::test]
+async fn create_instance_externalized_swaps_markers_and_persists_refs() {
+    use orch8_storage::externalizing::{is_marker, REF_KEY};
+
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    // Instance born with an already-large `data.big` field — externalization
+    // must happen during the INSERT, not a follow-up update.
+    let big_payload = json!({ "blob": "x".repeat(2_000) });
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({
+        "small": "tiny",
+        "big": big_payload.clone(),
+    });
+
+    s.create_instance_externalized(&inst, 1024).await.unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["small"], json!("tiny"));
+    assert!(is_marker(&back.context.data["big"]));
+
+    let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    assert_eq!(fetched, Some(big_payload));
+}
+
+#[tokio::test]
+async fn create_instance_externalized_threshold_zero_is_passthrough() {
+    // threshold_bytes == 0 means nothing is externalized; the row lands
+    // inline and no `externalized_state` records are produced.
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({ "inline": "y".repeat(5_000) });
+
+    s.create_instance_externalized(&inst, 0).await.unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["inline"], json!("y".repeat(5_000)));
+}
+
+#[tokio::test]
+async fn create_instances_batch_externalized_externalizes_each_instance_independently() {
+    use orch8_storage::externalizing::{is_marker, REF_KEY};
+
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let big_a = json!({ "blob": "a".repeat(2_000) });
+    let big_b = json!({ "blob": "b".repeat(3_000) });
+
+    let mut inst_a = make_instance("t1", seq.id);
+    inst_a.context.data = json!({ "tag": "A", "big": big_a.clone() });
+
+    let mut inst_b = make_instance("t1", seq.id);
+    inst_b.context.data = json!({ "tag": "B", "big": big_b.clone() });
+
+    let inserted = s
+        .create_instances_batch_externalized(&[inst_a.clone(), inst_b.clone()], 1024)
+        .await
+        .unwrap();
+    assert_eq!(inserted, 2);
+
+    for (inst, expected_blob, expected_tag) in [
+        (&inst_a, &big_a, "A"),
+        (&inst_b, &big_b, "B"),
+    ] {
+        let back = s.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(back.context.data["tag"], json!(expected_tag));
+        assert!(is_marker(&back.context.data["big"]));
+
+        // Each instance must own its own ref_key (keyed by its own id).
+        let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+        assert!(
+            ref_key.starts_with(&inst.id.0.to_string()),
+            "ref_key {ref_key:?} must be scoped to instance {}",
+            inst.id.0
+        );
+        let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+        assert_eq!(fetched.as_ref(), Some(expected_blob));
+    }
+}
+
+#[tokio::test]
+async fn create_instances_batch_externalized_empty_input_is_noop() {
+    let s = store().await;
+    let inserted = s
+        .create_instances_batch_externalized(&[], 1024)
+        .await
+        .unwrap();
+    assert_eq!(inserted, 0);
+}
+
+#[tokio::test]
 async fn merge_context_data_preserves_other_sections() {
     // `merge_context_data` updates only a key under `context.data`. It must
     // NOT touch `context.config`, `context.audit`, or `context.runtime`.

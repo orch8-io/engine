@@ -70,6 +70,62 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn create_instances_batch(&self, instances: &[TaskInstance])
         -> Result<u64, StorageError>;
 
+    /// Persist a new instance while externalizing large `context.data` fields.
+    ///
+    /// Contract mirrors [`Self::update_instance_context_externalized`]:
+    /// externalized payloads and the marker-swapped instance row land in the
+    /// same transaction, so partial failure can't leave dangling markers in
+    /// `task_instances.context`.
+    ///
+    /// When `threshold_bytes == 0` this degenerates to [`Self::create_instance`].
+    ///
+    /// The default impl is non-atomic (save refs, then insert instance) so
+    /// in-memory/test backends keep compiling. Production backends override
+    /// with a single transaction.
+    async fn create_instance_externalized(
+        &self,
+        instance: &TaskInstance,
+        threshold_bytes: u32,
+    ) -> Result<(), StorageError> {
+        let mut inst_clone = instance.clone();
+        let refs = crate::externalizing::externalize_fields(
+            &mut inst_clone.context.data,
+            &instance.id.0.to_string(),
+            threshold_bytes,
+        );
+        if !refs.is_empty() {
+            self.batch_save_externalized_state(instance.id, &refs).await?;
+        }
+        self.create_instance(&inst_clone).await
+    }
+
+    /// Batched counterpart of [`Self::create_instance_externalized`].
+    ///
+    /// Each instance's context is independently externalized (its own
+    /// `ref_key` prefix uses its own `instance_id`), then all externalized
+    /// payloads and all instance rows commit in a single transaction on
+    /// production backends.
+    async fn create_instances_batch_externalized(
+        &self,
+        instances: &[TaskInstance],
+        threshold_bytes: u32,
+    ) -> Result<u64, StorageError> {
+        let mut clones: Vec<TaskInstance> = Vec::with_capacity(instances.len());
+        for inst in instances {
+            let mut c = inst.clone();
+            let refs = crate::externalizing::externalize_fields(
+                &mut c.context.data,
+                &inst.id.0.to_string(),
+                threshold_bytes,
+            );
+            if !refs.is_empty() {
+                self.batch_save_externalized_state(inst.id, &refs).await?;
+            }
+            clones.push(c);
+        }
+        self.create_instances_batch(&clones).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
 
     /// Hot path. Uses `FOR UPDATE SKIP LOCKED` on Postgres.
