@@ -281,7 +281,9 @@ mod tests {
         assert_eq!(err.max, 128);
         // Surface the env var hint in the error message so operators know
         // which knob to turn.
-        assert!(err.to_string().contains("ORCH8_SCHEDULER__MAX_CONTEXT_BYTES"));
+        assert!(err
+            .to_string()
+            .contains("ORCH8_SCHEDULER__MAX_CONTEXT_BYTES"));
     }
 
     #[test]
@@ -302,7 +304,10 @@ mod tests {
             ..ExecutionContext::default()
         };
         let grown = ctx.serialized_size();
-        assert!(grown > empty + 500, "payload growth should dominate envelope");
+        assert!(
+            grown > empty + 500,
+            "payload growth should dominate envelope"
+        );
     }
 
     #[test]

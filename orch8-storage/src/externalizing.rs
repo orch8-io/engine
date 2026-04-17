@@ -218,7 +218,9 @@ mod tests {
         // Drift guard: if the canonical shape changes here it MUST also change
         // in orch8-engine::externalized and in docs/CONTEXT_MANAGEMENT.md §8.5.
         assert!(is_marker(&json!({"_externalized": true, "_ref": "k"})));
-        assert!(!is_marker(&json!({"_externalized": true, "_ref": "k", "x": 1})));
+        assert!(!is_marker(
+            &json!({"_externalized": true, "_ref": "k", "x": 1})
+        ));
         assert!(!is_marker(&json!({"_externalized": false, "_ref": "k"})));
         assert!(!is_marker(&json!({"_ref": "k"})));
         assert!(!is_marker(&json!("scalar")));
@@ -246,7 +248,10 @@ mod tests {
         let mut v = json!({ "k": payload });
         #[allow(clippy::cast_possible_truncation)]
         let refs = externalize_fields(&mut v, "inst1", (encoded_len + 1) as u32);
-        assert!(refs.is_empty(), "value one byte under threshold stays inline");
+        assert!(
+            refs.is_empty(),
+            "value one byte under threshold stays inline"
+        );
     }
 
     #[test]
@@ -271,7 +276,10 @@ mod tests {
         let refs = externalize_fields(&mut v, "inst1", 1024);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].0, "inst1:ctx:data:weird:field");
-        assert_eq!(v["weird:field"]["_ref"], json!("inst1:ctx:data:weird:field"));
+        assert_eq!(
+            v["weird:field"]["_ref"],
+            json!("inst1:ctx:data:weird:field")
+        );
     }
 
     #[test]
@@ -305,7 +313,14 @@ mod tests {
     fn marker_roundtrips_through_is_marker_with_various_keys() {
         // Ref-key content should not matter for marker recognition — only
         // the two-key shape and value types do.
-        for key in ["", "simple", "with:colons", "with spaces", "日本語", "a".repeat(1024).as_str()] {
+        for key in [
+            "",
+            "simple",
+            "with:colons",
+            "with spaces",
+            "日本語",
+            "a".repeat(1024).as_str(),
+        ] {
             let m = marker(key);
             assert!(is_marker(&m), "marker('{key}') not recognized as marker");
             assert_eq!(m[REF_KEY], json!(key));

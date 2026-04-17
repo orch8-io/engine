@@ -91,9 +91,7 @@ mod tests {
         // A user payload might happen to have `_externalized: true` and a
         // numeric / null / array `_ref`. That is not a marker — the engine
         // must leave it alone so the data survives the round-trip.
-        assert!(!is_ref_marker(
-            &json!({"_externalized": true, "_ref": 42})
-        ));
+        assert!(!is_ref_marker(&json!({"_externalized": true, "_ref": 42})));
         assert!(!is_ref_marker(
             &json!({"_externalized": true, "_ref": null})
         ));

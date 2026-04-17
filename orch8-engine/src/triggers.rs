@@ -76,8 +76,7 @@ async fn sync_triggers(
     let desired: HashMap<String, &TriggerDef> = triggers
         .iter()
         .filter(|t| {
-            t.enabled
-                && !matches!(t.trigger_type, TriggerType::Webhook | TriggerType::Event)
+            t.enabled && !matches!(t.trigger_type, TriggerType::Webhook | TriggerType::Event)
         })
         .map(|t| (t.slug.clone(), t))
         .collect();

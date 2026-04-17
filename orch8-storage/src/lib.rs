@@ -94,7 +94,8 @@ pub trait StorageBackend: Send + Sync + 'static {
             threshold_bytes,
         );
         if !refs.is_empty() {
-            self.batch_save_externalized_state(instance.id, &refs).await?;
+            self.batch_save_externalized_state(instance.id, &refs)
+                .await?;
         }
         self.create_instance(&inst_clone).await
     }
@@ -596,10 +597,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Rows with `expires_at IS NULL` never expire and are never touched.
     /// The default impl returns `Ok(0)` so test/memory backends remain
     /// compilable without an implementation.
-    async fn delete_expired_externalized_state(
-        &self,
-        _limit: u32,
-    ) -> Result<u64, StorageError> {
+    async fn delete_expired_externalized_state(&self, _limit: u32) -> Result<u64, StorageError> {
         Ok(0)
     }
 

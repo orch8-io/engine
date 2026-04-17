@@ -347,7 +347,10 @@ mod tests {
         let mut batch = vec![inst];
         preload_externalized_markers(&storage, &mut batch).await;
 
-        assert_eq!(batch[0].context.data["ok"], payload, "resolvable marker should hydrate");
+        assert_eq!(
+            batch[0].context.data["ok"], payload,
+            "resolvable marker should hydrate"
+        );
         assert_eq!(
             batch[0].context.data["missing"], missing_marker,
             "unresolvable marker must stay intact for downstream error reporting"

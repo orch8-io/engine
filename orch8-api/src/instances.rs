@@ -245,9 +245,9 @@ pub(crate) async fn create_instances_batch(
     // Enforce tenant isolation and context size for each item in the batch.
     for (i, r) in req.instances.iter().enumerate() {
         crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
-        r.context.check_size(state.max_context_bytes).map_err(|e| {
-            ApiError::PayloadTooLarge(format!("instances[{i}]: {e}"))
-        })?;
+        r.context
+            .check_size(state.max_context_bytes)
+            .map_err(|e| ApiError::PayloadTooLarge(format!("instances[{i}]: {e}")))?;
     }
 
     let now = Utc::now();

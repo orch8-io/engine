@@ -932,8 +932,7 @@ async fn execute_step_block(
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: step_def.params.clone(),
-        context: crate::handlers::step_block::context_for_step(storage, instance, step_def)
-            .await?,
+        context: crate::handlers::step_block::context_for_step(storage, instance, step_def).await?,
         attempt,
         timeout: step_def.timeout,
         externalize_threshold,
@@ -1118,10 +1117,8 @@ async fn dispatch_to_external_worker(
         // handing off to an external worker. Mirrors the in-process path.
         // The remote process cannot be trusted to filter on its own.
         context: {
-            let resolved = crate::handlers::step_block::context_for_step(
-                storage, instance, step_def,
-            )
-            .await?;
+            let resolved =
+                crate::handlers::step_block::context_for_step(storage, instance, step_def).await?;
             serde_json::to_value(&resolved).unwrap_or_default()
         },
         attempt: i16::try_from(attempt).unwrap_or(i16::MAX),

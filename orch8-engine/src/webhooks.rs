@@ -160,9 +160,9 @@ mod tests {
     #[test]
     fn backoff_increases_exponentially() {
         assert_eq!(backoff_duration(0), Duration::from_millis(500));
-        assert_eq!(backoff_duration(1), Duration::from_millis(1_000));
-        assert_eq!(backoff_duration(2), Duration::from_millis(2_000));
-        assert_eq!(backoff_duration(3), Duration::from_millis(4_000));
+        assert_eq!(backoff_duration(1), Duration::from_secs(1));
+        assert_eq!(backoff_duration(2), Duration::from_secs(2));
+        assert_eq!(backoff_duration(3), Duration::from_secs(4));
     }
 
     #[test]

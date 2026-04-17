@@ -501,7 +501,10 @@ mod tests {
     fn externalization_mode_parses_tagged_json() {
         let mode: ExternalizationMode =
             serde_json::from_str(r#"{"type":"threshold","bytes":32768}"#).unwrap();
-        assert!(matches!(mode, ExternalizationMode::Threshold { bytes: 32768 }));
+        assert!(matches!(
+            mode,
+            ExternalizationMode::Threshold { bytes: 32768 }
+        ));
 
         let mode: ExternalizationMode = serde_json::from_str(r#"{"type":"never"}"#).unwrap();
         assert!(matches!(mode, ExternalizationMode::Never));

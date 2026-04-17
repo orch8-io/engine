@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn serde_duration_opt_some_round_trip() {
         let w = OptDurationWrapper {
-            dur: Some(Duration::from_millis(3000)),
+            dur: Some(Duration::from_secs(3)),
         };
         let json = serde_json::to_string(&w).unwrap();
         assert_eq!(json, r#"{"dur":3000}"#);

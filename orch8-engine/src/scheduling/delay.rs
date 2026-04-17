@@ -96,7 +96,7 @@ mod tests {
     fn simple_delay() {
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_secs(3600),
+            duration: StdDuration::from_hours(1),
             business_days_only: false,
             jitter: None,
             holidays: vec![],
@@ -164,9 +164,9 @@ mod tests {
     fn jitter_stays_within_bounds() {
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_secs(3600),
+            duration: StdDuration::from_hours(1),
             business_days_only: false,
-            jitter: Some(StdDuration::from_secs(60)),
+            jitter: Some(StdDuration::from_mins(1)),
             holidays: vec![],
         };
         for _ in 0..100 {

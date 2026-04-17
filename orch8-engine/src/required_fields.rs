@@ -198,9 +198,8 @@ mod tests {
                 fields: vec!["user_id".into(), "order_id".into()],
             })),
         );
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(
-            step,
-        )]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(step)]));
         assert_eq!(
             rft.fields_for(&BlockId("step-1".into())),
             Some(&["user_id".into(), "order_id".into()][..])
@@ -210,9 +209,8 @@ mod tests {
     #[test]
     fn rft_returns_none_for_all_access_via_bool() {
         let step = step_def("step-1", Some(access_with(FieldAccess::ALL)));
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(
-            step,
-        )]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(step)]));
         assert_eq!(rft.fields_for(&BlockId("step-1".into())), None);
     }
 
@@ -222,27 +220,24 @@ mod tests {
             "step-1",
             Some(access_with(FieldAccess::Keyword(AccessKeyword::All))),
         );
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(
-            step,
-        )]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(step)]));
         assert_eq!(rft.fields_for(&BlockId("step-1".into())), None);
     }
 
     #[test]
     fn rft_empty_vec_for_no_access() {
         let step = step_def("step-1", Some(access_with(FieldAccess::NONE)));
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(
-            step,
-        )]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(step)]));
         assert_eq!(rft.fields_for(&BlockId("step-1".into())), Some(&[][..]));
     }
 
     #[test]
     fn rft_returns_none_when_context_access_not_declared() {
         let step = step_def("step-1", None);
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(
-            step,
-        )]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Step(step)]));
         // Unknown block and "no declaration" are both None — caller falls back
         // to full fetch.
         assert_eq!(rft.fields_for(&BlockId("step-1".into())), None);
@@ -269,9 +264,10 @@ mod tests {
                 vec![BlockDefinition::Step(step_b)],
             ],
         };
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
-            BlockDefinition::Parallel(par),
-        ]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Parallel(
+                par,
+            )]));
         assert_eq!(
             rft.fields_for(&BlockId("a".into())),
             Some(&["x".into()][..])

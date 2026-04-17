@@ -253,8 +253,7 @@ fn bench_preload(c: &mut Criterion) {
 
     // 1) No markers: early-return path — measures the scan overhead only.
     c.bench_function("preload_no_markers_50_instances", |b| {
-        let (storage, template) =
-            rt.block_on(async { seed_preload_batch(50, 0).await });
+        let (storage, template) = rt.block_on(async { seed_preload_batch(50, 0).await });
         b.to_async(&rt).iter(|| async {
             let mut batch = template.clone();
             orch8_engine::preload::preload_externalized_markers(
@@ -267,8 +266,7 @@ fn bench_preload(c: &mut Criterion) {
 
     // 2) Typical: 50 instances × 2 refs each = 100 markers in one batch.
     c.bench_function("preload_50x2_markers", |b| {
-        let (storage, template) =
-            rt.block_on(async { seed_preload_batch(50, 2).await });
+        let (storage, template) = rt.block_on(async { seed_preload_batch(50, 2).await });
         b.to_async(&rt).iter(|| async {
             let mut batch = template.clone();
             orch8_engine::preload::preload_externalized_markers(
@@ -282,8 +280,7 @@ fn bench_preload(c: &mut Criterion) {
     // 3) Wide: 100 instances × 4 refs each = 400 markers. Exercises dedup
     //    and the hydration walk at realistic fan-out.
     c.bench_function("preload_100x4_markers", |b| {
-        let (storage, template) =
-            rt.block_on(async { seed_preload_batch(100, 4).await });
+        let (storage, template) = rt.block_on(async { seed_preload_batch(100, 4).await });
         b.to_async(&rt).iter(|| async {
             let mut batch = template.clone();
             orch8_engine::preload::preload_externalized_markers(

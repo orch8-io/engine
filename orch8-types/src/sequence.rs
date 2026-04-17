@@ -182,9 +182,7 @@ pub enum FieldAccess {
     Bool(bool),
     /// Explicit field list: only the listed top-level keys of `context.data`
     /// are visible to the handler.
-    Fields {
-        fields: Vec<String>,
-    },
+    Fields { fields: Vec<String> },
     /// String keyword: `"all"` or `"none"`.
     Keyword(AccessKeyword),
 }
@@ -522,7 +520,7 @@ mod tests {
         }"#;
         let rp: RetryPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(rp.max_attempts, 5);
-        assert_eq!(rp.initial_backoff, Duration::from_millis(1000));
+        assert_eq!(rp.initial_backoff, Duration::from_secs(1));
         assert_eq!(rp.max_backoff, Duration::from_secs(30));
         assert!((rp.backoff_multiplier - 2.0).abs() < f64::EPSILON);
 

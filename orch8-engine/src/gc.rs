@@ -51,7 +51,7 @@ fn error_kind(err: &StorageError) -> &'static str {
 pub const GC_BATCH_LIMIT: u32 = 1_000;
 
 /// Default cadence between sweep ticks.
-pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
+pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Run the expiry sweeper until `cancel` fires. Each tick calls
 /// [`StorageBackend::delete_expired_externalized_state`] once with
@@ -125,10 +125,9 @@ mod tests {
 
         // Serialization needs its own case because it holds a
         // `serde_json::Error` which can't be cheaply constructed inline.
-        let ser_err: StorageError =
-            serde_json::from_str::<serde_json::Value>("{invalid")
-                .unwrap_err()
-                .into();
+        let ser_err: StorageError = serde_json::from_str::<serde_json::Value>("{invalid")
+            .unwrap_err()
+            .into();
         assert_eq!(error_kind(&ser_err), "serialization");
     }
 

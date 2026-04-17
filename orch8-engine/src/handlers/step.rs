@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn backoff_exponential() {
         let initial = Duration::from_secs(1);
-        let max = Duration::from_secs(60);
+        let max = Duration::from_mins(1);
         let multiplier = 2.0;
 
         assert_eq!(

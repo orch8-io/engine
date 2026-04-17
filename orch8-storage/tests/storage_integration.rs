@@ -820,20 +820,14 @@ async fn batch_save_externalized_state_upserts_existing_keys() {
     seed_instance(&s, inst_id).await;
 
     // Seed.
-    s.batch_save_externalized_state(
-        inst_id,
-        &[("bs_up".to_string(), json!({"v": 1}))],
-    )
-    .await
-    .unwrap();
+    s.batch_save_externalized_state(inst_id, &[("bs_up".to_string(), json!({"v": 1}))])
+        .await
+        .unwrap();
 
     // Re-save with a different value — ON CONFLICT DO UPDATE path.
-    s.batch_save_externalized_state(
-        inst_id,
-        &[("bs_up".to_string(), json!({"v": 2}))],
-    )
-    .await
-    .unwrap();
+    s.batch_save_externalized_state(inst_id, &[("bs_up".to_string(), json!({"v": 2}))])
+        .await
+        .unwrap();
 
     assert_eq!(
         s.get_externalized_state("bs_up").await.unwrap(),
@@ -1814,7 +1808,10 @@ async fn update_instance_context_externalized_swaps_markers_and_persists_refs() 
     assert!(is_marker(&back.context.data["big"]));
 
     // The marker's ref_key must resolve via externalized_state to the full payload.
-    let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+    let ref_key = back.context.data["big"][REF_KEY]
+        .as_str()
+        .unwrap()
+        .to_string();
     let fetched = s.get_externalized_state(&ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
@@ -1868,7 +1865,10 @@ async fn create_instance_externalized_swaps_markers_and_persists_refs() {
     assert_eq!(back.context.data["small"], json!("tiny"));
     assert!(is_marker(&back.context.data["big"]));
 
-    let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+    let ref_key = back.context.data["big"][REF_KEY]
+        .as_str()
+        .unwrap()
+        .to_string();
     let fetched = s.get_externalized_state(&ref_key).await.unwrap();
     assert_eq!(fetched, Some(big_payload));
 }
@@ -1913,16 +1913,16 @@ async fn create_instances_batch_externalized_externalizes_each_instance_independ
         .unwrap();
     assert_eq!(inserted, 2);
 
-    for (inst, expected_blob, expected_tag) in [
-        (&inst_a, &big_a, "A"),
-        (&inst_b, &big_b, "B"),
-    ] {
+    for (inst, expected_blob, expected_tag) in [(&inst_a, &big_a, "A"), (&inst_b, &big_b, "B")] {
         let back = s.get_instance(inst.id).await.unwrap().unwrap();
         assert_eq!(back.context.data["tag"], json!(expected_tag));
         assert!(is_marker(&back.context.data["big"]));
 
         // Each instance must own its own ref_key (keyed by its own id).
-        let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+        let ref_key = back.context.data["big"][REF_KEY]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(
             ref_key.starts_with(&inst.id.0.to_string()),
             "ref_key {ref_key:?} must be scoped to instance {}",
@@ -1969,7 +1969,9 @@ async fn merge_context_data_preserves_other_sections() {
     };
     s.create_instance(&inst).await.unwrap();
 
-    s.merge_context_data(inst.id, "b", &json!(99)).await.unwrap();
+    s.merge_context_data(inst.id, "b", &json!(99))
+        .await
+        .unwrap();
 
     let back = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(back.context.data["a"], 1, "existing key must survive");
@@ -1991,8 +1993,12 @@ async fn merge_context_data_overwrites_same_key() {
     inst.context.data = json!({});
     s.create_instance(&inst).await.unwrap();
 
-    s.merge_context_data(inst.id, "k", &json!("v1")).await.unwrap();
-    s.merge_context_data(inst.id, "k", &json!("v2")).await.unwrap();
+    s.merge_context_data(inst.id, "k", &json!("v1"))
+        .await
+        .unwrap();
+    s.merge_context_data(inst.id, "k", &json!("v2"))
+        .await
+        .unwrap();
     s.merge_context_data(inst.id, "k", &json!({"nested": true}))
         .await
         .unwrap();

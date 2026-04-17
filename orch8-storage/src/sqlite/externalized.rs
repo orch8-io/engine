@@ -288,11 +288,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn set_expires_at(
-        store: &SqliteStorage,
-        ref_key: &str,
-        expires: Option<&str>,
-    ) {
+    async fn set_expires_at(store: &SqliteStorage, ref_key: &str, expires: Option<&str>) {
         sqlx::query("UPDATE externalized_state SET expires_at = ?1 WHERE ref_key = ?2")
             .bind(expires)
             .bind(ref_key)

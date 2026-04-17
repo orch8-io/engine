@@ -239,7 +239,7 @@ async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
     });
 
     // Poll until all instances reach terminal state
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if Instant::now() > deadline {
             println!("  TIMEOUT after 60s");

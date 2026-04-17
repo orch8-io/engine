@@ -121,9 +121,7 @@ impl Engine {
     /// After the timeout, remaining tasks are aborted — we accept that a misbehaving
     /// task may lose its final state rather than let it hold the engine from exiting.
     pub(crate) async fn drain_background(background: &mut JoinSet<()>) {
-        let drain = async {
-            while background.join_next().await.is_some() {}
-        };
+        let drain = async { while background.join_next().await.is_some() {} };
         if tokio::time::timeout(BACKGROUND_SHUTDOWN_TIMEOUT, drain)
             .await
             .is_ok()
