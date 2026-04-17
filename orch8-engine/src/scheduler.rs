@@ -126,7 +126,7 @@ async fn process_tick(
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
     let now = Utc::now();
-    let instances = storage
+    let mut instances = storage
         .claim_due_instances(now, batch_size, max_per_tenant)
         .await?;
 
@@ -156,6 +156,12 @@ async fn process_tick(
                 .map_err(EngineError::from)
         },
     )?;
+
+    // Hydrate externalized `context.data` markers for every claimed
+    // instance in one batched fetch. This removes the per-step N+1 that
+    // would otherwise occur inside `resolve_markers`. Storage errors are
+    // non-fatal: the per-step resolver remains the correctness fallback.
+    crate::preload::preload_externalized_markers(storage.as_ref(), &mut instances).await;
 
     // Wrap in Arc so we can share cheaply across spawned tasks.
     let prefetched = Arc::new(build_prefetch_map(signals_map, completed_map));

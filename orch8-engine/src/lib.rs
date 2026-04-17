@@ -8,6 +8,7 @@ pub mod externalized;
 pub mod handlers;
 pub mod lifecycle;
 pub mod metrics;
+pub mod preload;
 pub mod recovery;
 pub mod required_fields;
 pub mod scheduler;
