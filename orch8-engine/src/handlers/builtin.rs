@@ -6,10 +6,12 @@
 //! - `http_request` — makes an HTTP request (minimal TCP-based)
 
 use std::net::ToSocketAddrs;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
+use orch8_storage::StorageBackend;
 use orch8_types::error::StepError;
 
 use super::{HandlerRegistry, StepContext};
@@ -70,7 +72,11 @@ pub(crate) fn is_url_safe(url: &str) -> bool {
 }
 
 /// Register all built-in handlers on the given registry.
-pub fn register_builtins(registry: &mut HandlerRegistry) {
+///
+/// Handlers that need access to storage (`emit_event`, `send_signal`,
+/// `query_instance`) capture an `Arc<dyn StorageBackend>` via closure so the
+/// registry's `Fn(StepContext) -> Future` signature is preserved.
+pub fn register_builtins(registry: &mut HandlerRegistry, storage: &Arc<dyn StorageBackend>) {
     registry.register("noop", handle_noop);
     registry.register("log", handle_log);
     registry.register("sleep", handle_sleep);
@@ -79,6 +85,25 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("tool_call", super::tool_call::handle_tool_call);
     registry.register("human_review", super::human_review::handle_human_review);
     registry.register("self_modify", super::self_modify::handle_self_modify);
+
+    // Handlers that need storage — capture via Arc::clone per handler.
+    let s = Arc::clone(storage);
+    registry.register("emit_event", move |ctx| {
+        let s = Arc::clone(&s);
+        async move { super::emit_event::handle_emit_event(ctx, s.as_ref()).await }
+    });
+
+    let s = Arc::clone(storage);
+    registry.register("send_signal", move |ctx| {
+        let s = Arc::clone(&s);
+        async move { super::send_signal::handle_send_signal(ctx, s.as_ref()).await }
+    });
+
+    let s = Arc::clone(storage);
+    registry.register("query_instance", move |ctx| {
+        let s = Arc::clone(&s);
+        async move { super::query_instance::handle_query_instance(ctx, s.as_ref()).await }
+    });
 }
 
 /// No-op handler. Always succeeds with an empty result.
@@ -312,13 +337,21 @@ mod tests {
         assert!(message.contains("url"));
     }
 
-    #[test]
-    fn register_builtins_populates_registry() {
+    #[tokio::test]
+    async fn register_builtins_populates_registry() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
         let mut registry = HandlerRegistry::new();
-        register_builtins(&mut registry);
+        register_builtins(&mut registry, &storage);
         assert!(registry.contains("noop"));
         assert!(registry.contains("log"));
         assert!(registry.contains("sleep"));
         assert!(registry.contains("http_request"));
+        assert!(registry.contains("emit_event"));
+        assert!(registry.contains("send_signal"));
+        assert!(registry.contains("query_instance"));
     }
 }

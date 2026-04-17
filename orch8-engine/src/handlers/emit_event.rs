@@ -20,7 +20,6 @@ use orch8_types::{
 
 use super::StepContext;
 
-#[allow(dead_code)] // registered in register_builtins (T14)
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_emit_event(
     ctx: StepContext,
