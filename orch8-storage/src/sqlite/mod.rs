@@ -1092,4 +1092,81 @@ mod tests {
 
         assert_eq!(outcome, EmitDedupeOutcome::Inserted);
     }
+
+    #[tokio::test]
+    async fn record_or_get_emit_dedupe_second_call_returns_existing() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let parent = InstanceId::new();
+        let first = InstanceId::new();
+        let second = InstanceId::new();
+
+        let _ = storage
+            .record_or_get_emit_dedupe(parent, "k", first)
+            .await
+            .unwrap();
+        let outcome = storage
+            .record_or_get_emit_dedupe(parent, "k", second)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, EmitDedupeOutcome::AlreadyExists(first));
+    }
+
+    #[tokio::test]
+    async fn record_or_get_emit_dedupe_per_parent_isolation() {
+        use crate::EmitDedupeOutcome;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let p1 = InstanceId::new();
+        let p2 = InstanceId::new();
+        let c1 = InstanceId::new();
+        let c2 = InstanceId::new();
+
+        let o1 = storage
+            .record_or_get_emit_dedupe(p1, "k", c1)
+            .await
+            .unwrap();
+        let o2 = storage
+            .record_or_get_emit_dedupe(p2, "k", c2)
+            .await
+            .unwrap();
+
+        assert_eq!(o1, EmitDedupeOutcome::Inserted);
+        assert_eq!(o2, EmitDedupeOutcome::Inserted);
+    }
+
+    #[tokio::test]
+    async fn record_or_get_emit_dedupe_concurrent_one_winner() {
+        use crate::EmitDedupeOutcome;
+        let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let parent = InstanceId::new();
+
+        let candidates: Vec<_> = (0..10).map(|_| InstanceId::new()).collect();
+        let mut handles = Vec::new();
+        for cand in candidates.iter().copied() {
+            let s = storage.clone();
+            handles.push(tokio::spawn(async move {
+                s.record_or_get_emit_dedupe(parent, "race", cand)
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut inserted = 0;
+        let mut existing_ids = std::collections::HashSet::new();
+        for h in handles {
+            match h.await.unwrap() {
+                EmitDedupeOutcome::Inserted => inserted += 1,
+                EmitDedupeOutcome::AlreadyExists(id) => {
+                    existing_ids.insert(id);
+                }
+            }
+        }
+        assert_eq!(inserted, 1, "exactly one task should win the race");
+        assert_eq!(
+            existing_ids.len(),
+            1,
+            "all losers should observe the same winner id"
+        );
+    }
 }
