@@ -24,6 +24,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::instance::TaskInstance;
 
 use crate::externalized::extract_ref_key;
+use crate::metrics;
 
 /// Hydrate every top-level externalized marker present in the given
 /// instances' `context.data`, via a single [`StorageBackend::
@@ -64,15 +65,18 @@ pub async fn preload_externalized_markers(
     ref_keys.dedup();
 
     tracing::Span::current().record("ref_count", ref_keys.len());
+    metrics::inc_by(metrics::PRELOAD_REFS_SCANNED, ref_keys.len() as u64);
 
     // Phase 2: single batched fetch. Storage errors are swallowed and
     // logged; per-step resolution will see un-hydrated markers and either
     // succeed via the fallback single-fetch path or surface the error
     // contextually.
+    let _timer = metrics::Timer::start(metrics::PRELOAD_BATCH_DURATION);
     let resolved = match storage.batch_get_externalized_state(&ref_keys).await {
         Ok(map) => map,
         Err(e) => {
             tracing::warn!(error = %e, "preload batch fetch failed; markers left un-hydrated");
+            metrics::inc(metrics::PRELOAD_ERRORS);
             return;
         }
     };
@@ -83,6 +87,7 @@ pub async fn preload_externalized_markers(
 
     // Phase 3: hydrate in place. Walks the same top-level keys the scan
     // visited; markers whose ref_key is absent from `resolved` stay intact.
+    let mut hydrated: u64 = 0;
     for inst in instances.iter_mut() {
         let Some(obj) = inst.context.data.as_object_mut() else {
             continue;
@@ -91,10 +96,12 @@ pub async fn preload_externalized_markers(
             if let Some(k) = extract_ref_key(value) {
                 if let Some(payload) = resolved.get(k) {
                     *value = payload.clone();
+                    hydrated += 1;
                 }
             }
         }
     }
+    metrics::inc_by(metrics::PRELOAD_REFS_HYDRATED, hydrated);
 }
 
 #[cfg(test)]

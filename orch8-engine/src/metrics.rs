@@ -16,11 +16,15 @@ pub const WEBHOOKS_FAILED: &str = "orch8_webhooks_failed_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
 pub const CACHE_HITS: &str = "orch8_cache_hits_total";
 pub const CACHE_MISSES: &str = "orch8_cache_misses_total";
+pub const PRELOAD_REFS_SCANNED: &str = "orch8_preload_refs_scanned_total";
+pub const PRELOAD_REFS_HYDRATED: &str = "orch8_preload_refs_hydrated_total";
+pub const PRELOAD_ERRORS: &str = "orch8_preload_errors_total";
 
 // === Histogram names ===
 pub const TICK_DURATION: &str = "orch8_tick_duration_seconds";
 pub const STEP_DURATION: &str = "orch8_step_duration_seconds";
 pub const INSTANCE_DURATION: &str = "orch8_instance_processing_seconds";
+pub const PRELOAD_BATCH_DURATION: &str = "orch8_preload_batch_duration_seconds";
 
 // === Gauge names ===
 pub const QUEUE_DEPTH: &str = "orch8_queue_depth";
@@ -29,6 +33,13 @@ pub const ACTIVE_TASKS: &str = "orch8_active_tasks";
 /// Record a counter increment.
 pub fn inc(name: &'static str) {
     counter!(name).increment(1);
+}
+
+/// Record a counter increment by N (no-op if `n == 0`).
+pub fn inc_by(name: &'static str, n: u64) {
+    if n > 0 {
+        counter!(name).increment(n);
+    }
 }
 
 /// Record a counter increment with labels.

@@ -1,9 +1,15 @@
-//! Criterion benchmarks for engine hot paths: expression processing, template resolution.
+//! Criterion benchmarks for engine hot paths: expression processing, template
+//! resolution, externalized-marker preload.
 
+use chrono::Utc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use serde_json::json;
+use tokio::runtime::Runtime;
 
+use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
+use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 
 fn make_context() -> ExecutionContext {
     ExecutionContext {
@@ -176,10 +182,124 @@ fn bench_expression_throughput(c: &mut Criterion) {
     });
 }
 
+// ---- Preload benchmarks -----------------------------------------------------
+
+fn mk_instance(data: serde_json::Value) -> TaskInstance {
+    let now = Utc::now();
+    TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: SequenceId::new(),
+        tenant_id: TenantId("bench".into()),
+        namespace: Namespace("ns".into()),
+        state: InstanceState::Running,
+        next_fire_at: None,
+        priority: Priority::Normal,
+        timezone: "UTC".into(),
+        metadata: json!({}),
+        context: ExecutionContext {
+            data,
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        },
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn marker(ref_key: &str) -> serde_json::Value {
+    json!({ "_externalized": true, "_ref": ref_key })
+}
+
+/// Seed `n_instances`, each with `refs_per_instance` top-level externalized
+/// markers. Payloads are a fixed ~1 KiB blob — small enough that the work is
+/// dominated by fetch/marker-walk overhead rather than JSON clone cost.
+async fn seed_preload_batch(
+    n_instances: usize,
+    refs_per_instance: usize,
+) -> (orch8_storage::sqlite::SqliteStorage, Vec<TaskInstance>) {
+    let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+        .await
+        .unwrap();
+    let payload = json!({ "blob": "x".repeat(1024) });
+
+    let mut instances = Vec::with_capacity(n_instances);
+    for i in 0..n_instances {
+        let inst_id = InstanceId::new();
+        let mut obj = serde_json::Map::with_capacity(refs_per_instance + 1);
+        obj.insert("keep_small".into(), json!("scalar"));
+        for j in 0..refs_per_instance {
+            let ref_k = format!("{}:ctx:data:f{}_{}", inst_id.0, i, j);
+            storage
+                .save_externalized_state(inst_id, &ref_k, &payload)
+                .await
+                .unwrap();
+            obj.insert(format!("f{j}"), marker(&ref_k));
+        }
+        let mut inst = mk_instance(serde_json::Value::Object(obj));
+        inst.id = inst_id;
+        instances.push(inst);
+    }
+    (storage, instances)
+}
+
+fn bench_preload(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    // 1) No markers: early-return path — measures the scan overhead only.
+    c.bench_function("preload_no_markers_50_instances", |b| {
+        let (storage, template) =
+            rt.block_on(async { seed_preload_batch(50, 0).await });
+        b.to_async(&rt).iter(|| async {
+            let mut batch = template.clone();
+            orch8_engine::preload::preload_externalized_markers(
+                black_box(&storage),
+                black_box(&mut batch),
+            )
+            .await;
+        });
+    });
+
+    // 2) Typical: 50 instances × 2 refs each = 100 markers in one batch.
+    c.bench_function("preload_50x2_markers", |b| {
+        let (storage, template) =
+            rt.block_on(async { seed_preload_batch(50, 2).await });
+        b.to_async(&rt).iter(|| async {
+            let mut batch = template.clone();
+            orch8_engine::preload::preload_externalized_markers(
+                black_box(&storage),
+                black_box(&mut batch),
+            )
+            .await;
+        });
+    });
+
+    // 3) Wide: 100 instances × 4 refs each = 400 markers. Exercises dedup
+    //    and the hydration walk at realistic fan-out.
+    c.bench_function("preload_100x4_markers", |b| {
+        let (storage, template) =
+            rt.block_on(async { seed_preload_batch(100, 4).await });
+        b.to_async(&rt).iter(|| async {
+            let mut batch = template.clone();
+            orch8_engine::preload::preload_externalized_markers(
+                black_box(&storage),
+                black_box(&mut batch),
+            )
+            .await;
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_expression_processing,
     bench_template_resolution,
     bench_expression_throughput,
+    bench_preload,
 );
 criterion_main!(benches);
