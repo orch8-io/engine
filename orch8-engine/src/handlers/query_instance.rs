@@ -153,4 +153,85 @@ mod tests {
         assert_eq!(result["found"], serde_json::json!(true));
         assert!(result.get("state").is_some());
     }
+
+    #[tokio::test]
+    async fn query_instance_returns_found_false_for_missing_target() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+
+        let missing_id = InstanceId::new();
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("q".into()),
+            params: serde_json::json!({ "instance_id": missing_id.0.to_string() }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let result = handle_query_instance(ctx, &storage).await.unwrap();
+
+        assert_eq!(result["found"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn query_instance_denies_cross_tenant_query() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1");
+        let target = mk_instance("T2");
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("q".into()),
+            params: serde_json::json!({ "instance_id": target.id.0.to_string() }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+
+        assert!(matches!(err, StepError::Permanent { .. }));
+        if let StepError::Permanent { message, .. } = &err {
+            assert!(
+                message.contains("cross-tenant"),
+                "expected 'cross-tenant' in message, got: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_instance_rejects_missing_instance_id_param() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("q".into()),
+            params: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[tokio::test]
+    async fn query_instance_rejects_invalid_uuid_param() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let caller = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = StepContext {
+            instance_id: caller.id,
+            block_id: BlockId("q".into()),
+            params: serde_json::json!({ "instance_id": "not-a-uuid" }),
+            context: ExecutionContext::default(),
+            attempt: 1,
+        };
+        let err = handle_query_instance(ctx, &storage).await.unwrap_err();
+
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
 }
