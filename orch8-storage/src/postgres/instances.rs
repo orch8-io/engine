@@ -212,6 +212,92 @@ pub(super) async fn update_context(
     Ok(())
 }
 
+/// Update a task instance's context with externalization, atomic:
+/// externalized payloads + marker-swapped context commit or rollback together.
+///
+/// Contract:
+/// 1. Clone + mutate the context in-memory so any `data.*` field whose
+///    serialized size meets `threshold_bytes` is swapped for a marker.
+/// 2. Inside a single transaction, `INSERT ... ON CONFLICT DO UPDATE` each
+///    externalized payload into `externalized_state`, then `UPDATE
+///    task_instances` to the marker-swapped context.
+/// 3. `threshold_bytes == 0` short-circuits to the plain update — no
+///    externalization work is performed.
+pub(super) async fn update_context_externalized(
+    store: &PostgresStorage,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    threshold_bytes: u32,
+) -> Result<(), StorageError> {
+    // Clone once; any externalization mutation happens on the clone so the
+    // caller's value is never silently rewritten.
+    let mut ctx_clone = context.clone();
+    let refs = crate::externalizing::externalize_fields(
+        &mut ctx_clone.data,
+        &id.0.to_string(),
+        threshold_bytes,
+    );
+    let ctx_json = serde_json::to_value(&ctx_clone)?;
+
+    let mut tx = store.pool.begin().await?;
+
+    // Step 1: persist each externalized payload inside the transaction.
+    for (ref_key, payload) in &refs {
+        use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
+        let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+
+        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+            let compressed = compress(payload)?;
+            sqlx::query(
+                r"INSERT INTO externalized_state
+                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+                  VALUES ($1, $2, $3, NULL, $4, 'zstd', $5, NOW())
+                  ON CONFLICT (ref_key) DO UPDATE
+                    SET payload = NULL,
+                        payload_bytes = EXCLUDED.payload_bytes,
+                        compression = 'zstd',
+                        size_bytes = EXCLUDED.size_bytes",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(id.0)
+            .bind(ref_key)
+            .bind(&compressed)
+            .bind(raw_size)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r"INSERT INTO externalized_state
+                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+                  VALUES ($1, $2, $3, $4, NULL, NULL, $5, NOW())
+                  ON CONFLICT (ref_key) DO UPDATE
+                    SET payload = EXCLUDED.payload,
+                        payload_bytes = NULL,
+                        compression = NULL,
+                        size_bytes = EXCLUDED.size_bytes",
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(id.0)
+            .bind(ref_key)
+            .bind(payload)
+            .bind(raw_size)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    // Step 2: flip the instance context to the marker-swapped form.
+    sqlx::query("UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1")
+        .bind(id.0)
+        .bind(&ctx_json)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(super) async fn update_sequence(
     store: &PostgresStorage,
     id: InstanceId,

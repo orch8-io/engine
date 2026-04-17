@@ -1767,6 +1767,70 @@ async fn update_instance_context_is_full_replacement() {
 }
 
 #[tokio::test]
+async fn update_instance_context_externalized_swaps_markers_and_persists_refs() {
+    use orch8_storage::externalizing::{is_marker, REF_KEY};
+
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.context.data = json!({});
+    s.create_instance(&inst).await.unwrap();
+
+    // One small field stays inline, one big field must externalize.
+    let big_payload = json!({ "blob": "x".repeat(2_000) });
+    let ctx = ExecutionContext {
+        data: json!({
+            "small": "tiny",
+            "big": big_payload.clone(),
+        }),
+        config: json!({}),
+        audit: vec![],
+        runtime: RuntimeContext::default(),
+    };
+    s.update_instance_context_externalized(inst.id, &ctx, 1024)
+        .await
+        .unwrap();
+
+    // Reload the instance — inline field is verbatim, large field is a marker.
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["small"], json!("tiny"));
+    assert!(is_marker(&back.context.data["big"]));
+
+    // The marker's ref_key must resolve via externalized_state to the full payload.
+    let ref_key = back.context.data["big"][REF_KEY].as_str().unwrap().to_string();
+    let fetched = s.get_externalized_state(&ref_key).await.unwrap();
+    assert_eq!(fetched, Some(big_payload));
+}
+
+#[tokio::test]
+async fn update_instance_context_externalized_threshold_zero_is_passthrough() {
+    // threshold_bytes == 0 short-circuits — no field is ever large enough
+    // to externalize, so the call must behave identically to
+    // update_instance_context (full inline replace, no externalized_state rows).
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let inst = make_instance("t1", seq.id);
+    s.create_instance(&inst).await.unwrap();
+
+    let ctx = ExecutionContext {
+        data: json!({ "inline": "y".repeat(5_000) }),
+        config: json!({}),
+        audit: vec![],
+        runtime: RuntimeContext::default(),
+    };
+    s.update_instance_context_externalized(inst.id, &ctx, 0)
+        .await
+        .unwrap();
+
+    let back = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(back.context.data["inline"], json!("y".repeat(5_000)));
+}
+
+#[tokio::test]
 async fn merge_context_data_preserves_other_sections() {
     // `merge_context_data` updates only a key under `context.data`. It must
     // NOT touch `context.config`, `context.audit`, or `context.runtime`.

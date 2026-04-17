@@ -95,6 +95,39 @@ pub trait StorageBackend: Send + Sync + 'static {
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError>;
 
+    /// Persist `context` with top-level `data` fields >= `threshold_bytes`
+    /// swapped for externalization markers. The payloads are written to
+    /// `externalized_state` and the mutated context lands in
+    /// `task_instances.context` **in the same transaction** so partial
+    /// failure can't leave dangling markers.
+    ///
+    /// When `threshold_bytes == 0` this is equivalent to
+    /// [`Self::update_instance_context`] — no field is ever large enough to
+    /// externalize. The scheduler uses this hook to enforce
+    /// [`crate::externalizing`] semantics under the configured
+    /// `ExternalizationMode`.
+    ///
+    /// The default impl is non-atomic (save refs, then update context) to
+    /// keep test/memory backends compiling. Production backends
+    /// (Postgres/SQLite) override this with a single transaction.
+    async fn update_instance_context_externalized(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        threshold_bytes: u32,
+    ) -> Result<(), StorageError> {
+        let mut ctx_clone = context.clone();
+        let refs = crate::externalizing::externalize_fields(
+            &mut ctx_clone.data,
+            &id.0.to_string(),
+            threshold_bytes,
+        );
+        if !refs.is_empty() {
+            self.batch_save_externalized_state(id, &refs).await?;
+        }
+        self.update_instance_context(id, &ctx_clone).await
+    }
+
     /// Hot migration: rebind an instance to a different sequence version.
     async fn update_instance_sequence(
         &self,

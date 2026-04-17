@@ -192,6 +192,81 @@ pub(super) async fn update_context(
     Ok(())
 }
 
+/// Transactional variant: externalize oversized `data.*` fields and commit
+/// the payload rows + context UPDATE atomically. See the Postgres twin in
+/// [`super::super::postgres::instances::update_context_externalized`] for the
+/// contract; SQLite differs only in wire syntax and bind form.
+pub(super) async fn update_context_externalized(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    context: &ExecutionContext,
+    threshold_bytes: u32,
+) -> Result<(), StorageError> {
+    let mut ctx_clone = context.clone();
+    let refs = crate::externalizing::externalize_fields(
+        &mut ctx_clone.data,
+        &id.0.to_string(),
+        threshold_bytes,
+    );
+    let ctx_str = serde_json::to_string(&ctx_clone)?;
+
+    let mut tx = storage
+        .pool
+        .begin()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    for (ref_key, payload) in &refs {
+        use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
+        let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
+        let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+
+        if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
+            let compressed = compress(payload)?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO externalized_state \
+                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+                 VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
+            )
+            .bind(ref_key)
+            .bind(id.0.to_string())
+            .bind(compressed)
+            .bind(raw_size)
+            .bind(ts(Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        } else {
+            sqlx::query(
+                "INSERT OR REPLACE INTO externalized_state \
+                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
+                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
+            )
+            .bind(ref_key)
+            .bind(id.0.to_string())
+            .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
+            .bind(raw_size)
+            .bind(ts(Utc::now()))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Query(e.to_string()))?;
+        }
+    }
+
+    sqlx::query("UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1")
+        .bind(id.0.to_string())
+        .bind(ctx_str)
+        .bind(ts(Utc::now()))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}
+
 pub(super) async fn update_sequence(
     storage: &SqliteStorage,
     id: InstanceId,

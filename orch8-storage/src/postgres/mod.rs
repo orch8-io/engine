@@ -152,6 +152,15 @@ impl StorageBackend for PostgresStorage {
         instances::update_context(self, id, context).await
     }
 
+    async fn update_instance_context_externalized(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        threshold_bytes: u32,
+    ) -> Result<(), StorageError> {
+        instances::update_context_externalized(self, id, context, threshold_bytes).await
+    }
+
     async fn update_instance_sequence(
         &self,
         id: InstanceId,

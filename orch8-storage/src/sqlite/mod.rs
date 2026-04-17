@@ -191,6 +191,15 @@ impl StorageBackend for SqliteStorage {
         instances::update_state(self, id, new_state, next_fire_at).await
     }
 
+    async fn update_instance_context_externalized(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        threshold_bytes: u32,
+    ) -> Result<(), StorageError> {
+        instances::update_context_externalized(self, id, context, threshold_bytes).await
+    }
+
     async fn update_instance_context(
         &self,
         id: InstanceId,
