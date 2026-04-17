@@ -56,12 +56,12 @@ export default function Layout() {
   }, []);
 
   return (
-    <div className="min-h-screen grid grid-cols-[208px_1fr] grid-rows-[1fr_28px] bg-bg text-fg">
+    <div className="min-h-screen grid grid-cols-[216px_1fr] grid-rows-[1fr_32px] bg-bg text-fg">
       {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="row-span-2 border-r border-hairline bg-surface flex flex-col">
-        <div className="px-4 py-4 border-b border-hairline">
+        <div className="px-4 py-4 border-b border-hairline flex items-baseline gap-2">
           <Wordmark />
-          <div className="eyebrow mt-1 text-faint">Console</div>
+          <span className="eyebrow text-faint">Console</span>
         </div>
 
         <nav className="flex-1 p-2 space-y-0.5">
@@ -71,10 +71,10 @@ export default function Layout() {
               to={to}
               end={end}
               className={({ isActive }) =>
-                `flex items-center gap-2.5 px-2.5 h-8 rounded-sm text-[13px] transition-colors ${
+                `relative flex items-center gap-2.5 pl-3 pr-2.5 h-8 rounded-sm text-[13px] transition-colors ${
                   isActive
-                    ? "bg-signal/10 text-signal"
-                    : "text-muted hover:text-fg hover:bg-raised/50"
+                    ? "text-signal bg-signal/[0.07] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[2px] before:bg-signal before:rounded-full"
+                    : "text-muted hover:text-fg hover:bg-raised/40"
                 }`
               }
             >
@@ -95,19 +95,24 @@ export default function Layout() {
 
       {/* ── Main ────────────────────────────────────────────── */}
       <main className="overflow-y-auto">
-        <div className="max-w-[1280px] mx-auto px-8 py-8 fade-in">
+        <div className="max-w-[1320px] mx-auto px-10 py-9 fade-in">
           <Outlet />
         </div>
       </main>
 
       {/* ── Statusline ──────────────────────────────────────── */}
-      <footer className="col-start-2 border-t border-hairline bg-surface px-4 flex items-center gap-6 text-[11px] font-mono text-muted tracking-wider uppercase">
+      <footer className="col-start-2 border-t border-hairline bg-surface px-4 flex items-center gap-5 text-[11px] font-mono text-muted tracking-wider uppercase">
         <span className="flex items-center gap-1.5">
           <StatusDot tone={CONN_TONE[conn]} live={conn === "online"} />
-          {conn}
+          <span className="text-fg-dim">{conn}</span>
         </span>
-        <span>WRK · {workers}</span>
-        <span className="ml-auto">POLL · {lastPoll}</span>
+        <span className="text-faint">·</span>
+        <span>
+          WRK <span className="text-fg-dim">{workers}</span>
+        </span>
+        <span className="ml-auto">
+          POLL <span className="text-fg-dim">{lastPoll}</span>
+        </span>
       </footer>
     </div>
   );

@@ -60,7 +60,7 @@ export default function Overview() {
         description="Worker throughput and queue health across all handlers."
       />
 
-      <section className="grid grid-cols-2 gap-3 lg:grid-cols-[2fr_1fr_1fr_2fr]">
+      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label="Pending" value={pending} tone="hold" sub={subPct(pending, total)} />
         <StatCard label="Claimed" value={claimed} tone="live" sub={subPct(claimed, total)} />
         <StatCard label="Completed" value={completed} tone="ok" sub={subPct(completed, total)} />

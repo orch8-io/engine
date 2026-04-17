@@ -11,7 +11,7 @@ export function Table({ children, className = "" }: { children: ReactNode; class
 export function THead({ children }: { children: ReactNode }) {
   return (
     <thead>
-      <tr className="border-b border-hairline text-left">{children}</tr>
+      <tr className="border-b border-hairline text-left bg-sunken/30">{children}</tr>
     </thead>
   );
 }
@@ -24,7 +24,7 @@ export function TH({
   return (
     <th
       {...rest}
-      className={`eyebrow py-2 pr-4 align-middle font-medium ${className}`}
+      className={`eyebrow py-2.5 pr-4 first:pl-4 align-middle font-medium ${className}`}
     >
       {children}
     </th>

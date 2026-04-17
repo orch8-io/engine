@@ -140,11 +140,16 @@
 
   .display-num {
     font-family: var(--font-sans);
-    font-size: 2rem;
-    line-height: 1;
-    font-weight: 400;
-    letter-spacing: -0.03em;
+    font-size: 2.375rem;
+    line-height: 0.95;
+    font-weight: 450;
+    letter-spacing: -0.035em;
     font-variant-numeric: tabular-nums;
+  }
+
+  .rule {
+    height: 1px;
+    background: var(--hairline);
   }
 }
 

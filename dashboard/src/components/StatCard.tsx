@@ -29,15 +29,15 @@ interface Props {
 
 export default function StatCard({ label, value, tone = "neutral", sub }: Props) {
   return (
-    <div className="relative border border-hairline rounded-md bg-surface overflow-hidden hover:border-hairline-strong transition-colors">
+    <div className="group relative border border-hairline rounded-md bg-surface overflow-hidden hover:border-hairline-strong transition-colors">
       <div
-        className={`absolute left-0 top-0 bottom-0 w-[2px] ${ACCENT[tone]}`}
+        className={`absolute left-0 top-0 bottom-0 w-[3px] ${ACCENT[tone]}`}
         aria-hidden
       />
       <div className="p-4 pl-5">
-        <div className="eyebrow mb-2.5">{label}</div>
+        <div className="eyebrow mb-3">{label}</div>
         <div className={`display-num ${NUM[tone]}`}>{value}</div>
-        {sub && <div className="mt-2 text-[12px] text-muted">{sub}</div>}
+        {sub && <div className="mt-2.5 text-[11px] font-mono tracking-wider uppercase text-faint">{sub}</div>}
       </div>
     </div>
   );

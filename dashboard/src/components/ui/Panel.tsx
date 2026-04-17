@@ -28,7 +28,7 @@ export function PanelHeader({
   className?: string;
 }) {
   return (
-    <div className={`px-4 py-3 border-b border-hairline flex items-center gap-3 ${className}`}>
+    <div className={`px-4 h-10 border-b border-hairline flex items-center gap-3 bg-sunken/40 ${className}`}>
       {children}
     </div>
   );
