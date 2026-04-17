@@ -124,13 +124,20 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::context::ExecutionContext;
-    use orch8_types::ids::{BlockId, InstanceId};
+    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+    use std::sync::Arc;
+
+    async fn mk_test_storage() -> Arc<dyn StorageBackend> {
+        Arc::new(SqliteStorage::in_memory().await.unwrap())
+    }
 
     #[tokio::test]
     async fn returns_review_context() {
         let ctx = StepContext {
             instance_id: InstanceId::new(),
+            tenant_id: TenantId("T".into()),
             block_id: BlockId("review".into()),
             params: json!({
                 "review_data": {"text": "LLM generated this"},
@@ -139,6 +146,7 @@ mod tests {
             }),
             context: ExecutionContext::default(),
             attempt: 0,
+            storage: mk_test_storage().await,
         };
         let result = handle_human_review(ctx).await.unwrap();
         assert_eq!(result["type"], "human_review");
@@ -151,10 +159,12 @@ mod tests {
     async fn defaults_when_minimal_params() {
         let ctx = StepContext {
             instance_id: InstanceId::new(),
+            tenant_id: TenantId("T".into()),
             block_id: BlockId("r".into()),
             params: json!({}),
             context: ExecutionContext::default(),
             attempt: 0,
+            storage: mk_test_storage().await,
         };
         let result = handle_human_review(ctx).await.unwrap();
         assert_eq!(result["reviewer"], "unassigned");

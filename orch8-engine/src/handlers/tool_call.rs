@@ -136,17 +136,22 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
     use orch8_types::context::ExecutionContext;
-    use orch8_types::ids::{BlockId, InstanceId};
+    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn missing_url_fails() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let ctx = StepContext {
             instance_id: InstanceId::new(),
+            tenant_id: TenantId("T".into()),
             block_id: BlockId("t".into()),
             params: json!({"tool_name": "search"}),
             context: ExecutionContext::default(),
             attempt: 0,
+            storage,
         };
         let err = handle_tool_call(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));

@@ -338,7 +338,9 @@ mod tests {
                     "expected 'cross-tenant' in message, got: {message}"
                 );
             }
-            other => panic!("expected Permanent error, got: {other:?}"),
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
         }
 
         // Verify no child instance was created in either tenant (no leakage).

@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn resolve_preserves_booleans_and_floats_in_single_expression() {
         let ctx = ExecutionContext {
-            data: json!({"flag": true, "ratio": 3.14}),
+            data: json!({"flag": true, "ratio": 2.5}),
             config: json!({}),
             audit: vec![],
             runtime: orch8_types::context::RuntimeContext::default(),
@@ -314,7 +314,7 @@ mod tests {
         );
         assert_eq!(
             resolve(&json!("{{context.data.ratio}}"), &ctx, &json!({})).unwrap(),
-            json!(3.14)
+            json!(2.5)
         );
     }
 

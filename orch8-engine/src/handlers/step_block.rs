@@ -86,7 +86,7 @@ where
 /// Returns `true` if the instance has more work (should re-schedule).
 #[allow(clippy::too_many_lines)]
 pub async fn execute_step_node(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -98,9 +98,12 @@ pub async fn execute_step_node(
     // know about the credential registry. Missing/disabled/cross-tenant refs
     // surface as StepError::Permanent which fails the node immediately.
     let mut resolved_params = step_def.params.clone();
-    if let Err(step_err) =
-        crate::credentials::resolve_in_value(storage, &instance.tenant_id.0, &mut resolved_params)
-            .await
+    if let Err(step_err) = crate::credentials::resolve_in_value(
+        storage.as_ref(),
+        &instance.tenant_id.0,
+        &mut resolved_params,
+    )
+    .await
     {
         tracing::warn!(
             instance_id = %instance.id,
@@ -108,7 +111,7 @@ pub async fn execute_step_node(
             error = ?step_err,
             "failed to resolve credentials for step"
         );
-        evaluator::fail_node(storage, node.id).await?;
+        evaluator::fail_node(storage.as_ref(), node.id).await?;
         return Ok(false);
     }
 
@@ -119,12 +122,14 @@ pub async fn execute_step_node(
         let handler_name = step_def.handler.clone();
         let ctx = super::StepContext {
             instance_id: instance.id,
+            tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params: resolved_params.clone(),
-            context: context_for_step(storage, instance, step_def).await?,
+            context: context_for_step(storage.as_ref(), instance, step_def).await?,
             attempt: 0,
+            storage: Arc::clone(storage),
         };
-        return dispatch_plugin(storage, node, move || async move {
+        return dispatch_plugin(storage.as_ref(), node, move || async move {
             super::activepieces::handle_ap(ctx, &handler_name).await
         })
         .await;
@@ -132,19 +137,21 @@ pub async fn execute_step_node(
 
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
     if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
-        let endpoint = resolve_plugin_source(storage, &step_def.handler, PluginType::Grpc)
+        let endpoint = resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc)
             .await
             .unwrap_or_else(|| step_def.handler.clone());
         let mut params = resolved_params.clone();
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
         let ctx = super::StepContext {
             instance_id: instance.id,
+            tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params,
-            context: context_for_step(storage, instance, step_def).await?,
+            context: context_for_step(storage.as_ref(), instance, step_def).await?,
             attempt: 0,
+            storage: Arc::clone(storage),
         };
-        return dispatch_plugin(storage, node, || {
+        return dispatch_plugin(storage.as_ref(), node, || {
             super::grpc_plugin::handle_grpc_plugin(ctx)
         })
         .await;
@@ -153,17 +160,19 @@ pub async fn execute_step_node(
     // If the handler is a WASM plugin, resolve via the plugin registry then dispatch.
     if super::wasm_plugin::is_wasm_handler(&step_def.handler) {
         if let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler) {
-            let wasm_path = resolve_plugin_source(storage, plugin_name, PluginType::Wasm)
+            let wasm_path = resolve_plugin_source(storage.as_ref(), plugin_name, PluginType::Wasm)
                 .await
                 .unwrap_or_else(|| plugin_name.to_string());
             let ctx = super::StepContext {
                 instance_id: instance.id,
+                tenant_id: instance.tenant_id.clone(),
                 block_id: step_def.id.clone(),
                 params: resolved_params.clone(),
-                context: context_for_step(storage, instance, step_def).await?,
+                context: context_for_step(storage.as_ref(), instance, step_def).await?,
                 attempt: 0,
+                storage: Arc::clone(storage),
             };
-            return dispatch_plugin(storage, node, || {
+            return dispatch_plugin(storage.as_ref(), node, || {
                 super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
             })
             .await;
@@ -172,15 +181,16 @@ pub async fn execute_step_node(
 
     // If the handler is not registered in-process, dispatch to external worker queue.
     if !handlers.contains(&step_def.handler) {
-        return dispatch_step_to_external_worker(storage, instance, node, step_def).await;
+        return dispatch_step_to_external_worker(storage.as_ref(), instance, node, step_def).await;
     }
 
     let exec_params = StepExecParams {
         instance_id: instance.id,
+        tenant_id: instance.tenant_id.clone(),
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
         params: resolved_params,
-        context: context_for_step(storage, instance, step_def).await?,
+        context: context_for_step(storage.as_ref(), instance, step_def).await?,
         attempt: 0,
         timeout: step_def.timeout,
         externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
@@ -223,7 +233,7 @@ pub async fn execute_step_node(
                     }
                 }
             }
-            evaluator::complete_node(storage, node.id).await?;
+            evaluator::complete_node(storage.as_ref(), node.id).await?;
             Ok(true)
         }
         Err(EngineError::StepFailed {
@@ -233,7 +243,7 @@ pub async fn execute_step_node(
             Ok(true)
         }
         Err(e) => {
-            evaluator::fail_node(storage, node.id).await?;
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
             Err(e)
         }
     }

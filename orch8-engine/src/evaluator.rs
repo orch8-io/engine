@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
@@ -249,16 +251,16 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
 /// progress can be made within this tick.
 /// Returns `true` if there is more work to do (instance should be re-scheduled).
 pub async fn evaluate(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     sequence: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
     // Merge sequence blocks with any dynamically injected blocks.
-    let blocks = merged_blocks(storage, instance.id, sequence).await?;
+    let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
 
     // Ensure the execution tree exists (creates on first call, adds new injected nodes).
-    ensure_execution_tree(storage, instance, &blocks).await?;
+    ensure_execution_tree(storage.as_ref(), instance, &blocks).await?;
 
     // Loop: each iteration dispatches one actionable node, then re-reads
     // the tree to find more work. This lets parallel branches, try-catch
@@ -466,7 +468,7 @@ pub fn find_block<'a>(
 /// On breach: invoke escalation handler (if configured), then fail the node.
 /// Returns `true` if any deadline was breached (tree state was modified).
 async fn check_sla_deadlines(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     blocks: &[BlockDefinition],
@@ -526,10 +528,12 @@ async fn check_sla_deadlines(
                 }
                 let step_ctx = crate::handlers::StepContext {
                     instance_id: instance.id,
+                    tenant_id: instance.tenant_id.clone(),
                     block_id: node.block_id.clone(),
                     params,
                     context: instance.context.clone(),
                     attempt: 0,
+                    storage: Arc::clone(storage),
                 };
                 // Fire-and-forget: escalation handler failure doesn't block the deadline fail.
                 if let Err(e) = handler(step_ctx).await {
@@ -550,7 +554,7 @@ async fn check_sla_deadlines(
         }
 
         // Fail the node.
-        fail_node(storage, node.id).await?;
+        fail_node(storage.as_ref(), node.id).await?;
 
         // Record as block output for diagnostics.
         let output = orch8_types::output::BlockOutput {
@@ -576,7 +580,7 @@ async fn check_sla_deadlines(
 /// Returns `true` if the instance has more work to do.
 #[allow(clippy::too_many_lines)]
 async fn dispatch_block(
-    storage: &dyn StorageBackend,
+    storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
     node: &ExecutionNode,
@@ -599,47 +603,89 @@ async fn dispatch_block(
         }
         BlockDefinition::Parallel(par_def) => {
             crate::handlers::parallel::execute_parallel(
-                storage, handlers, instance, node, par_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                par_def,
+                tree,
             )
             .await
         }
         BlockDefinition::Race(race_def) => {
-            crate::handlers::race::execute_race(storage, handlers, instance, node, race_def, tree)
-                .await
+            crate::handlers::race::execute_race(
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                race_def,
+                tree,
+            )
+            .await
         }
         BlockDefinition::Loop(loop_def) => {
             crate::handlers::loop_block::execute_loop(
-                storage, handlers, instance, node, loop_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                loop_def,
+                tree,
             )
             .await
         }
         BlockDefinition::ForEach(fe_def) => {
             crate::handlers::for_each::execute_for_each(
-                storage, handlers, instance, node, fe_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                fe_def,
+                tree,
             )
             .await
         }
         BlockDefinition::Router(router_def) => {
             crate::handlers::router::execute_router(
-                storage, handlers, instance, node, router_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                router_def,
+                tree,
             )
             .await
         }
         BlockDefinition::TryCatch(tc_def) => {
             crate::handlers::try_catch::execute_try_catch(
-                storage, handlers, instance, node, tc_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                tc_def,
+                tree,
             )
             .await
         }
         BlockDefinition::ABSplit(ab_def) => {
             crate::handlers::ab_split::execute_ab_split(
-                storage, handlers, instance, node, ab_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                ab_def,
+                tree,
             )
             .await
         }
         BlockDefinition::CancellationScope(cs_def) => {
             crate::handlers::cancellation_scope::execute_cancellation_scope(
-                storage, handlers, instance, node, cs_def, tree,
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                cs_def,
+                tree,
             )
             .await
         }
@@ -668,11 +714,11 @@ async fn dispatch_block(
                         created_at: chrono::Utc::now(),
                     };
                     storage.save_block_output(&block_output).await?;
-                    complete_node(storage, node.id).await?;
+                    complete_node(storage.as_ref(), node.id).await?;
                     Ok(true)
                 } else if child.state.is_terminal() {
                     // Child failed or cancelled.
-                    fail_node(storage, node.id).await?;
+                    fail_node(storage.as_ref(), node.id).await?;
                     Ok(true)
                 } else {
                     // Still running — wait.
@@ -933,7 +979,7 @@ mod tests {
             body: vec![mk_step("inner")],
             max_iterations: 5,
         });
-        assert!(find_block(&[loop_block.clone()], &BlockId("inner".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&loop_block), &BlockId("inner".into())).is_some());
         assert!(find_block(&[loop_block], &BlockId("loop".into())).is_some());
     }
 
@@ -955,8 +1001,12 @@ mod tests {
             }],
             default: Some(vec![mk_step("default-child")]),
         });
-        assert!(find_block(&[fe.clone()], &BlockId("fe-child".into())).is_some());
-        assert!(find_block(&[router.clone()], &BlockId("route-child".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&fe), &BlockId("fe-child".into())).is_some());
+        assert!(find_block(
+            std::slice::from_ref(&router),
+            &BlockId("route-child".into())
+        )
+        .is_some());
         assert!(find_block(&[router], &BlockId("default-child".into())).is_some());
     }
 
@@ -969,8 +1019,8 @@ mod tests {
             catch_block: vec![mk_step("c")],
             finally_block: Some(vec![mk_step("f")]),
         });
-        assert!(find_block(&[tc.clone()], &BlockId("t".into())).is_some());
-        assert!(find_block(&[tc.clone()], &BlockId("c".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&tc), &BlockId("t".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&tc), &BlockId("c".into())).is_some());
         assert!(find_block(&[tc], &BlockId("f".into())).is_some());
     }
 
@@ -1004,7 +1054,7 @@ mod tests {
             version: None,
             input: serde_json::Value::Null,
         });
-        assert!(find_block(&[sub.clone()], &BlockId("sub".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&sub), &BlockId("sub".into())).is_some());
         assert!(find_block(&[sub], &BlockId("child-step".into())).is_none());
     }
 
@@ -1232,7 +1282,7 @@ mod tests {
     fn block_meta_recognizes_each_variant() {
         use orch8_types::sequence::{
             ABSplitDef, ABVariant, CancellationScopeDef, ForEachDef, LoopDef, ParallelDef, RaceDef,
-            RouterDef, SubSequenceDef, TryCatchDef,
+            RaceSemantics, RouterDef, SubSequenceDef, TryCatchDef,
         };
         let par = BlockDefinition::Parallel(ParallelDef {
             id: BlockId("p".into()),
@@ -1241,7 +1291,7 @@ mod tests {
         let race = BlockDefinition::Race(RaceDef {
             id: BlockId("race".into()),
             branches: vec![],
-            semantics: Default::default(),
+            semantics: RaceSemantics::default(),
         });
         let lp = BlockDefinition::Loop(LoopDef {
             id: BlockId("lp".into()),
@@ -1298,13 +1348,13 @@ mod tests {
 
     #[test]
     fn find_block_nested_in_race_branches() {
-        use orch8_types::sequence::RaceDef;
+        use orch8_types::sequence::{RaceDef, RaceSemantics};
         let race = BlockDefinition::Race(RaceDef {
             id: BlockId("race".into()),
             branches: vec![vec![mk_step("fast")], vec![mk_step("slow")]],
-            semantics: Default::default(),
+            semantics: RaceSemantics::default(),
         });
-        assert!(find_block(&[race.clone()], &BlockId("fast".into())).is_some());
+        assert!(find_block(std::slice::from_ref(&race), &BlockId("fast".into())).is_some());
         assert!(find_block(&[race], &BlockId("slow".into())).is_some());
     }
 

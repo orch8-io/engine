@@ -243,10 +243,10 @@ mod tests {
 
     #[test]
     fn calculate_next_fire_daily_at_midnight() {
+        use chrono::Timelike;
         // Every day at 00:00:00 — next fire must be at a midnight in UTC.
         let schedule = mk_schedule("0 0 0 * * * *");
         let next = calculate_next_fire(&schedule).expect("next fire time");
-        use chrono::Timelike;
         assert_eq!(next.hour(), 0);
         assert_eq!(next.minute(), 0);
         assert_eq!(next.second(), 0);
