@@ -1,3 +1,4 @@
+pub mod compression;
 pub mod encrypting;
 pub mod postgres;
 pub mod sqlite;
