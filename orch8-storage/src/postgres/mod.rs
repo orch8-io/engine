@@ -324,6 +324,10 @@ impl StorageBackend for PostgresStorage {
         signals::enqueue(self, signal).await
     }
 
+    async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError> {
+        signals::enqueue_if_active(self, signal).await
+    }
+
     async fn get_pending_signals(
         &self,
         instance_id: InstanceId,

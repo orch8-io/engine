@@ -2,28 +2,100 @@ use uuid::Uuid;
 
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
+use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
 use super::rows::SignalRow;
 use super::PostgresStorage;
 
+/// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
+/// [`enqueue_if_active`] so adding a column touches one place.
+const SIGNAL_INSERT_SQL: &str = r"
+    INSERT INTO signal_inbox
+        (id, instance_id, signal_type, payload, delivered, created_at, delivered_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+";
+
+/// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.
+/// Serializes `signal_type` up front so the returned `Query` borrows only
+/// from the provided `String` slot.
+fn bind_signal_insert<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    s: &'q Signal,
+    signal_type_str: &'q str,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    q.bind(s.id)
+        .bind(s.instance_id.0)
+        .bind(signal_type_str)
+        .bind(&s.payload)
+        .bind(s.delivered)
+        .bind(s.created_at)
+        .bind(s.delivered_at)
+}
+
+fn parse_instance_state(s: &str) -> Result<InstanceState, StorageError> {
+    match s {
+        "scheduled" => Ok(InstanceState::Scheduled),
+        "running" => Ok(InstanceState::Running),
+        "waiting" => Ok(InstanceState::Waiting),
+        "paused" => Ok(InstanceState::Paused),
+        "completed" => Ok(InstanceState::Completed),
+        "failed" => Ok(InstanceState::Failed),
+        "cancelled" => Ok(InstanceState::Cancelled),
+        other => Err(StorageError::Query(format!(
+            "unknown instance state: {other}"
+        ))),
+    }
+}
+
 pub(super) async fn enqueue(store: &PostgresStorage, signal: &Signal) -> Result<(), StorageError> {
     let signal_type_str = signal.signal_type.to_string();
-    sqlx::query(
-        r"
-        INSERT INTO signal_inbox (id, instance_id, signal_type, payload, delivered, created_at, delivered_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ",
-    )
-    .bind(signal.id)
-    .bind(signal.instance_id.0)
-    .bind(&signal_type_str)
-    .bind(&signal.payload)
-    .bind(signal.delivered)
-    .bind(signal.created_at)
-    .bind(signal.delivered_at)
-    .execute(&store.pool)
-    .await?;
+    bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal, &signal_type_str)
+        .execute(&store.pool)
+        .await?;
+    Ok(())
+}
+
+/// Atomic enqueue gated on target non-terminal state.
+///
+/// `SELECT ... FOR UPDATE` inside the transaction locks the target row so
+/// no concurrent worker can transition it to terminal between our check and
+/// our INSERT. The txn stays tight: begin → select → (maybe) insert → commit.
+pub(super) async fn enqueue_if_active(
+    store: &PostgresStorage,
+    signal: &Signal,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT state FROM task_instances WHERE id = $1 FOR UPDATE")
+            .bind(signal.instance_id.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    let Some((state_str,)) = row else {
+        tx.rollback().await?;
+        return Err(StorageError::NotFound {
+            entity: "task_instance",
+            id: signal.instance_id.0.to_string(),
+        });
+    };
+
+    let state = parse_instance_state(&state_str)?;
+    if state.is_terminal() {
+        tx.rollback().await?;
+        return Err(StorageError::Conflict(format!(
+            "target instance {} is in terminal state '{}'",
+            signal.instance_id.0, state_str
+        )));
+    }
+
+    let signal_type_str = signal.signal_type.to_string();
+    bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal, &signal_type_str)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 

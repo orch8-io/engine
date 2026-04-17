@@ -309,6 +309,28 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
 
+    /// Atomically enqueue a signal, but only if the target instance exists and
+    /// is NOT in a terminal state (Completed / Failed / Cancelled).
+    ///
+    /// Closes the TOCTOU window between a read-side terminal-state check and
+    /// the INSERT into `signal_inbox`. Reads the target's state and inserts
+    /// the signal row inside a single transaction, so no concurrent worker
+    /// can transition the target in between.
+    ///
+    /// Errors:
+    /// - [`StorageError::NotFound`] if the target instance does not exist.
+    /// - [`StorageError::Conflict`] if the target is in a terminal state.
+    ///   (The handler layer maps `Conflict` to `StepError::Permanent`, which
+    ///   is the desired behaviour here — a signal to a dead instance will
+    ///   never be delivered.)
+    /// - Standard sqlx mappings for connection / serialization issues.
+    ///
+    /// Every backend MUST implement this — no default impl so a missing
+    /// implementation fails at compile time instead of silently falling back
+    /// to the non-atomic [`Self::enqueue_signal`] path (same rule as the R4
+    /// dedupe methods).
+    async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError>;
+
     async fn get_pending_signals(
         &self,
         instance_id: InstanceId,

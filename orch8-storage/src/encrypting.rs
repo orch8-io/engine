@@ -340,6 +340,13 @@ impl StorageBackend for EncryptingStorage {
         self.inner.enqueue_signal(signal).await
     }
 
+    async fn enqueue_signal_if_active(
+        &self,
+        signal: &orch8_types::signal::Signal,
+    ) -> Result<(), StorageError> {
+        self.inner.enqueue_signal_if_active(signal).await
+    }
+
     async fn get_pending_signals(
         &self,
         instance_id: InstanceId,

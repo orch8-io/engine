@@ -377,6 +377,10 @@ impl StorageBackend for SqliteStorage {
         signals::enqueue(self, signal).await
     }
 
+    async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError> {
+        signals::enqueue_if_active(self, signal).await
+    }
+
     async fn get_pending_signals(
         &self,
         instance_id: InstanceId,
@@ -1419,5 +1423,98 @@ mod tests {
             still_pre.is_some(),
             "pre-seeded row must still be present (it was never part of the tx)"
         );
+    }
+
+    // === R5 / finding #4: atomic signal enqueue gated on non-terminal state =
+
+    fn mk_signal_for(target: InstanceId) -> orch8_types::signal::Signal {
+        orch8_types::signal::Signal {
+            id: Uuid::new_v4(),
+            instance_id: target,
+            signal_type: orch8_types::signal::SignalType::Cancel,
+            payload: serde_json::Value::Null,
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_signal_if_active_succeeds_when_target_running() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let target = mk_inst_for_dedupe(InstanceId::new());
+        // mk_inst_for_dedupe seeds `Scheduled`; flip to Running so the
+        // non-terminal branch is exercised explicitly.
+        storage.create_instance(&target).await.unwrap();
+        storage
+            .update_instance_state(target.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let signal = mk_signal_for(target.id);
+        storage.enqueue_signal_if_active(&signal).await.unwrap();
+
+        let pending = storage.get_pending_signals(target.id).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, signal.id);
+    }
+
+    /// Core R5 invariant: rejected calls must NOT leave a stale row in
+    /// `signal_inbox`. This is the guarantee the atomic path was introduced to
+    /// provide — a permanent rejection must roll back cleanly.
+    #[tokio::test]
+    async fn enqueue_signal_if_active_rejects_terminal_and_leaves_no_row() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let target = mk_inst_for_dedupe(InstanceId::new());
+        storage.create_instance(&target).await.unwrap();
+        storage
+            .update_instance_state(target.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(target.id, InstanceState::Completed, None)
+            .await
+            .unwrap();
+
+        let signal = mk_signal_for(target.id);
+        let err = storage
+            .enqueue_signal_if_active(&signal)
+            .await
+            .expect_err("expected Conflict on terminal target");
+        assert!(
+            matches!(err, StorageError::Conflict(_)),
+            "expected Conflict, got: {err:?}"
+        );
+
+        let pending = storage.get_pending_signals(target.id).await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "rejected enqueue_signal_if_active must not persist a row, got: {pending:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_signal_if_active_returns_not_found_for_missing_target() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let missing = InstanceId::new();
+        let signal = mk_signal_for(missing);
+
+        let err = storage
+            .enqueue_signal_if_active(&signal)
+            .await
+            .expect_err("expected NotFound for missing target");
+        assert!(
+            matches!(
+                err,
+                StorageError::NotFound {
+                    entity: "task_instance",
+                    ..
+                }
+            ),
+            "expected NotFound, got: {err:?}"
+        );
+
+        let pending = storage.get_pending_signals(missing).await.unwrap();
+        assert!(pending.is_empty());
     }
 }
