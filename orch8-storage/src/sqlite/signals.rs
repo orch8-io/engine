@@ -3,10 +3,45 @@ use uuid::Uuid;
 
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
+use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
-use super::helpers::{parse_state, row_to_signal, ts};
+use super::helpers::{row_to_signal, ts};
 use super::SqliteStorage;
+
+/// Strict state parser used by the signal enqueue path.
+///
+/// Unlike the permissive [`super::helpers::parse_state`] (which is intentionally
+/// total for row-hydration hot paths — a corrupt legacy row shouldn't crash a
+/// list query), this fallible variant mirrors Postgres's `parse_instance_state`
+/// and surfaces unknown states as [`StorageError::Query`]. It's used only in
+/// `enqueue_if_active` so the atomic path never interprets a corrupted value
+/// as a non-terminal `Scheduled` and silently lets an INSERT through.
+fn try_parse_state(s: &str) -> Result<InstanceState, StorageError> {
+    match s {
+        "scheduled" => Ok(InstanceState::Scheduled),
+        "running" => Ok(InstanceState::Running),
+        "waiting" => Ok(InstanceState::Waiting),
+        "paused" => Ok(InstanceState::Paused),
+        "completed" => Ok(InstanceState::Completed),
+        "failed" => Ok(InstanceState::Failed),
+        "cancelled" => Ok(InstanceState::Cancelled),
+        other => Err(StorageError::Query(format!(
+            "unknown instance state: {other}"
+        ))),
+    }
+}
+
+/// Issue `ROLLBACK` on a pooled connection, swallowing any error. Used on
+/// failure paths inside `enqueue_if_active` where the caller's real error is
+/// the signal to propagate — a secondary rollback failure here would just
+/// shadow the root cause, and the connection will be reset by sqlx anyway
+/// when it returns to the pool in a broken txn state.
+async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
+    if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+        tracing::warn!(error = %e, "enqueue_if_active: ROLLBACK failed, connection will be reset");
+    }
+}
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.
@@ -38,43 +73,81 @@ pub(super) async fn enqueue(storage: &SqliteStorage, signal: &Signal) -> Result<
 
 /// Atomic enqueue gated on target non-terminal state.
 ///
-/// BEGIN IMMEDIATE acquires a write lock up-front so no other writer can
-/// transition `task_instances` between our SELECT and our INSERT — this is the
-/// SQLite equivalent of Postgres's `SELECT ... FOR UPDATE`. Keeps the txn
-/// tight: begin → select → (maybe) insert → commit, no unrelated awaits.
+/// Uses `BEGIN IMMEDIATE` rather than sqlx's default `BEGIN` (DEFERRED) so
+/// SQLite acquires a RESERVED write lock up-front — the closest equivalent to
+/// Postgres's `SELECT ... FOR UPDATE`. Without this, two concurrent callers
+/// could both SELECT a non-terminal `state` before either inserts, weakening
+/// the atomicity claim. With IMMEDIATE, one writer wins the lock, the other
+/// either waits on `busy_timeout` or fails with `SQLITE_BUSY`.
+///
+/// Because sqlx's `Transaction` wrapper hard-codes `BEGIN`, we manage the
+/// transaction manually on a pooled connection and rely on explicit COMMIT /
+/// ROLLBACK. Every early return path runs [`rollback_quiet`] before propagating
+/// the caller's error — leaving a live transaction on a returned pool
+/// connection would poison subsequent users.
+///
+/// State parsing uses [`try_parse_state`] so a corrupted `state` column
+/// surfaces as [`StorageError::Query`] instead of silently coercing to
+/// `Scheduled` (which would let the INSERT proceed on a broken row —
+/// previously possible via the permissive `parse_state` helper).
 pub(super) async fn enqueue_if_active(
     storage: &SqliteStorage,
     signal: &Signal,
 ) -> Result<(), StorageError> {
-    let mut tx = storage.pool.begin().await?;
+    let mut conn = storage.pool.acquire().await?;
 
-    let row: Option<(String,)> = sqlx::query_as("SELECT state FROM task_instances WHERE id = ?1")
-        .bind(signal.instance_id.0.to_string())
-        .fetch_optional(&mut *tx)
-        .await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let row: Option<(String,)> =
+        match sqlx::query_as("SELECT state FROM task_instances WHERE id = ?1")
+            .bind(signal.instance_id.0.to_string())
+            .fetch_optional(&mut *conn)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                rollback_quiet(&mut conn).await;
+                return Err(e.into());
+            }
+        };
 
     let Some((state_str,)) = row else {
-        // Rollback is implicit on drop but explicit is clearer.
-        tx.rollback().await?;
+        rollback_quiet(&mut conn).await;
         return Err(StorageError::NotFound {
             entity: "task_instance",
             id: signal.instance_id.0.to_string(),
         });
     };
 
-    if parse_state(&state_str).is_terminal() {
-        tx.rollback().await?;
-        return Err(StorageError::Conflict(format!(
-            "target instance {} is in terminal state '{}'",
-            signal.instance_id.0, state_str
-        )));
+    let state = match try_parse_state(&state_str) {
+        Ok(s) => s,
+        Err(e) => {
+            rollback_quiet(&mut conn).await;
+            return Err(e);
+        }
+    };
+
+    if state.is_terminal() {
+        rollback_quiet(&mut conn).await;
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instance".to_string(),
+            id: signal.instance_id.0.to_string(),
+        });
     }
 
-    bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal)?
-        .execute(&mut *tx)
-        .await?;
+    let bound = match bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal) {
+        Ok(q) => q,
+        Err(e) => {
+            rollback_quiet(&mut conn).await;
+            return Err(e);
+        }
+    };
+    if let Err(e) = bound.execute(&mut *conn).await {
+        rollback_quiet(&mut conn).await;
+        return Err(e.into());
+    }
 
-    tx.commit().await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(())
 }
 

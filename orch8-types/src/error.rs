@@ -13,6 +13,15 @@ pub enum StorageError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The operation targets an entity that is in a terminal state and cannot
+    /// accept further writes (e.g. signal enqueue to a Completed / Failed /
+    /// Cancelled instance). Distinct from [`Self::Conflict`] — which covers
+    /// idempotency-key duplicates, unique-constraint violations, etc. — so
+    /// handlers can map terminal-target to a dedicated `Permanent` without
+    /// overloading the generic conflict path.
+    #[error("terminal target: {entity} {id} is in a terminal state")]
+    TerminalTarget { entity: String, id: String },
+
     #[error("migration failed: {0}")]
     Migration(String),
 

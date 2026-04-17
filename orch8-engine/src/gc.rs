@@ -39,6 +39,7 @@ fn error_kind(err: &StorageError) -> &'static str {
         StorageError::Query(_) => "query",
         StorageError::NotFound { .. } => "not_found",
         StorageError::Conflict(_) => "conflict",
+        StorageError::TerminalTarget { .. } => "terminal_target",
         StorageError::Migration(_) => "migration",
         StorageError::Serialization(_) => "serialization",
         StorageError::PoolExhausted => "pool_exhausted",

@@ -44,6 +44,13 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
     match e {
         StorageError::NotFound { entity, id } => Status::not_found(format!("{entity} {id}")),
         StorageError::Conflict(msg) => Status::already_exists(msg),
+        // Terminal-state target: the request is well-formed but the target's
+        // current state forbids it. `FailedPrecondition` is the canonical gRPC
+        // mapping per the Google API guide ("resource is in a state that
+        // prevents the operation").
+        StorageError::TerminalTarget { entity, id } => {
+            Status::failed_precondition(format!("{entity} {id} is in a terminal state"))
+        }
         StorageError::Connection(_) => Status::unavailable("storage unavailable"),
         StorageError::PoolExhausted => Status::unavailable("pool exhausted"),
         other => {

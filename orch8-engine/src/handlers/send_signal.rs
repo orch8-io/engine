@@ -63,13 +63,14 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
     };
 
     // Atomic: BEGIN → SELECT state (locked) → INSERT (or reject) → COMMIT.
-    // Terminal state is surfaced as `StorageError::Conflict` — mapped to a
-    // dedicated `Permanent` with the legacy message so existing callers /
-    // audit logs stay readable.
+    // Terminal state is surfaced as a dedicated `StorageError::TerminalTarget`
+    // variant (distinct from generic `Conflict`, which would also match
+    // idempotency-key dupes and constraint violations — those must stay
+    // unambiguous for the handler).
     match storage.enqueue_signal_if_active(&signal).await {
         Ok(()) => Ok(json!({ "signal_id": signal.id.to_string() })),
         Err(StorageError::NotFound { .. }) => Err(permanent("target instance not found")),
-        Err(StorageError::Conflict(_)) => Err(StepError::Permanent {
+        Err(StorageError::TerminalTarget { .. }) => Err(StepError::Permanent {
             message: "cannot send signal to terminal instance".to_string(),
             details: Some(json!({ "instance_id": target_id.0.to_string() })),
         }),

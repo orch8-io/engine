@@ -38,6 +38,12 @@ impl ApiError {
         match err {
             StorageError::NotFound { entity: e, id } => Self::NotFound(format!("{e} {id}")),
             StorageError::Conflict(msg) => Self::AlreadyExists(msg),
+            // Terminal-state targets are precondition failures, not "already
+            // exists" — surface as 409 Conflict with a clear message so HTTP
+            // clients can distinguish "duplicate" from "wrong state".
+            StorageError::TerminalTarget { entity: e, id } => {
+                Self::AlreadyExists(format!("{e} {id} is in a terminal state"))
+            }
             StorageError::Connection(msg) => Self::Unavailable(msg),
             StorageError::PoolExhausted => Self::Unavailable("pool exhausted".into()),
             other => Self::Internal(format!("{entity}: {other}")),
@@ -87,6 +93,9 @@ impl From<EngineError> for ApiError {
                 ApiError::NotFound(format!("{entity} {id}"))
             }
             EngineError::Storage(StorageError::Conflict(msg)) => ApiError::AlreadyExists(msg),
+            EngineError::Storage(StorageError::TerminalTarget { entity, id }) => {
+                ApiError::AlreadyExists(format!("{entity} {id} is in a terminal state"))
+            }
             EngineError::InvalidTransition { .. } => ApiError::InvalidArgument(err.to_string()),
             EngineError::HandlerNotFound(h) => ApiError::NotFound(format!("handler: {h}")),
             EngineError::ShuttingDown => ApiError::Unavailable("shutdown in progress".into()),

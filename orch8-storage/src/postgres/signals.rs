@@ -84,10 +84,10 @@ pub(super) async fn enqueue_if_active(
     let state = parse_instance_state(&state_str)?;
     if state.is_terminal() {
         tx.rollback().await?;
-        return Err(StorageError::Conflict(format!(
-            "target instance {} is in terminal state '{}'",
-            signal.instance_id.0, state_str
-        )));
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instance".to_string(),
+            id: signal.instance_id.0.to_string(),
+        });
     }
 
     let signal_type_str = signal.signal_type.to_string();

@@ -47,8 +47,10 @@ pub(crate) fn parse_instance_id(params: &Value, field: &str) -> Result<InstanceI
 /// Map a `StorageError` to the appropriate `StepError` retryability.
 ///
 /// Connection/pool/query errors are treated as retryable (transient infra
-/// issues). Everything else — serialization, constraint violations, logic
-/// errors — is permanent.
+/// issues). Everything else — serialization, constraint violations, terminal
+/// targets, logic errors — is permanent. `TerminalTarget` in particular is
+/// permanent by definition: the target will never leave the terminal state,
+/// so retrying would only produce the same error.
 pub(crate) fn map_storage_err(e: &StorageError) -> StepError {
     match e {
         StorageError::Connection(_) | StorageError::PoolExhausted | StorageError::Query(_) => {

@@ -1480,10 +1480,10 @@ mod tests {
         let err = storage
             .enqueue_signal_if_active(&signal)
             .await
-            .expect_err("expected Conflict on terminal target");
+            .expect_err("expected TerminalTarget on terminal target");
         assert!(
-            matches!(err, StorageError::Conflict(_)),
-            "expected Conflict, got: {err:?}"
+            matches!(err, StorageError::TerminalTarget { .. }),
+            "expected TerminalTarget, got: {err:?}"
         );
 
         let pending = storage.get_pending_signals(target.id).await.unwrap();
@@ -1516,5 +1516,46 @@ mod tests {
 
         let pending = storage.get_pending_signals(missing).await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    /// Fix-2 regression: a corrupted `state` column (unknown string) MUST NOT
+    /// silently coerce to `Scheduled` and let the INSERT through. The strict
+    /// parser used by `enqueue_if_active` surfaces this as `StorageError::Query`,
+    /// matching Postgres's contract.
+    #[tokio::test]
+    async fn enqueue_signal_if_active_rejects_corrupted_state() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let target = mk_inst_for_dedupe(InstanceId::new());
+        storage.create_instance(&target).await.unwrap();
+
+        // Write a junk value directly into the state column. No public API
+        // can produce this — it models a legacy row, a migration bug, or a
+        // corrupted file.
+        sqlx::query("UPDATE task_instances SET state = ?1 WHERE id = ?2")
+            .bind("totally_bogus_state")
+            .bind(target.id.0.to_string())
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+
+        let signal = mk_signal_for(target.id);
+        let err = storage
+            .enqueue_signal_if_active(&signal)
+            .await
+            .expect_err("expected Query error on corrupted state");
+        match &err {
+            StorageError::Query(msg) => assert!(
+                msg.contains("unknown instance state"),
+                "expected 'unknown instance state' in message, got: {msg}"
+            ),
+            other => panic!("expected StorageError::Query, got: {other:?}"),
+        }
+
+        // And crucially: no row leaked through.
+        let pending = storage.get_pending_signals(target.id).await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "corrupted-state rejection must not persist a signal, got: {pending:?}"
+        );
     }
 }

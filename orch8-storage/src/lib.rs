@@ -319,10 +319,16 @@ pub trait StorageBackend: Send + Sync + 'static {
     ///
     /// Errors:
     /// - [`StorageError::NotFound`] if the target instance does not exist.
-    /// - [`StorageError::Conflict`] if the target is in a terminal state.
-    ///   (The handler layer maps `Conflict` to `StepError::Permanent`, which
-    ///   is the desired behaviour here — a signal to a dead instance will
-    ///   never be delivered.)
+    /// - [`StorageError::TerminalTarget`] if the target is in a terminal state
+    ///   (Completed / Failed / Cancelled). This is a dedicated variant —
+    ///   distinct from [`StorageError::Conflict`], which is reserved for
+    ///   idempotency-key duplicates and constraint violations — so the handler
+    ///   layer can map it to a `Permanent` "cannot send signal to terminal
+    ///   instance" without overloading the generic conflict path.
+    /// - [`StorageError::Query`] if the target's persisted state column holds
+    ///   an unknown value. The backend MUST NOT silently coerce unknown states
+    ///   to `Scheduled` (or any non-terminal) — a corrupted row should surface
+    ///   as a hard error so operators notice.
     /// - Standard sqlx mappings for connection / serialization issues.
     ///
     /// Every backend MUST implement this — no default impl so a missing
