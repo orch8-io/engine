@@ -70,9 +70,10 @@ pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_hours(720);
 /// with the same bound. Continued backlog naturally spreads across ticks.
 ///
 /// Both tables share the same tick so the engine only maintains one timer;
-/// sweeps run sequentially (externalized first, then dedupe) because the two
-/// backends hit different tables and a serial pair is simpler to reason about
-/// than spawning a nested task per table.
+/// the two sweeps run concurrently via [`tokio::join!`]. They target disjoint
+/// tables, so there is no lock contention between them, and running in
+/// parallel keeps total tick latency at `max(sweep_a, sweep_b)` rather than
+/// `sweep_a + sweep_b`. Errors are still logged independently per sweep.
 pub async fn run_gc_loop(
     storage: Arc<dyn StorageBackend>,
     interval: Duration,
@@ -97,8 +98,10 @@ pub async fn run_gc_loop_with_ttl(
         tokio::select! {
             () = cancel.cancelled() => break,
             _ = ticker.tick() => {
-                sweep_externalized(storage.as_ref()).await;
-                sweep_emit_dedupe(storage.as_ref(), dedupe_ttl).await;
+                tokio::join!(
+                    sweep_externalized(storage.as_ref()),
+                    sweep_emit_dedupe(storage.as_ref(), dedupe_ttl),
+                );
             }
         }
     }
