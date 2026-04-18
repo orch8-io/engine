@@ -115,7 +115,7 @@ async fn process_signals_inner(
                     continue;
                 }
 
-                eprintln!(
+                tracing::debug!(
                     "DBG-CANCEL: inst={} sequence_def={}",
                     instance_id,
                     sequence_def.is_some()
@@ -124,9 +124,10 @@ async fn process_signals_inner(
                 // cancellable nodes and let non-cancellable ones finish.
                 if let Some(seq) = sequence_def {
                     let has_non_cancellable = cancel_scoped(storage, instance_id, seq).await?;
-                    eprintln!(
+                    tracing::debug!(
                         "DBG-CANCEL: inst={} has_non_cancellable={}",
-                        instance_id, has_non_cancellable
+                        instance_id,
+                        has_non_cancellable
                     );
                     if has_non_cancellable {
                         debug!(
