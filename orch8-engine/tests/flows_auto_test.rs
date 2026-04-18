@@ -10,8 +10,8 @@ use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::{
-    BlockDefinition, ForEachDef, LoopDef, ParallelDef, RaceDef, RaceSemantics, Route, RouterDef,
-    SequenceDefinition, StepDef, TryCatchDef,
+    BlockDefinition, LoopDef, ParallelDef, RaceSemantics, Route, RouterDef, SequenceDefinition,
+    StepDef, TryCatchDef,
 };
 
 /// Drive the evaluator until it reports no more work.
@@ -22,7 +22,7 @@ async fn drive_to_completion(
     sequence: &SequenceDefinition,
 ) {
     let max_ticks = 2000;
-    for tick in 0..max_ticks {
+    for _tick in 0..max_ticks {
         let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
         let more = evaluator::evaluate(storage, handlers, &inst, sequence)
             .await
@@ -100,6 +100,7 @@ fn mk_instance(seq_id: SequenceId) -> TaskInstance {
 // -------------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn run_100_exhaustive_flow_tests() {
     let storage_inner = SqliteStorage::in_memory().await.unwrap();
     let storage: Arc<dyn StorageBackend> = Arc::new(storage_inner);
@@ -155,20 +156,20 @@ async fn run_100_exhaustive_flow_tests() {
         for j in 0..(i % 5) {
             routes.push(Route {
                 condition: "false".into(),
-                blocks: vec![mk_step(&format!("r{}", j), "fail")],
+                blocks: vec![mk_step(&format!("r{j}"), "fail")],
             });
         }
         routes.push(Route {
             condition: "true".into(),
             blocks: vec![mk_step("match", "noop")],
         });
-        let router = BlockDefinition::Router(RouterDef {
+        let router_block = BlockDefinition::Router(RouterDef {
             id: BlockId("router".into()),
             routes,
             default: Some(vec![mk_step("def", "fail")]),
         });
 
-        let seq = mk_sequence(vec![router]);
+        let seq = mk_sequence(vec![router_block]);
         storage.create_sequence(&seq).await.unwrap();
         let inst = mk_instance(seq.id);
         storage.create_instance(&inst).await.unwrap();

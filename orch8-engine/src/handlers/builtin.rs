@@ -161,6 +161,107 @@ async fn handle_log(ctx: StepContext) -> Result<Value, StepError> {
     Ok(json!({ "message": out_message }))
 }
 
+/// Returns `true` if the given block is a descendant of a `CancellationScope` node.
+async fn is_inside_cancellation_scope(ctx: &StepContext) -> bool {
+    match ctx.storage.get_execution_tree(ctx.instance_id).await {
+        Ok(tree) => {
+            use orch8_types::execution::BlockType;
+            let scope_ids: Vec<_> = tree
+                .iter()
+                .filter(|n| n.block_type == BlockType::CancellationScope)
+                .map(|n| n.id)
+                .collect();
+            let me = tree.iter().find(|n| n.block_id == ctx.block_id);
+            me.is_some_and(|n| {
+                let mut cur = n.parent_id;
+                while let Some(pid) = cur {
+                    if scope_ids.contains(&pid) {
+                        return true;
+                    }
+                    cur = tree.iter().find(|x| x.id == pid).and_then(|x| x.parent_id);
+                }
+                false
+            })
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check for pending pause/cancel signals during a sleep and handle them.
+async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepError>> {
+    let signals = ctx
+        .storage
+        .get_pending_signals(ctx.instance_id)
+        .await
+        .ok()?;
+    let has_cancel = signals
+        .iter()
+        .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Cancel));
+    let has_pause = signals
+        .iter()
+        .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Pause));
+    if has_pause && !has_cancel {
+        debug!(
+            instance_id = %ctx.instance_id,
+            block_id = %ctx.block_id,
+            "sleep step interrupted by pause signal — driving pause"
+        );
+        let _ = crate::signals::process_signals(
+            ctx.storage.as_ref(),
+            ctx.instance_id,
+            orch8_types::instance::InstanceState::Running,
+        )
+        .await;
+        if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
+            if let Some(n) = tree.iter().find(|n| {
+                n.block_id == ctx.block_id && n.state == orch8_types::execution::NodeState::Running
+            }) {
+                let _ = ctx
+                    .storage
+                    .update_node_state(n.id, orch8_types::execution::NodeState::Pending)
+                    .await;
+            }
+        }
+        return Some(Err(StepError::Retryable {
+            message: "sleep paused by signal".into(),
+            details: None,
+        }));
+    }
+    if has_cancel {
+        debug!(
+            instance_id = %ctx.instance_id,
+            block_id = %ctx.block_id,
+            "sleep step interrupted by cancel signal — driving cancel"
+        );
+        let _ = crate::signals::process_signals(
+            ctx.storage.as_ref(),
+            ctx.instance_id,
+            orch8_types::instance::InstanceState::Running,
+        )
+        .await;
+        if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
+            for n in tree.iter().filter(|n| {
+                matches!(
+                    n.state,
+                    orch8_types::execution::NodeState::Pending
+                        | orch8_types::execution::NodeState::Running
+                        | orch8_types::execution::NodeState::Waiting
+                )
+            }) {
+                let _ = ctx
+                    .storage
+                    .update_node_state(n.id, orch8_types::execution::NodeState::Cancelled)
+                    .await;
+            }
+        }
+        return Some(Err(StepError::Retryable {
+            message: "sleep cancelled by signal".into(),
+            details: None,
+        }));
+    }
+    None
+}
+
 /// Sleep handler. Waits for a configured duration.
 ///
 /// Params:
@@ -213,7 +314,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         // from external cancel signals (`handlers/cancellation_scope.rs`).
         // The scheduler's regular signal path will defer the cancel until
         // the scope drains, matching `cancel_scoped`'s semantics.
-        if is_inside_cancellation_scope(ctx.storage.as_ref(), ctx.instance_id, ctx.block_id).await {
+        if is_inside_cancellation_scope(&ctx).await {
             continue;
         }
         if let Some(result) = check_sleep_signals(&ctx).await {
