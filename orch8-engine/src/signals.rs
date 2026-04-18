@@ -238,10 +238,10 @@ fn is_descendant_of_any(
 mod tests {
     use super::*;
     use orch8_storage::sqlite::SqliteStorage;
-    use orch8_types::signal::SignalType;
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{Namespace, SequenceId, TenantId};
     use orch8_types::instance::{Priority, TaskInstance};
+    use orch8_types::signal::SignalType;
     use serde_json::json;
 
     fn mk_signal(instance_id: InstanceId, st: SignalType, payload: serde_json::Value) -> Signal {
