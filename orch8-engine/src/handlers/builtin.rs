@@ -179,8 +179,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(json!({ "slept_ms": duration_ms }));
     }
 
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
     loop {
         let now = std::time::Instant::now();
         if now >= deadline {
@@ -233,12 +232,9 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             );
         }
         if let Ok(signals) = ctx.storage.get_pending_signals(ctx.instance_id).await {
-            let has_cancel = signals.iter().any(|s| {
-                matches!(
-                    s.signal_type,
-                    orch8_types::signal::SignalType::Cancel
-                )
-            });
+            let has_cancel = signals
+                .iter()
+                .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Cancel));
             if has_cancel {
                 // A `cancel` signal is waiting to be processed. Drive it
                 // through the normal signal pipeline so the instance state

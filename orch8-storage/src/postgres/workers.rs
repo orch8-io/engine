@@ -166,13 +166,11 @@ pub(super) async fn cancel_for_block(
     //   2. ForEach/Loop iteration reset — must purge `completed` rows so
     //      the next iteration's INSERT isn't blocked by the
     //      UNIQUE(instance_id, block_id) constraint on worker_tasks.
-    let result = sqlx::query(
-        "DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = $2",
-    )
-    .bind(instance_id)
-    .bind(block_id)
-    .execute(&store.pool)
-    .await?;
+    let result = sqlx::query("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = $2")
+        .bind(instance_id)
+        .bind(block_id)
+        .execute(&store.pool)
+        .await?;
     Ok(result.rows_affected())
 }
 
