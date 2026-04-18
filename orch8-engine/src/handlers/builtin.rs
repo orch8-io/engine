@@ -4,6 +4,8 @@
 //! - `log` — logs a message from params, returns it
 //! - `sleep` — sleeps for a configured duration
 //! - `http_request` — makes an HTTP request (minimal TCP-based)
+//! - `fail` — always fails with a configurable message (for testing and
+//!   explicit force-fail steps in user sequences)
 
 use std::net::ToSocketAddrs;
 
@@ -78,6 +80,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("noop", handle_noop);
     registry.register("log", handle_log);
     registry.register("sleep", handle_sleep);
+    registry.register("fail", handle_fail);
     registry.register("http_request", handle_http_request);
     registry.register("llm_call", super::llm::handle_llm_call);
     registry.register("tool_call", super::tool_call::handle_tool_call);
@@ -164,6 +167,49 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
     tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
 
     Ok(json!({ "slept_ms": duration_ms }))
+}
+
+/// Fail handler. Always returns an error so callers can force an instance
+/// into the failed state — useful for DLQ/retry tests and for sequences
+/// that need an explicit failure branch.
+///
+/// Params:
+/// - `message` (string): Error message. Defaults to "forced failure".
+/// - `retryable` (bool): If true, returns `StepError::Retryable` so the
+///   runner schedules another attempt; defaults to false for
+///   `StepError::Permanent`, which lands the instance in the DLQ.
+async fn handle_fail(ctx: StepContext) -> Result<Value, StepError> {
+    let message = ctx
+        .params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("forced failure")
+        .to_string();
+
+    let retryable = ctx
+        .params
+        .get("retryable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    debug!(
+        instance_id = %ctx.instance_id,
+        block_id = %ctx.block_id,
+        retryable = retryable,
+        "fail step executing"
+    );
+
+    if retryable {
+        Err(StepError::Retryable {
+            message,
+            details: None,
+        })
+    } else {
+        Err(StepError::Permanent {
+            message,
+            details: None,
+        })
+    }
 }
 
 /// HTTP request handler. Makes an HTTP request via reqwest.
@@ -338,9 +384,38 @@ mod tests {
         assert!(registry.contains("noop"));
         assert!(registry.contains("log"));
         assert!(registry.contains("sleep"));
+        assert!(registry.contains("fail"));
         assert!(registry.contains("http_request"));
         assert!(registry.contains("emit_event"));
         assert!(registry.contains("send_signal"));
         assert!(registry.contains("query_instance"));
+    }
+
+    #[tokio::test]
+    async fn fail_returns_permanent_by_default() {
+        let err = handle_fail(test_ctx(json!({ "message": "nope" })).await)
+            .await
+            .unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert_eq!(message, "nope");
+    }
+
+    #[tokio::test]
+    async fn fail_honors_retryable_flag() {
+        let err = handle_fail(test_ctx(json!({ "retryable": true })).await)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StepError::Retryable { .. }));
+    }
+
+    #[tokio::test]
+    async fn fail_default_message() {
+        let err = handle_fail(test_ctx(json!({})).await).await.unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert_eq!(message, "forced failure");
     }
 }

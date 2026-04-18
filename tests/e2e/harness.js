@@ -39,8 +39,32 @@ function findBinary() {
 
 /**
  * Build and start the orch8-server. Returns a handle for stopServer().
+ *
+ * Two modes:
+ *   - **Spawn** (default): build, clean DB, spawn binary, wait for liveness.
+ *     Used when a suite runs standalone (`node --test ./foo.test.js`).
+ *   - **Attach** (`ORCH8_E2E_ATTACH=1`): a parent runner has already started
+ *     the server — skip build/clean/spawn and just verify it's up. Used by
+ *     `run-e2e.js` to share one server across every suite for ~15-20s of
+ *     savings over per-suite startup.
+ *
+ * The returned handle's `child` is `null` in attach mode, so `stopServer()`
+ * becomes a no-op and lifecycle stays owned by the runner.
  */
 export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
+  if (process.env.ORCH8_E2E_ATTACH === "1") {
+    const p = Number(process.env.ORCH8_E2E_PORT) || port;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(`http://localhost:${p}/health/live`);
+        if (res.ok) return { child: null, port: p, attached: true };
+      } catch { /* not ready */ }
+      await sleep(100);
+    }
+    throw new Error(`Attach mode: server not reachable on port ${p}`);
+  }
+
   if (build) {
     console.log("  Building orch8-server...");
     execFileSync("cargo", ["build", "--bin", "orch8-server"], {

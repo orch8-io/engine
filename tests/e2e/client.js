@@ -74,6 +74,91 @@ export class Orch8Client {
     return this.#patch("/instances/bulk/state", { filter, state });
   }
 
+  async bulkReschedule(filter, offsetSecs) {
+    return this.#patch("/instances/bulk/reschedule", {
+      filter,
+      offset_secs: offsetSecs,
+    });
+  }
+
+  async getInstanceTree(id) {
+    return this.#get(`/instances/${id}/tree`);
+  }
+
+  async getAuditLog(id) {
+    return this.#get(`/instances/${id}/audit`);
+  }
+
+  async pruneCheckpoints(id, keep) {
+    return this.#post(`/instances/${id}/checkpoints/prune`, { keep });
+  }
+
+  async listCheckpoints(id) {
+    return this.#get(`/instances/${id}/checkpoints`);
+  }
+
+  async saveCheckpoint(id, checkpointData) {
+    return this.#post(`/instances/${id}/checkpoints`, {
+      checkpoint_data: checkpointData,
+    });
+  }
+
+  // --- Pools ---
+
+  async createPool(req) {
+    return this.#post("/pools", req);
+  }
+
+  async listPools(query = {}) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v != null) params.set(k, v);
+    }
+    const qs = params.toString();
+    return this.#get(`/pools${qs ? `?${qs}` : ""}`);
+  }
+
+  async getPool(id) {
+    return this.#get(`/pools/${id}`);
+  }
+
+  async deletePool(id) {
+    const res = await fetch(`${this.baseUrl}/pools/${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, `/pools/${id}`);
+    }
+    return {};
+  }
+
+  async addPoolResource(poolId, req) {
+    return this.#post(`/pools/${poolId}/resources`, req);
+  }
+
+  async listPoolResources(poolId) {
+    return this.#get(`/pools/${poolId}/resources`);
+  }
+
+  async updatePoolResource(poolId, resourceId, body) {
+    return this.#put(`/pools/${poolId}/resources/${resourceId}`, body);
+  }
+
+  async deletePoolResource(poolId, resourceId) {
+    const res = await fetch(
+      `${this.baseUrl}/pools/${poolId}/resources/${resourceId}`,
+      { method: "DELETE" }
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(
+        res.status,
+        text,
+        `/pools/${poolId}/resources/${resourceId}`
+      );
+    }
+    return {};
+  }
+
   async listDlq(query = {}) {
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(query)) {
@@ -161,6 +246,120 @@ export class Orch8Client {
 
   async workerTaskStats() {
     return this.#get("/workers/tasks/stats");
+  }
+
+  // --- Triggers ---
+
+  async createTrigger(body) {
+    return this.#post("/triggers", body);
+  }
+
+  async getTrigger(slug) {
+    return this.#get(`/triggers/${slug}`);
+  }
+
+  async listTriggers(query = {}) {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v != null) params.set(k, v);
+    }
+    const qs = params.toString();
+    return this.#get(`/triggers${qs ? `?${qs}` : ""}`);
+  }
+
+  async deleteTrigger(slug) {
+    const res = await fetch(`${this.baseUrl}/triggers/${slug}`, { method: "DELETE" });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, `/triggers/${slug}`);
+    }
+    return {};
+  }
+
+  async fireTrigger(slug, body = {}, headers = {}) {
+    const res = await fetch(`${this.baseUrl}/triggers/${slug}/fire`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, `/triggers/${slug}/fire`);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+  }
+
+  async fireWebhook(slug, body = {}, headers = {}) {
+    const res = await fetch(`${this.baseUrl}/webhooks/${slug}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, text, `/webhooks/${slug}`);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : {};
+  }
+
+  // --- Circuit Breakers ---
+
+  async listCircuitBreakers() {
+    return this.#get("/circuit-breakers");
+  }
+
+  async getCircuitBreaker(handler) {
+    return this.#get(`/circuit-breakers/${handler}`);
+  }
+
+  async resetCircuitBreaker(handler) {
+    return this.#post(`/circuit-breakers/${handler}/reset`, {});
+  }
+
+  // --- Sessions ---
+
+  async createSession(body) {
+    return this.#post("/sessions", body);
+  }
+
+  async getSession(id) {
+    return this.#get(`/sessions/${id}`);
+  }
+
+  async getSessionByKey(tenantId, key) {
+    return this.#get(`/sessions/by-key/${encodeURIComponent(tenantId)}/${encodeURIComponent(key)}`);
+  }
+
+  async updateSessionData(id, data) {
+    return this.#patch(`/sessions/${id}/data`, { data });
+  }
+
+  async updateSessionState(id, state) {
+    return this.#patch(`/sessions/${id}/state`, { state });
+  }
+
+  async listSessionInstances(id) {
+    return this.#get(`/sessions/${id}/instances`);
+  }
+
+  // --- Sequence versioning ---
+
+  async listSequenceVersions(tenantId, namespace, name) {
+    const params = new URLSearchParams({ tenant_id: tenantId, namespace, name });
+    return this.#get(`/sequences/versions?${params}`);
+  }
+
+  async deprecateSequence(id) {
+    return this.#post(`/sequences/${id}/deprecate`, {});
+  }
+
+  async migrateInstance(instanceId, targetSequenceId) {
+    return this.#post("/sequences/migrate-instance", {
+      instance_id: instanceId,
+      target_sequence_id: targetSequenceId,
+    });
   }
 
   // --- Health ---

@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-timeout=30000 ./*.test.js",
-    "test:verbose": "node --test --test-timeout=30000 --test-reporter=spec ./*.test.js"
+    "test": "node ./run-e2e.js",
+    "test:verbose": "ORCH8_E2E_REPORTER=spec node ./run-e2e.js"
   },
   "devDependencies": {}
 }

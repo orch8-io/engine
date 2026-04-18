@@ -18,7 +18,10 @@ describe("DLQ (Dead Letter Queue)", () => {
 
   it("should list failed instances in DLQ", async () => {
     const tenantId = `dlq-${uuid().slice(0, 8)}`;
-    const seq = testSequence("dlq-fail", [step("s1", "does_not_exist")], { tenantId });
+    // Use the built-in `fail` handler so the instance lands in `failed`
+    // deterministically. An unregistered handler name would instead get
+    // routed to the external worker queue and wait forever.
+    const seq = testSequence("dlq-fail", [step("s1", "fail")], { tenantId });
     await client.createSequence(seq);
 
     const { id } = await client.createInstance({
@@ -42,8 +45,8 @@ describe("DLQ (Dead Letter Queue)", () => {
   });
 
   it("should retry a failed instance", async () => {
-    // Create a sequence with unknown handler so it fails naturally.
-    const seqFail = testSequence("dlq-retry-fail", [step("s1", "does_not_exist")]);
+    // Use the built-in `fail` handler so the instance fails deterministically.
+    const seqFail = testSequence("dlq-retry-fail", [step("s1", "fail")]);
     await client.createSequence(seqFail);
 
     const { id } = await client.createInstance({
