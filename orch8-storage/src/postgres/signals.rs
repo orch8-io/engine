@@ -34,7 +34,6 @@ fn bind_signal_insert<'q>(
         .bind(s.delivered_at)
 }
 
-
 pub(super) async fn enqueue(store: &PostgresStorage, signal: &Signal) -> Result<(), StorageError> {
     let signal_type_str = signal.signal_type.to_string();
     bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal, &signal_type_str)

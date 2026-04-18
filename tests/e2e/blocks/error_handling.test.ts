@@ -151,9 +151,11 @@ describe("Error Handling and Edge Cases", () => {
   });
 
   it("handles handler timeout gracefully", async () => {
-    // Create a sequence with a sleep step that acts as a "slow" handler
+    // Create a sequence with a sleep step that exceeds its timeout.
+    // The step has a 2-second timeout but sleeps for 10 seconds,
+    // so the handler should be interrupted and the instance should fail.
     const seq = testSequence("handler-timeout", [
-      step("s1", "sleep", { duration_ms: 10_000 }), // 10 second sleep
+      step("s1", "sleep", { duration_ms: 10_000 }, { timeout: 2000 }),
     ]);
 
     await client.createSequence(seq);
@@ -164,11 +166,7 @@ describe("Error Handling and Edge Cases", () => {
       namespace: "default",
     });
 
-    // Send cancel signal to simulate timeout handling
-    await new Promise((r) => setTimeout(r, 500)); // Wait a bit
-    await client.sendSignal(id, "cancel");
-
-    // Instance should be cancelled
+    // Instance should fail due to step timeout
     const instance = await client.waitForState(id, ["cancelled", "failed"], {
       timeoutMs: 15_000,
     });

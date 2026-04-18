@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -49,7 +51,8 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
         sequence_id: SequenceId(parse_uuid(row.get::<&str, _>("sequence_id"))?),
         tenant_id: TenantId(row.get::<String, _>("tenant_id")),
         namespace: Namespace(row.get::<String, _>("namespace")),
-        state: InstanceState::from_str(row.get::<&str, _>("state")).unwrap_or(InstanceState::Scheduled),
+        state: InstanceState::from_str(row.get::<&str, _>("state"))
+            .unwrap_or(InstanceState::Scheduled),
         next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at")),
         priority: Priority::try_from(row.get::<i16, _>("priority")).unwrap_or(Priority::Normal),
         timezone: row.get::<String, _>("timezone"),
@@ -79,7 +82,8 @@ pub(super) fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionNode
             .get::<Option<String>, _>("parent_id")
             .and_then(|s| Uuid::parse_str(&s).ok())
             .map(ExecutionNodeId),
-        block_type: BlockType::from_str(row.get::<&str, _>("block_type")).unwrap_or(BlockType::Step),
+        block_type: BlockType::from_str(row.get::<&str, _>("block_type"))
+            .unwrap_or(BlockType::Step),
         branch_index: row.get::<Option<i32>, _>("branch_index").map(|v| v as i16),
         state: NodeState::from_str(row.get::<&str, _>("state")).unwrap_or(NodeState::Pending),
         started_at: parse_ts_opt(row.get::<Option<String>, _>("started_at")),
@@ -151,7 +155,8 @@ pub(super) fn row_to_worker_task(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<WorkerTask, StorageError> {
     use orch8_types::worker::WorkerTaskState;
-    let state = WorkerTaskState::from_str(row.get::<&str, _>("state")).unwrap_or(WorkerTaskState::Pending);
+    let state =
+        WorkerTaskState::from_str(row.get::<&str, _>("state")).unwrap_or(WorkerTaskState::Pending);
     Ok(WorkerTask {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         instance_id: InstanceId(parse_uuid(row.get::<&str, _>("instance_id"))?),
