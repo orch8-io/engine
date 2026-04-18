@@ -1,14 +1,14 @@
-//! Regression tests for the "loop nested inside for_each" iteration-marker
+//! Regression tests for the "loop nested inside `for_each`" iteration-marker
 //! purge bug.
 //!
 //! Background: under the write-append `block_outputs` schema (migration 027)
 //! composite blocks (`Loop`, `ForEach`) persist their iteration counter as
-//! a `BlockOutput` keyed by their own `block_id`. When an outer for_each
+//! a `BlockOutput` keyed by their own `block_id`. When an outer `for_each`
 //! advances to the next iteration it resets descendant subtree state to
 //! `Pending`. Before the fix, the descendant inner loop's previous-iteration
 //! marker was left in `block_outputs` — on the next tick its handler read
 //! the stale counter, the top-of-function cap guard tripped, and the body
-//! was never re-run. This test reproduces the exact "for_each over 3 items
+//! was never re-run. This test reproduces the exact "`for_each` over 3 items
 //! containing an inner loop of 2 iterations should produce 6 inner step
 //! outputs" scenario from the failing TS e2e test.
 
@@ -26,7 +26,7 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, ForEachDef, LoopDef, SequenceDefinition, StepDef};
 
 /// Build the sequence equivalent to the failing e2e test:
-///   for_each items {
+///   `for_each` items {
 ///     loop max=2 condition=true {
 ///       step "inner" handler "noop"
 ///     }
@@ -74,7 +74,7 @@ fn build_sequence() -> SequenceDefinition {
     }
 }
 
-fn mk_instance(seq_id: SequenceId, items: serde_json::Value) -> TaskInstance {
+fn mk_instance(seq_id: SequenceId, items: &serde_json::Value) -> TaskInstance {
     let now = Utc::now();
     TaskInstance {
         id: InstanceId::new(),
@@ -141,7 +141,7 @@ async fn r1_for_each_3_over_loop_2_yields_6_inner_outputs() {
     let seq = build_sequence();
     storage.create_sequence(&seq).await.unwrap();
 
-    let inst = mk_instance(seq.id, json!(["x", "y", "z"]));
+    let inst = mk_instance(seq.id, &json!(["x", "y", "z"]));
     storage.create_instance(&inst).await.unwrap();
 
     drive_to_completion(&storage, &registry, inst.id, &seq).await;
@@ -195,7 +195,7 @@ async fn r2_for_each_3_over_loop_0_items_completes_immediately() {
     let seq = build_sequence();
     storage.create_sequence(&seq).await.unwrap();
 
-    let inst = mk_instance(seq.id, json!([]));
+    let inst = mk_instance(seq.id, &json!([]));
     storage.create_instance(&inst).await.unwrap();
 
     drive_to_completion(&storage, &registry, inst.id, &seq).await;

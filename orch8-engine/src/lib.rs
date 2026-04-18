@@ -143,6 +143,7 @@ impl Engine {
     /// [`JoinSet`] so `run()` can await graceful shutdown after cancel fires
     /// instead of detaching them. Each task listens on `self.cancel` and is
     /// expected to exit promptly once the token is cancelled.
+    #[allow(clippy::too_many_lines)]
     fn spawn_background_tasks(&self) -> JoinSet<()> {
         let mut set: JoinSet<()> = JoinSet::new();
         // Cluster heartbeat + drain check (every 10 seconds).

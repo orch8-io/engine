@@ -82,60 +82,57 @@ pub async fn execute_for_each(
 
     let prior_marker = storage.get_block_output(instance.id, &fe_def.id).await?;
 
-    let (snapshot_items, index): (Vec<serde_json::Value>, u32) = match &prior_marker {
-        Some(m) => {
-            // Subsequent tick — use the previously snapshotted items.
-            let items_snap = m
-                .output
-                .get("_items")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let idx = m
-                .output
-                .get("_index")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|n| u32::try_from(n).ok())
-                .unwrap_or(0);
-            (items_snap, idx)
+    let (snapshot_items, index): (Vec<serde_json::Value>, u32) = if let Some(m) = &prior_marker {
+        // Subsequent tick — use the previously snapshotted items.
+        let items_snap = m
+            .output
+            .get("_items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let idx = m
+            .output
+            .get("_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0);
+        (items_snap, idx)
+    } else {
+        // First visit — resolve live and persist a snapshot marker so
+        // subsequent ticks see a stable collection.
+        let Some(items) = resolve_collection(&fe_def.collection, &instance.context) else {
+            warn!(
+                instance_id = %instance.id,
+                block_id = %fe_def.id,
+                collection = %fe_def.collection,
+                "for_each collection not found or not an array; completing"
+            );
+            evaluator::complete_node(storage, node.id).await?;
+            return Ok(true);
+        };
+        if items.is_empty() {
+            evaluator::complete_node(storage, node.id).await?;
+            return Ok(true);
         }
-        None => {
-            // First visit — resolve live and persist a snapshot marker so
-            // subsequent ticks see a stable collection.
-            let Some(items) = resolve_collection(&fe_def.collection, &instance.context) else {
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %fe_def.id,
-                    collection = %fe_def.collection,
-                    "for_each collection not found or not an array; completing"
-                );
-                evaluator::complete_node(storage, node.id).await?;
-                return Ok(true);
-            };
-            if items.is_empty() {
-                evaluator::complete_node(storage, node.id).await?;
-                return Ok(true);
-            }
-            // Persist the initial snapshot so later ticks stay consistent
-            // with this exact collection, regardless of context mutation.
-            let init_marker = BlockOutput {
-                id: uuid::Uuid::new_v4(),
-                instance_id: instance.id,
-                block_id: fe_def.id.clone(),
-                output: serde_json::json!({
-                    "_index": 0,
-                    "_total": items.len(),
-                    "_item_var": fe_def.item_var,
-                    "_items": items,
-                }),
-                output_ref: None,
-                output_size: 0,
-                attempt: 0,
-                created_at: chrono::Utc::now(),
-            };
-            storage.save_block_output(&init_marker).await?;
-            (items, 0)
-        }
+        // Persist the initial snapshot so later ticks stay consistent
+        // with this exact collection, regardless of context mutation.
+        let init_marker = BlockOutput {
+            id: uuid::Uuid::new_v4(),
+            instance_id: instance.id,
+            block_id: fe_def.id.clone(),
+            output: serde_json::json!({
+                "_index": 0,
+                "_total": items.len(),
+                "_item_var": fe_def.item_var,
+                "_items": items,
+            }),
+            output_ref: None,
+            output_size: 0,
+            attempt: 0,
+            created_at: chrono::Utc::now(),
+        };
+        storage.save_block_output(&init_marker).await?;
+        (items, 0)
     };
 
     // From here on, all iteration math uses the snapshot.
@@ -238,15 +235,12 @@ async fn bind_item_var(
     item: serde_json::Value,
 ) -> Result<(), EngineError> {
     let mut new_ctx = instance.context.clone();
-    match new_ctx.data {
-        serde_json::Value::Object(ref mut obj) => {
-            obj.insert(item_var.to_string(), item);
-        }
-        _ => {
-            let mut obj = serde_json::Map::new();
-            obj.insert(item_var.to_string(), item);
-            new_ctx.data = serde_json::Value::Object(obj);
-        }
+    if let serde_json::Value::Object(ref mut obj) = new_ctx.data {
+        obj.insert(item_var.to_string(), item);
+    } else {
+        let mut obj = serde_json::Map::new();
+        obj.insert(item_var.to_string(), item);
+        new_ctx.data = serde_json::Value::Object(obj);
     }
     storage
         .update_instance_context(instance.id, &new_ctx)

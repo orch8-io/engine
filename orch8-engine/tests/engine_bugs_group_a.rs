@@ -175,7 +175,7 @@ async fn a1_parallel_activates_only_first_step_per_branch() {
         .clone();
 
     let registry = HandlerRegistry::new();
-    evaluator::ensure_execution_tree(&storage, &instance, &[par.clone()])
+    evaluator::ensure_execution_tree(&storage, &instance, std::slice::from_ref(&par))
         .await
         .unwrap();
 
