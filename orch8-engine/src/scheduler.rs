@@ -468,15 +468,16 @@ async fn process_instance_tree(
             }
         }
         Ok(false) => {
-            // Evaluator says done. Check if any root node failed.
+            // Evaluator says done. Check if any root node failed or was cancelled.
             let tree = storage.get_execution_tree(instance_id).await?;
-            let root_failed = tree.iter().filter(|n| n.parent_id.is_none()).any(|n| {
-                matches!(
-                    n.state,
-                    orch8_types::execution::NodeState::Failed
-                        | orch8_types::execution::NodeState::Cancelled
-                )
-            });
+            let root_failed = tree
+                .iter()
+                .filter(|n| n.parent_id.is_none())
+                .any(|n| matches!(n.state, orch8_types::execution::NodeState::Failed));
+            let root_cancelled = tree
+                .iter()
+                .filter(|n| n.parent_id.is_none())
+                .any(|n| matches!(n.state, orch8_types::execution::NodeState::Cancelled));
 
             // Read current instance state — may differ from Running if an external
             // worker dispatch changed it to Waiting within this tick.
@@ -485,7 +486,17 @@ async fn process_instance_tree(
                 .await?
                 .map_or(InstanceState::Running, |i| i.state);
 
-            if root_failed {
+            // Distinguish user-initiated cancel from genuine failure: a
+            // Cancelled root node (and no Failed root) means the instance
+            // was cancelled, not that a step failed. Preserve the Cancelled
+            // terminal state for the instance so callers can tell the two
+            // apart.
+            if root_cancelled && !root_failed {
+                storage
+                    .update_instance_state(instance_id, InstanceState::Cancelled, None)
+                    .await?;
+                info!(instance_id = %instance_id, from = %current_state, "instance cancelled (tree evaluation)");
+            } else if root_failed {
                 // Use update_instance_state directly to handle any current state.
                 storage
                     .update_instance_state(instance_id, InstanceState::Failed, None)

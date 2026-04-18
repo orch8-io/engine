@@ -187,7 +187,11 @@ pub(super) async fn cancel_for_block(
     instance_id: Uuid,
     block_id: &str,
 ) -> Result<u64, StorageError> {
-    let result = sqlx::query("DELETE FROM worker_tasks WHERE instance_id=?1 AND block_id=?2 AND state IN ('pending','claimed')")
+    // Delete all rows for (instance_id, block_id) regardless of state.
+    // Mirrors postgres::workers::cancel_for_block — iteration reset in
+    // ForEach/Loop must remove `completed` rows so the next iteration's
+    // INSERT isn't dropped by UNIQUE(instance_id, block_id).
+    let result = sqlx::query("DELETE FROM worker_tasks WHERE instance_id=?1 AND block_id=?2")
         .bind(instance_id.to_string())
         .bind(block_id)
         .execute(&storage.pool)

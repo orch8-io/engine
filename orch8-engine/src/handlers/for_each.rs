@@ -285,6 +285,15 @@ async fn reset_subtree_to_pending(
         if matches!(block_type, BlockType::Loop | BlockType::ForEach) {
             storage.delete_block_outputs(instance_id, block_id).await?;
         }
+        // Purge any stale worker_tasks row for this block_id. Without this,
+        // the UNIQUE(instance_id, block_id) constraint on worker_tasks would
+        // silently drop the next iteration's INSERT (ON CONFLICT DO NOTHING),
+        // so the external worker would never see the new dispatch.
+        // Composite descendants have no worker_tasks row — the delete is a
+        // no-op for them, so we don't branch on block_type here.
+        storage
+            .cancel_worker_tasks_for_block(instance_id.0, &block_id.0)
+            .await?;
     }
     Ok(())
 }

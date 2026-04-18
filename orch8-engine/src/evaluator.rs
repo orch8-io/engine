@@ -320,8 +320,33 @@ pub async fn evaluate(
 
         // Phase 3: re-evaluate Running composite nodes (parents check child completion,
         // activate next phases like catch/finally, dispatch pending children).
+        //
+        // A composite can be Running while all its relevant children are in
+        // Waiting (external worker) or Running (in-flight) — no actionable
+        // work. Re-dispatching such a composite is a no-op; without the
+        // change-detection below the evaluator would spin until
+        // `max_iterations` expired, starving every instance of progress and
+        // eventually stranding the workflow. Snapshot `(id, state)` before
+        // dispatch and bail if nothing changed — that's the correct signal
+        // that we're parked waiting for an external event (worker callback,
+        // signal, timer) and the outer scheduler should stop ticking.
         if let Some((node, block)) = find_running_composite(&tree, &blocks) {
+            let pre_states: Vec<(ExecutionNodeId, NodeState)> =
+                tree.iter().map(|n| (n.id, n.state)).collect();
             dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            let post_tree = storage.get_execution_tree(instance.id).await?;
+            let post_states: Vec<(ExecutionNodeId, NodeState)> =
+                post_tree.iter().map(|n| (n.id, n.state)).collect();
+            if pre_states == post_states {
+                // No progress — parked waiting on external work. Break out
+                // rather than re-dispatch the same composite in a hot loop.
+                debug!(
+                    instance_id = %instance.id,
+                    composite = %node.block_id,
+                    "evaluate: composite re-entry produced no state change; parking tick"
+                );
+                return Ok(true);
+            }
             continue;
         }
 

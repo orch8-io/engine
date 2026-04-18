@@ -193,8 +193,12 @@ async fn cancel_scoped(
             continue;
         }
 
-        // A node inside a CancellationScope is non-cancellable.
+        // A node inside a CancellationScope is non-cancellable. The scope
+        // node itself is also non-cancellable — cancelling it would
+        // terminate the scope (and its children) before they had a chance
+        // to drain, defeating the purpose of the scope in the first place.
         let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
+        let is_scope_node = node.block_type == BlockType::CancellationScope;
 
         // Check per-step cancellable flag.
         let step_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
@@ -204,7 +208,7 @@ async fn cancel_scoped(
             })
             .unwrap_or(true);
 
-        let is_cancellable = step_cancellable && !inside_scope;
+        let is_cancellable = step_cancellable && !inside_scope && !is_scope_node;
 
         if is_cancellable {
             storage

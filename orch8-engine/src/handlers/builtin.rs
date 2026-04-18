@@ -150,6 +150,13 @@ async fn handle_log(ctx: StepContext) -> Result<Value, StepError> {
 ///
 /// Params:
 /// - `duration_ms` (u64): Milliseconds to sleep. Defaults to 100.
+///
+/// Long sleeps poll for a pending `cancel` signal on a short interval so
+/// that in-flight sleeps are interruptible — a plain `tokio::time::sleep`
+/// can't be cancelled from another task, and the scheduler doesn't
+/// re-check signals until the handler returns. Without this polling, a
+/// `cancel` signal queued mid-sleep would not take effect until the full
+/// duration elapsed (by which point the instance is already completing).
 async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
     let duration_ms = ctx
         .params
@@ -164,7 +171,129 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         "sleep step starting"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
+    // Short sleeps (<250ms) aren't worth the signal-poll overhead — fall
+    // back to the trivial implementation.
+    const CANCEL_POLL_MS: u64 = 250;
+    if duration_ms <= CANCEL_POLL_MS {
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
+        return Ok(json!({ "slept_ms": duration_ms }));
+    }
+
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let tick = remaining.min(std::time::Duration::from_millis(CANCEL_POLL_MS));
+        tokio::time::sleep(tick).await;
+
+        // Check for a pending cancel signal. A failed lookup must not
+        // abort the sleep — storage glitches should be transparent here.
+        //
+        // Skip cancel handling if this sleep is running inside a
+        // `CancellationScope` — scoped children are intentionally shielded
+        // from external cancel signals (`handlers/cancellation_scope.rs`).
+        // The scheduler's regular signal path will defer the cancel until
+        // the scope drains, matching `cancel_scoped`'s semantics.
+        let inside_scope = match ctx.storage.get_execution_tree(ctx.instance_id).await {
+            Ok(tree) => {
+                use orch8_types::execution::BlockType;
+                let scope_ids: Vec<_> = tree
+                    .iter()
+                    .filter(|n| n.block_type == BlockType::CancellationScope)
+                    .map(|n| n.id)
+                    .collect();
+                let me = tree.iter().find(|n| n.block_id == ctx.block_id);
+                me.map_or(false, |n| {
+                    let mut cur = n.parent_id;
+                    while let Some(pid) = cur {
+                        if scope_ids.contains(&pid) {
+                            return true;
+                        }
+                        cur = tree.iter().find(|x| x.id == pid).and_then(|x| x.parent_id);
+                    }
+                    false
+                })
+            }
+            Err(_) => false,
+        };
+        if inside_scope {
+            eprintln!(
+                "SLEEP-SCOPE: inside=true inst={} block={}",
+                ctx.instance_id, ctx.block_id
+            );
+            continue;
+        } else {
+            eprintln!(
+                "SLEEP-SCOPE: inside=false inst={} block={}",
+                ctx.instance_id, ctx.block_id
+            );
+        }
+        if let Ok(signals) = ctx.storage.get_pending_signals(ctx.instance_id).await {
+            let has_cancel = signals.iter().any(|s| {
+                matches!(
+                    s.signal_type,
+                    orch8_types::signal::SignalType::Cancel
+                )
+            });
+            if has_cancel {
+                // A `cancel` signal is waiting to be processed. Drive it
+                // through the normal signal pipeline so the instance state
+                // is transitioned to Cancelled. This must happen from inside
+                // the handler because the evaluator doesn't re-check signals
+                // between sibling step dispatches, and if we wait for the
+                // next scheduler tick the remaining parallel sleep siblings
+                // would complete normally and the instance would land in
+                // Completed instead of Cancelled.
+                //
+                // We also flip every active node in the tree to `Cancelled`
+                // directly, because `process_signals` can't call
+                // `cancel_scoped` without a `SequenceDefinition` (which the
+                // handler doesn't carry). Setting node states here is
+                // idempotent with the eventual scheduler-level cancel path.
+                //
+                // Returning `StepError::Retryable` keeps `dispatch_plugin`
+                // from overwriting our node's `Cancelled` state with
+                // `Completed` (via `complete_node`) or `Failed` (via
+                // `Permanent`).
+                debug!(
+                    instance_id = %ctx.instance_id,
+                    block_id = %ctx.block_id,
+                    "sleep step interrupted by cancel signal — driving cancel"
+                );
+                let _ = crate::signals::process_signals(
+                    ctx.storage.as_ref(),
+                    ctx.instance_id,
+                    orch8_types::instance::InstanceState::Running,
+                )
+                .await;
+                // Mark every active (non-terminal) node Cancelled so the
+                // evaluator's termination check trips on the next iteration.
+                if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
+                    for n in tree.iter().filter(|n| {
+                        matches!(
+                            n.state,
+                            orch8_types::execution::NodeState::Pending
+                                | orch8_types::execution::NodeState::Running
+                                | orch8_types::execution::NodeState::Waiting
+                        )
+                    }) {
+                        let _ = ctx
+                            .storage
+                            .update_node_state(n.id, orch8_types::execution::NodeState::Cancelled)
+                            .await;
+                    }
+                }
+                return Err(StepError::Retryable {
+                    message: "sleep cancelled by signal".into(),
+                    details: None,
+                });
+            }
+        }
+    }
 
     Ok(json!({ "slept_ms": duration_ms }))
 }

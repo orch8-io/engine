@@ -40,6 +40,20 @@ impl From<sqlx::Error> for StorageError {
                 entity: "row",
                 id: String::new(),
             },
+            sqlx::Error::Database(ref db_err) => {
+                // Unique-constraint violations should surface as `Conflict`
+                // so the API layer maps them to 409 instead of swallowing
+                // them as a generic 500. `sqlx::Error::Database` wraps a
+                // backend-specific error; its `kind()` normalises the most
+                // common ones (unique / foreign-key / check / not-null)
+                // across Postgres + SQLite.
+                match db_err.kind() {
+                    sqlx::error::ErrorKind::UniqueViolation => {
+                        Self::Conflict(db_err.message().to_string())
+                    }
+                    _ => Self::Query(err.to_string()),
+                }
+            }
             other => Self::Query(other.to_string()),
         }
     }

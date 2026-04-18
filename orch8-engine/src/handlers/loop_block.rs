@@ -225,6 +225,13 @@ async fn reset_subtree_to_pending(
         if matches!(block_type, BlockType::Loop | BlockType::ForEach) {
             storage.delete_block_outputs(instance_id, block_id).await?;
         }
+        // Purge any stale worker_tasks row for this block_id. Without this,
+        // UNIQUE(instance_id, block_id) on worker_tasks blocks the next
+        // iteration's dispatch via ON CONFLICT DO NOTHING. Composite
+        // descendants have no worker_tasks row, so this is a no-op for them.
+        storage
+            .cancel_worker_tasks_for_block(instance_id.0, &block_id.0)
+            .await?;
     }
     Ok(())
 }
