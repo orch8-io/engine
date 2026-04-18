@@ -349,18 +349,18 @@ async fn process_instance(
     }
 
     // Fast path: all blocks are Steps. Execute multi-block per claim cycle.
-    let mut completed_blocks: std::collections::HashSet<String> = prefetched
-        .completed_block_ids
-        .into_iter()
-        .map(|id| id.0)
-        .collect();
+    //
+    // Typical sequences have a handful of blocks; a linear scan over a `Vec`
+    // is cheaper than the HashSet allocation + hashing overhead that a
+    // `HashSet<String>` would incur on every instance tick.
+    let mut completed_blocks: Vec<BlockId> = prefetched.completed_block_ids;
 
-    for block in &blocks {
+    for block in blocks.iter() {
         let orch8_types::sequence::BlockDefinition::Step(step_def) = block else {
             unreachable!("checked above: all blocks are steps");
         };
 
-        if completed_blocks.contains(&step_def.id.0) {
+        if completed_blocks.iter().any(|id| id == &step_def.id) {
             continue;
         }
 
@@ -382,7 +382,7 @@ async fn process_instance(
         .await?
         {
             StepOutcome::Completed => {
-                completed_blocks.insert(step_def.id.0.clone());
+                completed_blocks.push(step_def.id.clone());
             }
             StepOutcome::Deferred | StepOutcome::Failed => {
                 return Ok(());

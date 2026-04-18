@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -11,13 +12,18 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 
-/// Fetch any dynamically injected blocks and merge them with the sequence blocks.
-/// Returns the merged list (sequence blocks + injected blocks appended).
-pub async fn merged_blocks(
+/// Fetch any dynamically injected blocks and merge them with the sequence
+/// blocks.
+///
+/// The common case on the scheduler hot path is "no injection" — the entire
+/// block list is the sequence's own. Returning [`Cow::Borrowed`] in that case
+/// avoids cloning the `Vec<BlockDefinition>` on every tick. Only when extra
+/// blocks have actually been injected do we materialise an owned vector.
+pub async fn merged_blocks<'s>(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
-    sequence: &SequenceDefinition,
-) -> Result<Vec<BlockDefinition>, EngineError> {
+    sequence: &'s SequenceDefinition,
+) -> Result<Cow<'s, [BlockDefinition]>, EngineError> {
     let injected = storage.get_injected_blocks(instance_id).await?;
     match injected {
         Some(val) if val.is_array() => {
@@ -25,17 +31,17 @@ pub async fn merged_blocks(
                 Ok(v) => v,
                 Err(e) => {
                     warn!(instance_id = %instance_id, error = %e, "failed to deserialize injected blocks, ignoring");
-                    return Ok(sequence.blocks.clone());
+                    return Ok(Cow::Borrowed(sequence.blocks.as_slice()));
                 }
             };
             if extra.is_empty() {
-                return Ok(sequence.blocks.clone());
+                return Ok(Cow::Borrowed(sequence.blocks.as_slice()));
             }
             let mut merged = sequence.blocks.clone();
             merged.extend(extra);
-            Ok(merged)
+            Ok(Cow::Owned(merged))
         }
-        _ => Ok(sequence.blocks.clone()),
+        _ => Ok(Cow::Borrowed(sequence.blocks.as_slice())),
     }
 }
 
