@@ -360,10 +360,32 @@ async fn run_file_watch_listener(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
+    let watcher_slug = trigger.slug.clone();
     let mut watcher: RecommendedWatcher =
         notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
-            if let Ok(event) = res {
-                let _ = tx.blocking_send(event);
+            // This closure runs on the notify backend thread (not a tokio
+            // worker), so we surface problems via tracing rather than try to
+            // return an error. Silent drops of either the watch error *or*
+            // the forward-to-channel result would mean events vanish without
+            // anyone noticing — e.g. permission revoked, filesystem
+            // unmounted, or the scheduler-side receiver already dropped.
+            match res {
+                Ok(event) => {
+                    if let Err(e) = tx.blocking_send(event) {
+                        warn!(
+                            slug = %watcher_slug,
+                            error = %e,
+                            "file watch event dropped: receiver unavailable or channel full"
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        slug = %watcher_slug,
+                        error = %e,
+                        "file watch backend reported error"
+                    );
+                }
             }
         })
         .map_err(|e| {
