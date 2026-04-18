@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -15,6 +17,19 @@ pub enum RotationStrategy {
     Weighted,
     /// Assign resources randomly.
     Random,
+}
+
+impl FromStr for RotationStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "round_robin" => Ok(Self::RoundRobin),
+            "weighted" => Ok(Self::Weighted),
+            "random" => Ok(Self::Random),
+            other => Err(format!("unknown rotation strategy: {other}")),
+        }
+    }
 }
 
 /// A pool of resources that can be assigned to instances.

@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
@@ -33,20 +34,6 @@ fn bind_signal_insert<'q>(
         .bind(s.delivered_at)
 }
 
-fn parse_instance_state(s: &str) -> Result<InstanceState, StorageError> {
-    match s {
-        "scheduled" => Ok(InstanceState::Scheduled),
-        "running" => Ok(InstanceState::Running),
-        "waiting" => Ok(InstanceState::Waiting),
-        "paused" => Ok(InstanceState::Paused),
-        "completed" => Ok(InstanceState::Completed),
-        "failed" => Ok(InstanceState::Failed),
-        "cancelled" => Ok(InstanceState::Cancelled),
-        other => Err(StorageError::Query(format!(
-            "unknown instance state: {other}"
-        ))),
-    }
-}
 
 pub(super) async fn enqueue(store: &PostgresStorage, signal: &Signal) -> Result<(), StorageError> {
     let signal_type_str = signal.signal_type.to_string();
@@ -81,7 +68,7 @@ pub(super) async fn enqueue_if_active(
         });
     };
 
-    let state = parse_instance_state(&state_str)?;
+    let state = InstanceState::from_str(&state_str).map_err(StorageError::Query)?;
     if state.is_terminal() {
         tx.rollback().await?;
         return Err(StorageError::TerminalTarget {

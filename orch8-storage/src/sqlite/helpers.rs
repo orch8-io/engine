@@ -43,63 +43,15 @@ fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StorageError
     serde_json::from_str(s).map_err(StorageError::Serialization)
 }
 
-pub(super) fn parse_state(s: &str) -> InstanceState {
-    match s {
-        "running" => InstanceState::Running,
-        "waiting" => InstanceState::Waiting,
-        "paused" => InstanceState::Paused,
-        "completed" => InstanceState::Completed,
-        "failed" => InstanceState::Failed,
-        "cancelled" => InstanceState::Cancelled,
-        _ => InstanceState::Scheduled,
-    }
-}
-
-pub(super) fn parse_node_state(s: &str) -> NodeState {
-    match s {
-        "running" => NodeState::Running,
-        "waiting" => NodeState::Waiting,
-        "completed" => NodeState::Completed,
-        "failed" => NodeState::Failed,
-        "cancelled" => NodeState::Cancelled,
-        "skipped" => NodeState::Skipped,
-        _ => NodeState::Pending,
-    }
-}
-
-pub(super) fn parse_block_type(s: &str) -> BlockType {
-    match s {
-        "parallel" => BlockType::Parallel,
-        "race" => BlockType::Race,
-        "loop" => BlockType::Loop,
-        "for_each" => BlockType::ForEach,
-        "router" => BlockType::Router,
-        "try_catch" => BlockType::TryCatch,
-        "sub_sequence" => BlockType::SubSequence,
-        "ab_split" => BlockType::ABSplit,
-        "cancellation_scope" => BlockType::CancellationScope,
-        _ => BlockType::Step,
-    }
-}
-
-pub(super) fn parse_priority(v: i64) -> Priority {
-    match v {
-        0 => Priority::Low,
-        2 => Priority::High,
-        3 => Priority::Critical,
-        _ => Priority::Normal,
-    }
-}
-
 pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInstance, StorageError> {
     Ok(TaskInstance {
         id: InstanceId(parse_uuid(row.get::<&str, _>("id"))?),
         sequence_id: SequenceId(parse_uuid(row.get::<&str, _>("sequence_id"))?),
         tenant_id: TenantId(row.get::<String, _>("tenant_id")),
         namespace: Namespace(row.get::<String, _>("namespace")),
-        state: parse_state(row.get::<&str, _>("state")),
+        state: InstanceState::from_str(row.get::<&str, _>("state")).unwrap_or(InstanceState::Scheduled),
         next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at")),
-        priority: parse_priority(row.get::<i64, _>("priority")),
+        priority: Priority::try_from(row.get::<i16, _>("priority")).unwrap_or(Priority::Normal),
         timezone: row.get::<String, _>("timezone"),
         metadata: parse_json(row.get::<&str, _>("metadata"))?,
         context: parse_json(row.get::<&str, _>("context"))?,
@@ -127,9 +79,9 @@ pub(super) fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionNode
             .get::<Option<String>, _>("parent_id")
             .and_then(|s| Uuid::parse_str(&s).ok())
             .map(ExecutionNodeId),
-        block_type: parse_block_type(row.get::<&str, _>("block_type")),
+        block_type: BlockType::from_str(row.get::<&str, _>("block_type")).unwrap_or(BlockType::Step),
         branch_index: row.get::<Option<i32>, _>("branch_index").map(|v| v as i16),
-        state: parse_node_state(row.get::<&str, _>("state")),
+        state: NodeState::from_str(row.get::<&str, _>("state")).unwrap_or(NodeState::Pending),
         started_at: parse_ts_opt(row.get::<Option<String>, _>("started_at")),
         completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at")),
     })
@@ -199,12 +151,7 @@ pub(super) fn row_to_worker_task(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<WorkerTask, StorageError> {
     use orch8_types::worker::WorkerTaskState;
-    let state = match row.get::<&str, _>("state") {
-        "claimed" => WorkerTaskState::Claimed,
-        "completed" => WorkerTaskState::Completed,
-        "failed" => WorkerTaskState::Failed,
-        _ => WorkerTaskState::Pending,
-    };
+    let state = WorkerTaskState::from_str(row.get::<&str, _>("state")).unwrap_or(WorkerTaskState::Pending);
     Ok(WorkerTask {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         instance_id: InstanceId(parse_uuid(row.get::<&str, _>("instance_id"))?),
@@ -231,8 +178,7 @@ pub(super) fn row_to_worker_task(
 
 pub(super) fn row_to_pool(row: &sqlx::sqlite::SqliteRow) -> Result<ResourcePool, StorageError> {
     use orch8_types::pool::RotationStrategy;
-    let strategy_str = row.get::<String, _>("strategy");
-    let strategy = serde_json::from_str::<RotationStrategy>(&format!("\"{strategy_str}\""))
+    let strategy = RotationStrategy::from_str(&row.get::<String, _>("strategy"))
         .unwrap_or(RotationStrategy::RoundRobin);
     Ok(ResourcePool {
         id: parse_uuid(row.get::<&str, _>("id"))?,
@@ -279,12 +225,7 @@ pub(super) fn row_to_checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<Checkpo
 }
 
 pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StorageError> {
-    let state = match row.get::<&str, _>("state") {
-        "completed" => SessionState::Completed,
-        "expired" => SessionState::Expired,
-        "paused" => SessionState::Paused,
-        _ => SessionState::Active,
-    };
+    let state = SessionState::from_str(row.get::<&str, _>("state")).unwrap_or(SessionState::Active);
     Ok(Session {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         tenant_id: TenantId(row.get::<String, _>("tenant_id")),
@@ -314,11 +255,7 @@ pub(super) fn row_to_audit(row: &sqlx::sqlite::SqliteRow) -> Result<AuditLogEntr
 pub(super) fn row_to_cluster_node(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<ClusterNode, StorageError> {
-    let status = match row.get::<&str, _>("status") {
-        "draining" => NodeStatus::Draining,
-        "stopped" => NodeStatus::Stopped,
-        _ => NodeStatus::Active,
-    };
+    let status = NodeStatus::from_str(row.get::<&str, _>("status")).unwrap_or(NodeStatus::Active);
     Ok(ClusterNode {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         name: row.get::<String, _>("name"),

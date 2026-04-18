@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -25,6 +27,20 @@ pub enum SignalType {
     Cancel,
     UpdateContext,
     Custom(String),
+}
+
+impl FromStr for SignalType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pause" => Ok(Self::Pause),
+            "resume" => Ok(Self::Resume),
+            "cancel" => Ok(Self::Cancel),
+            "update_context" => Ok(Self::UpdateContext),
+            other => Ok(Self::Custom(other.to_string())),
+        }
+    }
 }
 
 impl std::fmt::Display for SignalType {

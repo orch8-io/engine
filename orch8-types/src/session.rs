@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -31,6 +33,20 @@ pub enum SessionState {
     Paused,
     Completed,
     Expired,
+}
+
+impl FromStr for SessionState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            "completed" => Ok(Self::Completed),
+            "expired" => Ok(Self::Expired),
+            other => Err(format!("unknown session state: {other}")),
+        }
+    }
 }
 
 impl std::fmt::Display for SessionState {

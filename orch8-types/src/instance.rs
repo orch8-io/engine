@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -18,6 +20,23 @@ pub enum InstanceState {
     Completed,
     Failed,
     Cancelled,
+}
+
+impl FromStr for InstanceState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "scheduled" => Ok(Self::Scheduled),
+            "running" => Ok(Self::Running),
+            "waiting" => Ok(Self::Waiting),
+            "paused" => Ok(Self::Paused),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            other => Err(format!("unknown instance state: {other}")),
+        }
+    }
 }
 
 impl InstanceState {
@@ -88,6 +107,20 @@ pub enum Priority {
     Normal = 1,
     High = 2,
     Critical = 3,
+}
+
+impl TryFrom<i16> for Priority {
+    type Error = String;
+
+    fn try_from(v: i16) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Low),
+            1 => Ok(Self::Normal),
+            2 => Ok(Self::High),
+            3 => Ok(Self::Critical),
+            other => Err(format!("unknown priority value: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

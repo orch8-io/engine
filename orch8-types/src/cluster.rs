@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -30,6 +32,19 @@ pub enum NodeStatus {
     Draining,
     /// Node has shut down gracefully.
     Stopped,
+}
+
+impl FromStr for NodeStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "draining" => Ok(Self::Draining),
+            "stopped" => Ok(Self::Stopped),
+            other => Err(format!("unknown node status: {other}")),
+        }
+    }
 }
 
 impl std::fmt::Display for NodeStatus {
