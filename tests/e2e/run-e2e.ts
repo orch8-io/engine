@@ -30,14 +30,33 @@
  */
 
 import { spawn } from "node:child_process";
-import { readdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readdirSync, statSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, stopServer } from "./harness.ts";
 import type { ServerHandle } from "./harness.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.ORCH8_E2E_PORT) || 18080;
+
+// TTY-aware ANSI. Disabled automatically in CI/pipes so log files stay clean.
+const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const c = {
+  dim: (s: string) => (USE_COLOR ? `\x1b[2m${s}\x1b[0m` : s),
+  bold: (s: string) => (USE_COLOR ? `\x1b[1m${s}\x1b[0m` : s),
+  green: (s: string) => (USE_COLOR ? `\x1b[32m${s}\x1b[0m` : s),
+  red: (s: string) => (USE_COLOR ? `\x1b[31m${s}\x1b[0m` : s),
+  cyan: (s: string) => (USE_COLOR ? `\x1b[36m${s}\x1b[0m` : s),
+};
+
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s - m * 60);
+  return `${m}m${rem}s`;
+}
 
 // Suites that need their own server.
 //
@@ -58,13 +77,56 @@ const SELF_MANAGED_SUITES = new Set<string>([
   "wait-signal.test.ts",
   "worker-dashboard.test.ts",
   "workers.test.ts",
+  // Worker task queue — not keyed by tenant_id (see rule #2).
+  "worker_task_timeout.test.ts",
+  "worker_heartbeat_timeout.test.ts",
+  "retryable_false_open_circuit.test.ts",
+  // Signal inbox — not keyed by tenant_id.
+  "signal_ordering.test.ts",
+  "signal_during_finally.test.ts",
+  // Trigger definitions — globally scoped, leak across suites.
+  "emit_event_deep_chains.test.ts",
+  "emit_event_invalid_target.test.ts",
+  // Server-lifecycle tests (rule #1): require mid-test restart or env swap.
+  "encryption_key_rotation.test.ts",
+  "ab_split_determinism_restart.test.ts",
+  // Needs its own server started with ORCH8_ENCRYPTION_KEY set — the shared
+  // attach-mode server was launched without a key.
+  "encryption_at_rest.test.ts",
 ]);
 
+// Directories whose tests are organizational scaffolding, not runnable yet.
+// Skip them so empty scaffolds don't fail the runner. Remove once they have
+// real assertions.
+const SKIP_DIRS = new Set<string>(["node_modules", ".git"]);
+
+/**
+ * Recursively collect every *.test.ts under the e2e directory.
+ *
+ * Groups live in subfolders (`features/`, `blocks/`, `resilience/`, ...).
+ * SELF_MANAGED_SUITES filtering still matches by basename so a test moved
+ * into a subfolder keeps its "needs own server" classification without
+ * needing a full-path rewrite in the set.
+ */
 function findTestFiles(): string[] {
-  return readdirSync(__dirname)
-    .filter((f) => f.endsWith(".test.ts") && !SELF_MANAGED_SUITES.has(f))
-    .sort()
-    .map((f) => resolve(__dirname, f));
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir)) {
+      if (SKIP_DIRS.has(entry)) continue;
+      const full = resolve(dir, entry);
+      const s = statSync(full);
+      if (s.isDirectory()) {
+        walk(full);
+      } else if (
+        entry.endsWith(".test.ts") &&
+        !SELF_MANAGED_SUITES.has(basename(entry))
+      ) {
+        out.push(full);
+      }
+    }
+  };
+  walk(__dirname);
+  return out.sort();
 }
 
 let handle: ServerHandle | undefined;
@@ -89,20 +151,34 @@ process.on("SIGTERM", () => {
   void shutdown(143);
 });
 
+const runStart = Date.now();
+
 try {
-  console.log("runner: starting shared orch8-server...");
+  // Pick a human-friendly default reporter. Default Node TAP output is dense
+  // and hard to skim; `spec` groups by describe/it and colors pass/fail.
+  // `dot` is available for ultra-compact CI logs via ORCH8_E2E_REPORTER=dot.
+  const reporter = process.env.ORCH8_E2E_REPORTER || "spec";
+
+  console.log("");
+  console.log(c.bold(c.cyan("━━━ orch8 e2e ━━━")));
+  console.log(c.dim(`port=${PORT}  reporter=${reporter}  concurrency=1`));
+  console.log("");
+
+  console.log(c.dim("› starting shared orch8-server..."));
+  const serverStart = Date.now();
   handle = await startServer({ port: PORT });
+  console.log(c.dim(`  ready in ${fmtDuration(Date.now() - serverStart)}`));
 
   const testFiles = findTestFiles();
   if (testFiles.length === 0) {
-    console.error("runner: no *.test.ts files found");
+    console.error(c.red("runner: no *.test.ts files found"));
     await shutdown(1);
   }
 
-  console.log(`runner: executing ${testFiles.length} test file(s) serially`);
-  const reporterArgs = process.env.ORCH8_E2E_REPORTER
-    ? [`--test-reporter=${process.env.ORCH8_E2E_REPORTER}`]
-    : [];
+  console.log("");
+  console.log(c.bold(`› running ${testFiles.length} test file(s)`));
+  console.log("");
+  const reporterArgs = [`--test-reporter=${reporter}`];
   const child = spawn(
     process.execPath,
     [
@@ -135,9 +211,21 @@ try {
     });
   });
 
+  const total = fmtDuration(Date.now() - runStart);
+  console.log("");
+  if (code === 0) {
+    console.log(c.bold(c.green(`✓ all test files passed`)) + c.dim(`  (${total})`));
+  } else {
+    console.log(
+      c.bold(c.red(`✗ test run failed`)) +
+        c.dim(`  (exit=${code}, ${total})`),
+    );
+  }
+  console.log("");
+
   await shutdown(code);
 } catch (err) {
   const msg = err instanceof Error ? err.message : String(err);
-  console.error(`runner: ${msg}`);
+  console.error(c.red(`runner: ${msg}`));
   await shutdown(1);
 }

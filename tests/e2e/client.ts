@@ -20,7 +20,12 @@ import type {
   WorkerTask,
 } from "./types.ts";
 
-const DEFAULT_BASE = "http://localhost:18080";
+// Default base URL honours `ORCH8_E2E_BASE_URL` (full override) and
+// `ORCH8_E2E_PORT` (just the port). `run-standalone.ts` uses `ORCH8_E2E_PORT`
+// to point each parallel suite at its own server without per-suite edits.
+const DEFAULT_BASE: string =
+  process.env.ORCH8_E2E_BASE_URL ??
+  `http://localhost:${process.env.ORCH8_E2E_PORT ?? "18080"}`;
 
 /** A loose JSON response shape — individual endpoints narrow as needed. */
 type ApiResponse = Record<string, unknown>;
@@ -416,7 +421,7 @@ export class Orch8Client {
   async waitForState(
     id: string,
     targetStates: string | string[],
-    { timeoutMs = 15_000, intervalMs = 200 }: WaitOptions = {},
+    { timeoutMs = 15_000, intervalMs = 50 }: WaitOptions = {},
   ): Promise<Instance> {
     const states = Array.isArray(targetStates) ? targetStates : [targetStates];
     const deadline = Date.now() + timeoutMs;
@@ -436,7 +441,7 @@ export class Orch8Client {
   /** Wait for server to be healthy. */
   async waitForReady({
     timeoutMs = 10_000,
-    intervalMs = 200,
+    intervalMs = 50,
   }: WaitOptions = {}): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {

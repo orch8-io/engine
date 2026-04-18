@@ -82,6 +82,12 @@ async-nats = "0.38"
 notify = { version = "7", features = ["serde"] }
 wasmtime = "29"
 
+# Speed up debug builds: keep our own crates cheap to compile (opt-level 0)
+# but build 3rd-party deps at opt-level 1. Big win for sqlx, tokio, axum
+# etc. in E2E tests where we pay dep runtime cost on every server boot.
+[profile.dev.package."*"]
+opt-level = 1
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 

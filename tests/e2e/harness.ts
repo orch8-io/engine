@@ -21,10 +21,27 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "../..");
 
-const DEFAULT_PORT = 18080;
+// A caller can override the default port via env — lets `run-standalone.ts`
+// assign each parallel suite its own port without touching each test file.
+const DEFAULT_PORT = Number(process.env.ORCH8_E2E_PORT) || 18080;
 const DB_URL =
   process.env.ORCH8_DATABASE_URL || "postgres://orch8:orch8@localhost:5434/orch8";
+/**
+ * Raw Postgres URL for the test DB. Exported so individual suites can run
+ * their own direct queries (e.g. to inspect ciphertext at rest).
+ */
+export const TEST_DB_URL = DB_URL;
 const STORAGE_BACKEND = process.env.ORCH8_STORAGE_BACKEND || "postgres";
+
+// Server logs drown real test output at `info` — the engine emits per-tick
+// and per-poll lines. Default to `warn` so warnings/errors still surface;
+// opt back into full verbosity with ORCH8_E2E_VERBOSE=1 when debugging.
+const VERBOSE = process.env.ORCH8_E2E_VERBOSE === "1";
+const SERVER_LOG_LEVEL =
+  process.env.ORCH8_LOG_LEVEL || (VERBOSE ? "info" : "warn");
+
+const USE_COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const dim = (s: string): string => (USE_COLOR ? `\x1b[2m${s}\x1b[0m` : s);
 
 /**
  * Handle returned by `startServer`. In attach mode `child` is `null` and
@@ -38,26 +55,55 @@ export interface ServerHandle {
 
 export interface StartServerOptions {
   port?: number;
+  /**
+   * Extra environment variables merged into the spawned server's env.
+   *
+   * Ignored in attach mode (`ORCH8_E2E_ATTACH=1`) since the runner-owned
+   * server is already running — a warning is emitted so the test author
+   * can move the suite into `SELF_MANAGED_SUITES` if the override matters.
+   */
+  env?: Record<string, string>;
 }
 
 /**
- * Find the orch8-server binary. Checks target/debug first, then target/<triple>/debug.
+ * Find the orch8-server binary.
+ *
+ * Preference order (fastest runtime first):
+ *   1. target/release/
+ *   2. target/<triple>/release/
+ *   3. target/debug/
+ *   4. target/<triple>/debug/
+ *
+ * Release builds are 3-10x faster on async/DB-heavy paths, so a one-time
+ * `cargo build --release --bin orch8-server` locally slashes E2E wall time.
+ * CI still builds debug by default — the debug fallback keeps that path
+ * working unchanged.
  */
 function findBinary(): string {
-  const direct = resolve(PROJECT_ROOT, "target/debug/orch8-server");
-  if (existsSync(direct)) return direct;
+  const candidates: string[] = [
+    resolve(PROJECT_ROOT, "target/release/orch8-server"),
+  ];
 
-  // Check target/<triple>/debug/ (cross-compiled builds land here).
   const targetDir = resolve(PROJECT_ROOT, "target");
   if (existsSync(targetDir)) {
     for (const entry of readdirSync(targetDir)) {
-      const candidate = resolve(targetDir, entry, "debug/orch8-server");
-      if (existsSync(candidate)) return candidate;
+      candidates.push(resolve(targetDir, entry, "release/orch8-server"));
     }
   }
 
+  candidates.push(resolve(PROJECT_ROOT, "target/debug/orch8-server"));
+  if (existsSync(targetDir)) {
+    for (const entry of readdirSync(targetDir)) {
+      candidates.push(resolve(targetDir, entry, "debug/orch8-server"));
+    }
+  }
+
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+
   throw new Error(
-    "orch8-server binary not found. Run: cargo build --bin orch8-server",
+    "orch8-server binary not found. Run: cargo build --bin orch8-server (or --release for faster E2E)",
   );
 }
 
@@ -76,9 +122,16 @@ function findBinary(): string {
  * missing, `findBinary()` throws with the `cargo build` hint.
  */
 export async function startServer(
-  { port = DEFAULT_PORT }: StartServerOptions = {},
+  { port = DEFAULT_PORT, env: extraEnv }: StartServerOptions = {},
 ): Promise<ServerHandle> {
   if (process.env.ORCH8_E2E_ATTACH === "1") {
+    if (extraEnv && Object.keys(extraEnv).length > 0) {
+      console.log(
+        dim(
+          "  warning: `env` override ignored in attach mode — move the suite into SELF_MANAGED_SUITES for the override to take effect",
+        ),
+      );
+    }
     const p = Number(process.env.ORCH8_E2E_PORT) || port;
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -88,13 +141,13 @@ export async function startServer(
       } catch {
         /* not ready */
       }
-      await sleep(100);
+      await sleep(25);
     }
     throw new Error(`Attach mode: server not reachable on port ${p}`);
   }
 
   const binaryPath = findBinary();
-  console.log(`  Using binary: ${binaryPath}`);
+  console.log(dim(`  binary: ${binaryPath}`));
 
   // Kill any stale process on the target port.
   try {
@@ -103,7 +156,7 @@ export async function startServer(
     }).trim();
     if (pids) {
       execFileSync("kill", ["-9", ...pids.split("\n")], { stdio: "ignore" });
-      console.log(`  Killed stale process(es) on port ${port}`);
+      console.log(dim(`  killed stale process(es) on port ${port}`));
       await sleep(500);
     }
   } catch {
@@ -121,7 +174,7 @@ export async function startServer(
           /* ignore if absent */
         }
       }
-      console.log(`  Deleted stale SQLite database: ${sqlitePath}`);
+      console.log(dim(`  deleted stale sqlite db: ${sqlitePath}`));
     }
   } else {
     try {
@@ -157,10 +210,10 @@ export async function startServer(
           stdio: "pipe",
         },
       );
-      console.log("  Cleaned stale test data from database");
+      console.log(dim("  cleaned stale test data from db"));
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.log(`  Warning: DB cleanup failed: ${msg}`);
+      console.log(dim(`  warning: db cleanup failed: ${msg}`));
     }
   }
 
@@ -173,35 +226,43 @@ export async function startServer(
       ORCH8_STORAGE_BACKEND: STORAGE_BACKEND,
       ORCH8_DATABASE_URL: DB_URL,
       ORCH8_HTTP_ADDR: httpAddr,
-      ORCH8_LOG_LEVEL: "info",
+      ORCH8_LOG_LEVEL: SERVER_LOG_LEVEL,
       ORCH8_TICK_INTERVAL_MS: "100",
+      ...(extraEnv ?? {}),
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  // Stream all stderr for debugging.
+  // Stream server stderr, line by line. Verbose mode keeps everything;
+  // normal mode relies on the level filter (warn+) set above — whatever
+  // makes it through is worth seeing, so keep it visible (just dimmed).
   child.stderr.on("data", (data: Buffer) => {
-    const line = data.toString().trim();
-    if (line) console.log(`  [server] ${line}`);
+    const text = data.toString();
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trimEnd();
+      if (line) console.log(dim(`  [server] ${line}`));
+    }
   });
 
   child.on("error", (err: Error) => {
     console.error(`  [server] Failed to start: ${err.message}`);
   });
 
-  // Wait for server to be ready.
+  // Wait for server to be ready. Poll aggressively — the server usually
+  // comes up in <1s, so a 200ms interval wastes ~100ms per spawn on
+  // average, which compounds across parallel suites.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://localhost:${port}/health/live`);
       if (res.ok) {
-        console.log(`  Server ready on port ${port}`);
+        console.log(dim(`  server ready on port ${port}`));
         return { child, port };
       }
     } catch {
       // Not ready yet.
     }
-    await sleep(200);
+    await sleep(25);
   }
 
   child.kill("SIGTERM");

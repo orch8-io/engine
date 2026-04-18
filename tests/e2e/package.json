@@ -5,8 +5,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx ./run-e2e.ts",
-    "test:verbose": "ORCH8_E2E_REPORTER=spec tsx ./run-e2e.ts",
-    "test:standalone": "node --import tsx/esm --test --test-concurrency=1 --test-timeout=60000 ./persistence_recovery.test.ts ./triggers.test.ts ./wait-signal.test.ts ./worker-dashboard.test.ts ./workers.test.ts"
+    "test:verbose": "ORCH8_E2E_VERBOSE=1 tsx ./run-e2e.ts",
+    "test:dot": "ORCH8_E2E_REPORTER=dot tsx ./run-e2e.ts",
+    "test:tap": "ORCH8_E2E_REPORTER=tap tsx ./run-e2e.ts",
+    "test:standalone": "tsx ./run-standalone.ts",
+    "test:standalone:serial": "node --import tsx/esm --test --test-concurrency=1 --test-timeout=60000 ./resilience/persistence_recovery.test.ts ./features/triggers.test.ts ./signals/wait-signal.test.ts ./features/worker-dashboard.test.ts ./features/workers.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
