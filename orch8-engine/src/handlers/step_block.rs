@@ -288,6 +288,13 @@ pub async fn execute_step_node(
             // Leave node as Running for retry on next tick.
             Ok(true)
         }
+        Err(EngineError::StepFailed {
+            retryable: false, ..
+        }) => {
+            // Permanent failure - mark node as failed
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            Ok(false)
+        }
         Err(e) => {
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Err(e)

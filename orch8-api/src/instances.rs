@@ -255,10 +255,11 @@ pub(crate) async fn create_instances_batch(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BatchCreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Empty batch is a no-op — return success with count=0 so callers
+    // can pass through dynamically-computed batches without special-casing
+    // the zero-length path.
     if req.instances.is_empty() {
-        return Err(ApiError::InvalidArgument(
-            "instances array must not be empty".into(),
-        ));
+        return Ok((StatusCode::OK, Json(CountResponse { count: 0 })));
     }
     if req.instances.len() > 10_000 {
         return Err(ApiError::InvalidArgument(

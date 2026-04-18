@@ -671,4 +671,117 @@ mod tests {
         let json = r#"{"type": "unknown_block", "id": "x"}"#;
         assert!(serde_json::from_str::<BlockDefinition>(json).is_err());
     }
+
+    fn sample_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
+        SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("default".into()),
+            name: "sample".into(),
+            version: 1,
+            deprecated: false,
+            blocks,
+            interceptors: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn step(id: &str) -> BlockDefinition {
+        BlockDefinition::Step(StepDef {
+            id: BlockId(id.into()),
+            handler: "noop".into(),
+            params: serde_json::Value::Null,
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
+            queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
+        })
+    }
+
+    #[test]
+    fn validate_accepts_unique_ids() {
+        let seq = sample_seq(vec![step("a"), step("b"), step("c")]);
+        assert!(seq.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_top_level() {
+        let seq = sample_seq(vec![step("dup"), step("dup")]);
+        let err = seq.validate().unwrap_err();
+        assert!(matches!(err, SequenceValidationError::DuplicateBlockId(ref s) if s == "dup"));
+    }
+
+    #[test]
+    fn validate_descends_into_parallel_branches() {
+        let seq = sample_seq(vec![
+            step("outer"),
+            BlockDefinition::Parallel(ParallelDef {
+                id: BlockId("par".into()),
+                branches: vec![vec![step("outer")]],
+            }),
+        ]);
+        assert!(matches!(
+            seq.validate().unwrap_err(),
+            SequenceValidationError::DuplicateBlockId(_)
+        ));
+    }
+
+    #[test]
+    fn validate_descends_into_try_catch() {
+        let seq = sample_seq(vec![BlockDefinition::TryCatch(TryCatchDef {
+            id: BlockId("tc".into()),
+            try_block: vec![step("x")],
+            catch_block: vec![step("x")],
+            finally_block: None,
+        })]);
+        assert!(matches!(
+            seq.validate().unwrap_err(),
+            SequenceValidationError::DuplicateBlockId(_)
+        ));
+    }
+
+    #[test]
+    fn validate_descends_into_router() {
+        let seq = sample_seq(vec![BlockDefinition::Router(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![Route {
+                condition: "true".into(),
+                blocks: vec![step("dup")],
+            }],
+            default: Some(vec![step("dup")]),
+        })]);
+        assert!(matches!(
+            seq.validate().unwrap_err(),
+            SequenceValidationError::DuplicateBlockId(_)
+        ));
+    }
+
+    #[test]
+    fn validate_descends_into_cancellation_scope_and_ab_split() {
+        let seq = sample_seq(vec![
+            BlockDefinition::CancellationScope(CancellationScopeDef {
+                id: BlockId("cs".into()),
+                blocks: vec![step("shared")],
+            }),
+            BlockDefinition::ABSplit(ABSplitDef {
+                id: BlockId("ab".into()),
+                variants: vec![ABVariant {
+                    name: "v1".into(),
+                    weight: 1,
+                    blocks: vec![step("shared")],
+                }],
+            }),
+        ]);
+        assert!(matches!(
+            seq.validate().unwrap_err(),
+            SequenceValidationError::DuplicateBlockId(_)
+        ));
+    }
 }
