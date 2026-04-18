@@ -136,8 +136,8 @@ mod tests {
 
     fn make_resource(daily_cap: u32, warmup_days: u32, warmup_start_cap: u32) -> PoolResource {
         PoolResource {
-            id: Uuid::new_v4(),
-            pool_id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
+            pool_id: Uuid::now_v7(),
             resource_key: ResourceKey("test".into()),
             name: "test".into(),
             weight: 1,

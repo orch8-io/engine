@@ -1534,7 +1534,7 @@ mod tests {
 
     fn mk_signal_for(target: InstanceId) -> orch8_types::signal::Signal {
         orch8_types::signal::Signal {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: target,
             signal_type: orch8_types::signal::SignalType::Cancel,
             payload: serde_json::Value::Null,

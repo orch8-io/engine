@@ -55,7 +55,7 @@ pub async fn audit_transition(
     block_id: Option<&str>,
 ) {
     let entry = AuditLogEntry {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id,
         tenant_id: tenant_id.clone(),
         event_type: "state_transition".into(),
@@ -80,7 +80,7 @@ pub async fn audit_event(
     details: serde_json::Value,
 ) {
     let entry = AuditLogEntry {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id,
         tenant_id: tenant_id.clone(),
         event_type: event_type.into(),

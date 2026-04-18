@@ -152,7 +152,7 @@ pub async fn execute_loop(
 
         let next_iteration = iteration.saturating_add(1);
         let marker = BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: loop_def.id.clone(),
             output: serde_json::json!({ "_iterations": next_iteration }),
@@ -306,7 +306,7 @@ mod tests {
 
     fn mk_marker(inst: InstanceId, block: &str, value: i64) -> BlockOutput {
         BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst,
             block_id: BlockId(block.into()),
             output: json!({ "_iterations": value }),
@@ -411,7 +411,7 @@ mod tests {
         let tree = vec![outer.clone(), inner.clone()];
 
         s.save_block_output(&BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst,
             block_id: inner.block_id.clone(),
             output: json!({"_index": 1, "_total": 3}),
@@ -445,7 +445,7 @@ mod tests {
         let tree = vec![outer.clone(), step.clone()];
 
         s.save_block_output(&BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst,
             block_id: step.block_id.clone(),
             output: json!({"result": "ok"}),
@@ -467,6 +467,93 @@ mod tests {
             .unwrap()
             .expect("step output preserved");
         assert_eq!(got.output["result"], "ok");
+    }
+
+    /// Regression: `reset_subtree_to_pending` in `loop_block` must purge
+    /// stale `worker_tasks` rows for each descendant `block_id`. Mirror of
+    /// `for_each::tests::fe_reset_subtree_purges_descendant_worker_tasks`.
+    /// Without this, the `UNIQUE(instance_id, block_id)` constraint on
+    /// `worker_tasks` combined with `ON CONFLICT DO NOTHING` silently drops
+    /// iteration 1+ external dispatches.
+    #[tokio::test]
+    async fn lp_reset_subtree_purges_descendant_worker_tasks() {
+        use orch8_types::worker::{WorkerTask, WorkerTaskState};
+        use uuid::Uuid;
+
+        let s = SqliteStorage::in_memory().await.unwrap();
+        let inst = InstanceId::new();
+        seed_instance(&s, inst).await;
+
+        let outer = mk_node(inst, "outer_lp", BlockType::Loop, None);
+        let step = mk_node(inst, "body_step", BlockType::Step, Some(outer.id));
+        let tree = vec![outer.clone(), step.clone()];
+
+        // Simulate iteration 0's completed worker_tasks row for the body step.
+        let iter0 = WorkerTask {
+            id: Uuid::now_v7(),
+            instance_id: inst,
+            block_id: step.block_id.clone(),
+            handler_name: "external_handler".into(),
+            queue_name: None,
+            params: json!({}),
+            context: json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: chrono::Utc::now(),
+        };
+        s.create_worker_task(&iter0).await.unwrap();
+        s.claim_worker_tasks("external_handler", "w1", 1)
+            .await
+            .unwrap();
+        s.complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
+            .await
+            .unwrap();
+
+        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+            .await
+            .unwrap();
+
+        assert!(
+            s.get_worker_task(iter0.id).await.unwrap().is_none(),
+            "completed worker_tasks row must be purged by reset_subtree"
+        );
+
+        // Iteration 1 INSERT for the same block_id must now succeed.
+        let iter1 = WorkerTask {
+            id: Uuid::now_v7(),
+            instance_id: inst,
+            block_id: step.block_id.clone(),
+            handler_name: "external_handler".into(),
+            queue_name: None,
+            params: json!({}),
+            context: json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: chrono::Utc::now(),
+        };
+        s.create_worker_task(&iter1).await.unwrap();
+        let claimed = s
+            .claim_worker_tasks("external_handler", "w2", 1)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, iter1.id);
     }
 
     #[tokio::test]
@@ -618,7 +705,7 @@ mod tests {
             .unwrap();
         // A step output from the previous iteration — must be preserved.
         s.save_block_output(&BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst_id,
             block_id: BlockId("body".into()),
             output: json!({"prev": true}),

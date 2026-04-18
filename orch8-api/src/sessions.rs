@@ -55,7 +55,7 @@ async fn create_session(
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     let now = chrono::Utc::now();
     let session = Session {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id,
         session_key: body.session_key,
         data: body.data,

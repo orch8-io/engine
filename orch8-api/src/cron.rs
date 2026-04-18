@@ -76,7 +76,7 @@ pub(crate) async fn create_cron(
         .map_err(|e| ApiError::InvalidArgument(format!("invalid cron expression: {e}")))?;
 
     let now = Utc::now();
-    let id = Uuid::new_v4();
+    let id = Uuid::now_v7();
 
     let schedule = CronSchedule {
         id,

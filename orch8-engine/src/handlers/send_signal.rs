@@ -53,7 +53,7 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
     check_same_tenant(&ctx.tenant_id, &target.tenant_id, "send_signal")?;
 
     let signal = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: target_id,
         signal_type,
         payload,

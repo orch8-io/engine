@@ -65,7 +65,7 @@ pub async fn execute_ab_split(
         );
 
         let output = BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: ab_def.id.clone(),
             output: serde_json::json!({

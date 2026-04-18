@@ -508,7 +508,7 @@ pub(crate) async fn send_signal(
     }
 
     let signal = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id,
         signal_type: req.signal_type,
         payload: req.payload,
@@ -799,7 +799,7 @@ pub(crate) async fn save_checkpoint(
     )?;
 
     let checkpoint = orch8_types::checkpoint::Checkpoint {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id,
         checkpoint_data: req.checkpoint_data,
         created_at: Utc::now(),

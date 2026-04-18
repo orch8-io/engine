@@ -171,7 +171,7 @@ pub(crate) async fn complete_task(
     let output_json = serde_json::to_string(&req.output).unwrap_or_else(|_| "{}".to_string());
     let task_block_id = task.block_id.clone();
     let block_output = BlockOutput {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: task.instance_id,
         block_id: task.block_id,
         output: req.output,

@@ -319,7 +319,7 @@ async fn dispatch_step_to_external_worker(
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
     let task = WorkerTask {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
@@ -570,7 +570,7 @@ mod tests {
         block_id: &str,
     ) -> ExecutionNode {
         let node = ExecutionNode {
-            id: ExecutionNodeId(uuid::Uuid::new_v4()),
+            id: ExecutionNodeId(uuid::Uuid::now_v7()),
             instance_id,
             block_id: BlockId(block_id.into()),
             parent_id: None,
@@ -591,7 +591,7 @@ mod tests {
         output: serde_json::Value,
     ) {
         let bo = BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id,
             block_id: BlockId(block_id.into()),
             output,

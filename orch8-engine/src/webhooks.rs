@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn instance_event_sets_fields() {
-        let id = InstanceId(uuid::Uuid::new_v4());
+        let id = InstanceId(uuid::Uuid::now_v7());
         let event = instance_event("instance.completed", id, serde_json::json!({"key": "val"}));
         assert_eq!(event.event_type, "instance.completed");
         assert_eq!(event.instance_id, Some(id));
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn webhook_event_with_instance_id_serializes_id_as_string() {
-        let id = InstanceId(uuid::Uuid::new_v4());
+        let id = InstanceId(uuid::Uuid::now_v7());
         let event = WebhookEvent {
             event_type: "instance.running".into(),
             instance_id: Some(id),
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn instance_event_timestamp_is_rfc3339_parseable() {
-        let id = InstanceId(uuid::Uuid::new_v4());
+        let id = InstanceId(uuid::Uuid::now_v7());
         let event = instance_event("x", id, serde_json::json!({}));
         // Must parse as a valid RFC 3339 timestamp.
         let parsed = chrono::DateTime::parse_from_rfc3339(&event.timestamp);
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn instance_event_preserves_arbitrary_nested_data() {
-        let id = InstanceId(uuid::Uuid::new_v4());
+        let id = InstanceId(uuid::Uuid::now_v7());
         let payload = serde_json::json!({
             "nested": {"a": [1, 2, 3], "b": null},
             "flag": true,
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn webhook_event_is_cloneable() {
         // Clone is derived; this test locks the derive in place.
-        let id = InstanceId(uuid::Uuid::new_v4());
+        let id = InstanceId(uuid::Uuid::now_v7());
         let a = WebhookEvent {
             event_type: "e".into(),
             instance_id: Some(id),
@@ -298,7 +298,7 @@ mod tests {
         };
         let event = instance_event(
             "test",
-            InstanceId(uuid::Uuid::new_v4()),
+            InstanceId(uuid::Uuid::now_v7()),
             serde_json::json!({}),
         );
         let cancel = CancellationToken::new();

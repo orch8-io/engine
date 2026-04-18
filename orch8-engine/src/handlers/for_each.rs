@@ -117,7 +117,7 @@ pub async fn execute_for_each(
         // Persist the initial snapshot so later ticks stay consistent
         // with this exact collection, regardless of context mutation.
         let init_marker = BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: fe_def.id.clone(),
             output: serde_json::json!({
@@ -183,7 +183,7 @@ pub async fn execute_for_each(
 
         let next_index = index.saturating_add(1);
         let marker = BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: fe_def.id.clone(),
             output: serde_json::json!({
@@ -413,7 +413,7 @@ mod tests {
 
     fn mk_marker(inst: InstanceId, block: &str, value: i64) -> BlockOutput {
         BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst,
             block_id: BlockId(block.into()),
             output: json!({ "_iterations": value }),
@@ -533,6 +533,102 @@ mod tests {
             .is_none());
     }
 
+    /// Regression: `reset_subtree_to_pending` must purge stale `worker_tasks`
+    /// rows for each descendant `block_id`. Without this, the
+    /// `UNIQUE(instance_id, block_id)` constraint combined with
+    /// `ON CONFLICT (instance_id, block_id) DO NOTHING` in `create_worker_task`
+    /// silently drops the next iteration's INSERT, so external workers never
+    /// see iteration 1+ dispatches.
+    #[tokio::test]
+    async fn fe_reset_subtree_purges_descendant_worker_tasks() {
+        use orch8_types::worker::{WorkerTask, WorkerTaskState};
+        use uuid::Uuid;
+
+        let s = SqliteStorage::in_memory().await.unwrap();
+        let inst = InstanceId::new();
+        seed_instance(&s, inst, json!({})).await;
+
+        let outer = mk_node(inst, "outer_fe", BlockType::ForEach, None);
+        let step = mk_node(inst, "body_step", BlockType::Step, Some(outer.id));
+        let tree = vec![outer.clone(), step.clone()];
+
+        // Simulate iteration 0's completed worker_tasks row for the body step.
+        let iter0 = WorkerTask {
+            id: Uuid::now_v7(),
+            instance_id: inst,
+            block_id: step.block_id.clone(),
+            handler_name: "external_handler".into(),
+            queue_name: None,
+            params: json!({}),
+            context: json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: chrono::Utc::now(),
+        };
+        s.create_worker_task(&iter0).await.unwrap();
+        s.claim_worker_tasks("external_handler", "w1", 1)
+            .await
+            .unwrap();
+        s.complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
+            .await
+            .unwrap();
+
+        // Reset subtree must purge the completed worker_tasks row.
+        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+            .await
+            .unwrap();
+
+        assert!(
+            s.get_worker_task(iter0.id).await.unwrap().is_none(),
+            "completed worker_tasks row must be purged by reset_subtree"
+        );
+
+        // Iteration 1 INSERT for the same block_id must now succeed.
+        let iter1 = WorkerTask {
+            id: Uuid::now_v7(),
+            instance_id: inst,
+            block_id: step.block_id.clone(),
+            handler_name: "external_handler".into(),
+            queue_name: None,
+            params: json!({}),
+            context: json!({}),
+            attempt: 1,
+            timeout_ms: None,
+            state: WorkerTaskState::Pending,
+            worker_id: None,
+            claimed_at: None,
+            heartbeat_at: None,
+            completed_at: None,
+            output: None,
+            error_message: None,
+            error_retryable: None,
+            created_at: chrono::Utc::now(),
+        };
+        s.create_worker_task(&iter1).await.unwrap();
+
+        let claimed = s
+            .claim_worker_tasks("external_handler", "w2", 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed.len(),
+            1,
+            "iteration 1 worker_tasks row must be claimable after reset"
+        );
+        assert_eq!(
+            claimed[0].id, iter1.id,
+            "claimed task must be the iter1 row, not a ghost of iter0"
+        );
+    }
+
     #[tokio::test]
     async fn fe_reset_subtree_preserves_step_outputs() {
         let s = SqliteStorage::in_memory().await.unwrap();
@@ -544,7 +640,7 @@ mod tests {
         let tree = vec![outer.clone(), step.clone()];
 
         s.save_block_output(&BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst,
             block_id: step.block_id.clone(),
             output: json!({"result": "ok"}),
@@ -586,7 +682,7 @@ mod tests {
 
         // Stale prior-run marker (_index=3 means it had iterated 3 times).
         s.save_block_output(&BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: inst_id,
             block_id: BlockId("fe".into()),
             output: json!({"_index": 3, "_total": 4, "_item_var": "item"}),

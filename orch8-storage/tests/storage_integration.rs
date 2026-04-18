@@ -186,7 +186,7 @@ async fn signal_lifecycle() {
     let inst_id = InstanceId::new();
 
     let sig = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         signal_type: SignalType::Pause,
         payload: json!({"reason": "maintenance"}),
@@ -214,7 +214,7 @@ async fn signal_batch_operations() {
     let inst2 = InstanceId::new();
 
     let sig1 = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst1,
         signal_type: SignalType::Cancel,
         payload: json!(null),
@@ -223,7 +223,7 @@ async fn signal_batch_operations() {
         delivered_at: None,
     };
     let sig2 = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst2,
         signal_type: SignalType::Resume,
         payload: json!(null),
@@ -232,7 +232,7 @@ async fn signal_batch_operations() {
         delivered_at: None,
     };
     let sig3 = Signal {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst1,
         signal_type: SignalType::Custom("wake".into()),
         payload: json!({"key": "val"}),
@@ -267,7 +267,7 @@ async fn worker_task_full_lifecycle() {
     let inst_id = InstanceId::new();
 
     let task = WorkerTask {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId("step_1".into()),
         handler_name: "http_request".into(),
@@ -330,7 +330,7 @@ async fn worker_task_fail_and_cancel() {
     let inst_id = InstanceId::new();
 
     let task = WorkerTask {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId("step_fail".into()),
         handler_name: "flaky_handler".into(),
@@ -367,7 +367,7 @@ async fn worker_task_fail_and_cancel() {
 
     // Create another task and cancel by block.
     let task2 = WorkerTask {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId("step_cancel".into()),
         handler_name: "slow".into(),
@@ -394,13 +394,192 @@ async fn worker_task_fail_and_cancel() {
     assert_eq!(cancelled, 1);
 }
 
+/// Regression: `cancel_worker_tasks_for_block` must DELETE rows regardless of
+/// state (including `completed`). The ForEach/Loop iteration-reset path relies
+/// on this to purge the previous iteration's completed row so the next
+/// iteration's INSERT isn't silently dropped by the
+/// `UNIQUE(instance_id, block_id)` constraint (with `ON CONFLICT DO NOTHING`).
+///
+/// Prior behavior filtered `state IN ('pending', 'claimed')`, which left
+/// `completed` rows in place and caused `ForEach` iterations past the first to
+/// never dispatch to external workers.
+#[tokio::test]
+async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    // Simulate iteration 0: task created, claimed, completed.
+    let iter0 = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("loop_body".into()),
+        handler_name: "external_handler".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&iter0).await.unwrap();
+    s.claim_worker_tasks("external_handler", "w1", 1)
+        .await
+        .unwrap();
+    let ok = s
+        .complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
+        .await
+        .unwrap();
+    assert!(ok);
+
+    // Reset for next iteration: must delete the completed row.
+    let deleted = s
+        .cancel_worker_tasks_for_block(inst_id.0, "loop_body")
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted, 1,
+        "completed rows must be deleted by cancel_worker_tasks_for_block"
+    );
+
+    // Iteration 1 INSERT must now succeed (UNIQUE constraint no longer holds).
+    let iter1 = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("loop_body".into()),
+        handler_name: "external_handler".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&iter1).await.unwrap();
+
+    // Verify iter1 is the current row by claiming and checking the id.
+    let claimed = s
+        .claim_worker_tasks("external_handler", "w2", 1)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1, "iter1 row must be claimable");
+    assert_eq!(claimed[0].id, iter1.id, "claimed task should be iter1");
+}
+
+/// Regression: `cancel_worker_tasks_for_block` must also delete rows in
+/// `failed` state. Race cancellation and `ForEach` reset both rely on a clean
+/// slate regardless of terminal state.
+#[tokio::test]
+async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    let task = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("race_branch".into()),
+        handler_name: "external_handler".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task).await.unwrap();
+    s.claim_worker_tasks("external_handler", "w1", 1)
+        .await
+        .unwrap();
+    let failed = s
+        .fail_worker_task(task.id, "w1", "boom", false)
+        .await
+        .unwrap();
+    assert!(failed);
+
+    let deleted = s
+        .cancel_worker_tasks_for_block(inst_id.0, "race_branch")
+        .await
+        .unwrap();
+    assert_eq!(
+        deleted, 1,
+        "failed rows must be deleted by cancel_worker_tasks_for_block"
+    );
+
+    // Subsequent INSERT for same (instance_id, block_id) must succeed.
+    let task2 = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("race_branch".into()),
+        handler_name: "external_handler".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task2).await.unwrap();
+    let fetched = s.get_worker_task(task2.id).await.unwrap();
+    assert!(
+        fetched.is_some(),
+        "new task for same block must be insertable after cancel"
+    );
+}
+
+/// `cancel_worker_tasks_for_block` on a block with no matching rows must
+/// return 0 without error. The `ForEach` / `Loop` reset path calls this for
+/// every descendant, including composite descendants that never had
+/// `worker_tasks` rows — those calls must be no-ops.
+#[tokio::test]
+async fn cancel_worker_tasks_for_block_noop_on_missing() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    let deleted = s
+        .cancel_worker_tasks_for_block(inst_id.0, "never_existed")
+        .await
+        .unwrap();
+    assert_eq!(deleted, 0);
+}
+
 #[tokio::test]
 async fn worker_task_queue_routing() {
     let s = store().await;
     let inst_id = InstanceId::new();
 
     let task = WorkerTask {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId("q_step".into()),
         handler_name: "email_send".into(),
@@ -446,7 +625,7 @@ async fn cron_schedule_lifecycle() {
     let now = Utc::now();
 
     let schedule = CronSchedule {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id: TenantId("t1".into()),
         namespace: Namespace("default".into()),
         sequence_id: SequenceId::new(),
@@ -501,7 +680,7 @@ async fn session_lifecycle() {
     let now = Utc::now();
 
     let session = Session {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id: TenantId("t1".into()),
         session_key: "user:42:onboarding".into(),
         data: json!({"step": 1}),
@@ -543,7 +722,7 @@ async fn session_lifecycle() {
 async fn session_instances_link() {
     let s = store().await;
     let now = Utc::now();
-    let session_id = Uuid::new_v4();
+    let session_id = Uuid::now_v7();
 
     let session = Session {
         id: session_id,
@@ -584,7 +763,7 @@ async fn checkpoint_save_and_prune() {
     // Save 5 checkpoints.
     for i in 0..5 {
         let cp = Checkpoint {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: inst_id,
             checkpoint_data: json!({"step": i}),
             created_at: Utc::now() + Duration::seconds(i),
@@ -619,7 +798,7 @@ async fn audit_log_append_and_query() {
 
     for i in 0..3 {
         let entry = AuditLogEntry {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: inst_id,
             tenant_id: tenant.clone(),
             event_type: "state_transition".into(),
@@ -650,7 +829,7 @@ async fn resource_pool_lifecycle() {
     let tenant = TenantId("t_pool".into());
 
     let pool = ResourcePool {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id: tenant.clone(),
         name: "email_senders".into(),
         strategy: RotationStrategy::RoundRobin,
@@ -662,7 +841,7 @@ async fn resource_pool_lifecycle() {
 
     // Add resources.
     let res1 = PoolResource {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         pool_id: pool.id,
         resource_key: ResourceKey("sender_a@acme.com".into()),
         name: "Sender A".into(),
@@ -677,7 +856,7 @@ async fn resource_pool_lifecycle() {
         created_at: now,
     };
     let res2 = PoolResource {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         pool_id: pool.id,
         resource_key: ResourceKey("sender_b@acme.com".into()),
         name: "Sender B".into(),
@@ -872,7 +1051,7 @@ async fn cluster_node_lifecycle() {
     let now = Utc::now();
 
     let node = ClusterNode {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         name: "node-1".into(),
         status: NodeStatus::Active,
         registered_at: now,
@@ -914,7 +1093,7 @@ async fn rate_limit_check_and_exceed() {
 
     // Set up rate limit: 3 per 60 seconds.
     let rl = RateLimit {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id: tenant.clone(),
         resource_key: key.clone(),
         max_count: 3,
@@ -945,7 +1124,7 @@ async fn block_output_crud() {
     let inst_id = InstanceId::new();
 
     let out = BlockOutput {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId("step_1".into()),
         output: json!({"result": "ok"}),
@@ -982,7 +1161,7 @@ async fn save_output_and_transition_atomic() {
     s.create_instance(&inst).await.unwrap();
 
     let out = BlockOutput {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst.id,
         block_id: BlockId("s1".into()),
         output: json!({"done": true}),
@@ -1012,7 +1191,7 @@ async fn completed_block_ids_batch() {
 
     for (inst_id, block_name) in &[(inst1, "a"), (inst1, "b"), (inst2, "c")] {
         let out = BlockOutput {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: *inst_id,
             block_id: BlockId((*block_name).into()),
             output: json!({}),
@@ -1040,7 +1219,7 @@ async fn completed_block_ids_batch() {
 
 fn mk_output(inst_id: InstanceId, block: &str, attempt: i16) -> BlockOutput {
     BlockOutput {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst_id,
         block_id: BlockId(block.into()),
         output: json!({"_iterations": attempt}),
@@ -1133,7 +1312,7 @@ async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance(
         .await
         .unwrap();
     s.save_block_output(&BlockOutput {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         instance_id: inst,
         block_id: step_id.clone(),
         output: json!({"result": "ok"}),
@@ -1588,7 +1767,7 @@ async fn worker_task_list_and_stats() {
         .enumerate()
     {
         let task = WorkerTask {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: inst_id,
             block_id: BlockId(format!("step_{i}")),
             handler_name: (*handler).into(),
@@ -1689,7 +1868,7 @@ async fn perf_signal_batch_throughput() {
     let mut sig_ids = Vec::new();
     for _ in 0..200 {
         let sig = Signal {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: inst_id,
             signal_type: SignalType::Custom("tick".into()),
             payload: json!(null),
@@ -1775,7 +1954,7 @@ async fn perf_concurrent_worker_claims() {
     // Create 100 worker tasks.
     for i in 0..100 {
         let task = WorkerTask {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id: inst_id,
             block_id: BlockId(format!("step_{i}")),
             handler_name: "batch_handler".into(),

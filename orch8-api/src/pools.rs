@@ -83,7 +83,7 @@ pub(crate) async fn create_pool(
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId(req.tenant_id))?;
     let now = Utc::now();
     let pool = ResourcePool {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         tenant_id,
         name: req.name,
         strategy: req.strategy,
@@ -210,7 +210,7 @@ pub(crate) async fn add_resource(
         .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
 
     let resource = PoolResource {
-        id: Uuid::new_v4(),
+        id: Uuid::now_v7(),
         pool_id,
         resource_key: ResourceKey(req.resource_key),
         name: req.name,

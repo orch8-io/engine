@@ -473,7 +473,7 @@ impl Orch8Service for Orch8GrpcService {
             from_json_str(&format!("\"{}\"", inner.strategy))?;
         let now = chrono::Utc::now();
         let pool = orch8_types::pool::ResourcePool {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             tenant_id: TenantId(inner.tenant_id),
             name: inner.name,
             strategy,
@@ -566,7 +566,7 @@ impl Orch8Service for Orch8GrpcService {
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
 
         let resource = orch8_types::pool::PoolResource {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             pool_id,
             resource_key: orch8_types::ids::ResourceKey(r.resource_key),
             name: r.name,

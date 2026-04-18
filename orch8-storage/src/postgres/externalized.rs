@@ -29,7 +29,7 @@ pub(super) async fn save(
                     compression = 'zstd',
                     size_bytes = EXCLUDED.size_bytes",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(instance_id.0)
         .bind(ref_key)
         .bind(&compressed)
@@ -47,7 +47,7 @@ pub(super) async fn save(
                     compression = NULL,
                     size_bytes = EXCLUDED.size_bytes",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(instance_id.0)
         .bind(ref_key)
         .bind(payload)
@@ -129,7 +129,7 @@ pub(super) async fn batch_save(
                         compression = 'zstd',
                         size_bytes = EXCLUDED.size_bytes",
             )
-            .bind(Uuid::new_v4())
+            .bind(Uuid::now_v7())
             .bind(instance_id.0)
             .bind(ref_key)
             .bind(&compressed)
@@ -147,7 +147,7 @@ pub(super) async fn batch_save(
                         compression = NULL,
                         size_bytes = EXCLUDED.size_bytes",
             )
-            .bind(Uuid::new_v4())
+            .bind(Uuid::now_v7())
             .bind(instance_id.0)
             .bind(ref_key)
             .bind(payload)

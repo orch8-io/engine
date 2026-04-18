@@ -53,10 +53,10 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
         })
         .collect();
     SequenceDefinition {
-        id: SequenceId(uuid::Uuid::new_v4()),
+        id: SequenceId(uuid::Uuid::now_v7()),
         tenant_id: TenantId(tenant.into()),
         namespace: Namespace("default".into()),
-        name: format!("bench-seq-{}", uuid::Uuid::new_v4()),
+        name: format!("bench-seq-{}", uuid::Uuid::now_v7()),
         version: 1,
         deprecated: false,
         blocks,
@@ -131,7 +131,7 @@ async fn main() {
 /// Benchmark 1: Batch INSERT 100K instances.
 /// Target: < 3 seconds.
 async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
-    let tenant = format!("bench-insert-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let tenant = format!("bench-insert-{}", &uuid::Uuid::now_v7().to_string()[..8]);
     let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
@@ -159,7 +159,7 @@ async fn bench_batch_insert(storage: Arc<PostgresStorage>) {
 /// Benchmark 2: `claim_due_instances` throughput.
 /// How fast can we claim batches of 256 from a pool of 10K scheduled instances?
 async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
-    let tenant = format!("bench-claim-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let tenant = format!("bench-claim-{}", &uuid::Uuid::now_v7().to_string()[..8]);
     let seq = make_sequence(&tenant, 1);
     storage.create_sequence(&seq).await.unwrap();
 
@@ -198,7 +198,7 @@ async fn bench_claim_throughput(storage: Arc<PostgresStorage>) {
 /// Benchmark: End-to-end throughput.
 /// Schedule N instances with noop handler(s), run engine, measure time to complete all.
 async fn bench_e2e_throughput(storage: Arc<PostgresStorage>, num_steps: usize) {
-    let tenant = format!("bench-e2e-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let tenant = format!("bench-e2e-{}", &uuid::Uuid::now_v7().to_string()[..8]);
     let seq = make_sequence(&tenant, num_steps);
     storage.create_sequence(&seq).await.unwrap();
 

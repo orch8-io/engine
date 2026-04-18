@@ -77,6 +77,7 @@ pub(super) fn parse_block_type(s: &str) -> BlockType {
         "try_catch" => BlockType::TryCatch,
         "sub_sequence" => BlockType::SubSequence,
         "ab_split" => BlockType::ABSplit,
+        "cancellation_scope" => BlockType::CancellationScope,
         _ => BlockType::Step,
     }
 }

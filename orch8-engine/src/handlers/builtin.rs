@@ -220,16 +220,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             Err(_) => false,
         };
         if inside_scope {
-            eprintln!(
-                "SLEEP-SCOPE: inside=true inst={} block={}",
-                ctx.instance_id, ctx.block_id
-            );
             continue;
-        } else {
-            eprintln!(
-                "SLEEP-SCOPE: inside=false inst={} block={}",
-                ctx.instance_id, ctx.block_id
-            );
         }
         if let Ok(signals) = ctx.storage.get_pending_signals(ctx.instance_id).await {
             let has_cancel = signals

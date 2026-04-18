@@ -151,7 +151,7 @@ fn bench_block_outputs(c: &mut Criterion) {
                 runtime.block_on(async {
                     let inst_id = InstanceId::new();
                     let out = BlockOutput {
-                        id: Uuid::new_v4(),
+                        id: Uuid::now_v7(),
                         instance_id: inst_id,
                         block_id: BlockId("step_1".into()),
                         output: json!({"result": "ok", "data": [1,2,3]}),
@@ -182,7 +182,7 @@ fn bench_signals(c: &mut Criterion) {
                     let inst_id = InstanceId::new();
                     for _ in 0..100 {
                         let sig = Signal {
-                            id: Uuid::new_v4(),
+                            id: Uuid::now_v7(),
                             instance_id: inst_id,
                             signal_type: SignalType::Custom("tick".into()),
                             payload: json!(null),
@@ -256,7 +256,7 @@ fn bench_worker_tasks(c: &mut Criterion) {
                     let inst_id = InstanceId::new();
                     for i in 0..50 {
                         let task = WorkerTask {
-                            id: Uuid::new_v4(),
+                            id: Uuid::now_v7(),
                             instance_id: inst_id,
                             block_id: BlockId(format!("step_{i}")),
                             handler_name: "bench_handler".into(),

@@ -409,7 +409,7 @@ async fn insert_externalized_row(
                     compression = 'zstd',
                     size_bytes = EXCLUDED.size_bytes",
         )
-        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::now_v7())
         .bind(instance_id.0)
         .bind(ref_key)
         .bind(&compressed)
@@ -427,7 +427,7 @@ async fn insert_externalized_row(
                     compression = NULL,
                     size_bytes = EXCLUDED.size_bytes",
         )
-        .bind(uuid::Uuid::new_v4())
+        .bind(uuid::Uuid::now_v7())
         .bind(instance_id.0)
         .bind(ref_key)
         .bind(payload)

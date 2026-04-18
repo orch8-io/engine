@@ -654,7 +654,7 @@ async fn check_step_deadline(
 
     // Record breach output and fail the instance.
     let breach_output = orch8_types::output::BlockOutput {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id,
         block_id: step_def.id.clone(),
         output: serde_json::json!({
@@ -807,7 +807,7 @@ async fn check_human_input(
             if *name == signal_name {
                 // Human responded — store payload as block output and continue execution.
                 let output = orch8_types::output::BlockOutput {
-                    id: uuid::Uuid::new_v4(),
+                    id: uuid::Uuid::now_v7(),
                     instance_id: instance.id,
                     block_id: step_def.id.clone(),
                     output: signal.payload.clone(),
@@ -845,7 +845,7 @@ async fn check_human_input(
                     );
                     // Store escalation marker as output so the next step can handle it.
                     let output = orch8_types::output::BlockOutput {
-                        id: uuid::Uuid::new_v4(),
+                        id: uuid::Uuid::now_v7(),
                         instance_id: instance.id,
                         block_id: step_def.id.clone(),
                         output: serde_json::json!({
@@ -1255,7 +1255,7 @@ async fn dispatch_to_external_worker(
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
     let task = WorkerTask {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),
@@ -1313,14 +1313,14 @@ mod tests {
 
     #[test]
     fn build_prefetch_map_merges_signals_and_blocks() {
-        let id1 = InstanceId(Uuid::new_v4());
-        let id2 = InstanceId(Uuid::new_v4());
+        let id1 = InstanceId(Uuid::now_v7());
+        let id2 = InstanceId(Uuid::now_v7());
 
         let mut signals = HashMap::new();
         signals.insert(
             id1,
             vec![Signal {
-                id: Uuid::new_v4(),
+                id: Uuid::now_v7(),
                 instance_id: id1,
                 signal_type: SignalType::Pause,
                 payload: serde_json::Value::Null,
@@ -1352,12 +1352,12 @@ mod tests {
     #[test]
     fn build_prefetch_map_signals_only_instance() {
         // An instance with signals but no completed blocks must still appear.
-        let id = InstanceId(Uuid::new_v4());
+        let id = InstanceId(Uuid::now_v7());
         let mut signals = HashMap::new();
         signals.insert(
             id,
             vec![Signal {
-                id: Uuid::new_v4(),
+                id: Uuid::now_v7(),
                 instance_id: id,
                 signal_type: SignalType::Resume,
                 payload: serde_json::Value::Null,
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn build_prefetch_map_completed_only_instance() {
         // An instance with only completed-block data must still appear with empty signals.
-        let id = InstanceId(Uuid::new_v4());
+        let id = InstanceId(Uuid::now_v7());
         let mut completed = HashMap::new();
         completed.insert(id, vec![BlockId("step-a".into()), BlockId("step-b".into())]);
 

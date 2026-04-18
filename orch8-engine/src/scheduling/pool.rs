@@ -64,8 +64,8 @@ mod tests {
 
     fn make_resource(key: &str, weight: u32, daily_cap: u32) -> PoolResource {
         PoolResource {
-            id: Uuid::new_v4(),
-            pool_id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
+            pool_id: Uuid::now_v7(),
             resource_key: ResourceKey(key.into()),
             name: key.into(),
             weight,

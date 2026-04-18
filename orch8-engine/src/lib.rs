@@ -54,7 +54,7 @@ impl Engine {
         handlers: HandlerRegistry,
         cancel: CancellationToken,
     ) -> Self {
-        let node_id = Uuid::new_v4();
+        let node_id = Uuid::now_v7();
         let node_name = hostname().unwrap_or_else(|| {
             // UUID hyphen-form is always ≥ 8 chars, so slicing is safe.
             let id_str = node_id.to_string();

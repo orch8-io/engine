@@ -240,7 +240,7 @@ async fn maybe_externalize(
             .save_externalized_state(instance_id, &ref_key, &output)
             .await?;
         Ok(BlockOutput {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id,
             block_id,
             output: serde_json::json!({"_externalized": true, "_ref": ref_key}),
@@ -251,7 +251,7 @@ async fn maybe_externalize(
         })
     } else {
         Ok(BlockOutput {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             instance_id,
             block_id,
             output,

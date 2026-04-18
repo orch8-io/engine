@@ -1111,7 +1111,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
     //    iteration 0.
     storage
         .save_block_output(&orch8_types::output::BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: BlockId("inner_lp".into()),
             output: json!({ "_iterations": 2 }),
@@ -1130,7 +1130,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
     // for_each reset (step outputs carry user-observable history).
     storage
         .save_block_output(&orch8_types::output::BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: BlockId("lp_body".into()),
             output: json!({ "result": "iter0" }),
@@ -1287,7 +1287,7 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     // Seed a claimed worker task whose last heartbeat is 5 seconds ago.
     // With a 1-millisecond stale threshold it MUST be reaped; with a 10-second
     // threshold it must NOT be reaped.
-    let task_id = Uuid::new_v4();
+    let task_id = Uuid::now_v7();
     let long_ago = Utc::now() - ChronoDuration::seconds(5);
     let task = WorkerTask {
         id: task_id,
@@ -1412,7 +1412,7 @@ async fn a8_pending_cancel_signal_wins_before_dispatch() {
 
     // Queue a cancel signal — identical to what send_signal() would write.
     let sig = Signal {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
         signal_type: SignalType::Cancel,
         payload: json!({}),
@@ -1645,7 +1645,7 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
     //     this unit test we only care that the parent's propagation path
     //     finds a Completed child with block outputs to hoist.
     let child_output = BlockOutput {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id: child.id,
         block_id: BlockId("child_step".into()),
         output: json!({"child_said": "hi"}),
@@ -2032,7 +2032,7 @@ async fn a14_unknown_handler_currently_parks_instance_in_waiting() {
         unreachable!()
     };
     let task = orch8_types::worker::WorkerTask {
-        id: uuid::Uuid::new_v4(),
+        id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
         block_id: step_def.id.clone(),
         handler_name: step_def.handler.clone(),

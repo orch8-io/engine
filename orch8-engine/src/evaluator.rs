@@ -589,7 +589,7 @@ async fn check_sla_deadlines(
 
         // Record as block output for diagnostics.
         let output = orch8_types::output::BlockOutput {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
             block_id: node.block_id.clone(),
             output: serde_json::json!({
@@ -735,7 +735,7 @@ async fn dispatch_block(
                     let child_outputs = storage.get_all_outputs(child.id).await?;
                     let output_val = serde_json::to_value(&child_outputs).unwrap_or_default();
                     let block_output = orch8_types::output::BlockOutput {
-                        id: uuid::Uuid::new_v4(),
+                        id: uuid::Uuid::now_v7(),
                         instance_id: instance.id,
                         block_id: ss_def.id.clone(),
                         output: output_val,

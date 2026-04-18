@@ -250,7 +250,7 @@ mod tests {
 
     fn mk_signal(instance_id: InstanceId, st: SignalType, payload: serde_json::Value) -> Signal {
         Signal {
-            id: uuid::Uuid::new_v4(),
+            id: uuid::Uuid::now_v7(),
             instance_id,
             signal_type: st,
             payload,
