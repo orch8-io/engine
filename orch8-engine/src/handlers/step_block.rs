@@ -148,6 +148,11 @@ pub async fn execute_step_node(
         return Ok(false);
     }
 
+    // Each dispatch branch below ends in `return`, so we can *move*
+    // `resolved_params` and `step_context` into the branch that matches —
+    // later branches are unreachable from that point. The clone calls were
+    // defensive but redundant and measurable on the step hot path.
+
     // If the handler is an ActivePieces sidecar call, dispatch via HTTP to the
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
     // env-configured sidecar, and piece/action names live in the handler string.
@@ -157,8 +162,8 @@ pub async fn execute_step_node(
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
-            params: resolved_params.clone(),
-            context: step_context.clone(),
+            params: resolved_params,
+            context: step_context,
             attempt: 0,
             storage: Arc::clone(storage),
         };
@@ -173,14 +178,14 @@ pub async fn execute_step_node(
         let endpoint = resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc)
             .await
             .unwrap_or_else(|| step_def.handler.clone());
-        let mut params = resolved_params.clone();
+        let mut params = resolved_params;
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
         let ctx = super::StepContext {
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params,
-            context: step_context.clone(),
+            context: step_context,
             attempt: 0,
             storage: Arc::clone(storage),
         };
@@ -200,8 +205,8 @@ pub async fn execute_step_node(
                 instance_id: instance.id,
                 tenant_id: instance.tenant_id.clone(),
                 block_id: step_def.id.clone(),
-                params: resolved_params.clone(),
-                context: step_context.clone(),
+                params: resolved_params,
+                context: step_context,
                 attempt: 0,
                 storage: Arc::clone(storage),
             };
