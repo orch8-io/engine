@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines)]
 //! Engine bug reproducers — Group A (from e2e failure triage).
 //!
 //! These tests codify observed engine bugs surfaced by the e2e suite so they
@@ -1296,10 +1297,10 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     storage.create_worker_task(&task).await.unwrap();
 
     // Case 1: threshold larger than the heartbeat age — MUST NOT reap.
-    let reaped = storage
-        .reap_stale_worker_tasks(Duration::from_secs(60 * 60))
-        .await
-        .unwrap();
+    // 3600s keeps the intent obvious (an hour) without depending on unstable
+    // `Duration::from_mins` / `from_hours` constructors.
+    let one_hour = Duration::from_secs(60) * 60;
+    let reaped = storage.reap_stale_worker_tasks(one_hour).await.unwrap();
     assert_eq!(
         reaped, 0,
         "stale threshold well in the future — task must not be reaped"
@@ -2011,9 +2012,7 @@ async fn a14_unknown_handler_currently_parks_instance_in_waiting() {
     // the scheduler module, but we can assert the observable side effect:
     // when the handler is unknown, the engine is expected to enqueue a
     // worker task. Simulate that by invoking the path at handler level.
-    let step_def = if let BlockDefinition::Step(s) = step {
-        s
-    } else {
+    let BlockDefinition::Step(step_def) = step else {
         unreachable!()
     };
     let task = orch8_types::worker::WorkerTask {
