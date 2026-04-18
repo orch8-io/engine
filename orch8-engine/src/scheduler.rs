@@ -461,10 +461,6 @@ async fn process_instance_tree(
                 .get_instance(instance_id)
                 .await?
                 .map_or(InstanceState::Running, |i| i.state);
-            eprintln!(
-                "DBG-SCHED: inst={} after-eval state={:?}",
-                instance_id, current
-            );
             if matches!(
                 current,
                 InstanceState::Paused | InstanceState::Cancelled | InstanceState::Failed
@@ -493,7 +489,6 @@ async fn process_instance_tree(
             }
         }
         Ok(false) => {
-            eprintln!("DBG-SCHED-FALSE: inst={}", instance_id);
             // Evaluator says done. Check if any root node failed or was cancelled.
             let tree = storage.get_execution_tree(instance_id).await?;
             let root_failed = tree
@@ -556,7 +551,6 @@ async fn process_instance_tree(
             }
         }
         Err(e) => {
-            eprintln!("DBG-SCHED-ERR: inst={} error={}", instance_id, e);
             error!(instance_id = %instance_id, error = %e, "tree evaluation failed");
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
