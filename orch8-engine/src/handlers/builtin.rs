@@ -213,8 +213,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         // from external cancel signals (`handlers/cancellation_scope.rs`).
         // The scheduler's regular signal path will defer the cancel until
         // the scope drains, matching `cancel_scoped`'s semantics.
-        if is_inside_cancellation_scope(ctx.storage.as_ref(), ctx.instance_id, ctx.block_id).await
-        {
+        if is_inside_cancellation_scope(ctx.storage.as_ref(), ctx.instance_id, ctx.block_id).await {
             continue;
         }
         if let Some(result) = check_sleep_signals(&ctx).await {
