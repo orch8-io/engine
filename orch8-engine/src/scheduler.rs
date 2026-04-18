@@ -317,12 +317,16 @@ async fn process_instance(
     // Merge dynamically injected blocks with the sequence definition.
     let blocks = crate::evaluator::merged_blocks(storage.as_ref(), instance.id, &sequence).await?;
 
-    // Fast path SLA deadline check for all steps BEFORE concurrency checks. 
+    // Fast path SLA deadline check for all steps BEFORE concurrency checks.
     // This prevents SLA breaches from being ignored while an instance is artificially
     // deferred due to rate / concurrency limits.
     for block in blocks.iter() {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if !prefetched.completed_block_ids.iter().any(|id| id == &step_def.id) {
+            if !prefetched
+                .completed_block_ids
+                .iter()
+                .any(|id| id == &step_def.id)
+            {
                 // SLA deadline check: if a previous attempt exists and the deadline has
                 // been breached (wall-clock time since first attempt), fail the instance.
                 if check_step_deadline(storage, handlers, &instance, step_def).await? {

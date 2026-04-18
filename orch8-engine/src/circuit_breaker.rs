@@ -24,7 +24,8 @@ impl CircuitBreakerRegistry {
     /// or `Err(remaining_cooldown_secs)` if the circuit is open.
     pub fn check(&self, handler: &str) -> Result<(), u64> {
         let now = Utc::now();
-        let mut breaker = self.breakers
+        let mut breaker = self
+            .breakers
             .entry(handler.to_string())
             .or_insert_with(|| self.default_breaker(handler));
 
@@ -62,7 +63,8 @@ impl CircuitBreakerRegistry {
     /// Record a failure for a handler. May trip the circuit to Open.
     pub fn record_failure(&self, handler: &str) {
         let now = Utc::now();
-        let mut breaker = self.breakers
+        let mut breaker = self
+            .breakers
             .entry(handler.to_string())
             .or_insert_with(|| self.default_breaker(handler));
 
@@ -76,7 +78,10 @@ impl CircuitBreakerRegistry {
 
     /// Get the current state of all breakers.
     pub fn list_all(&self) -> Vec<CircuitBreakerState> {
-        self.breakers.iter().map(|item| item.value().clone()).collect()
+        self.breakers
+            .iter()
+            .map(|item| item.value().clone())
+            .collect()
     }
 
     /// Get the current state of a specific handler's breaker.
