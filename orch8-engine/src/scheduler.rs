@@ -129,7 +129,7 @@ async fn process_tick(
     if available == 0 {
         return Ok(());
     }
-    let fetch_limit = std::cmp::min(batch_size, available as u32);
+    let fetch_limit = std::cmp::min(batch_size, u32::try_from(available).unwrap_or(u32::MAX));
 
     let now = Utc::now();
     let mut instances = storage
@@ -282,6 +282,7 @@ enum StepOutcome {
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn process_instance(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
