@@ -329,28 +329,35 @@ pub(super) fn row_to_cluster_node(
     })
 }
 
-/// Build a parameterized SQL filter. Returns bind values alongside the SQL fragment.
-pub(super) fn apply_filter_sql(sql: &mut String, filter: &InstanceFilter, args: &mut Vec<String>) {
+/// Build a parameterized SQL filter.
+pub(super) fn apply_filter_sql<'q>(
+    qb: &mut sqlx::QueryBuilder<'q, sqlx::Sqlite>,
+    filter: &'q InstanceFilter,
+) {
     if let Some(ref tid) = filter.tenant_id {
-        args.push(tid.0.clone());
-        sql.push_str(&format!(" AND tenant_id=?{}", args.len()));
+        qb.push(" AND tenant_id=");
+        qb.push_bind(&tid.0);
     }
     if let Some(ref ns) = filter.namespace {
-        args.push(ns.0.clone());
-        sql.push_str(&format!(" AND namespace=?{}", args.len()));
+        qb.push(" AND namespace=");
+        qb.push_bind(&ns.0);
     }
     if let Some(ref sid) = filter.sequence_id {
-        args.push(sid.0.to_string());
-        sql.push_str(&format!(" AND sequence_id=?{}", args.len()));
+        qb.push(" AND sequence_id=");
+        qb.push_bind(sid.0.to_string());
     }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
-            // States are from a fixed enum — safe to inline (no user-controlled strings).
-            let state_strs: Vec<String> = states.iter().map(|s| format!("'{s}'")).collect();
-            sql.push_str(&format!(" AND state IN ({})", state_strs.join(",")));
+            qb.push(" AND state IN (");
+            let mut separated = qb.separated(",");
+            for state in states {
+                separated.push_bind(state.to_string());
+            }
+            separated.push_unseparated(")");
         }
     }
     if let Some(ref p) = filter.priority {
-        sql.push_str(&format!(" AND priority={}", *p as i16));
+        qb.push(" AND priority=");
+        qb.push_bind(*p as i16);
     }
 }

@@ -136,21 +136,17 @@ pub(super) async fn claim_due(
         .map(row_to_instance)
         .collect::<Result<Vec<_>, _>>()?;
     if !instances.is_empty() {
-        let ids: Vec<String> = instances.iter().map(|i| i.id.0.to_string()).collect();
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 2))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE task_instances SET state='running', updated_at=?1 WHERE id IN ({placeholders})"
-        );
-        let mut q = sqlx::query(&sql).bind(&now_s);
-        for id in &ids {
-            q = q.bind(id);
+        let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state='running', updated_at=");
+        qb.push_bind(&now_s);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for i in &instances {
+            separated.push_bind(i.id.0.to_string());
         }
-        q.execute(&mut *tx)
+        separated.push_unseparated(")");
+
+        qb.build()
+            .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
     }
@@ -428,19 +424,16 @@ pub(super) async fn list(
     filter: &InstanceFilter,
     pagination: &Pagination,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let mut sql = String::from("SELECT * FROM task_instances WHERE 1=1");
-    let mut args: Vec<String> = Vec::new();
-    apply_filter_sql(&mut sql, filter, &mut args);
-    let limit = pagination.limit.min(1000);
-    args.push(limit.to_string());
-    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT ?{}", args.len()));
-    args.push(pagination.offset.to_string());
-    sql.push_str(&format!(" OFFSET ?{}", args.len()));
-    let mut q = sqlx::query(&sql);
-    for arg in &args {
-        q = q.bind(arg);
-    }
-    let rows = q
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM task_instances WHERE 1=1");
+    apply_filter_sql(&mut qb, filter);
+
+    qb.push(" ORDER BY created_at DESC LIMIT ");
+    qb.push_bind(i64::from(pagination.limit.min(1000)));
+    qb.push(" OFFSET ");
+    qb.push_bind(i64::from(pagination.offset));
+
+    let rows = qb
+        .build()
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -451,14 +444,11 @@ pub(super) async fn count(
     storage: &SqliteStorage,
     filter: &InstanceFilter,
 ) -> Result<u64, StorageError> {
-    let mut sql = String::from("SELECT COUNT(*) as cnt FROM task_instances WHERE 1=1");
-    let mut args: Vec<String> = Vec::new();
-    apply_filter_sql(&mut sql, filter, &mut args);
-    let mut q = sqlx::query(&sql);
-    for arg in &args {
-        q = q.bind(arg);
-    }
-    let row = q
+    let mut qb = sqlx::QueryBuilder::new("SELECT COUNT(*) as cnt FROM task_instances WHERE 1=1");
+    apply_filter_sql(&mut qb, filter);
+
+    let row = qb
+        .build()
         .fetch_one(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -470,14 +460,15 @@ pub(super) async fn bulk_update_state(
     filter: &InstanceFilter,
     new_state: InstanceState,
 ) -> Result<u64, StorageError> {
-    let mut args: Vec<String> = vec![new_state.to_string(), ts(Utc::now())];
-    let mut sql = String::from("UPDATE task_instances SET state=?1, updated_at=?2 WHERE 1=1");
-    apply_filter_sql(&mut sql, filter, &mut args);
-    let mut q = sqlx::query(&sql);
-    for arg in &args {
-        q = q.bind(arg);
-    }
-    let result = q
+    let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state=");
+    qb.push_bind(new_state.to_string());
+    qb.push(", updated_at=");
+    qb.push_bind(ts(Utc::now()));
+    qb.push(" WHERE 1=1");
+    apply_filter_sql(&mut qb, filter);
+
+    let result = qb
+        .build()
         .execute(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -489,16 +480,15 @@ pub(super) async fn bulk_reschedule(
     filter: &InstanceFilter,
     offset_secs: i64,
 ) -> Result<u64, StorageError> {
-    let mut args: Vec<String> = vec![format!("+{offset_secs} seconds"), ts(Utc::now())];
-    let mut sql = String::from(
-        "UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ?1), updated_at=?2 WHERE state='scheduled'"
-    );
-    apply_filter_sql(&mut sql, filter, &mut args);
-    let mut q = sqlx::query(&sql);
-    for arg in &args {
-        q = q.bind(arg);
-    }
-    let result = q
+    let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ");
+    qb.push_bind(format!("+{offset_secs} seconds"));
+    qb.push("), updated_at=");
+    qb.push_bind(ts(Utc::now()));
+    qb.push(" WHERE state='scheduled'");
+    apply_filter_sql(&mut qb, filter);
+
+    let result = qb
+        .build()
         .execute(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;

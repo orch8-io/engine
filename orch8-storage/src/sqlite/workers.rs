@@ -77,21 +77,21 @@ pub(super) async fn claim(
         .map(row_to_worker_task)
         .collect::<Result<Vec<_>, _>>()?;
     if !tasks.is_empty() {
-        let ids: Vec<String> = tasks.iter().map(|t| t.id.to_string()).collect();
-        let placeholders: String = ids
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 4))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "UPDATE worker_tasks SET state='claimed', worker_id=?1, claimed_at=?2, heartbeat_at=?3 WHERE id IN ({placeholders})"
-        );
-        let mut q = sqlx::query(&sql).bind(worker_id).bind(&now).bind(&now);
-        for id in &ids {
-            q = q.bind(id);
+        let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
+        qb.push_bind(worker_id);
+        qb.push(", claimed_at=");
+        qb.push_bind(&now);
+        qb.push(", heartbeat_at=");
+        qb.push_bind(&now);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for t in &tasks {
+            separated.push_bind(t.id.to_string());
         }
-        q.execute(&mut *tx)
+        separated.push_unseparated(")");
+
+        qb.build()
+            .execute(&mut *tx)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
     }
@@ -205,46 +205,46 @@ pub(super) async fn list(
     filter: &orch8_types::worker_filter::WorkerTaskFilter,
     pagination: &orch8_types::filter::Pagination,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let mut sql = String::from("SELECT * FROM worker_tasks WHERE 1=1");
-    let mut args: Vec<String> = Vec::new();
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM worker_tasks WHERE 1=1");
     if let Some(ref tid) = filter.tenant_id {
-        args.push(tid.0.clone());
-        sql.push_str(&format!(
-            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id=?{})",
-            args.len()
-        ));
+        qb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        qb.push_bind(tid.0.clone());
+        qb.push(")");
     }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
-            let placeholders: Vec<String> = states.iter().map(|s| format!("'{s}'")).collect();
-            sql.push_str(&format!(" AND state IN ({})", placeholders.join(",")));
+            qb.push(" AND state IN (");
+            let mut separated = qb.separated(",");
+            for state in states {
+                separated.push_bind(state.to_string());
+            }
+            separated.push_unseparated(")");
         }
     }
     if let Some(ref handler) = filter.handler_name {
-        args.push(handler.clone());
-        sql.push_str(&format!(" AND handler_name=?{}", args.len()));
+        qb.push(" AND handler_name=");
+        qb.push_bind(handler.clone());
     }
     if let Some(ref wid) = filter.worker_id {
-        args.push(wid.clone());
-        sql.push_str(&format!(" AND worker_id=?{}", args.len()));
+        qb.push(" AND worker_id=");
+        qb.push_bind(wid.clone());
     }
     if let Some(ref queue) = filter.queue_name {
-        args.push(queue.clone());
-        sql.push_str(&format!(" AND queue_name=?{}", args.len()));
+        qb.push(" AND queue_name=");
+        qb.push_bind(queue.clone());
     }
-    sql.push_str(" ORDER BY created_at DESC");
+    qb.push(" ORDER BY created_at DESC");
+
     let limit = i64::from(pagination.limit.min(1000));
     let offset = i64::try_from(pagination.offset).unwrap_or(i64::MAX);
-    args.push(limit.to_string());
-    sql.push_str(&format!(" LIMIT ?{}", args.len()));
-    args.push(offset.to_string());
-    sql.push_str(&format!(" OFFSET ?{}", args.len()));
 
-    let mut q = sqlx::query(&sql);
-    for arg in &args {
-        q = q.bind(arg);
-    }
-    let rows = q
+    qb.push(" LIMIT ");
+    qb.push_bind(limit);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    let rows = qb
+        .build()
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -255,20 +255,17 @@ pub(super) async fn stats(
     storage: &SqliteStorage,
     tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-    let tenant_clause = if tenant_id.is_some() {
-        " WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id=?1)"
-    } else {
-        ""
-    };
-
-    let count_sql = format!(
-        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{tenant_clause} GROUP BY state, handler_name"
-    );
-    let mut q = sqlx::query_as::<_, (String, String, i64)>(&count_sql);
+    let mut cqb =
+        sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
     if let Some(tid) = tenant_id {
-        q = q.bind(&tid.0);
+        cqb.push(" WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        cqb.push_bind(&tid.0);
+        cqb.push(")");
     }
-    let counts = q
+    cqb.push(" GROUP BY state, handler_name");
+
+    let counts = cqb
+        .build_query_as::< (String, String, i64)>()
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -286,19 +283,17 @@ pub(super) async fn stats(
             .or_default() += cnt;
     }
 
-    let workers_sql = format!(
-        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{}",
-        if tenant_id.is_some() {
-            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id=?1)"
-        } else {
-            ""
-        }
+    let mut wqb = sqlx::QueryBuilder::new(
+        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
     );
-    let mut wq = sqlx::query_as::<_, (String,)>(&workers_sql);
     if let Some(tid) = tenant_id {
-        wq = wq.bind(&tid.0);
+        wqb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        wqb.push_bind(&tid.0);
+        wqb.push(")");
     }
-    let workers = wq
+
+    let workers = wqb
+        .build_query_as::<(String,)>()
         .fetch_all(&storage.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
