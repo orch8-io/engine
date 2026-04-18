@@ -158,6 +158,8 @@ async fn handle_log(ctx: StepContext) -> Result<Value, StepError> {
 /// `cancel` signal queued mid-sleep would not take effect until the full
 /// duration elapsed (by which point the instance is already completing).
 async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
+    const CANCEL_POLL_MS: u64 = 250;
+
     let duration_ms = ctx
         .params
         .get("duration_ms")
@@ -173,7 +175,6 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
 
     // Short sleeps (<250ms) aren't worth the signal-poll overhead — fall
     // back to the trivial implementation.
-    const CANCEL_POLL_MS: u64 = 250;
     if duration_ms <= CANCEL_POLL_MS {
         tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
         return Ok(json!({ "slept_ms": duration_ms }));
@@ -206,7 +207,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
                     .map(|n| n.id)
                     .collect();
                 let me = tree.iter().find(|n| n.block_id == ctx.block_id);
-                me.map_or(false, |n| {
+                me.is_some_and(|n| {
                     let mut cur = n.parent_id;
                     while let Some(pid) = cur {
                         if scope_ids.contains(&pid) {
@@ -219,6 +220,10 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             }
             Err(_) => false,
         };
+        eprintln!(
+            "DBG-SLEEP: inst={} block={} inside_scope={}",
+            ctx.instance_id, ctx.block_id, inside_scope
+        );
         if inside_scope {
             continue;
         }
