@@ -4,13 +4,16 @@
  * against the shared server, then tears down.
  *
  * Why: the previous `npm test` path had each suite's `before()` spawn its
- * own binary. With 9 suites that's 9 × (cargo fingerprint + port kill +
- * DB cleanup + liveness wait) of overhead. Sharing one server cuts that
- * to one-time cost and brings wall-clock down from ~165s to ~30-40s.
+ * own binary. With 9 suites that's 9 × (port kill + DB cleanup + liveness
+ * wait) of overhead. Sharing one server drops that to one-time cost.
+ *
+ * Does NOT build — the binary at `target/debug/orch8-server` must already
+ * exist. CI and dev workflows build separately so this runner stays fast
+ * and predictable.
  *
  * Contract with test files:
  *   - `startServer()` in `harness.js` switches to attach mode when it sees
- *     `ORCH8_E2E_ATTACH=1` — skips build/spawn/cleanup, just waits for
+ *     `ORCH8_E2E_ATTACH=1` — skips spawn/cleanup, just waits for
  *     `/health/live` on `ORCH8_E2E_PORT`.
  *   - `stopServer()` is a no-op for attach-mode handles (lifecycle stays
  *     here in the runner).
@@ -33,9 +36,33 @@ import { startServer, stopServer } from "./harness.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.ORCH8_E2E_PORT) || 18080;
 
+// Suites that need their own server.
+//
+// Two reasons a suite lands here:
+//
+// 1. Server-lifecycle tests (persistence_recovery): the suite itself does
+//    stop/start mid-test, which is incompatible with attach-mode.
+//
+// 2. Suites exercising **globally-scoped** state — worker task queue,
+//    trigger definitions, signal inbox, worker dashboard. These tables
+//    aren't keyed by tenant_id, so accumulated rows from earlier suites
+//    in a shared server leak in and break assertions like
+//    `assert.equal(tasks.length, 1)`. A tenant prefix doesn't help; only
+//    a fresh server does.
+//
+// All other suites use tenant-scoped UUIDs via `testSequence()` and are
+// safe to share a server.
+const SELF_MANAGED_SUITES = new Set([
+  "persistence_recovery.test.js",
+  "triggers.test.js",
+  "wait-signal.test.js",
+  "worker-dashboard.test.js",
+  "workers.test.js",
+]);
+
 function findTestFiles() {
   return readdirSync(__dirname)
-    .filter((f) => f.endsWith(".test.js"))
+    .filter((f) => f.endsWith(".test.js") && !SELF_MANAGED_SUITES.has(f))
     .sort()
     .map((f) => resolve(__dirname, f));
 }
@@ -59,7 +86,7 @@ process.on("SIGTERM", () => shutdown(143));
 
 try {
   console.log("runner: starting shared orch8-server...");
-  handle = await startServer({ port: PORT, build: true });
+  handle = await startServer({ port: PORT });
 
   const testFiles = findTestFiles();
   if (testFiles.length === 0) {

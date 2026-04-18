@@ -365,11 +365,15 @@ export class Orch8Client {
   // --- Health ---
 
   async healthLive() {
-    return this.#get("/health/live");
+    const res = await fetch(`${this.baseUrl}/health/live`);
+    if (!res.ok) throw new ApiError(res.status, await res.text(), "/health/live");
+    return { status: res.status };
   }
 
   async healthReady() {
-    return this.#get("/health/ready");
+    const res = await fetch(`${this.baseUrl}/health/ready`);
+    if (!res.ok) throw new ApiError(res.status, await res.text(), "/health/ready");
+    return { status: res.status };
   }
 
   // --- Metrics ---

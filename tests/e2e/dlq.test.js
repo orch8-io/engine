@@ -9,7 +9,7 @@ describe("DLQ (Dead Letter Queue)", () => {
   let server;
 
   before(async () => {
-    server = await startServer({ build: false });
+    server = await startServer();
   });
 
   after(async () => {

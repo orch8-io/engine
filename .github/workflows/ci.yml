@@ -41,8 +41,11 @@ jobs:
           POSTGRES_PASSWORD: orch8
         ports:
           - 5432:5432
+        # Pass -U/-d explicitly so the healthcheck doesn't attempt auth as
+        # the container's default user (root) — otherwise the Postgres log
+        # fills with `FATAL: role "root" does not exist`.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U orch8 -d orch8_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -71,8 +74,10 @@ jobs:
           POSTGRES_PASSWORD: orch8
         ports:
           - 5434:5432
+        # Pass -U/-d explicitly — otherwise pg_isready runs as root and
+        # spams `FATAL: role "root" does not exist` into the Postgres log.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U orch8 -d orch8"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -85,16 +90,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc & psql
+        # psql is used by tests/e2e/harness.js to clean stale rows between
+        # runs; without it the harness logs a warning and stale data can
+        # leak across suites.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
       - name: Build server
         run: cargo build --bin orch8-server
-      - name: Run E2E tests
-        run: |
-          for f in tests/e2e/*.test.js; do
-            echo "=== $f ==="
-            node --test "$f" || exit 1
-          done
+      - name: Run E2E tests (shared server)
+        working-directory: tests/e2e
+        # `npm test` boots orch8-server ONCE and runs every *.test.js
+        # serially against it. Replaces the prior per-file loop which paid
+        # ~15s of spawn+cleanup per suite.
+        run: npm test
+      - name: Run self-managed E2E suites
+        working-directory: tests/e2e
+        # Suites that can't share a server: persistence_recovery restarts
+        # mid-test; triggers/wait-signal/worker-dashboard/workers exercise
+        # globally-scoped state (trigger defs, signal inbox, worker queue)
+        # that leaks across suites. Each boots its own server via the
+        # harness in spawn mode.
+        run: npm run test:standalone
 
   node-sdks:
     name: Node SDKs (build & test)

@@ -1,12 +1,18 @@
 /**
  * Test harness: starts/stops the orch8-server binary for E2E tests.
  *
- * Prerequisites:
+ * Prerequisites (the harness does NOT build):
  *   - Postgres running (docker-compose up -d)
- *   - cargo build (binary must exist)
+ *   - `cargo build --bin orch8-server` already ran so the binary exists
+ *     under `target/debug/` or `target/<triple>/debug/`
+ *
+ * Building is an orthogonal step that belongs to the caller (CI pipeline,
+ * `make`, or the developer before running the suite). Embedding it here
+ * meant every suite invocation paid cargo fingerprint overhead even when
+ * the binary was already current.
  */
 
-import { spawn, execSync, execFileSync } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,20 +44,23 @@ function findBinary() {
 }
 
 /**
- * Build and start the orch8-server. Returns a handle for stopServer().
+ * Start the orch8-server. Returns a handle for stopServer().
  *
  * Two modes:
- *   - **Spawn** (default): build, clean DB, spawn binary, wait for liveness.
- *     Used when a suite runs standalone (`node --test ./foo.test.js`).
- *   - **Attach** (`ORCH8_E2E_ATTACH=1`): a parent runner has already started
- *     the server — skip build/clean/spawn and just verify it's up. Used by
- *     `run-e2e.js` to share one server across every suite for ~15-20s of
- *     savings over per-suite startup.
+ *   - **Spawn** (default): locate pre-built binary, clean DB, spawn it,
+ *     wait for liveness. Used when a suite runs standalone
+ *     (`node --test ./foo.test.js`).
+ *   - **Attach** (`ORCH8_E2E_ATTACH=1`): a parent runner has already
+ *     started the server — skip spawn/clean and just verify it's up. Used
+ *     by `run-e2e.js` to share one server across every suite.
+ *
+ * Does NOT build — the binary must already exist in `target/`. If it's
+ * missing, `findBinary()` throws with the `cargo build` hint.
  *
  * The returned handle's `child` is `null` in attach mode, so `stopServer()`
  * becomes a no-op and lifecycle stays owned by the runner.
  */
-export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
+export async function startServer({ port = DEFAULT_PORT } = {}) {
   if (process.env.ORCH8_E2E_ATTACH === "1") {
     const p = Number(process.env.ORCH8_E2E_PORT) || port;
     const deadline = Date.now() + 10000;
@@ -63,15 +72,6 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
       await sleep(100);
     }
     throw new Error(`Attach mode: server not reachable on port ${p}`);
-  }
-
-  if (build) {
-    console.log("  Building orch8-server...");
-    execFileSync("cargo", ["build", "--bin", "orch8-server"], {
-      cwd: PROJECT_ROOT,
-      stdio: "pipe",
-    });
-    console.log("  Build complete.");
   }
 
   const binaryPath = findBinary();

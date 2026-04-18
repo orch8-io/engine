@@ -9,7 +9,7 @@ describe("Cron Schedules", () => {
   let server;
 
   before(async () => {
-    server = await startServer({ build: false });
+    server = await startServer();
   });
 
   after(async () => {
