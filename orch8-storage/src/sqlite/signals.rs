@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
@@ -8,29 +9,6 @@ use orch8_types::signal::Signal;
 
 use super::helpers::{row_to_signal, ts};
 use super::SqliteStorage;
-
-/// Strict state parser used by the signal enqueue path.
-///
-/// Unlike the permissive [`super::helpers::parse_state`] (which is intentionally
-/// total for row-hydration hot paths — a corrupt legacy row shouldn't crash a
-/// list query), this fallible variant mirrors Postgres's `parse_instance_state`
-/// and surfaces unknown states as [`StorageError::Query`]. It's used only in
-/// `enqueue_if_active` so the atomic path never interprets a corrupted value
-/// as a non-terminal `Scheduled` and silently lets an INSERT through.
-fn try_parse_state(s: &str) -> Result<InstanceState, StorageError> {
-    match s {
-        "scheduled" => Ok(InstanceState::Scheduled),
-        "running" => Ok(InstanceState::Running),
-        "waiting" => Ok(InstanceState::Waiting),
-        "paused" => Ok(InstanceState::Paused),
-        "completed" => Ok(InstanceState::Completed),
-        "failed" => Ok(InstanceState::Failed),
-        "cancelled" => Ok(InstanceState::Cancelled),
-        other => Err(StorageError::Query(format!(
-            "unknown instance state: {other}"
-        ))),
-    }
-}
 
 /// Issue `ROLLBACK` on a pooled connection, swallowing any error. Used on
 /// failure paths inside `enqueue_if_active` where the caller's real error is
@@ -119,11 +97,11 @@ pub(super) async fn enqueue_if_active(
         });
     };
 
-    let state = match try_parse_state(&state_str) {
+    let state = match InstanceState::from_str(&state_str) {
         Ok(s) => s,
         Err(e) => {
             rollback_quiet(&mut conn).await;
-            return Err(e);
+            return Err(StorageError::Query(e));
         }
     };
 

@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -13,6 +15,20 @@ pub enum WorkerTaskState {
     Claimed,
     Completed,
     Failed,
+}
+
+impl FromStr for WorkerTaskState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "claimed" => Ok(Self::Claimed),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            other => Err(format!("unknown worker task state: {other}")),
+        }
+    }
 }
 
 impl std::fmt::Display for WorkerTaskState {

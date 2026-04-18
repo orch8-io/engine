@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
@@ -6,10 +8,11 @@ use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{
     BlockId, ExecutionNodeId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId,
 };
-use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::output::BlockOutput;
 use orch8_types::sequence::SequenceDefinition;
-use orch8_types::signal::Signal;
+use orch8_types::session::SessionState;
+use orch8_types::signal::{Signal, SignalType};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 #[derive(sqlx::FromRow)]
@@ -82,26 +85,8 @@ pub(super) struct InstanceRow {
 
 impl InstanceRow {
     pub fn into_instance(self) -> Result<TaskInstance, StorageError> {
-        let state = match self.state.as_str() {
-            "scheduled" => InstanceState::Scheduled,
-            "running" => InstanceState::Running,
-            "waiting" => InstanceState::Waiting,
-            "paused" => InstanceState::Paused,
-            "completed" => InstanceState::Completed,
-            "failed" => InstanceState::Failed,
-            "cancelled" => InstanceState::Cancelled,
-            other => {
-                return Err(StorageError::Query(format!(
-                    "unknown instance state: {other}"
-                )))
-            }
-        };
-        let priority = match self.priority {
-            0 => orch8_types::instance::Priority::Low,
-            2 => orch8_types::instance::Priority::High,
-            3 => orch8_types::instance::Priority::Critical,
-            _ => orch8_types::instance::Priority::Normal,
-        };
+        let state = InstanceState::from_str(&self.state).map_err(StorageError::Query)?;
+        let priority = Priority::try_from(self.priority).unwrap_or(Priority::Normal);
         let context = serde_json::from_value(self.context)?;
 
         Ok(TaskInstance {
@@ -141,26 +126,8 @@ pub(super) struct ExecutionNodeRow {
 
 impl ExecutionNodeRow {
     pub fn into_node(self) -> ExecutionNode {
-        let block_type = match self.block_type.as_str() {
-            "parallel" => BlockType::Parallel,
-            "race" => BlockType::Race,
-            "loop" => BlockType::Loop,
-            "for_each" => BlockType::ForEach,
-            "router" => BlockType::Router,
-            "try_catch" => BlockType::TryCatch,
-            "sub_sequence" => BlockType::SubSequence,
-            "ab_split" => BlockType::ABSplit,
-            _ => BlockType::Step, // "step" and unknown
-        };
-        let state = match self.state.as_str() {
-            "running" => NodeState::Running,
-            "waiting" => NodeState::Waiting,
-            "completed" => NodeState::Completed,
-            "failed" => NodeState::Failed,
-            "cancelled" => NodeState::Cancelled,
-            "skipped" => NodeState::Skipped,
-            _ => NodeState::Pending, // "pending" and unknown
-        };
+        let block_type = BlockType::from_str(&self.block_type).unwrap_or(BlockType::Step);
+        let state = NodeState::from_str(&self.state).unwrap_or(NodeState::Pending);
         ExecutionNode {
             id: ExecutionNodeId(self.id),
             instance_id: InstanceId(self.instance_id),
@@ -215,13 +182,7 @@ pub(super) struct SignalRow {
 
 impl SignalRow {
     pub fn into_signal(self) -> Signal {
-        let signal_type = match self.signal_type.as_str() {
-            "pause" => orch8_types::signal::SignalType::Pause,
-            "resume" => orch8_types::signal::SignalType::Resume,
-            "cancel" => orch8_types::signal::SignalType::Cancel,
-            "update_context" => orch8_types::signal::SignalType::UpdateContext,
-            other => orch8_types::signal::SignalType::Custom(other.to_string()),
-        };
+        let signal_type = SignalType::from_str(&self.signal_type).unwrap();
         Signal {
             id: self.id,
             instance_id: InstanceId(self.instance_id),
@@ -293,12 +254,7 @@ pub(super) struct WorkerTaskRow {
 
 impl WorkerTaskRow {
     pub fn into_task(self) -> WorkerTask {
-        let state = match self.state.as_str() {
-            "claimed" => WorkerTaskState::Claimed,
-            "completed" => WorkerTaskState::Completed,
-            "failed" => WorkerTaskState::Failed,
-            _ => WorkerTaskState::Pending,
-        };
+        let state = WorkerTaskState::from_str(&self.state).unwrap_or(WorkerTaskState::Pending);
         WorkerTask {
             id: self.id,
             instance_id: InstanceId(self.instance_id),
@@ -335,15 +291,13 @@ pub(super) struct ResourcePoolRow {
 
 impl ResourcePoolRow {
     pub fn into_pool(self) -> orch8_types::pool::ResourcePool {
+        use orch8_types::pool::RotationStrategy;
         orch8_types::pool::ResourcePool {
             id: self.id,
             tenant_id: TenantId(self.tenant_id),
             name: self.name,
-            strategy: match self.strategy.as_str() {
-                "weighted" => orch8_types::pool::RotationStrategy::Weighted,
-                "random" => orch8_types::pool::RotationStrategy::Random,
-                _ => orch8_types::pool::RotationStrategy::RoundRobin,
-            },
+            strategy: RotationStrategy::from_str(&self.strategy)
+                .unwrap_or(RotationStrategy::RoundRobin),
             round_robin_index: self.round_robin_index as u32,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -431,12 +385,7 @@ pub(super) struct SessionRow {
 
 impl SessionRow {
     pub fn into_session(self) -> orch8_types::session::Session {
-        let state = match self.state.as_str() {
-            "completed" => orch8_types::session::SessionState::Completed,
-            "expired" => orch8_types::session::SessionState::Expired,
-            "paused" => orch8_types::session::SessionState::Paused,
-            _ => orch8_types::session::SessionState::Active,
-        };
+        let state = SessionState::from_str(&self.state).unwrap_or(SessionState::Active);
         orch8_types::session::Session {
             id: self.id,
             tenant_id: TenantId(self.tenant_id),
@@ -463,11 +412,7 @@ pub(super) struct ClusterNodeRow {
 impl ClusterNodeRow {
     pub fn into_node(self) -> orch8_types::cluster::ClusterNode {
         use orch8_types::cluster::NodeStatus;
-        let status = match self.status.as_str() {
-            "draining" => NodeStatus::Draining,
-            "stopped" => NodeStatus::Stopped,
-            _ => NodeStatus::Active,
-        };
+        let status = NodeStatus::from_str(&self.status).unwrap_or(NodeStatus::Active);
         orch8_types::cluster::ClusterNode {
             id: self.id,
             name: self.name,

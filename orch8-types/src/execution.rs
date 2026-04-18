@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -16,6 +18,23 @@ pub enum NodeState {
     Failed,
     Cancelled,
     Skipped,
+}
+
+impl FromStr for NodeState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "waiting" => Ok(Self::Waiting),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "skipped" => Ok(Self::Skipped),
+            other => Err(format!("unknown node state: {other}")),
+        }
+    }
 }
 
 impl std::fmt::Display for NodeState {
@@ -47,6 +66,26 @@ pub enum BlockType {
     SubSequence,
     ABSplit,
     CancellationScope,
+}
+
+impl FromStr for BlockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "step" => Ok(Self::Step),
+            "parallel" => Ok(Self::Parallel),
+            "race" => Ok(Self::Race),
+            "loop" => Ok(Self::Loop),
+            "for_each" => Ok(Self::ForEach),
+            "router" => Ok(Self::Router),
+            "try_catch" => Ok(Self::TryCatch),
+            "sub_sequence" => Ok(Self::SubSequence),
+            "ab_split" => Ok(Self::ABSplit),
+            "cancellation_scope" => Ok(Self::CancellationScope),
+            other => Err(format!("unknown block type: {other}")),
+        }
+    }
 }
 
 impl std::fmt::Display for BlockType {
