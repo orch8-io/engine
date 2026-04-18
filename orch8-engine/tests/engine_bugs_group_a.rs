@@ -973,10 +973,7 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     // `try_step:Failed` and take the `fail_node` path at
     // for_each.rs:181-184.
     let tree_final = storage.get_execution_tree(instance.id).await.unwrap();
-    let fe_final = tree_final
-        .iter()
-        .find(|n| n.block_id.0 == "fe")
-        .unwrap();
+    let fe_final = tree_final.iter().find(|n| n.block_id.0 == "fe").unwrap();
     assert_ne!(
         fe_final.state,
         NodeState::Failed,
@@ -1609,7 +1606,10 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         "child must reference the resolved sub-sequence definition"
     );
     assert_eq!(
-        child.metadata.get("_parent_block_id").and_then(|v| v.as_str()),
+        child
+            .metadata
+            .get("_parent_block_id")
+            .and_then(|v| v.as_str()),
         Some("ss"),
         "child metadata must carry the parent block_id so the parent handler \
          can match it back via get_child_instances on later ticks \
@@ -1672,14 +1672,9 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         .await
         .unwrap()
         .expect("parent instance row");
-    let _ = orch8_engine::evaluator::evaluate(
-        &storage,
-        &registry,
-        &parent_refreshed,
-        &parent_seq,
-    )
-    .await
-    .expect("parent evaluate tick 2");
+    let _ = orch8_engine::evaluator::evaluate(&storage, &registry, &parent_refreshed, &parent_seq)
+        .await
+        .expect("parent evaluate tick 2");
 
     // --- Assertion 2: parent can now read child outputs through its own
     //     block_id namespace.
