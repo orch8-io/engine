@@ -81,6 +81,7 @@ tikv-jemallocator = "0.6"
 async-nats = "0.38"
 notify = { version = "7", features = ["serde"] }
 wasmtime = "29"
+dashmap = "6"
 
 # Speed up debug builds: keep our own crates cheap to compile (opt-level 0)
 # but build 3rd-party deps at opt-level 1. Big win for sqlx, tokio, axum

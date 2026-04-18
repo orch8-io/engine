@@ -740,7 +740,10 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
         .await
         .unwrap()
         .expect("for_each marker");
-    let total = marker.output.get("_total").and_then(serde_json::Value::as_u64);
+    let total = marker
+        .output
+        .get("_total")
+        .and_then(serde_json::Value::as_u64);
     assert_eq!(
         total,
         Some(3),
@@ -988,14 +991,20 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
         .await
         .unwrap()
         .expect("for_each marker after advance");
-    let index = marker.output.get("_index").and_then(serde_json::Value::as_u64);
+    let index = marker
+        .output
+        .get("_index")
+        .and_then(serde_json::Value::as_u64);
     assert_eq!(
         index,
         Some(1),
         "for_each must advance _index from 0 to 1 after a body iteration where an \
          inner try_catch recovered via its catch block (for_each.rs:186-202)"
     );
-    let total = marker.output.get("_total").and_then(serde_json::Value::as_u64);
+    let total = marker
+        .output
+        .get("_total")
+        .and_then(serde_json::Value::as_u64);
     assert_eq!(
         total,
         Some(2),
@@ -1148,7 +1157,10 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         .unwrap()
         .expect("inner loop marker set by outer iteration 0");
     assert_eq!(
-        before.output.get("_iterations").and_then(serde_json::Value::as_u64),
+        before
+            .output
+            .get("_iterations")
+            .and_then(serde_json::Value::as_u64),
         Some(2)
     );
 
@@ -1221,7 +1233,10 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         .unwrap()
         .expect("for_each marker present");
     assert_eq!(
-        fe_marker.output.get("_index").and_then(serde_json::Value::as_u64),
+        fe_marker
+            .output
+            .get("_index")
+            .and_then(serde_json::Value::as_u64),
         Some(1),
         "for_each index must advance 0 -> 1 on the reset tick"
     );
@@ -1297,9 +1312,10 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     storage.create_worker_task(&task).await.unwrap();
 
     // Case 1: threshold larger than the heartbeat age — MUST NOT reap.
-    // 3600s keeps the intent obvious (an hour) without depending on unstable
-    // `Duration::from_mins` / `from_hours` constructors.
-    let one_hour = Duration::from_secs(60) * 60;
+    // An hour expressed in seconds; the exact unit doesn't matter, only
+    // that it is comfortably larger than any plausible heartbeat age.
+    #[allow(clippy::duration_suboptimal_units)]
+    let one_hour = Duration::from_secs(3600);
     let reaped = storage.reap_stale_worker_tasks(one_hour).await.unwrap();
     assert_eq!(
         reaped, 0,

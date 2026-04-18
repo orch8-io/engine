@@ -21,6 +21,7 @@ rand.workspace = true
 metrics.workspace = true
 cron.workspace = true
 moka.workspace = true
+dashmap.workspace = true
 reqwest.workspace = true
 url.workspace = true
 tokio-stream.workspace = true

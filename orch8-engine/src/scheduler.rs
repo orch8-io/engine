@@ -125,9 +125,15 @@ async fn process_tick(
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
 
+    let available = semaphore.available_permits();
+    if available == 0 {
+        return Ok(());
+    }
+    let fetch_limit = std::cmp::min(batch_size, available as u32);
+
     let now = Utc::now();
     let mut instances = storage
-        .claim_due_instances(now, batch_size, max_per_tenant)
+        .claim_due_instances(now, fetch_limit, max_per_tenant)
         .await?;
 
     if instances.is_empty() {
@@ -308,6 +314,24 @@ async fn process_instance(
         }
     }
 
+    // Merge dynamically injected blocks with the sequence definition.
+    let blocks = crate::evaluator::merged_blocks(storage.as_ref(), instance.id, &sequence).await?;
+
+    // Fast path SLA deadline check for all steps BEFORE concurrency checks. 
+    // This prevents SLA breaches from being ignored while an instance is artificially
+    // deferred due to rate / concurrency limits.
+    for block in blocks.iter() {
+        if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
+            if !prefetched.completed_block_ids.iter().any(|id| id == &step_def.id) {
+                // SLA deadline check: if a previous attempt exists and the deadline has
+                // been breached (wall-clock time since first attempt), fail the instance.
+                if check_step_deadline(storage, handlers, &instance, step_def).await? {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     // Concurrency control: if this instance has a concurrency key, check the limit.
     if let (Some(ref key), Some(max)) = (&instance.concurrency_key, instance.max_concurrency) {
         let position = storage.concurrency_position(instance_id, key).await?;
@@ -326,9 +350,6 @@ async fn process_instance(
             return Ok(());
         }
     }
-
-    // Merge dynamically injected blocks with the sequence definition.
-    let blocks = crate::evaluator::merged_blocks(storage.as_ref(), instance.id, &sequence).await?;
 
     // Decide execution path: if the sequence has any composite (non-Step) blocks,
     // use the tree-based evaluator. Otherwise, use the fast step-only loop.
@@ -362,12 +383,6 @@ async fn process_instance(
 
         if completed_blocks.iter().any(|id| id == &step_def.id) {
             continue;
-        }
-
-        // SLA deadline check: if a previous attempt exists and the deadline has
-        // been breached (wall-clock time since first attempt), fail the instance.
-        if check_step_deadline(storage, handlers, &instance, step_def).await? {
-            return Ok(());
         }
 
         match execute_step_block(
