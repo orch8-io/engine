@@ -1,7 +1,5 @@
 /**
  * Verifies that queued signals are applied in submission order (SELF_MANAGED: signal_inbox is globally scoped).
- *
- * TODO: Implement — plan below.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

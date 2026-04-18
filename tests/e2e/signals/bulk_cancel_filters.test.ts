@@ -1,7 +1,5 @@
 /**
  * Verifies bulk-cancel with a condition expression only cancels matching instances.
- *
- * TODO: Implement — plan below.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

@@ -1,7 +1,5 @@
 /**
  * Verifies session-level pause coexists with per-instance resume signal.
- *
- * TODO: Implement — plan below.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

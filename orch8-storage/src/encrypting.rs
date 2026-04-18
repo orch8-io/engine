@@ -311,6 +311,14 @@ impl StorageBackend for EncryptingStorage {
             .await
     }
 
+    async fn delete_block_outputs(
+        &self,
+        instance_id: InstanceId,
+        block_id: &orch8_types::ids::BlockId,
+    ) -> Result<u64, StorageError> {
+        self.inner.delete_block_outputs(instance_id, block_id).await
+    }
+
     // === Rate Limits (pass-through) ===
 
     async fn check_rate_limit(

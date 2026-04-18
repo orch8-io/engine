@@ -1032,6 +1032,130 @@ async fn completed_block_ids_batch() {
     assert_eq!(batch.get(&inst2).map_or(0, Vec::len), 1);
 }
 
+// ---------------------------------------------------------------------------
+// delete_block_outputs — composite-marker purge primitive used by the
+// loop / for_each subtree-reset path. See lib.rs::StorageBackend
+// documentation for semantics.
+// ---------------------------------------------------------------------------
+
+fn mk_output(inst_id: InstanceId, block: &str, attempt: i16) -> BlockOutput {
+    BlockOutput {
+        id: Uuid::new_v4(),
+        instance_id: inst_id,
+        block_id: BlockId(block.into()),
+        output: json!({"_iterations": attempt}),
+        output_ref: None,
+        output_size: 0,
+        attempt,
+        created_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn delete_block_outputs_removes_all_rows_for_block() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    let block = BlockId("loop_marker".into());
+
+    for attempt in 0..3 {
+        s.save_block_output(&mk_output(inst, "loop_marker", attempt))
+            .await
+            .unwrap();
+    }
+    let removed = s.delete_block_outputs(inst, &block).await.unwrap();
+    assert_eq!(removed, 3);
+    assert!(s.get_block_output(inst, &block).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_block_outputs_leaves_other_blocks_untouched() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    let block_a = BlockId("block_a".into());
+    let block_b = BlockId("block_b".into());
+
+    for _ in 0..2 {
+        s.save_block_output(&mk_output(inst, "block_a", 0))
+            .await
+            .unwrap();
+        s.save_block_output(&mk_output(inst, "block_b", 0))
+            .await
+            .unwrap();
+    }
+    let removed = s.delete_block_outputs(inst, &block_a).await.unwrap();
+    assert_eq!(removed, 2);
+    assert!(s.get_block_output(inst, &block_a).await.unwrap().is_none());
+    assert!(s.get_block_output(inst, &block_b).await.unwrap().is_some());
+    let remaining = s.get_all_outputs(inst).await.unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().all(|o| o.block_id == block_b));
+}
+
+#[tokio::test]
+async fn delete_block_outputs_leaves_other_instances_untouched() {
+    let s = store().await;
+    let inst1 = InstanceId::new();
+    let inst2 = InstanceId::new();
+    let block = BlockId("shared".into());
+
+    s.save_block_output(&mk_output(inst1, "shared", 0))
+        .await
+        .unwrap();
+    s.save_block_output(&mk_output(inst2, "shared", 0))
+        .await
+        .unwrap();
+
+    let removed = s.delete_block_outputs(inst1, &block).await.unwrap();
+    assert_eq!(removed, 1);
+    assert!(s.get_block_output(inst1, &block).await.unwrap().is_none());
+    assert!(s.get_block_output(inst2, &block).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn delete_block_outputs_on_empty_is_noop() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    let removed = s
+        .delete_block_outputs(inst, &BlockId("nope".into()))
+        .await
+        .unwrap();
+    assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    let loop_id = BlockId("loop_1".into());
+    let step_id = BlockId("inner_step".into());
+
+    s.save_block_output(&mk_output(inst, "loop_1", 1))
+        .await
+        .unwrap();
+    s.save_block_output(&BlockOutput {
+        id: Uuid::new_v4(),
+        instance_id: inst,
+        block_id: step_id.clone(),
+        output: json!({"result": "ok"}),
+        output_ref: None,
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+
+    let removed = s.delete_block_outputs(inst, &loop_id).await.unwrap();
+    assert_eq!(removed, 1);
+    assert!(s.get_block_output(inst, &loop_id).await.unwrap().is_none());
+    let step_row = s
+        .get_block_output(inst, &step_id)
+        .await
+        .unwrap()
+        .expect("step output must remain");
+    assert_eq!(step_row.output["result"], "ok");
+}
+
 // ===========================================================================
 // Complex Scenarios
 // ===========================================================================

@@ -81,6 +81,7 @@ const SELF_MANAGED_SUITES = new Set<string>([
   "worker_task_timeout.test.ts",
   "worker_heartbeat_timeout.test.ts",
   "retryable_false_open_circuit.test.ts",
+  "complex_patterns.test.ts",
   // Signal inbox — not keyed by tenant_id.
   "signal_ordering.test.ts",
   "signal_during_finally.test.ts",

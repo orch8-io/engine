@@ -281,6 +281,7 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session, S
     let state = match row.get::<&str, _>("state") {
         "completed" => SessionState::Completed,
         "expired" => SessionState::Expired,
+        "paused" => SessionState::Paused,
         _ => SessionState::Active,
     };
     Ok(Session {

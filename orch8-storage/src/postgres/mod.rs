@@ -303,6 +303,14 @@ impl StorageBackend for PostgresStorage {
             .await
     }
 
+    async fn delete_block_outputs(
+        &self,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+    ) -> Result<u64, StorageError> {
+        outputs::delete_for_block(self, instance_id, block_id).await
+    }
+
     // === Rate Limits ===
 
     async fn check_rate_limit(

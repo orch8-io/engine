@@ -225,6 +225,27 @@ pub struct SchedulerConfig {
     /// land in `externalized_state`. Default: `Threshold { bytes: 65536 }`.
     #[serde(default)]
     pub externalization_mode: ExternalizationMode,
+    /// How often the worker-task reaper ticks, in seconds. Controls the
+    /// scan cadence for resetting stale claimed tasks back to Pending so
+    /// another worker can pick them up.
+    ///
+    /// Exposing this matters for retry-backoff e2e tests: the default of
+    /// 30s is too long for tight unit loops. Set to a smaller value in
+    /// tests to tighten the observable reap latency.
+    #[serde(default = "default_worker_reaper_tick_secs")]
+    pub worker_reaper_tick_secs: u64,
+    /// How old a worker task's heartbeat can be before the reaper resets
+    /// it, in seconds. Must be greater than the expected handler latency
+    /// to avoid yanking still-active workers. Default: 60s.
+    #[serde(default = "default_worker_reaper_stale_secs")]
+    pub worker_reaper_stale_secs: u64,
+    /// How often the cluster-node reaper ticks, in seconds. Default: 60s.
+    #[serde(default = "default_node_reaper_tick_secs")]
+    pub node_reaper_tick_secs: u64,
+    /// How old a cluster node's heartbeat can be before the reaper marks
+    /// it dead, in seconds. Default: 120s.
+    #[serde(default = "default_node_reaper_stale_secs")]
+    pub node_reaper_stale_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -241,8 +262,28 @@ impl Default for SchedulerConfig {
             encryption_key: SecretString::default(),
             max_context_bytes: default_max_context_bytes(),
             externalization_mode: ExternalizationMode::default(),
+            worker_reaper_tick_secs: default_worker_reaper_tick_secs(),
+            worker_reaper_stale_secs: default_worker_reaper_stale_secs(),
+            node_reaper_tick_secs: default_node_reaper_tick_secs(),
+            node_reaper_stale_secs: default_node_reaper_stale_secs(),
         }
     }
+}
+
+fn default_worker_reaper_tick_secs() -> u64 {
+    30
+}
+
+fn default_worker_reaper_stale_secs() -> u64 {
+    60
+}
+
+fn default_node_reaper_tick_secs() -> u64 {
+    60
+}
+
+fn default_node_reaper_stale_secs() -> u64 {
+    120
 }
 
 fn default_max_context_bytes() -> u32 {

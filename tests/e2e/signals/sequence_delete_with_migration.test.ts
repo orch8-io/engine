@@ -1,7 +1,5 @@
 /**
  * Verifies sequence delete is rejected or rolled back cleanly when a hot migration is in flight.
- *
- * TODO: Implement — plan below.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";

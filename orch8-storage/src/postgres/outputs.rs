@@ -9,6 +9,14 @@ use orch8_types::output::BlockOutput;
 use super::rows::BlockOutputRow;
 use super::PostgresStorage;
 
+/// Append a new `block_outputs` row.
+///
+/// `block_outputs` is a write-append log: every execution of a block — first
+/// attempt, each retry, and each loop / `for_each` iteration — writes its own
+/// row. The pair `(instance_id, block_id)` is NOT unique, so callers that
+/// want "the current state" of a block must read the most recent row (see
+/// [`get`] below). See migration 027 for the schema change that removed the
+/// previous UNIQUE constraint.
 pub(super) async fn save(
     store: &PostgresStorage,
     output: &BlockOutput,
@@ -17,8 +25,6 @@ pub(super) async fn save(
         r"
         INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (instance_id, block_id) DO UPDATE
-        SET output = $4, output_ref = $5, output_size = $6, attempt = $7
         ",
     )
     .bind(output.id)
@@ -34,6 +40,13 @@ pub(super) async fn save(
     Ok(())
 }
 
+/// Return the most recent `block_outputs` row for `(instance_id, block_id)`.
+///
+/// With the write-append model (migration 027) multiple rows can share the
+/// same `(instance_id, block_id)` pair. Every caller of this function wants
+/// "the current state" — the latest attempt / iteration — so we sort by
+/// `created_at DESC` and take the first. The supporting composite index
+/// `idx_block_outputs_instance_block_created` keeps this cheap.
 pub(super) async fn get(
     store: &PostgresStorage,
     instance_id: InstanceId,
@@ -41,7 +54,10 @@ pub(super) async fn get(
 ) -> Result<Option<BlockOutput>, StorageError> {
     let row = sqlx::query_as::<_, BlockOutputRow>(
         r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
-           FROM block_outputs WHERE instance_id = $1 AND block_id = $2",
+           FROM block_outputs
+           WHERE instance_id = $1 AND block_id = $2
+           ORDER BY created_at DESC
+           LIMIT 1",
     )
     .bind(instance_id.0)
     .bind(&block_id.0)
@@ -64,12 +80,15 @@ pub(super) async fn get_all(
     Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
 }
 
+/// Distinct `block_id`s that have produced at least one output for this
+/// instance. `DISTINCT` is required because under the write-append model a
+/// single block can have multiple rows (loop iterations, retries).
 pub(super) async fn get_completed_ids(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockId>, StorageError> {
     let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT block_id FROM block_outputs WHERE instance_id = $1")
+        sqlx::query_as("SELECT DISTINCT block_id FROM block_outputs WHERE instance_id = $1")
             .bind(instance_id.0)
             .fetch_all(&store.pool)
             .await?;
@@ -85,7 +104,7 @@ pub(super) async fn get_completed_ids_batch(
     }
     let uuids: Vec<Uuid> = instance_ids.iter().map(|id| id.0).collect();
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT instance_id, block_id FROM block_outputs WHERE instance_id = ANY($1)",
+        "SELECT DISTINCT instance_id, block_id FROM block_outputs WHERE instance_id = ANY($1)",
     )
     .bind(&uuids)
     .fetch_all(&store.pool)
@@ -99,6 +118,28 @@ pub(super) async fn get_completed_ids_batch(
     Ok(map)
 }
 
+/// Delete every `block_outputs` row matching `(instance_id, block_id)`.
+///
+/// Used by the `loop` / `for_each` iteration-reset path to purge stale
+/// composite iteration-counter markers from descendants without disturbing
+/// the rest of the write-append history (other instances, other blocks,
+/// sibling markers).
+pub(super) async fn delete_for_block(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query(r"DELETE FROM block_outputs WHERE instance_id = $1 AND block_id = $2")
+        .bind(instance_id.0)
+        .bind(&block_id.0)
+        .execute(&store.pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Append a `block_outputs` row and transition the instance state in one
+/// transaction. Like [`save`], this is a pure INSERT under the write-append
+/// model — no ON CONFLICT clause.
 pub(super) async fn save_output_and_transition(
     store: &PostgresStorage,
     output: &BlockOutput,
@@ -112,8 +153,6 @@ pub(super) async fn save_output_and_transition(
         r"
         INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (instance_id, block_id) DO UPDATE
-        SET output = $4, output_ref = $5, output_size = $6, attempt = $7
         ",
     )
     .bind(output.id)

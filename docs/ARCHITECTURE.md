@@ -234,7 +234,7 @@ Both sweepers share one ticker and run **concurrently via `tokio::join!`** — t
 | `sequences` | Workflow definitions (tenant, name, version, JSONB blocks) |
 | `task_instances` | Executions (state, next_fire_at, priority, context, metadata) |
 | `execution_tree` | Runtime tree for composite blocks (parent-child nodes) |
-| `block_outputs` | Memoized step results (instance_id + block_id unique) |
+| `block_outputs` | Append-only step results — one row per execution (attempt, loop iteration, for_each pass). Readers that want "current state" use the most recent row by `created_at`. |
 | `signal_inbox` | Pending signals for instances |
 | `rate_limits` | Per-resource rate limit state |
 | `cron_schedules` | Recurring workflow triggers |

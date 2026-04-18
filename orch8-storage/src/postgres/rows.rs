@@ -434,6 +434,7 @@ impl SessionRow {
         let state = match self.state.as_str() {
             "completed" => orch8_types::session::SessionState::Completed,
             "expired" => orch8_types::session::SessionState::Expired,
+            "paused" => orch8_types::session::SessionState::Paused,
             _ => orch8_types::session::SessionState::Active,
         };
         orch8_types::session::Session {

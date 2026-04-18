@@ -172,17 +172,20 @@ impl Engine {
             }
         });
 
-        // Stale node reaper (every 60 seconds).
+        // Stale node reaper. Tick cadence + stale threshold come from
+        // SchedulerConfig so tight-loop integration tests can shrink them.
         let node_reaper_storage = Arc::clone(&self.storage);
         let node_reaper_cancel = self.cancel.clone();
+        let node_reaper_tick = Duration::from_secs(self.config.node_reaper_tick_secs);
+        let node_reaper_stale = Duration::from_secs(self.config.node_reaper_stale_secs);
         set.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_mins(1));
+            let mut ticker = tokio::time::interval(node_reaper_tick);
             loop {
                 tokio::select! {
                     () = node_reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
                         match node_reaper_storage
-                            .reap_stale_nodes(std::time::Duration::from_mins(2))
+                            .reap_stale_nodes(node_reaper_stale)
                             .await
                         {
                             Ok(0) => {}
@@ -194,17 +197,20 @@ impl Engine {
             }
         });
 
-        // Worker task reaper (resets stale claimed tasks every 30 seconds).
+        // Worker task reaper (resets stale claimed tasks). Tick + threshold
+        // come from SchedulerConfig for the same reason as the node reaper.
         let reaper_storage = Arc::clone(&self.storage);
         let reaper_cancel = self.cancel.clone();
+        let worker_reaper_tick = Duration::from_secs(self.config.worker_reaper_tick_secs);
+        let worker_reaper_stale = Duration::from_secs(self.config.worker_reaper_stale_secs);
         set.spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut ticker = tokio::time::interval(worker_reaper_tick);
             loop {
                 tokio::select! {
                     () = reaper_cancel.cancelled() => break,
                     _ = ticker.tick() => {
                         match reaper_storage
-                            .reap_stale_worker_tasks(std::time::Duration::from_mins(1))
+                            .reap_stale_worker_tasks(worker_reaper_stale)
                             .await
                         {
                             Ok(0) => {}

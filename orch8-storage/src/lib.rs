@@ -294,6 +294,35 @@ pub trait StorageBackend: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Delete every `block_outputs` row for `(instance_id, block_id)`.
+    ///
+    /// Returns the number of rows actually removed.
+    ///
+    /// Purpose: under the write-append model (migration 027) composite blocks
+    /// (`Loop`, `ForEach`) persist their iteration counter as a `BlockOutput`
+    /// marker keyed by their own `block_id`. When an outer iteration boundary
+    /// resets a descendant subtree back to `Pending`, the descendant's
+    /// previous-iteration marker must be purged too — otherwise the
+    /// next-tick `get_block_output` would return the stale counter and the
+    /// top-of-handler cap guard would immediately complete the descendant
+    /// without ever running its body.
+    ///
+    /// Step outputs are intentionally keyed by the step's own `block_id`,
+    /// so they are NOT affected when a sibling composite's marker is
+    /// purged — callers should only invoke this method against composite
+    /// markers whose semantics are "internal iteration state".
+    ///
+    /// Every backend MUST implement this — there is deliberately no default
+    /// impl so a missing implementation fails at compile time rather than
+    /// silently no-oping (same convention as
+    /// [`Self::enqueue_signal_if_active`] and
+    /// [`Self::record_or_get_emit_dedupe`]).
+    async fn delete_block_outputs(
+        &self,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+    ) -> Result<u64, StorageError>;
+
     // === Rate Limits ===
 
     /// Atomic check-and-increment. Single DB round-trip.

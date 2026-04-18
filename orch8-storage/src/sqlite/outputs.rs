@@ -100,6 +100,25 @@ pub(super) async fn get_completed_ids_batch(
     Ok(result)
 }
 
+/// Delete every `block_outputs` row matching `(instance_id, block_id)`.
+///
+/// Mirror of the Postgres impl: used by the loop / for_each iteration-reset
+/// path to purge composite-block iteration-counter markers from descendants
+/// when an outer iteration advances.
+pub(super) async fn delete_for_block(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+) -> Result<u64, StorageError> {
+    let result = sqlx::query("DELETE FROM block_outputs WHERE instance_id=?1 AND block_id=?2")
+        .bind(instance_id.0.to_string())
+        .bind(&block_id.0)
+        .execute(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(result.rows_affected())
+}
+
 pub(super) async fn save_output_and_transition(
     storage: &SqliteStorage,
     output: &BlockOutput,
