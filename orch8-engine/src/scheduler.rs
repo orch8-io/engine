@@ -451,23 +451,49 @@ async fn process_instance_tree(
             // More work — check if the tree has nodes waiting for external workers.
             // If so, transition to Waiting (the worker completion callback will
             // re-schedule). Otherwise, re-schedule for the next tick.
-            let tree = storage.get_execution_tree(instance_id).await?;
-            if crate::evaluator::has_waiting_nodes(&tree) {
-                crate::lifecycle::transition_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Waiting,
-                    None,
-                )
-                .await?;
+            //
+            // But: if a step handler drove a pause/cancel transition mid-tick
+            // (see `handle_sleep` in `handlers/builtin.rs`), the instance may
+            // already be in `Paused` or `Cancelled` when we land here — we
+            // must NOT overwrite that with `Scheduled`, or the observable
+            // state would flip right back to running.
+            let current = storage
+                .get_instance(instance_id)
+                .await?
+                .map_or(InstanceState::Running, |i| i.state);
+            eprintln!(
+                "DBG-SCHED: inst={} after-eval state={:?}",
+                instance_id, current
+            );
+            if matches!(
+                current,
+                InstanceState::Paused | InstanceState::Cancelled | InstanceState::Failed
+            ) {
+                // Terminal/paused — leave state as-is.
             } else {
-                storage
-                    .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+                let tree = storage.get_execution_tree(instance_id).await?;
+                if crate::evaluator::has_waiting_nodes(&tree) {
+                    crate::lifecycle::transition_instance(
+                        storage.as_ref(),
+                        instance_id,
+                        InstanceState::Running,
+                        InstanceState::Waiting,
+                        None,
+                    )
                     .await?;
+                } else {
+                    storage
+                        .update_instance_state(
+                            instance_id,
+                            InstanceState::Scheduled,
+                            Some(Utc::now()),
+                        )
+                        .await?;
+                }
             }
         }
         Ok(false) => {
+            eprintln!("DBG-SCHED-FALSE: inst={}", instance_id);
             // Evaluator says done. Check if any root node failed or was cancelled.
             let tree = storage.get_execution_tree(instance_id).await?;
             let root_failed = tree
@@ -530,6 +556,7 @@ async fn process_instance_tree(
             }
         }
         Err(e) => {
+            eprintln!("DBG-SCHED-ERR: inst={} error={}", instance_id, e);
             error!(instance_id = %instance_id, error = %e, "tree evaluation failed");
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
@@ -1060,6 +1087,19 @@ async fn execute_step_block(
             ..
         }) => {
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
+            // If a step handler drove a pause/cancel transition mid-flight
+            // (see `handle_sleep` in `handlers/builtin.rs`), the instance
+            // already sits in `Paused` or `Cancelled`. Treat the
+            // `Retryable` as a benign yield in that case — falling through
+            // to `handle_retryable_failure` would otherwise attempt an
+            // invalid `Paused→Failed` transition and error out.
+            let current = storage
+                .get_instance(instance_id)
+                .await?
+                .map_or(InstanceState::Running, |i| i.state);
+            if matches!(current, InstanceState::Paused | InstanceState::Cancelled) {
+                return Ok(StepOutcome::Deferred);
+            }
             handle_retryable_failure(
                 storage.as_ref(),
                 instance_id,

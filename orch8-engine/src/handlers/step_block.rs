@@ -21,26 +21,17 @@ use crate::handlers::HandlerRegistry;
 ///
 /// If the referenced payload is missing, the marker is left in place so
 /// downstream code can detect the broken reference.
+///
+/// Delegates to [`externalized::resolve_context_markers`] so every engine
+/// site (step dispatch, router conditions, …) shares one implementation.
 async fn resolve_markers(
     storage: &dyn StorageBackend,
     _instance_id: InstanceId,
-    mut ctx: ExecutionContext,
+    ctx: ExecutionContext,
 ) -> Result<ExecutionContext, EngineError> {
-    let Some(obj) = ctx.data.as_object_mut() else {
-        return Ok(ctx);
-    };
-    for (_key, value) in obj.iter_mut() {
-        if let Some(ref_key) = externalized::extract_ref_key(value) {
-            if let Some(resolved) = storage
-                .get_externalized_state(ref_key)
-                .await
-                .map_err(EngineError::Storage)?
-            {
-                *value = resolved;
-            }
-        }
-    }
-    Ok(ctx)
+    externalized::resolve_context_markers(storage, ctx)
+        .await
+        .map_err(EngineError::Storage)
 }
 
 /// Build the context snapshot a step will see, honouring its

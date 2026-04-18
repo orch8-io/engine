@@ -7,6 +7,9 @@
 //! The "exactly two keys" rule prevents false positives on user payloads
 //! that happen to include a `_ref` field alongside other data.
 
+use orch8_storage::StorageBackend;
+use orch8_types::context::ExecutionContext;
+use orch8_types::error::StorageError;
 use serde_json::Value;
 
 pub const EXTERNALIZED_FLAG: &str = "_externalized";
@@ -33,6 +36,36 @@ pub fn extract_ref_key(v: &Value) -> Option<&str> {
         return None;
     }
     v.as_object()?.get(REF_KEY)?.as_str()
+}
+
+/// Walk the top-level fields of `ctx.data` and replace any externalization
+/// markers with their resolved payloads. Non-object `data` and non-marker
+/// values are left untouched; broken refs (payload missing in storage) are
+/// also left in place so downstream code can detect them.
+///
+/// This is the shared inflator used by every engine site that needs to see
+/// user context values: step dispatch (`step_block.rs`), router condition
+/// evaluation (`router.rs`), and any future site that reads `instance.context`
+/// before it is handed to user code.
+///
+/// Only top-level keys are scanned — nested objects are not recursed into.
+/// This mirrors the externalizer's write side: `externalize_fields` only
+/// promotes top-level keys, so the resolver only needs to look there.
+pub async fn resolve_context_markers(
+    storage: &dyn StorageBackend,
+    mut ctx: ExecutionContext,
+) -> Result<ExecutionContext, StorageError> {
+    let Some(obj) = ctx.data.as_object_mut() else {
+        return Ok(ctx);
+    };
+    for (_key, value) in obj.iter_mut() {
+        if let Some(ref_key) = extract_ref_key(value) {
+            if let Some(resolved) = storage.get_externalized_state(ref_key).await? {
+                *value = resolved;
+            }
+        }
+    }
+    Ok(ctx)
 }
 
 #[cfg(test)]

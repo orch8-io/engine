@@ -146,15 +146,32 @@ async fn trigger_cron_schedule(
     Ok(())
 }
 
+/// Normalize a cron expression so that standard 5-field Unix cron
+/// (`m h dom mon dow`) is accepted alongside the `cron` crate's native
+/// 6-field (`s m h dom mon dow`) and 7-field (`s m h dom mon dow year`)
+/// formats. Other shapes are returned unchanged and passed through to the
+/// underlying parser (which will reject them with a useful error).
+fn normalize_cron_expr(expr: &str) -> String {
+    let trimmed = expr.trim();
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    match fields.len() {
+        // Standard Unix cron: prepend "0" seconds, append "*" year.
+        5 => format!("0 {} *", fields.join(" ")),
+        _ => trimmed.to_string(),
+    }
+}
+
 /// Calculate the next fire time from a cron expression.
 pub fn calculate_next_fire(schedule: &CronSchedule) -> Option<chrono::DateTime<Utc>> {
-    let cron_schedule = Schedule::from_str(&schedule.cron_expr).ok()?;
+    let normalized = normalize_cron_expr(&schedule.cron_expr);
+    let cron_schedule = Schedule::from_str(&normalized).ok()?;
     cron_schedule.upcoming(Utc).next()
 }
 
 /// Validate a cron expression. Returns an error message if invalid.
 pub fn validate_cron_expr(expr: &str) -> Result<(), String> {
-    Schedule::from_str(expr)
+    let normalized = normalize_cron_expr(expr);
+    Schedule::from_str(&normalized)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -222,9 +239,11 @@ mod tests {
     }
 
     #[test]
-    fn invalid_expr_with_too_few_fields() {
-        // cron crate requires 6 or 7 fields; 5 (standard Unix) is rejected.
-        assert!(validate_cron_expr("* * * * *").is_err());
+    fn standard_unix_cron_is_accepted() {
+        // We normalise 5-field standard Unix cron (`m h dom mon dow`) into the
+        // `cron` crate's 7-field form, so these must parse.
+        assert!(validate_cron_expr("* * * * *").is_ok());
+        assert!(validate_cron_expr("0 0 * * *").is_ok());
     }
 
     #[test]

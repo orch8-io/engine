@@ -110,11 +110,23 @@ async fn handle_noop(ctx: StepContext) -> Result<Value, StepError> {
 /// - `message` (string): The message to log. Defaults to "no message".
 /// - `level` (string): Log level — "debug", "info", "warn". Defaults to "info".
 async fn handle_log(ctx: StepContext) -> Result<Value, StepError> {
-    let message = ctx
-        .params
-        .get("message")
+    // Preserve the caller's `message` value verbatim in the step output so
+    // whole-string template resolution (e.g. a missing `{{path}}` that
+    // resolved to JSON null) propagates through as-is. Only fall back to
+    // the placeholder string when `message` is absent entirely — a present
+    // null must stay null.
+    let message_value = ctx.params.get("message").cloned();
+    let log_str = message_value
+        .as_ref()
         .and_then(Value::as_str)
-        .unwrap_or("no message");
+        .map(std::string::ToString::to_string)
+        .or_else(|| {
+            message_value
+                .as_ref()
+                .filter(|v| !v.is_null())
+                .map(std::string::ToString::to_string)
+        })
+        .unwrap_or_else(|| "no message".to_string());
 
     let level = ctx
         .params
@@ -126,24 +138,27 @@ async fn handle_log(ctx: StepContext) -> Result<Value, StepError> {
         "debug" => debug!(
             instance_id = %ctx.instance_id,
             block_id = %ctx.block_id,
-            message = %message,
+            message = %log_str,
             "log step"
         ),
         "warn" => tracing::warn!(
             instance_id = %ctx.instance_id,
             block_id = %ctx.block_id,
-            message = %message,
+            message = %log_str,
             "log step"
         ),
         _ => info!(
             instance_id = %ctx.instance_id,
             block_id = %ctx.block_id,
-            message = %message,
+            message = %log_str,
             "log step"
         ),
     }
 
-    Ok(json!({ "message": message }))
+    // Echo back the original value (preserving null / non-string shapes)
+    // when it was provided; otherwise return the placeholder string.
+    let out_message = message_value.unwrap_or_else(|| Value::String("no message".into()));
+    Ok(json!({ "message": out_message }))
 }
 
 /// Sleep handler. Waits for a configured duration.
@@ -220,12 +235,6 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             }
             Err(_) => false,
         };
-        tracing::debug!(
-            "DBG-SLEEP: inst={} block={} inside_scope={}",
-            ctx.instance_id,
-            ctx.block_id,
-            inside_scope
-        );
         if inside_scope {
             continue;
         }
@@ -233,6 +242,65 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             let has_cancel = signals
                 .iter()
                 .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Cancel));
+            let has_pause = signals
+                .iter()
+                .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Pause));
+            if has_pause && !has_cancel {
+                // A `pause` signal is queued. Drive it through the normal
+                // signal pipeline so the instance state transitions to
+                // `Paused` before we yield — without this, long-running
+                // sleeps would keep the instance in `Running` for the full
+                // duration, masking the pause from external observers.
+                //
+                // After process_signals transitions the instance to Paused,
+                // we reset our own node back to `Pending` so the
+                // evaluator's `find_running_step` doesn't immediately
+                // re-dispatch us in the same tick (which would re-enter
+                // this handler with no signals queued, sleep the full
+                // duration, and silently complete — overwriting the Paused
+                // state). On resume, the scheduler re-enters with the node
+                // pending and we start fresh.
+                //
+                // Returning `StepError::Retryable` leaves the node state
+                // alone (we already set it to Pending above).
+                debug!(
+                    instance_id = %ctx.instance_id,
+                    block_id = %ctx.block_id,
+                    "sleep step interrupted by pause signal — driving pause"
+                );
+                let _ = crate::signals::process_signals(
+                    ctx.storage.as_ref(),
+                    ctx.instance_id,
+                    orch8_types::instance::InstanceState::Running,
+                )
+                .await;
+                // When running under the tree evaluator, the sleep step's
+                // node is Running in the tree. Reset it to Pending so the
+                // evaluator's `find_running_step` doesn't immediately
+                // re-dispatch us in the same tick (which would re-enter
+                // this handler with the pause signal already delivered,
+                // sleep the full duration, and silently complete —
+                // overwriting the Paused state). On resume, the scheduler
+                // re-enters with the node Pending and we start fresh. In
+                // the fast-path there's no tree to update, which is fine
+                // because the scheduler detects the post-pause state and
+                // returns `StepOutcome::Deferred` (see `scheduler.rs`).
+                if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
+                    if let Some(n) = tree.iter().find(|n| {
+                        n.block_id == ctx.block_id
+                            && n.state == orch8_types::execution::NodeState::Running
+                    }) {
+                        let _ = ctx
+                            .storage
+                            .update_node_state(n.id, orch8_types::execution::NodeState::Pending)
+                            .await;
+                    }
+                }
+                return Err(StepError::Retryable {
+                    message: "sleep paused by signal".into(),
+                    details: None,
+                });
+            }
             if has_cancel {
                 // A `cancel` signal is waiting to be processed. Drive it
                 // through the normal signal pipeline so the instance state
