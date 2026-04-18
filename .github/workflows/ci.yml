@@ -90,16 +90,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
       - name: Install protoc & psql
-        # psql is used by tests/e2e/harness.js to clean stale rows between
+        # psql is used by tests/e2e/harness.ts to clean stale rows between
         # runs; without it the harness logs a warning and stale data can
         # leak across suites.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
+      - name: Install E2E deps
+        # Tests are authored in TypeScript and executed via `tsx` — this
+        # is the only npm install in the E2E job. Kept separate so cache
+        # hits are visible in the step log.
+        working-directory: tests/e2e
+        run: npm ci --no-audit --no-fund
+      - name: Typecheck E2E tests
+        working-directory: tests/e2e
+        run: npm run typecheck
       - name: Build server
         run: cargo build --bin orch8-server
       - name: Run E2E tests (shared server)
         working-directory: tests/e2e
-        # `npm test` boots orch8-server ONCE and runs every *.test.js
+        # `npm test` boots orch8-server ONCE and runs every *.test.ts
         # serially against it. Replaces the prior per-file loop which paid
         # ~15s of spawn+cleanup per suite.
         run: npm test

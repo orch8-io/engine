@@ -3,9 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node ./run-e2e.js",
-    "test:verbose": "ORCH8_E2E_REPORTER=spec node ./run-e2e.js",
-    "test:standalone": "node --test --test-concurrency=1 --test-timeout=60000 ./persistence_recovery.test.js ./triggers.test.js ./wait-signal.test.js ./worker-dashboard.test.js ./workers.test.js"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx ./run-e2e.ts",
+    "test:verbose": "ORCH8_E2E_REPORTER=spec tsx ./run-e2e.ts",
+    "test:standalone": "node --import tsx/esm --test --test-concurrency=1 --test-timeout=60000 ./persistence_recovery.test.ts ./triggers.test.ts ./wait-signal.test.ts ./worker-dashboard.test.ts ./workers.test.ts"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
 }
