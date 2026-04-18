@@ -106,7 +106,7 @@ fn resolve_path(
     };
 
     match resolved {
-        Some(v) if !v.is_null() => Ok(v),
+        Some(v) if !v.is_null() => Ok(v.clone()),
         _ => {
             if let Some(default) = fallback {
                 Ok(serde_json::Value::String(default.to_string()))
@@ -117,7 +117,11 @@ fn resolve_path(
     }
 }
 
-fn navigate_json<'a, I>(value: &serde_json::Value, path: I) -> Option<serde_json::Value>
+/// Walk a JSON value by path segments, returning a borrow of the terminal
+/// node. Returning `&Value` (rather than an owned clone) keeps traversal
+/// zero-allocation; the single clone happens at the `resolve_path` boundary,
+/// and only when the value is actually needed by the caller.
+fn navigate_json<'a, 'v, I>(value: &'v serde_json::Value, path: I) -> Option<&'v serde_json::Value>
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -134,7 +138,7 @@ where
             _ => return None,
         }
     }
-    Some(current.clone())
+    Some(current)
 }
 
 #[cfg(test)]
