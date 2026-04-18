@@ -220,7 +220,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
             }
             Err(_) => false,
         };
-        eprintln!(
+        tracing::debug!(
             "DBG-SLEEP: inst={} block={} inside_scope={}",
             ctx.instance_id, ctx.block_id, inside_scope
         );
