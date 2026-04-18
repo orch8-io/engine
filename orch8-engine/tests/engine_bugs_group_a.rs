@@ -739,7 +739,7 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
         .await
         .unwrap()
         .expect("for_each marker");
-    let total = marker.output.get("_total").and_then(|v| v.as_u64());
+    let total = marker.output.get("_total").and_then(serde_json::Value::as_u64);
     assert_eq!(
         total,
         Some(3),
@@ -987,14 +987,14 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
         .await
         .unwrap()
         .expect("for_each marker after advance");
-    let index = marker.output.get("_index").and_then(|v| v.as_u64());
+    let index = marker.output.get("_index").and_then(serde_json::Value::as_u64);
     assert_eq!(
         index,
         Some(1),
         "for_each must advance _index from 0 to 1 after a body iteration where an \
          inner try_catch recovered via its catch block (for_each.rs:186-202)"
     );
-    let total = marker.output.get("_total").and_then(|v| v.as_u64());
+    let total = marker.output.get("_total").and_then(serde_json::Value::as_u64);
     assert_eq!(
         total,
         Some(2),
@@ -1147,7 +1147,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         .unwrap()
         .expect("inner loop marker set by outer iteration 0");
     assert_eq!(
-        before.output.get("_iterations").and_then(|v| v.as_u64()),
+        before.output.get("_iterations").and_then(serde_json::Value::as_u64),
         Some(2)
     );
 
@@ -1220,7 +1220,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         .unwrap()
         .expect("for_each marker present");
     assert_eq!(
-        fe_marker.output.get("_index").and_then(|v| v.as_u64()),
+        fe_marker.output.get("_index").and_then(serde_json::Value::as_u64),
         Some(1),
         "for_each index must advance 0 -> 1 on the reset tick"
     );
@@ -1297,7 +1297,7 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
 
     // Case 1: threshold larger than the heartbeat age — MUST NOT reap.
     let reaped = storage
-        .reap_stale_worker_tasks(Duration::from_secs(3600))
+        .reap_stale_worker_tasks(Duration::from_secs(60 * 60))
         .await
         .unwrap();
     assert_eq!(
@@ -1609,7 +1609,7 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
         child
             .metadata
             .get("_parent_block_id")
-            .and_then(|v| v.as_str()),
+            .and_then(serde_json::Value::as_str),
         Some("ss"),
         "child metadata must carry the parent block_id so the parent handler \
          can match it back via get_child_instances on later ticks \
