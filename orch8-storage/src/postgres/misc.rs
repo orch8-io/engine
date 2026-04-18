@@ -50,9 +50,20 @@ pub(super) async fn concurrency_position(
     instance_id: InstanceId,
     concurrency_key: &str,
 ) -> Result<i64, StorageError> {
+    // Order by `(created_at, id)`. Instance IDs are UUIDv7 so the 48-bit
+    // timestamp prefix already gives us FIFO on `id` alone at millisecond
+    // granularity — but within the same millisecond v7 falls back to 74
+    // random bits, and three rapid HTTP creates comfortably land in the
+    // same ms. The `created_at` leading column plus `id` tiebreaker keeps
+    // position-1 assignment deterministic across ties so a same-ms newer
+    // instance can't sneak ahead of an already-running older one and
+    // exceed max_concurrency.
     let row: (i64,) = sqlx::query_as(
         r"SELECT COUNT(*) FROM task_instances
-          WHERE concurrency_key = $1 AND state = 'running' AND id <= $2",
+          WHERE concurrency_key = $1 AND state = 'running'
+            AND (created_at, id) <= (
+                SELECT created_at, id FROM task_instances WHERE id = $2
+            )",
     )
     .bind(concurrency_key)
     .bind(instance_id.0)

@@ -83,12 +83,29 @@ export async function startServer({ port = DEFAULT_PORT, build = true } = {}) {
   } else {
     try {
       const dbUrl = new URL(DB_URL);
+      // Guarded cleanup: on the very first run the binary hasn't applied
+      // migrations yet so the tables don't exist. A plain DELETE would emit
+      // "relation ... does not exist" noise. The DO block checks pg_tables
+      // and only deletes when the schema is already in place.
+      const cleanupSql = `
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'task_instances') THEN
+            DELETE FROM worker_tasks;
+            DELETE FROM block_outputs;
+            DELETE FROM execution_tree;
+            DELETE FROM signal_inbox;
+            DELETE FROM task_instances;
+          END IF;
+        END $$;
+      `;
       execFileSync("psql", [
         "-h", dbUrl.hostname,
         "-p", dbUrl.port,
         "-U", dbUrl.username,
         "-d", dbUrl.pathname.slice(1),
-        "-c", "DELETE FROM worker_tasks; DELETE FROM block_outputs; DELETE FROM execution_tree; DELETE FROM signal_inbox; DELETE FROM task_instances;",
+        "-v", "ON_ERROR_STOP=1",
+        "-c", cleanupSql,
       ], {
         env: { ...process.env, PGPASSWORD: dbUrl.password },
         stdio: "pipe",

@@ -48,8 +48,15 @@ pub(super) async fn concurrency_position(
     instance_id: InstanceId,
     concurrency_key: &str,
 ) -> Result<i64, StorageError> {
+    // Order by `(created_at, id)`. IDs are UUIDv7 so the 48-bit timestamp
+    // prefix gives us FIFO-on-`id` at ms granularity — within a single ms
+    // v7 falls back to 74 random bits, so `created_at` leads and `id`
+    // tiebreaks to keep position assignment deterministic for same-ms
+    // arrivals. Matches the Postgres backend.
     let rows = sqlx::query(
-        "SELECT id FROM task_instances WHERE concurrency_key=?1 AND state='running' ORDER BY id",
+        "SELECT id FROM task_instances
+         WHERE concurrency_key=?1 AND state='running'
+         ORDER BY created_at, id",
     )
     .bind(concurrency_key)
     .fetch_all(&storage.pool)
