@@ -11,7 +11,7 @@ use crate::error::EngineError;
 use crate::evaluator;
 use crate::handlers::HandlerRegistry;
 
-/// Absolute upper bound on for_each iterations.
+/// Absolute upper bound on `for_each` iterations.
 ///
 /// Mirrors [`crate::handlers::loop_block::LOOP_ABSOLUTE_MAX`]: a last-resort
 /// safety net that protects the scheduler from a misconfigured sequence or
@@ -21,13 +21,13 @@ use crate::handlers::HandlerRegistry;
 /// for the plan to reject such workflows at submit time.
 pub const FOR_EACH_ABSOLUTE_MAX: u32 = 1_000_000;
 
-/// Execute a for_each block: iterate over each element of `collection`,
+/// Execute a `for_each` block: iterate over each element of `collection`,
 /// binding it to `item_var` in the instance context and running the body
 /// once per element, up to the lesser of `items.len()`, the user's
 /// `max_iterations` cap, and [`FOR_EACH_ABSOLUTE_MAX`].
 ///
 /// Iteration bookkeeping is persisted as a `BlockOutput` keyed by the
-/// for_each's own `block_id`, carrying `{ "_index": N, "_total": L,
+/// `for_each`'s own `block_id`, carrying `{ "_index": N, "_total": L,
 /// "_item_var": name }`. Under the write-append storage model (see
 /// migration 027) this produces one marker row per completed iteration, so
 /// the history of iterations is observable via `get_all_outputs`.
@@ -40,12 +40,13 @@ pub const FOR_EACH_ABSOLUTE_MAX: u32 = 1_000_000;
 ///      effective max.
 ///   4. If body children are `Pending`, binds `item_var = items[index]` in
 ///      the instance context and activates the children to `Running`.
-///   5. If every body child is terminal, either fails the for_each (on any
+///   5. If every body child is terminal, either fails the `for_each` (on any
 ///      child failure) or increments the index, persists the marker, and
 ///      resets the body subtree to `Pending` so the next tick re-executes
 ///      it against the next element.
 ///
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_for_each(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
