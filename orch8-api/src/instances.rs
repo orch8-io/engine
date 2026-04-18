@@ -167,6 +167,30 @@ pub(crate) async fn create_instance(
         req.tenant_id.clone()
     };
 
+    // Reject empty tenant / namespace up-front. Without this the DB happily
+    // accepts the blank strings and the resulting row leaks into the default
+    // tenant's view — tenant isolation requires non-empty scoping values.
+    if tenant_id.0.trim().is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "tenant_id must not be empty".into(),
+        ));
+    }
+    if req.namespace.0.trim().is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "namespace must not be empty".into(),
+        ));
+    }
+
+    // Resolve the target sequence up-front and surface "not found" as 404 —
+    // otherwise the insert would bottom out on a Postgres FK violation and
+    // bubble up as a generic 500.
+    let _sequence = state
+        .storage
+        .get_sequence(req.sequence_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound(format!("sequence {}", req.sequence_id.0)))?;
+
     // Reject oversized contexts before they hit the DB.
     req.context.check_size(state.max_context_bytes)?;
 

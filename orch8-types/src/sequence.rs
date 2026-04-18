@@ -410,6 +410,77 @@ pub struct ABVariant {
     pub blocks: Vec<BlockDefinition>,
 }
 
+/// Validation error produced by [`SequenceDefinition::validate`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SequenceValidationError {
+    /// Two or more blocks in the tree share the same `id`.
+    #[error("duplicate block id: {0}")]
+    DuplicateBlockId(String),
+}
+
+impl SequenceDefinition {
+    /// Structural validation performed at submit time (before the sequence
+    /// reaches storage). Currently checks that every `BlockId` in the
+    /// recursive block tree is unique — the engine relies on ids being
+    /// distinct keys for block outputs, execution-tree edges, and signal
+    /// routing, so duplicates would break every one of those subsystems.
+    pub fn validate(&self) -> Result<(), SequenceValidationError> {
+        let mut seen = std::collections::HashSet::new();
+        for block in &self.blocks {
+            walk_block_ids(block, &mut seen)?;
+        }
+        Ok(())
+    }
+}
+
+/// Recursively descend into a block and every composite child body,
+/// inserting each encountered `BlockId` into `seen`. The first duplicate
+/// encountered short-circuits with [`SequenceValidationError::DuplicateBlockId`].
+fn walk_block_ids(
+    block: &BlockDefinition,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    let (id, children): (&BlockId, Vec<&[BlockDefinition]>) = match block {
+        BlockDefinition::Step(s) => (&s.id, vec![]),
+        BlockDefinition::Parallel(p) => (&p.id, p.branches.iter().map(Vec::as_slice).collect()),
+        BlockDefinition::Race(r) => (&r.id, r.branches.iter().map(Vec::as_slice).collect()),
+        BlockDefinition::Loop(l) => (&l.id, vec![l.body.as_slice()]),
+        BlockDefinition::ForEach(fe) => (&fe.id, vec![fe.body.as_slice()]),
+        BlockDefinition::Router(r) => {
+            let mut kids: Vec<&[BlockDefinition]> =
+                r.routes.iter().map(|rt| rt.blocks.as_slice()).collect();
+            if let Some(default) = r.default.as_ref() {
+                kids.push(default.as_slice());
+            }
+            (&r.id, kids)
+        }
+        BlockDefinition::TryCatch(tc) => {
+            let mut kids: Vec<&[BlockDefinition]> =
+                vec![tc.try_block.as_slice(), tc.catch_block.as_slice()];
+            if let Some(finally) = tc.finally_block.as_ref() {
+                kids.push(finally.as_slice());
+            }
+            (&tc.id, kids)
+        }
+        BlockDefinition::SubSequence(s) => (&s.id, vec![]),
+        BlockDefinition::ABSplit(ab) => (
+            &ab.id,
+            ab.variants.iter().map(|v| v.blocks.as_slice()).collect(),
+        ),
+        BlockDefinition::CancellationScope(cs) => (&cs.id, vec![cs.blocks.as_slice()]),
+    };
+
+    if !seen.insert(id.0.clone()) {
+        return Err(SequenceValidationError::DuplicateBlockId(id.0.clone()));
+    }
+    for child in children {
+        for b in child {
+            walk_block_ids(b, seen)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,6 +38,12 @@ pub(crate) async fn create_sequence(
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &seq.tenant_id)?;
     seq.tenant_id = tenant_id;
 
+    // Structural validation — reject duplicate block ids up-front so the
+    // engine isn't forced to reconcile collisions in block_outputs /
+    // execution_tree keyed on BlockId.
+    seq.validate()
+        .map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
+
     state
         .storage
         .create_sequence(&seq)

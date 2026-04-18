@@ -516,7 +516,7 @@ export class ApiError extends Error {
   readonly path: string;
 
   constructor(status: number, body: string, path: string) {
-    super(`HTTP ${status} on ${path}: ${body}`);
+    super(`HTTP ${status} on ${path}:\n${body}`);
     this.status = status;
     this.body = body;
     this.path = path;
