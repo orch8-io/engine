@@ -1883,6 +1883,7 @@ async fn dispatch_to_external_worker(
 }
 
 #[cfg(test)]
+#[allow(clippy::duration_suboptimal_units)]
 mod tests {
     use super::*;
 
@@ -2188,6 +2189,220 @@ mod tests {
             tasks[0].params["trigger_slug"], "user.signed_up",
             "external worker must receive fully-resolved params"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduler core helpers (TEST_PLAN.md #198-212).
+    // ------------------------------------------------------------------
+
+    use orch8_types::sequence::{BlockDefinition, DelaySpec, SequenceDefinition};
+
+    fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
+        SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            name: "cache-test".into(),
+            version: 1,
+            deprecated: false,
+            blocks,
+            interceptors: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_sequence_cached_hit_avoids_storage_query() {
+        // #212 — second call with the same SequenceId must be served from
+        // the moka cache, not the storage layer. We verify by deleting the
+        // sequence from storage after the first call: if the function still
+        // returns it, it came from the cache.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let seq = mk_sequence(vec![]);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache: Cache<SequenceId, Arc<SequenceDefinition>> = Cache::builder()
+            .max_capacity(16)
+            .time_to_live(Duration::from_secs(60))
+            .build();
+
+        let first = get_sequence_cached(storage.as_ref(), &cache, seq.id)
+            .await
+            .unwrap();
+        assert_eq!(first.id, seq.id);
+
+        // Drop from storage. If the cache is working the second call still
+        // succeeds because it never touches storage.
+        storage.delete_sequence(seq.id).await.unwrap();
+
+        let second = get_sequence_cached(storage.as_ref(), &cache, seq.id)
+            .await
+            .expect("cache hit should bypass the now-missing storage row");
+        assert_eq!(second.id, seq.id);
+    }
+
+    #[tokio::test]
+    async fn get_sequence_cached_miss_returns_error_when_not_in_storage() {
+        // Cache miss + not-in-storage must surface as an error so the
+        // scheduler can fail the instance cleanly.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let cache: Cache<SequenceId, Arc<SequenceDefinition>> = Cache::builder()
+            .max_capacity(16)
+            .time_to_live(Duration::from_secs(60))
+            .build();
+
+        let err = get_sequence_cached(storage.as_ref(), &cache, SequenceId::new()).await;
+        assert!(err.is_err(), "unknown sequence must not be fabricated");
+    }
+
+    async fn seed_instance_in_state(
+        storage: &dyn StorageBackend,
+        id: InstanceId,
+        parent: Option<InstanceId>,
+        state: InstanceState,
+    ) {
+        let now = Utc::now();
+        let inst = TaskInstance {
+            id,
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: parent,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wake_parent_if_child_wakes_waiting_parent() {
+        // #210 — when a child reaches a terminal state, any parent sitting in
+        // `Waiting` must be moved back to `Scheduled` so the scheduler picks
+        // it up on the next tick.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let parent_id = InstanceId::new();
+        let child_id = InstanceId::new();
+        seed_instance_in_state(storage.as_ref(), parent_id, None, InstanceState::Waiting).await;
+        seed_instance_in_state(
+            storage.as_ref(),
+            child_id,
+            Some(parent_id),
+            InstanceState::Completed,
+        )
+        .await;
+
+        let child = storage.get_instance(child_id).await.unwrap().unwrap();
+        wake_parent_if_child(storage.as_ref(), &child).await;
+
+        let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
+        assert_eq!(
+            parent.state,
+            InstanceState::Scheduled,
+            "waiting parent must be moved to scheduled after child terminal state"
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_parent_if_child_is_noop_when_parent_not_waiting() {
+        // Parents that aren't in `Waiting` (e.g. already running, paused,
+        // cancelled) must NOT be disturbed. The hook is idempotent and
+        // conservative — any other state is someone else's business.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let parent_id = InstanceId::new();
+        let child_id = InstanceId::new();
+        seed_instance_in_state(storage.as_ref(), parent_id, None, InstanceState::Running).await;
+        seed_instance_in_state(
+            storage.as_ref(),
+            child_id,
+            Some(parent_id),
+            InstanceState::Failed,
+        )
+        .await;
+
+        let child = storage.get_instance(child_id).await.unwrap().unwrap();
+        wake_parent_if_child(storage.as_ref(), &child).await;
+
+        let parent = storage.get_instance(parent_id).await.unwrap().unwrap();
+        assert_eq!(
+            parent.state,
+            InstanceState::Running,
+            "non-waiting parent must be left alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_parent_if_child_is_noop_when_no_parent() {
+        // Root instances have `parent_instance_id = None` — the function
+        // must short-circuit without touching storage.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let child_id = InstanceId::new();
+        seed_instance_in_state(storage.as_ref(), child_id, None, InstanceState::Completed).await;
+        let child = storage.get_instance(child_id).await.unwrap().unwrap();
+        // Not panicking is the assertion — the function returns unit.
+        wake_parent_if_child(storage.as_ref(), &child).await;
+    }
+
+    #[tokio::test]
+    async fn check_step_delay_defers_instance_with_correct_fire_at() {
+        // #203 — a step with a delay re-schedules the instance with
+        // `next_fire_at` set to approximately `now + duration`, and moves
+        // it back to `Scheduled` so the tick loop can pick it up.
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let instance_id = InstanceId::new();
+        seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+        let mut step_def = mk_step_def("s", "noop", serde_json::json!({}));
+        step_def.delay = Some(DelaySpec {
+            duration: Duration::from_secs(30),
+            business_days_only: false,
+            jitter: None,
+            holidays: vec![],
+            fire_at_local: Some(String::new()).filter(|s| !s.is_empty()),
+            timezone: None,
+        });
+
+        let deferred = check_step_delay(storage.as_ref(), &instance, &step_def)
+            .await
+            .expect("check_step_delay errored");
+        assert!(deferred, "delay present → must defer");
+
+        let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+        assert_eq!(refreshed.state, InstanceState::Scheduled);
+        let fire_at = refreshed.next_fire_at.expect("fire_at should be set");
+        let now = Utc::now();
+        let diff = (fire_at - now).num_seconds();
+        assert!(
+            (25..=35).contains(&diff),
+            "fire_at should be ~30s in the future, got {diff}s"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_step_delay_is_noop_when_no_delay() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let instance_id = InstanceId::new();
+        seed_instance_in_state(storage.as_ref(), instance_id, None, InstanceState::Running).await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+        let step_def = mk_step_def("s", "noop", serde_json::json!({}));
+        let deferred = check_step_delay(storage.as_ref(), &instance, &step_def)
+            .await
+            .unwrap();
+        assert!(!deferred);
+        // State must stay Running since there's nothing to defer.
+        let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+        assert_eq!(refreshed.state, InstanceState::Running);
     }
 
     #[tokio::test]

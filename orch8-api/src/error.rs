@@ -106,3 +106,134 @@ impl From<EngineError> for ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Error mapping unit tests (#281-285 from `TEST_PLAN.md`).
+    //!
+    //! Pins HTTP status mapping — regressions here would silently change
+    //! API contract for clients that switch on status codes.
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn status_of(err: ApiError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn storage_not_found_maps_to_404() {
+        // #281
+        let err: ApiError = StorageError::NotFound {
+            entity: "instance",
+            id: "abc".into(),
+        }
+        .into();
+        assert!(matches!(err, ApiError::NotFound(_)));
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn storage_conflict_maps_to_409_already_exists() {
+        // #282
+        let err: ApiError = StorageError::Conflict("dup".into()).into();
+        assert!(matches!(err, ApiError::AlreadyExists(_)));
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn api_error_conflict_maps_to_409() {
+        // #283
+        assert_eq!(
+            status_of(ApiError::Conflict("bad state".into())),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn payload_too_large_maps_to_413() {
+        // #284
+        assert_eq!(
+            status_of(ApiError::PayloadTooLarge("context > max".into())),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn unauthorized_maps_to_401() {
+        assert_eq!(status_of(ApiError::Unauthorized), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn forbidden_maps_to_403() {
+        assert_eq!(
+            status_of(ApiError::Forbidden("cross-tenant".into())),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn invalid_argument_maps_to_400() {
+        assert_eq!(
+            status_of(ApiError::InvalidArgument("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn internal_response_redacts_message() {
+        // The body for Internal errors must not leak the underlying message
+        // (we log it at `error` level server-side instead). Redaction is
+        // part of the API contract — tests here stop a regression where
+        // someone "helpfully" starts returning error details to clients.
+        let err = ApiError::Internal("db driver panic: stack trace".into());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .now_or_never()
+            .expect("body ready")
+            .expect("body ok");
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(
+            !text.contains("stack trace"),
+            "internal error body must not leak details: {text}"
+        );
+        assert!(text.contains("internal server error"));
+    }
+
+    #[test]
+    fn storage_terminal_target_maps_to_conflict_status() {
+        let err: ApiError = StorageError::TerminalTarget {
+            entity: "instance".into(),
+            id: "xyz".into(),
+        }
+        .into();
+        // TerminalTarget is surfaced as `AlreadyExists` → 409 (CONFLICT), so
+        // HTTP clients can distinguish "duplicate create" from "wrong state"
+        // via the error message while keeping the status code consistent.
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn storage_connection_maps_to_503_unavailable() {
+        let err: ApiError = StorageError::Connection("timeout".into()).into();
+        assert_eq!(status_of(err), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // `now_or_never` lives behind `futures` which orch8-api doesn't pull
+    // in — inline a tiny helper to poll the body future once.
+    trait NowOrNever: std::future::Future + Sized {
+        fn now_or_never(self) -> Option<Self::Output>;
+    }
+    impl<F: std::future::Future> NowOrNever for F {
+        fn now_or_never(self) -> Option<Self::Output> {
+            use std::pin::pin;
+            use std::task::{Context, Poll, Waker};
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            match pin!(self).poll(&mut cx) {
+                Poll::Ready(v) => Some(v),
+                Poll::Pending => None,
+            }
+        }
+    }
+}

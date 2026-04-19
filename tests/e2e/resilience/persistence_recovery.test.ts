@@ -34,15 +34,16 @@ function findBinary(): string {
 
 describe("Data Persistence and Recovery", () => {
   let server: ServerHandle | undefined;
-  let originalServerHandle: ServerHandle | undefined;
 
   before(async () => {
     server = await startServer();
-    originalServerHandle = server;
   });
 
   after(async () => {
-    await stopServer(originalServerHandle);
+    // `server` points at whichever handle was started last (tests restart
+    // the server mid-flight). Stopping the current handle prevents the leaked
+    // child keeping Node's event loop alive past the test-runner timeout.
+    await stopServer(server);
   });
 
   // --- Server Restart During Execution ---
@@ -69,7 +70,9 @@ describe("Data Persistence and Recovery", () => {
     await stopServer(server);
 
     console.log("Starting new server...");
-    server = await startServer();
+    // skipCleanup: true — the whole point of this test is verifying the
+    // instance survives the restart, so the DB must NOT be wiped.
+    server = await startServer({ skipCleanup: true });
 
     // Wait a bit for server to be ready
     await new Promise((r) => setTimeout(r, 1000));
@@ -106,7 +109,7 @@ describe("Data Persistence and Recovery", () => {
 
     console.log("Restarting server...");
     await stopServer(server);
-    server = await startServer();
+    server = await startServer({ skipCleanup: true });
     await new Promise((r) => setTimeout(r, 1000));
 
     // Instance should still exist and be completed
@@ -258,6 +261,15 @@ describe("Data Persistence and Recovery", () => {
       namespace: "default",
     });
 
+    // v2's s2_updated is also an external handler — poll + complete it so
+    // the instance can progress through s3 and reach `completed`. Without
+    // this the instance stalls in `waiting` forever.
+    await client.waitForState(id2, "waiting", { timeoutMs: 5_000 });
+    const v2Tasks = await client.pollWorkerTasks("migration_step", "worker-1");
+    if (v2Tasks.length > 0) {
+      await client.completeWorkerTask(v2Tasks[0]!.id, "worker-1", { migrated: true });
+    }
+
     // New instance should use v2 sequence
     const instance2 = await client.waitForState(id2, "completed", { timeoutMs: 10_000 });
     assert.equal(instance2.sequence_id, seqV2.id);
@@ -307,7 +319,7 @@ describe("Data Persistence and Recovery", () => {
 
     console.log("Restarting server with externalized state...");
     await stopServer(server);
-    server = await startServer();
+    server = await startServer({ skipCleanup: true });
     await new Promise((r) => setTimeout(r, 1000));
 
     // Instance should still exist and preserve context
@@ -331,7 +343,7 @@ describe("Data Persistence and Recovery", () => {
   it("preserves audit log across restarts", async () => {
     const seq = testSequence("audit-persistence", [
       step("s1", "noop"),
-      step("s2", "sleep", { duration_ms: 100 }),
+      step("s2", "sleep", { duration_ms: 3000 }),
     ]);
     await client.createSequence(seq);
 
@@ -341,11 +353,14 @@ describe("Data Persistence and Recovery", () => {
       namespace: "default",
     });
 
-    // Perform some operations that generate audit entries
-    await new Promise((r) => setTimeout(r, 200));
+    // Wait for instance to start running (generates Scheduled→Running audit entry).
+    // s2 sleeps 3s giving us a generous window to signal and observe.
+    await client.waitForState(id, "running", { timeoutMs: 3_000 });
     await client.sendSignal(id, "pause");
     await new Promise((r) => setTimeout(r, 100));
     await client.sendSignal(id, "resume");
+    // Small wait so signal-driven audit entries are flushed before we read.
+    await new Promise((r) => setTimeout(r, 200));
 
     // Get audit log before restart
     const auditBefore = await client.getAuditLog(id);
@@ -353,7 +368,7 @@ describe("Data Persistence and Recovery", () => {
 
     console.log("Restarting server...");
     await stopServer(server);
-    server = await startServer();
+    server = await startServer({ skipCleanup: true });
     await new Promise((r) => setTimeout(r, 1000));
 
     // Get audit log after restart
@@ -392,7 +407,7 @@ describe("Data Persistence and Recovery", () => {
 
     console.log("Restarting server with claimed worker task...");
     await stopServer(server);
-    server = await startServer();
+    server = await startServer({ skipCleanup: true });
     await new Promise((r) => setTimeout(r, 1000));
 
     // After restart, the task should still be in claimed state (or retried)
@@ -466,7 +481,7 @@ describe("Data Persistence and Recovery", () => {
     // Restart server
     console.log("Restarting after concurrent modifications...");
     await stopServer(server);
-    server = await startServer();
+    server = await startServer({ skipCleanup: true });
     await new Promise((r) => setTimeout(r, 1000));
 
     // Verify consistency persists after restart

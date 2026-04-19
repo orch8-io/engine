@@ -57,8 +57,22 @@ describe("External Workers", () => {
   });
 
   it("should handle retryable failure and re-dispatch", async () => {
+    // Retry policy is REQUIRED — without a retry config, the server rejects
+    // re-dispatch even when the worker sets `retryable: true`. Matches the
+    // "no retry policy → fail immediately" branch in orch8-api/workers.rs.
     const seq = testSequence("ext-retry", [
-      step("s1", "flaky_handler", { attempt: 1 }),
+      step(
+        "s1",
+        "flaky_handler",
+        { attempt: 1 },
+        {
+          retry: {
+            max_attempts: 3,
+            initial_backoff: 100,
+            max_backoff: 1_000,
+          },
+        },
+      ),
     ]);
     await client.createSequence(seq);
 

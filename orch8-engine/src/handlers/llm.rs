@@ -609,6 +609,109 @@ mod tests {
     }
 
     #[test]
+    fn resolve_api_key_prefers_direct_param_over_env() {
+        // #298/#185 — if `api_key` is set directly on params, it wins. We
+        // don't want to accidentally read the process env when the caller
+        // has already provided a key (avoids ambient credential leaks).
+        let params = json!({"api_key": "direct-param-key"});
+        // Even if OPENAI_API_KEY is set, direct param is returned.
+        std::env::set_var("OPENAI_API_KEY", "env-sourced-key");
+        let key = resolve_api_key(&params, "openai").expect("direct param must resolve");
+        assert_eq!(key, "direct-param-key");
+    }
+
+    #[test]
+    fn resolve_api_key_from_explicit_env_var_param() {
+        // #185 — if `api_key_env` names an env var, we read that var.
+        // Use a unique var name to avoid clashing with other tests.
+        let var = "ORCH8_TEST_LLM_KEY_EXPLICIT";
+        std::env::set_var(var, "from-explicit-env");
+        let params = json!({"api_key_env": var});
+        let key = resolve_api_key(&params, "openai").unwrap();
+        assert_eq!(key, "from-explicit-env");
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn resolve_api_key_returns_permanent_error_when_nothing_set() {
+        // #299 — exhaustive miss (no param, no api_key_env, no default env
+        // var set) must be a `Permanent` step error. Retry would just spin.
+        // Use a made-up provider so the default env var is OPENAI_API_KEY
+        // which we blank out for this test.
+        let prev = std::env::var("ORCH8_TEST_LLM_KEY_NONE").ok();
+        std::env::set_var("OPENAI_API_KEY_UNSET_MARKER", "ignored");
+        let params = json!({"api_key_env": "ORCH8_TEST_LLM_KEY_NONE_UNSET_VAR"});
+        let err = resolve_api_key(&params, "openai").expect_err("missing env var must error out");
+        assert!(matches!(err, StepError::Permanent { .. }));
+        if let Some(v) = prev {
+            std::env::set_var("ORCH8_TEST_LLM_KEY_NONE", v);
+        }
+    }
+
+    #[test]
+    fn classify_api_error_403_is_permanent() {
+        // #304 — 403 Forbidden must match 401 semantics: permanent auth
+        // failure. Retrying won't help; re-queueing is wasted work.
+        let body = json!({"error": {"message": "forbidden"}});
+        assert!(matches!(
+            classify_api_error(403, &body),
+            StepError::Permanent { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_api_error_503_is_retryable() {
+        // #305 (non-500 5xx) — service unavailable is transient.
+        let body = json!({"error": {"message": "unavailable"}});
+        assert!(matches!(
+            classify_api_error(503, &body),
+            StepError::Retryable { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_api_error_4xx_other_is_permanent() {
+        // 4xx (other than 401/403/429) is a client error — permanent.
+        let body = json!({"error": {"message": "bad request"}});
+        assert!(matches!(
+            classify_api_error(400, &body),
+            StepError::Permanent { .. }
+        ));
+    }
+
+    #[test]
+    fn merge_provider_params_preserves_base_when_empty_override() {
+        // #183 — overlay with an empty config should be a pure pass-through
+        // of the base (minus the `providers` array, which is always stripped).
+        let base = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "gpt-4",
+            "providers": [{"provider": "anthropic"}],
+        });
+        let config = json!({});
+        let merged = merge_provider_params(&base, &config);
+        assert_eq!(merged["model"], "gpt-4");
+        assert!(merged.get("providers").is_none());
+        assert!(merged.get("messages").is_some());
+    }
+
+    #[test]
+    fn extract_system_first_system_wins_others_dropped() {
+        // Edge case: multiple system messages — only the first is surfaced.
+        let msgs = json!([
+            {"role": "system", "content": "first"},
+            {"role": "user", "content": "hello"},
+            {"role": "system", "content": "second"},
+        ]);
+        let (sys, filtered) = extract_system_message(&msgs);
+        assert_eq!(sys, Some("first".into()));
+        // Both system messages are filtered out of the returned array.
+        let arr = filtered.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "user");
+    }
+
+    #[test]
     fn empty_providers_returns_error() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()

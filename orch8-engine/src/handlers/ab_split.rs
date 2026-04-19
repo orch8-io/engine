@@ -242,4 +242,73 @@ mod tests {
         }];
         assert_eq!(select_variant(&instance, &block_id, &variants), 0);
     }
+
+    #[test]
+    fn select_variant_with_weight_zero_is_never_selected() {
+        // #177 — a variant with weight=0 must never be returned. We verify
+        // by running many instance IDs against a fixed (1, 0, 1) weighting:
+        // only index 0 and 2 should ever be chosen.
+        let block_id = BlockId("zw".into());
+        let variants = vec![
+            ABVariant {
+                name: "a".into(),
+                weight: 1,
+                blocks: vec![],
+            },
+            ABVariant {
+                name: "dead".into(),
+                weight: 0,
+                blocks: vec![],
+            },
+            ABVariant {
+                name: "c".into(),
+                weight: 1,
+                blocks: vec![],
+            },
+        ];
+
+        for _ in 0..500 {
+            let instance = make_instance();
+            let idx = select_variant(&instance, &block_id, &variants);
+            assert_ne!(idx, 1, "weight=0 variant must never be chosen");
+        }
+    }
+
+    #[test]
+    fn select_variant_single_variant_always_selected() {
+        // #176 — only one variant defined → index 0 every time, regardless
+        // of the instance ID hash. Covers the trivial single-arm rollout
+        // case (e.g. launching a feature to 100% of users).
+        let block_id = BlockId("only-one".into());
+        let variants = vec![ABVariant {
+            name: "solo".into(),
+            weight: 1,
+            blocks: vec![],
+        }];
+        for _ in 0..100 {
+            let instance = make_instance();
+            assert_eq!(select_variant(&instance, &block_id, &variants), 0);
+        }
+    }
+
+    #[test]
+    fn select_variant_total_weight_zero_defaults_to_zero() {
+        // All weights zero is degenerate but must not divide-by-zero —
+        // the helper short-circuits to index 0.
+        let block_id = BlockId("dz".into());
+        let variants = vec![
+            ABVariant {
+                name: "a".into(),
+                weight: 0,
+                blocks: vec![],
+            },
+            ABVariant {
+                name: "b".into(),
+                weight: 0,
+                blocks: vec![],
+            },
+        ];
+        let instance = make_instance();
+        assert_eq!(select_variant(&instance, &block_id, &variants), 0);
+    }
 }

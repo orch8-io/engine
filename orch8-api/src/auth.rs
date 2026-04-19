@@ -123,3 +123,123 @@ pub async fn tenant_middleware(
 
     Ok(next.run(request).await)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for auth helpers (#276-280 from `TEST_PLAN.md`).
+    //!
+    //! Middleware tests only exercise the pure logic we can test without
+    //! spinning up a full Axum router — header extraction, tenant scoping,
+    //! and tenant-access enforcement. End-to-end middleware wiring is
+    //! covered by `tests/e2e/security/api_key_auth_enforcement.test.ts`.
+    use super::*;
+    use axum::Extension;
+    use subtle::ConstantTimeEq;
+
+    #[allow(clippy::unnecessary_wraps)] // matches `OptionalTenant` alias
+    fn ctx(t: &str) -> OptionalTenant {
+        Some(Extension(TenantContext {
+            tenant_id: TenantId(t.to_string()),
+        }))
+    }
+
+    #[test]
+    fn enforce_tenant_access_rejects_cross_tenant_with_not_found() {
+        // #276: rejects cross-tenant read — note the API returns NotFound
+        // (not Forbidden) to avoid leaking existence of foreign resources.
+        let caller = ctx("tenant-a");
+        let resource_tenant = TenantId("tenant-b".to_string());
+        let err = enforce_tenant_access(&caller, &resource_tenant, "instance")
+            .expect_err("cross-tenant access must be rejected");
+        assert!(matches!(err, ApiError::NotFound(_)));
+    }
+
+    #[test]
+    fn enforce_tenant_access_allows_same_tenant() {
+        let caller = ctx("tenant-a");
+        let resource_tenant = TenantId("tenant-a".to_string());
+        assert!(enforce_tenant_access(&caller, &resource_tenant, "instance").is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_access_with_no_ctx_is_permissive() {
+        // When no tenant header is set, cross-tenant reads are not
+        // blocked — only the middleware+create path enforces isolation.
+        let resource_tenant = TenantId("tenant-b".to_string());
+        assert!(enforce_tenant_access(&None, &resource_tenant, "instance").is_ok());
+    }
+
+    #[test]
+    fn enforce_tenant_create_validates_header_matches_body() {
+        // #277: tenant header present + body tenant_id present → must match.
+        let caller = ctx("tenant-a");
+        let body = TenantId("tenant-b".to_string());
+        let err = enforce_tenant_create(&caller, &body)
+            .expect_err("header/body mismatch must be rejected");
+        assert!(matches!(err, ApiError::Forbidden(_)));
+    }
+
+    #[test]
+    fn enforce_tenant_create_allows_matching() {
+        let caller = ctx("tenant-a");
+        let body = TenantId("tenant-a".to_string());
+        let id = enforce_tenant_create(&caller, &body).expect("match must pass");
+        assert_eq!(id.0, "tenant-a");
+    }
+
+    #[test]
+    fn enforce_tenant_create_with_empty_body_trusts_header() {
+        // Empty body tenant_id is allowed — the header becomes authoritative.
+        let caller = ctx("tenant-a");
+        let body = TenantId(String::new());
+        let id = enforce_tenant_create(&caller, &body).expect("must succeed");
+        assert_eq!(id.0, "tenant-a");
+    }
+
+    #[test]
+    fn enforce_tenant_create_with_no_header_uses_body() {
+        // No header → body value passes through unchanged (legacy path
+        // for clients that haven't adopted the header yet).
+        let body = TenantId("tenant-x".to_string());
+        let id = enforce_tenant_create(&None, &body).expect("must succeed");
+        assert_eq!(id.0, "tenant-x");
+    }
+
+    #[test]
+    fn scoped_tenant_id_prefers_header_over_query_param() {
+        // #280: header takes priority — a query-param attempt to scope to
+        // a different tenant must be overridden by the header.
+        let caller = ctx("tenant-header");
+        let id = scoped_tenant_id(&caller, Some("tenant-query"));
+        assert_eq!(id, Some(TenantId("tenant-header".to_string())));
+    }
+
+    #[test]
+    fn scoped_tenant_id_falls_back_to_query_when_no_header() {
+        let id = scoped_tenant_id(&None, Some("tenant-query"));
+        assert_eq!(id, Some(TenantId("tenant-query".to_string())));
+    }
+
+    #[test]
+    fn scoped_tenant_id_ignores_empty_query() {
+        // An empty query param should not produce an empty TenantId filter.
+        let id = scoped_tenant_id(&None, Some(""));
+        assert!(id.is_none());
+    }
+
+    #[test]
+    fn api_key_constant_time_comparison_matches_semantics() {
+        // #278: the middleware uses `subtle::ConstantTimeEq` so equal-length
+        // keys compare without timing leaks. We don't measure timing here —
+        // we just assert the comparison primitive the middleware relies on
+        // returns the right boolean in both match and mismatch cases, and
+        // that the length pre-check keeps ct_eq from seeing mixed lengths.
+        let expected = b"secret-key-abcd";
+        let good = b"secret-key-abcd";
+        let bad = b"WRONG-key-abcd."; // same length, different bytes
+        assert_eq!(good.len(), expected.len());
+        assert_eq!(bad.len(), expected.len());
+        assert!(bool::from(good.ct_eq(expected)));
+        assert!(!bool::from(bad.ct_eq(expected)));
+    }
+}
