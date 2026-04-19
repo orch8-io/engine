@@ -222,6 +222,155 @@ mod tests {
     }
 
     #[test]
+    fn jitter_produces_variation() {
+        // With 10s jitter, 200 samples should not all be identical.
+        let from = Utc::now();
+        let delay = DelaySpec {
+            duration: StdDuration::from_mins(1),
+            business_days_only: false,
+            jitter: Some(StdDuration::from_secs(10)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        let mut results: Vec<i64> = (0..200)
+            .map(|_| {
+                let r = calculate_next_fire_at(from, &delay, "UTC", None);
+                (r - from).num_milliseconds()
+            })
+            .collect();
+        results.sort_unstable();
+        let min = results[0];
+        let max = results[results.len() - 1];
+        // With 10s jitter range (±10 000ms), 200 samples should span
+        // at least 1 second of spread.
+        assert!(
+            max - min > 1_000,
+            "jitter should produce variation; got range {min}..{max} ms"
+        );
+    }
+
+    #[test]
+    fn zero_jitter_has_no_effect() {
+        let from = Utc::now();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(30),
+            business_days_only: false,
+            jitter: Some(StdDuration::from_secs(0)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        for _ in 0..50 {
+            let result = calculate_next_fire_at(from, &delay, "UTC", None);
+            let diff = (result - from).num_seconds();
+            assert_eq!(diff, 30, "zero jitter should not alter the delay");
+        }
+    }
+
+    #[test]
+    fn no_jitter_is_deterministic() {
+        let from = Utc::now();
+        let delay = DelaySpec {
+            duration: StdDuration::from_mins(2),
+            business_days_only: false,
+            jitter: None,
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        let results: Vec<i64> = (0..50)
+            .map(|_| (calculate_next_fire_at(from, &delay, "UTC", None) - from).num_seconds())
+            .collect();
+        assert!(
+            results.iter().all(|&d| d == 120),
+            "without jitter, every result must be exactly the delay"
+        );
+    }
+
+    #[test]
+    fn jitter_with_zero_duration() {
+        // Jitter alone (no base delay) should scatter around `from`.
+        let from = Utc::now();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(0),
+            business_days_only: false,
+            jitter: Some(StdDuration::from_secs(5)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        let mut any_negative = false;
+        let mut any_positive = false;
+        for _ in 0..200 {
+            let diff_ms =
+                (calculate_next_fire_at(from, &delay, "UTC", None) - from).num_milliseconds();
+            assert!(
+                (-5_000..=5_000).contains(&diff_ms),
+                "jitter must stay within ±5s, got {diff_ms}ms"
+            );
+            if diff_ms < 0 {
+                any_negative = true;
+            }
+            if diff_ms > 0 {
+                any_positive = true;
+            }
+        }
+        assert!(any_negative, "jitter should produce some negative offsets");
+        assert!(any_positive, "jitter should produce some positive offsets");
+    }
+
+    #[test]
+    fn large_jitter_stays_within_bounds() {
+        let from = Utc::now();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(10),
+            business_days_only: false,
+            jitter: Some(StdDuration::from_mins(1)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        for _ in 0..200 {
+            let diff_ms =
+                (calculate_next_fire_at(from, &delay, "UTC", None) - from).num_milliseconds();
+            // base=10s, jitter=±60s → range [-50s, +70s]
+            assert!(
+                (-50_000..=70_000).contains(&diff_ms),
+                "large jitter out of bounds: {diff_ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_combined_with_business_days() {
+        // 2024-01-08 Monday 10:00 UTC, 1s jitter, business_days_only
+        let mon = chrono::NaiveDate::from_ymd_opt(2024, 1, 8)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc();
+        let delay = DelaySpec {
+            duration: StdDuration::from_secs(0),
+            business_days_only: true,
+            jitter: Some(StdDuration::from_secs(1)),
+            holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
+        };
+        for _ in 0..50 {
+            let result = calculate_next_fire_at(mon, &delay, "UTC", None);
+            // Should still land on Monday (business day skip first, jitter second)
+            assert_eq!(result.weekday(), Weekday::Mon);
+            let diff_ms = (result - mon).num_milliseconds();
+            assert!(
+                (-1_000..=1_000).contains(&diff_ms),
+                "jitter must stay within ±1s, got {diff_ms}ms"
+            );
+        }
+    }
+
+    #[test]
     fn holiday_skips_to_next_business_day() {
         // 2024-01-08 is a Monday — mark it as a holiday
         let mon = chrono::NaiveDate::from_ymd_opt(2024, 1, 8)
