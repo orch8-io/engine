@@ -1,16 +1,9 @@
 /**
  * Timezone-Aware Delays Across DST.
  *
- * This file has two cases:
- *   1. A real test that locks in the instance `timezone` field round-trip
- *      via the REST API. `TaskInstance` already carries `timezone: String`
- *      (see `orch8-types/src/instance.rs:102`) and
- *      `orch8-api/src/instances.rs:60,198,265` reads/writes it on
- *      CreateInstanceRequest and GET paths, so this invariant is observable
- *      today.
- *   2. A ready-to-flip `it.skip` for the actual DST behaviour, blocked on
- *      engine primitives (no wall-clock target in `DelaySpec`, no fake
- *      clock).
+ * Tests:
+ *   1. Instance `timezone` field round-trips via the REST API.
+ *   2. `fire_at_local` on delay spec honours DST transitions.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -31,9 +24,6 @@ describe("Timezone-Aware Delays Across DST", () => {
     await stopServer(server);
   });
 
-  // REAL: instance timezone round-trips via the API. Confirms the field is
-  // wired end-to-end (request parsing → storage → response), which is the
-  // prerequisite for any future wall-clock or DST-aware logic.
   it("round-trips instance timezone through create + get", async () => {
     const tenantId = `tz-${uuid().slice(0, 8)}`;
     const seq = testSequence("tz-roundtrip", [step("s1", "noop")], { tenantId });
@@ -75,82 +65,58 @@ describe("Timezone-Aware Delays Across DST", () => {
     );
   });
 
-  // BLOCKED BY: `DelaySpec` has no wall-clock target field and the engine
-  //   has no fake-clock hook.
-  //   - `DelaySpec` (in `orch8-types/src/sequence.rs`) exposes only
-  //     `duration` (ms relative to now). `calculate_next_fire_at` computes
-  //     `now + duration` in UTC and uses the instance timezone only for
-  //     skip-weekend / skip-holiday checks — no "fire at local 02:30 on
-  //     YYYY-MM-DD" primitive.
-  //   - The engine has no fake-clock env var, so a real-time DST assertion
-  //     would be wall-clock bound.
-  // UNBLOCK:
-  //   - Add `fire_at_local: Option<NaiveDateTime>` to `DelaySpec` and honour
-  //     the instance timezone in `calculate_next_fire_at` inside
-  //     `orch8-engine/src/scheduler.rs`.
-  //   - Expose an `ORCH8_FAKE_NOW` env var read by the engine clock source
-  //     so tests can pin "now" just before a DST transition.
-  // Flip to `it` once both land.
-  it.skip(
-    "honours wall-clock time across DST boundary",
-    async () => {
-      // Scenario: pin fake_now to just before US spring-forward
-      // (2026-03-07 12:00 America/New_York → 17:00 UTC). Schedule a step
-      // whose delay fires at local 02:30 on 2026-03-08 in
-      // America/New_York — the hour 02:00–03:00 is skipped for DST.
-      //
-      // Either DST-aware policy is acceptable as long as it is documented:
-      // (a) roll forward to 03:30 EDT → 07:30 UTC, or (b) fire at pre-DST
-      // 02:30 EST → 07:30 UTC as well (yes, same UTC for different local
-      // meanings — pick one and lock it in when unblocked). A NAIVE
-      // +14h30m-from-now computation ignoring the DST gap would land at
-      // a different UTC; this test exists to catch that regression.
-      const tenantId = `tz-dst-${uuid().slice(0, 8)}`;
-      const seq = testSequence(
-        "tz-dst-wallclock",
-        [
-          // Placeholder shape. Real field name matches whatever the engine
-          // introduces — substitute `delay` key when unblocked.
-          step(
-            "s1",
-            "noop",
-            {},
-            {
-              delay: {
-                fire_at_local: "2026-03-08T02:30:00",
-                timezone: "America/New_York",
-              },
+  it("honours wall-clock time across DST boundary", async () => {
+    // 2026-03-08 is US spring-forward in America/New_York:
+    // 2:00 AM jumps to 3:00 AM. Local time 02:30 does not exist.
+    // The engine should roll forward to 03:30 EDT = 07:30 UTC.
+    const tenantId = `tz-dst-${uuid().slice(0, 8)}`;
+    const seq = testSequence(
+      "tz-dst-wallclock",
+      [
+        step(
+          "s1",
+          "noop",
+          {},
+          {
+            delay: {
+              duration: 0,
+              fire_at_local: "2026-03-08T02:30:00",
+              timezone: "America/New_York",
             },
-          ),
-        ],
-        { tenantId },
-      );
-      await client.createSequence(seq);
+          },
+        ),
+      ],
+      { tenantId },
+    );
+    await client.createSequence(seq);
 
-      const { id } = await client.createInstance({
-        sequence_id: seq.id,
-        tenant_id: tenantId,
-        namespace: "default",
-        timezone: "America/New_York",
-      });
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      timezone: "America/New_York",
+    });
 
-      const inst = await client.getInstance(id);
-      const nextFireAt = inst.next_fire_at;
-      assert.ok(
-        typeof nextFireAt === "string",
-        "instance should have next_fire_at set from the wall-clock delay",
-      );
-      const utc = new Date(nextFireAt!).toISOString();
-      // Both branches represent sane DST-aware resolutions; the engine
-      // choosing one is acceptable, ignoring DST is not.
-      const okPolicies = new Set([
-        "2026-03-08T07:30:00.000Z", // rolled to 03:30 EDT
-        "2026-03-08T06:30:00.000Z", // fires at pre-DST 02:30 EST
-      ]);
-      assert.ok(
-        okPolicies.has(utc),
-        `DST-aware resolution expected; got ${utc}.`,
-      );
-    },
-  );
+    // Wait briefly for the scheduler to process the delay.
+    await new Promise((r) => setTimeout(r, 500));
+
+    const inst = await client.getInstance(id);
+    const nextFireAt = inst.next_fire_at;
+    assert.ok(
+      typeof nextFireAt === "string",
+      "instance should have next_fire_at set from the wall-clock delay",
+    );
+    const utc = new Date(nextFireAt!).toISOString();
+    // Both policies represent sane DST-aware resolutions:
+    // (a) rolled to 03:30 EDT → 07:30 UTC
+    // (b) fires at pre-DST 02:30 EST → 07:30 UTC
+    const okPolicies = new Set([
+      "2026-03-08T07:30:00.000Z", // rolled to 03:30 EDT
+      "2026-03-08T06:30:00.000Z", // fires at pre-DST 02:30 EST
+    ]);
+    assert.ok(
+      okPolicies.has(utc),
+      `DST-aware resolution expected; got ${utc}.`,
+    );
+  });
 });

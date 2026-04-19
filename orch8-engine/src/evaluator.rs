@@ -353,7 +353,16 @@ pub async fn evaluate(
                 }
                 let node = root_nodes[idx];
                 if let Some(block) = find_block(&blocks, &node.block_id) {
-                    dispatch_block(storage, handlers, instance, node, block, &tree).await?;
+                    dispatch_block(
+                        storage,
+                        handlers,
+                        instance,
+                        node,
+                        block,
+                        &tree,
+                        sequence.interceptors.as_ref(),
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -361,7 +370,16 @@ pub async fn evaluate(
 
         // Phase 2: execute Running step nodes (leaf work first).
         if let Some((node, block)) = find_running_step(&tree, &blocks, handlers) {
-            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
+            dispatch_block(
+                storage,
+                handlers,
+                instance,
+                &node,
+                block,
+                &tree,
+                sequence.interceptors.as_ref(),
+            )
+            .await?;
             continue;
         }
 
@@ -376,7 +394,16 @@ pub async fn evaluate(
             for (node, block) in &composites {
                 let pre_states: Vec<(ExecutionNodeId, NodeState)> =
                     tree.iter().map(|n| (n.id, n.state)).collect();
-                dispatch_block(storage, handlers, instance, node, block, &tree).await?;
+                dispatch_block(
+                    storage,
+                    handlers,
+                    instance,
+                    node,
+                    block,
+                    &tree,
+                    sequence.interceptors.as_ref(),
+                )
+                .await?;
                 let post_tree = storage.get_execution_tree(instance.id).await?;
                 let post_states: Vec<(ExecutionNodeId, NodeState)> =
                     post_tree.iter().map(|n| (n.id, n.state)).collect();
@@ -767,6 +794,7 @@ async fn dispatch_block(
     node: &ExecutionNode,
     block: &BlockDefinition,
     tree: &[ExecutionNode],
+    interceptors: Option<&orch8_types::interceptor::InterceptorDef>,
 ) -> Result<bool, EngineError> {
     // Mark node as running.
     if node.state == NodeState::Pending {
@@ -777,10 +805,31 @@ async fn dispatch_block(
 
     match block {
         BlockDefinition::Step(step_def) => {
-            crate::handlers::step_block::execute_step_node(
+            // Interceptor: before_step
+            if let Some(ic) = interceptors {
+                crate::interceptors::emit_before_step(
+                    storage.as_ref(),
+                    ic,
+                    instance.id,
+                    &step_def.id,
+                )
+                .await;
+            }
+            let result = crate::handlers::step_block::execute_step_node(
                 storage, handlers, instance, node, step_def,
             )
-            .await
+            .await;
+            // Interceptor: after_step
+            if let Some(ic) = interceptors {
+                crate::interceptors::emit_after_step(
+                    storage.as_ref(),
+                    ic,
+                    instance.id,
+                    &step_def.id,
+                )
+                .await;
+            }
+            result
         }
         BlockDefinition::Parallel(par_def) => {
             crate::handlers::parallel::execute_parallel(

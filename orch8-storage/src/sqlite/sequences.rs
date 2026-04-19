@@ -82,3 +82,12 @@ pub(super) async fn deprecate(storage: &SqliteStorage, id: SequenceId) -> Result
         .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }
+
+pub(super) async fn delete(storage: &SqliteStorage, id: SequenceId) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM sequences WHERE id=?1")
+        .bind(id.0.to_string())
+        .execute(&storage.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+    Ok(())
+}

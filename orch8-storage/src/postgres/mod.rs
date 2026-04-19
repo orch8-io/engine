@@ -109,6 +109,10 @@ impl StorageBackend for PostgresStorage {
         sequences::deprecate(self, id).await
     }
 
+    async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
+        sequences::delete(self, id).await
+    }
+
     // === Task Instances ===
 
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {

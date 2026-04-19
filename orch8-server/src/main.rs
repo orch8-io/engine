@@ -107,8 +107,23 @@ async fn main() -> anyhow::Result<()> {
         if key.is_empty() {
             storage
         } else {
-            let encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(key)
+            let mut encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(key)
                 .context("Invalid encryption key (expected 64 hex chars for AES-256-GCM)")?;
+
+            // Support key rotation: when ORCH8_OLD_ENCRYPTION_KEY is set, the
+            // encryptor will try the old key as a fallback during decryption,
+            // allowing reads of rows encrypted with the previous key.
+            let old_env_key = std::env::var("ORCH8_OLD_ENCRYPTION_KEY").unwrap_or_default();
+            if !old_env_key.is_empty() {
+                encryptor = encryptor.with_old_key(&old_env_key).context(
+                    "Invalid old encryption key (expected 64 hex chars for AES-256-GCM)",
+                )?;
+                tracing::info!(
+                    "Encryption key rotation enabled: new writes use primary key, \
+                     old key retained for decryption"
+                );
+            }
+
             tracing::info!("Encryption at rest enabled for context.data");
             Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
                 storage, encryptor,

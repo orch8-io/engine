@@ -63,6 +63,12 @@ export interface StartServerOptions {
    * can move the suite into `SELF_MANAGED_SUITES` if the override matters.
    */
   env?: Record<string, string>;
+  /**
+   * Skip database cleanup before starting. Useful when restarting a server
+   * mid-test (e.g. key rotation) and you need to preserve data from the
+   * prior phase.
+   */
+  skipCleanup?: boolean;
 }
 
 /**
@@ -122,7 +128,7 @@ function findBinary(): string {
  * missing, `findBinary()` throws with the `cargo build` hint.
  */
 export async function startServer(
-  { port = DEFAULT_PORT, env: extraEnv }: StartServerOptions = {},
+  { port = DEFAULT_PORT, env: extraEnv, skipCleanup = false }: StartServerOptions = {},
 ): Promise<ServerHandle> {
   if (process.env.ORCH8_E2E_ATTACH === "1") {
     if (extraEnv && Object.keys(extraEnv).length > 0) {
@@ -164,7 +170,9 @@ export async function startServer(
   }
 
   // Clean stale data from previous test runs.
-  if (STORAGE_BACKEND === "sqlite") {
+  if (skipCleanup) {
+    console.log(dim("  skipping db cleanup (skipCleanup=true)"));
+  } else if (STORAGE_BACKEND === "sqlite") {
     const sqlitePath = DB_URL.replace(/^sqlite:\/\//, "").replace(/^sqlite:/, "");
     if (sqlitePath && sqlitePath !== ":memory:") {
       for (const suffix of ["", "-wal", "-shm"]) {

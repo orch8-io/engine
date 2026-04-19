@@ -9,6 +9,7 @@
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
 //! | `provider` | string | `"openai"` | Provider name (see below) |
+//! | `providers` | array | — | Failover list of `{provider, api_key, model}` objects |
 //! | `base_url` | string | per-provider | Override API base URL |
 //! | `api_key` | string | — | API key (direct) |
 //! | `api_key_env` | string | — | Env var name containing API key |
@@ -61,7 +62,17 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 }
 
 /// Main handler: routes to the correct provider API.
+///
+/// If the params contain a `providers` array, iterates through each provider
+/// in order, attempting the call. On failure, tries the next provider.
+/// The output includes a `tried` array listing providers attempted in order.
 pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
+    // Check for multi-provider failover mode.
+    if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
+        return handle_llm_call_failover(&ctx.params, providers).await;
+    }
+
+    // Single-provider mode (existing behavior).
     let provider = ctx
         .params
         .get("provider")
@@ -76,6 +87,90 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
     } else {
         call_openai_compat(&ctx.params, &api_key, &base, provider).await
     }
+}
+
+/// Failover logic: iterate through providers, try each one, stop on first success.
+async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
+    if providers.is_empty() {
+        return Err(permanent("providers array is empty".to_string()));
+    }
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_error: Option<StepError> = None;
+
+    for provider_config in providers {
+        let provider_name = provider_config
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("openai");
+
+        tried.push(provider_name.to_string());
+
+        // Build merged params: base params overlaid with per-provider overrides.
+        let merged = merge_provider_params(params, provider_config);
+
+        let api_key = match resolve_api_key(&merged, provider_name) {
+            Ok(key) => key,
+            Err(e) => {
+                warn!(provider = %provider_name, error = %e, "llm_call failover: skipping provider (key resolution failed)");
+                last_error = Some(e);
+                continue;
+            }
+        };
+
+        let base = resolve_base_url(&merged, provider_name);
+
+        let result = if provider_name == "anthropic" {
+            call_anthropic(&merged, &api_key, &base).await
+        } else {
+            call_openai_compat(&merged, &api_key, &base, provider_name).await
+        };
+
+        match result {
+            Ok(mut output) => {
+                // Inject the `tried` list into the successful response.
+                if let Some(obj) = output.as_object_mut() {
+                    obj.insert("tried".into(), json!(tried));
+                }
+                return Ok(output);
+            }
+            Err(e) => {
+                warn!(provider = %provider_name, error = %e, "llm_call failover: provider failed, trying next");
+                last_error = Some(e);
+            }
+        }
+    }
+
+    // All providers failed.
+    let error_msg = match last_error.as_ref() {
+        Some(e) => format!("all providers failed, last error: {e}"),
+        None => "all providers failed".to_string(),
+    };
+
+    Err(permanent(error_msg))
+}
+
+/// Merge base params with per-provider overrides.
+/// Provider-specific fields (`provider`, `api_key`, `api_key_env`, `model`, `base_url`)
+/// from the provider config override the top-level params.
+fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value {
+    let mut merged = base_params.clone();
+
+    // Remove the `providers` key so downstream code doesn't see it.
+    if let Some(obj) = merged.as_object_mut() {
+        obj.remove("providers");
+    }
+
+    // Overlay provider-specific fields.
+    if let (Some(merged_obj), Some(config_obj)) =
+        (merged.as_object_mut(), provider_config.as_object())
+    {
+        for (key, value) in config_obj {
+            merged_obj.insert(key.clone(), value.clone());
+        }
+    }
+
+    merged
 }
 
 // ---------------------------------------------------------------------------
@@ -486,5 +581,38 @@ mod tests {
             classify_api_error(401, &body_401),
             StepError::Permanent { .. }
         ));
+    }
+
+    #[test]
+    fn merge_provider_params_overlays_fields() {
+        let base = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "provider": "openai",
+            "api_key": "base-key",
+            "model": "gpt-4o",
+            "providers": [{"provider": "anthropic"}],
+        });
+        let config = json!({
+            "provider": "anthropic",
+            "api_key": "override-key",
+            "model": "claude-sonnet-4-20250514",
+        });
+
+        let merged = merge_provider_params(&base, &config);
+        assert_eq!(merged.get("provider").unwrap(), "anthropic");
+        assert_eq!(merged.get("api_key").unwrap(), "override-key");
+        assert_eq!(merged.get("model").unwrap(), "claude-sonnet-4-20250514");
+        // messages preserved from base
+        assert!(merged.get("messages").is_some());
+        // providers key removed
+        assert!(merged.get("providers").is_none());
+    }
+
+    #[test]
+    fn empty_providers_returns_error() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(handle_llm_call_failover(&json!({}), &[]));
+        assert!(result.is_err());
     }
 }

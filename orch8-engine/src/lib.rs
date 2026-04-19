@@ -7,6 +7,7 @@ pub mod expression;
 pub mod externalized;
 pub mod gc;
 pub mod handlers;
+pub mod interceptors;
 pub mod lifecycle;
 pub mod metrics;
 pub mod preload;

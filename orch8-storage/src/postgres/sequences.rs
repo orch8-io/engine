@@ -108,3 +108,11 @@ pub(super) async fn deprecate(store: &PostgresStorage, id: SequenceId) -> Result
         .await?;
     Ok(())
 }
+
+pub(super) async fn delete(store: &PostgresStorage, id: SequenceId) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM sequences WHERE id = $1")
+        .bind(id.0)
+        .execute(&store.pool)
+        .await?;
+    Ok(())
+}

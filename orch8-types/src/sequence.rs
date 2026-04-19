@@ -115,6 +115,17 @@ pub struct DelaySpec {
     /// Merged with `context.config.holidays` at runtime for tenant-level calendars.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holidays: Vec<String>,
+    /// Fire at a specific local wall-clock time (ISO 8601 `NaiveDateTime`,
+    /// e.g. `"2026-03-08T02:30:00"`). When set, `duration` is ignored and
+    /// the engine converts this local time to UTC using the step-level
+    /// `timezone` (or the instance timezone as fallback). DST transitions
+    /// are handled by rolling forward to the next valid local time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fire_at_local: Option<String>,
+    /// Timezone for `fire_at_local` (IANA, e.g. `"America/New_York"`).
+    /// Falls back to the instance's timezone if omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 /// Time window during which a step is allowed to execute.

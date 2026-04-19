@@ -73,6 +73,9 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Mark a sequence version as deprecated.
     async fn deprecate_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
 
+    /// Delete a sequence by ID.
+    async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
+
     // === Task Instances ===
 
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;

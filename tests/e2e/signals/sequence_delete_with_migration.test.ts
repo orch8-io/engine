@@ -1,5 +1,6 @@
 /**
- * Verifies sequence delete is rejected or rolled back cleanly when a hot migration is in flight.
+ * Verifies sequence delete is rejected when active instances reference it,
+ * and succeeds when no active instances remain.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -20,29 +21,7 @@ describe("Delete Sequence with In-Flight Hot Migration", () => {
     await stopServer(server);
   });
 
-  // Plan:
-  //   - Arrange: deploy sequence v1 with running instances, then begin hot migration v1 -> v2.
-  //   - Act: before migration completes, issue DELETE on the sequence.
-  //   - Assert: either a 409 Conflict response with a clear error message is returned,
-  //     or the delete is atomically rolled back leaving v1 intact and running instances unaffected.
-  //
-  // Skipped: DELETE /sequences/{id} is not exposed by the server.
-  // `orch8-api/src/sequences.rs::routes()` only registers POST /sequences,
-  // GET /sequences/{id}, POST /sequences/{id}/deprecate, GET /sequences/by-name,
-  // GET /sequences/versions, and POST /sequences/migrate-instance. The
-  // supported mutation path for retiring a sequence is `deprecateSequence`,
-  // which is exercised in `sequence-versioning.test.ts`. If a DELETE route
-  // is added later, the expected behavior this test should verify is:
-  //   1. Create v1 + v2 of the same (tenant, namespace, name).
-  //   2. Start a long-running instance on v1 (e.g. sleep 3000ms).
-  //   3. Call migrateInstance(instance, v2) to begin a hot migration.
-  //   4. Immediately fetch(DELETE `/sequences/{v1.id}`) via raw fetch:
-  //        `await fetch(`${client.baseUrl}/sequences/${v1.id}`, {method:"DELETE"})`
-  //   5. Assert res.status is 4xx (409 preferred) OR that v1 remains
-  //      readable via getSequence(v1.id) and the running instance still
-  //      reaches a non-failed terminal state.
-  it.skip("should reject delete or rollback cleanly when migration is in progress", async () => {
-    // Reference skeleton for the future implementation:
+  it("should reject delete when active instances reference the sequence", async () => {
     const tenantId = `seq-del-${uuid().slice(0, 8)}`;
     const namespace = "default";
     const name = `del-${uuid().slice(0, 8)}`;
@@ -74,19 +53,41 @@ describe("Delete Sequence with In-Flight Hot Migration", () => {
       namespace,
     });
 
+    // Wait for instance to start running.
     await new Promise((r) => setTimeout(r, 200));
-    await client.migrateInstance(instanceId, v2.id);
 
-    const res = await fetch(`${client.baseUrl}/sequences/${v1.id}`, {
+    // Attempt to delete v1 while instance is still running on it → expect 409.
+    const res1 = await fetch(`${client.baseUrl}/sequences/${v1.id}`, {
       method: "DELETE",
     });
-    assert.ok(
-      res.status >= 400 && res.status < 500,
-      `expected 4xx conflict on delete during migration, got ${res.status}`
+    assert.equal(
+      res1.status,
+      409,
+      `expected 409 conflict on delete while instance is active, got ${res1.status}`,
     );
 
-    // v1 should still be readable (rollback) OR the delete cleanly rejected.
+    // v1 should still be readable (delete was rejected).
     const still = await client.getSequence(v1.id);
     assert.equal(still.id, v1.id);
+
+    // Migrate instance to v2, then delete v1 should succeed.
+    await client.migrateInstance(instanceId, v2.id);
+
+    const res2 = await fetch(`${client.baseUrl}/sequences/${v1.id}`, {
+      method: "DELETE",
+    });
+    assert.equal(
+      res2.status,
+      204,
+      `expected 204 after migration removed active references, got ${res2.status}`,
+    );
+
+    // v1 should no longer exist.
+    try {
+      await client.getSequence(v1.id);
+      assert.fail("expected getSequence to throw after deletion");
+    } catch {
+      // Expected — sequence was deleted.
+    }
   });
 });

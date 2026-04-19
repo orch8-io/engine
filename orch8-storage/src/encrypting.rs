@@ -102,6 +102,10 @@ impl StorageBackend for EncryptingStorage {
         self.inner.deprecate_sequence(id).await
     }
 
+    async fn delete_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<(), StorageError> {
+        self.inner.delete_sequence(id).await
+    }
+
     // === Instances (encrypt/decrypt context.data) ===
 
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {

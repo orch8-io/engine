@@ -7,7 +7,9 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use orch8_types::filter::InstanceFilter;
 use orch8_types::ids::{InstanceId, SequenceId};
+use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
 use crate::error::ApiError;
@@ -16,7 +18,7 @@ use crate::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sequences", post(create_sequence))
-        .route("/sequences/{id}", get(get_sequence))
+        .route("/sequences/{id}", get(get_sequence).delete(delete_sequence))
         .route("/sequences/{id}/deprecate", post(deprecate_sequence))
         .route("/sequences/by-name", get(get_sequence_by_name))
         .route("/sequences/versions", get(list_sequence_versions))
@@ -148,6 +150,58 @@ pub(crate) async fn deprecate_sequence(
     state
         .storage
         .deprecate_sequence(SequenceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(delete, path = "/sequences/{id}", tag = "sequences",
+    params(("id" = Uuid, Path, description = "Sequence ID to delete")),
+    responses(
+        (status = 204, description = "Sequence deleted"),
+        (status = 404, description = "Sequence not found"),
+        (status = 409, description = "Cannot delete: active instances exist"),
+    )
+)]
+pub(crate) async fn delete_sequence(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let seq = state
+        .storage
+        .get_sequence(SequenceId(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound(format!("sequence {id}")))?;
+
+    crate::auth::enforce_tenant_access(&tenant_ctx, &seq.tenant_id, &format!("sequence {id}"))?;
+
+    // Reject delete if non-terminal instances reference this sequence.
+    let active_filter = InstanceFilter {
+        sequence_id: Some(SequenceId(id)),
+        states: Some(vec![
+            InstanceState::Scheduled,
+            InstanceState::Running,
+            InstanceState::Paused,
+            InstanceState::Waiting,
+        ]),
+        ..Default::default()
+    };
+    let active_count = state
+        .storage
+        .count_instances(&active_filter)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    if active_count > 0 {
+        return Err(ApiError::Conflict(format!(
+            "cannot delete sequence {id}: {active_count} active instance(s) still reference it"
+        )));
+    }
+
+    state
+        .storage
+        .delete_sequence(SequenceId(id))
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
     Ok(StatusCode::NO_CONTENT)

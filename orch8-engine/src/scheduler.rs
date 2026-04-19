@@ -713,7 +713,18 @@ async fn process_instance(
             continue;
         }
 
-        match execute_step_block(
+        // Interceptor: before_step
+        if let Some(ref interceptors) = sequence.interceptors {
+            crate::interceptors::emit_before_step(
+                storage.as_ref(),
+                interceptors,
+                instance_id,
+                &step_def.id,
+            )
+            .await;
+        }
+
+        let outcome = execute_step_block(
             storage,
             handlers,
             webhook_config,
@@ -722,12 +733,36 @@ async fn process_instance(
             step_def,
             cancel,
         )
-        .await?
-        {
+        .await?;
+
+        // Interceptor: after_step (fires regardless of outcome)
+        if let Some(ref interceptors) = sequence.interceptors {
+            crate::interceptors::emit_after_step(
+                storage.as_ref(),
+                interceptors,
+                instance_id,
+                &step_def.id,
+            )
+            .await;
+        }
+
+        match outcome {
             StepOutcome::Completed => {
                 completed_blocks.push(step_def.id.clone());
             }
-            StepOutcome::Deferred | StepOutcome::Failed => {
+            StepOutcome::Failed => {
+                // Interceptor: on_failure
+                if let Some(ref interceptors) = sequence.interceptors {
+                    crate::interceptors::emit_on_failure(
+                        storage.as_ref(),
+                        interceptors,
+                        instance_id,
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+            StepOutcome::Deferred => {
                 return Ok(());
             }
         }
@@ -742,6 +777,11 @@ async fn process_instance(
         None,
     )
     .await?;
+
+    // Interceptor: on_complete
+    if let Some(ref interceptors) = sequence.interceptors {
+        crate::interceptors::emit_on_complete(storage.as_ref(), interceptors, instance_id).await;
+    }
 
     crate::metrics::inc(crate::metrics::INSTANCES_COMPLETED);
     crate::webhooks::emit(
@@ -882,6 +922,15 @@ async fn process_instance_tree(
                 storage
                     .update_instance_state(instance_id, InstanceState::Failed, None)
                     .await?;
+                // Interceptor: on_failure
+                if let Some(ref interceptors) = sequence.interceptors {
+                    crate::interceptors::emit_on_failure(
+                        storage.as_ref(),
+                        interceptors,
+                        instance_id,
+                    )
+                    .await;
+                }
                 crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
                 crate::webhooks::emit(
                     webhook_config,
@@ -897,6 +946,15 @@ async fn process_instance_tree(
                 storage
                     .update_instance_state(instance_id, InstanceState::Completed, None)
                     .await?;
+                // Interceptor: on_complete
+                if let Some(ref interceptors) = sequence.interceptors {
+                    crate::interceptors::emit_on_complete(
+                        storage.as_ref(),
+                        interceptors,
+                        instance_id,
+                    )
+                    .await;
+                }
                 crate::metrics::inc(crate::metrics::INSTANCES_COMPLETED);
                 crate::webhooks::emit(
                     webhook_config,
@@ -923,6 +981,11 @@ async fn process_instance_tree(
                 None,
             )
             .await?;
+            // Interceptor: on_failure
+            if let Some(ref interceptors) = sequence.interceptors {
+                crate::interceptors::emit_on_failure(storage.as_ref(), interceptors, instance_id)
+                    .await;
+            }
             crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
         }
     }

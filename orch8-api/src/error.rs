@@ -17,6 +17,9 @@ pub enum ApiError {
     #[error("already exists: {0}")]
     AlreadyExists(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("unauthorized")]
     Unauthorized,
 
@@ -58,7 +61,7 @@ impl IntoResponse for ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
-            ApiError::AlreadyExists(_) => StatusCode::CONFLICT,
+            ApiError::AlreadyExists(_) | ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,

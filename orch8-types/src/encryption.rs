@@ -19,9 +19,16 @@ use base64::Engine;
 ///
 /// Encrypted values are stored as JSON strings with the prefix `"enc:v1:"`,
 /// followed by base64-encoded `nonce || ciphertext`.
+///
+/// Supports an optional old key for key rotation: encryption always uses the
+/// primary key, while decryption tries the primary key first and falls back
+/// to the old key when present.
 #[derive(Clone)]
 pub struct FieldEncryptor {
     cipher: Aes256Gcm,
+    /// Previous key used during key rotation. Decryption falls back to this
+    /// cipher when the primary key fails to decrypt a value.
+    old_cipher: Option<Aes256Gcm>,
 }
 
 const ENC_PREFIX: &str = "enc:v1:";
@@ -37,6 +44,7 @@ impl FieldEncryptor {
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
         Ok(Self {
             cipher: Aes256Gcm::new(key),
+            old_cipher: None,
         })
     }
 
@@ -45,7 +53,24 @@ impl FieldEncryptor {
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(key);
         Self {
             cipher: Aes256Gcm::new(key),
+            old_cipher: None,
         }
+    }
+
+    /// Return a copy of this encryptor with an additional old key for rotation.
+    ///
+    /// Encryption always uses the primary key. Decryption tries the primary
+    /// key first; if that fails, it retries with the old key. This allows
+    /// reading rows that were encrypted with the previous key.
+    #[must_use = "returns a new FieldEncryptor with the old key; does not modify self"]
+    pub fn with_old_key(mut self, hex_key: &str) -> Result<Self, EncryptionError> {
+        let key_bytes = hex_decode(hex_key)?;
+        if key_bytes.len() != 32 {
+            return Err(EncryptionError::InvalidKeyLength(key_bytes.len()));
+        }
+        let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
+        self.old_cipher = Some(Aes256Gcm::new(key));
+        Ok(self)
     }
 
     /// Encrypt a JSON value into an opaque string value: `"enc:v1:<base64(nonce||ciphertext)>"`.
@@ -70,6 +95,9 @@ impl FieldEncryptor {
 
     /// Decrypt a value previously encrypted by `encrypt_value`.
     /// If the value is not encrypted (no `enc:v1:` prefix), returns it unchanged.
+    ///
+    /// When an old key is configured, decryption tries the primary key first
+    /// and falls back to the old key on failure.
     pub fn decrypt_value(
         &self,
         value: &serde_json::Value,
@@ -87,13 +115,23 @@ impl FieldEncryptor {
         }
         let (nonce_bytes, ciphertext) = payload.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| EncryptionError::DecryptFailed)?;
 
-        let value = serde_json::from_slice(&plaintext)?;
-        Ok(value)
+        // Try primary key first.
+        if let Ok(plaintext) = self.cipher.decrypt(nonce, ciphertext) {
+            let value = serde_json::from_slice(&plaintext)?;
+            return Ok(value);
+        }
+
+        // Fall back to old key if present.
+        if let Some(ref old) = self.old_cipher {
+            let plaintext = old
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| EncryptionError::DecryptFailed)?;
+            let value = serde_json::from_slice(&plaintext)?;
+            return Ok(value);
+        }
+
+        Err(EncryptionError::DecryptFailed)
     }
 
     /// Returns true if the value appears to be encrypted.
@@ -194,6 +232,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn to_hex(key: &[u8]) -> String {
+        use std::fmt::Write;
+        key.iter().fold(String::new(), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+    }
+
     #[test]
     fn each_encryption_unique() {
         let enc = FieldEncryptor::from_bytes(&test_key());
@@ -205,5 +251,71 @@ mod tests {
         // Both decrypt to the same value.
         assert_eq!(enc.decrypt_value(&e1).unwrap(), val);
         assert_eq!(enc.decrypt_value(&e2).unwrap(), val);
+    }
+
+    #[test]
+    fn dual_key_decrypts_old_key_data() {
+        let key1 = test_key();
+        let mut key2 = test_key();
+        key2[0] = 255;
+
+        // Encrypt with key1.
+        let enc1 = FieldEncryptor::from_bytes(&key1);
+        let original = serde_json::json!({"rotated": true});
+        let encrypted = enc1.encrypt_value(&original).unwrap();
+
+        // Create encryptor with key2 as primary and key1 as old.
+        let hex_old = to_hex(&key1);
+        let enc2 = FieldEncryptor::from_bytes(&key2)
+            .with_old_key(&hex_old)
+            .unwrap();
+
+        // Should decrypt via fallback to old key.
+        let decrypted = enc2.decrypt_value(&encrypted).unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    #[test]
+    fn dual_key_encrypts_with_new_key() {
+        let key1 = test_key();
+        let mut key2 = test_key();
+        key2[0] = 255;
+
+        let hex_old = to_hex(&key1);
+        let enc_dual = FieldEncryptor::from_bytes(&key2)
+            .with_old_key(&hex_old)
+            .unwrap();
+
+        let original = serde_json::json!("new-data");
+        let encrypted = enc_dual.encrypt_value(&original).unwrap();
+
+        // New data should be decryptable with key2 alone.
+        let enc2_only = FieldEncryptor::from_bytes(&key2);
+        let decrypted = enc2_only.decrypt_value(&encrypted).unwrap();
+        assert_eq!(original, decrypted);
+
+        // New data should NOT be decryptable with key1 alone.
+        let enc1_only = FieldEncryptor::from_bytes(&key1);
+        assert!(enc1_only.decrypt_value(&encrypted).is_err());
+    }
+
+    #[test]
+    fn dual_key_primary_takes_priority() {
+        let key1 = test_key();
+        let mut key2 = test_key();
+        key2[0] = 255;
+
+        let hex_old = to_hex(&key1);
+        let enc_dual = FieldEncryptor::from_bytes(&key2)
+            .with_old_key(&hex_old)
+            .unwrap();
+
+        // Encrypt with key2 (the primary in dual mode).
+        let original = serde_json::json!("primary-key-data");
+        let encrypted = enc_dual.encrypt_value(&original).unwrap();
+
+        // Should decrypt with primary key (no fallback needed).
+        let decrypted = enc_dual.decrypt_value(&encrypted).unwrap();
+        assert_eq!(original, decrypted);
     }
 }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Utc, Weekday};
 use rand::Rng;
 
 use orch8_types::sequence::DelaySpec;
@@ -11,7 +11,16 @@ pub fn calculate_next_fire_at(
     timezone: &str,
     context_config: Option<&serde_json::Value>,
 ) -> DateTime<Utc> {
-    let mut target = from + Duration::from_std(delay.duration).unwrap_or_else(|_| Duration::zero());
+    // If fire_at_local is specified, compute the UTC equivalent using the
+    // delay's timezone (falling back to the instance timezone).
+    let mut target = if let Some(ref local_str) = delay.fire_at_local {
+        let tz_name = delay.timezone.as_deref().unwrap_or(timezone);
+        resolve_fire_at_local(local_str, tz_name).unwrap_or_else(|| {
+            from + Duration::from_std(delay.duration).unwrap_or_else(|_| Duration::zero())
+        })
+    } else {
+        from + Duration::from_std(delay.duration).unwrap_or_else(|_| Duration::zero())
+    };
 
     if delay.business_days_only {
         let holidays = collect_holidays(&delay.holidays, context_config);
@@ -57,6 +66,32 @@ fn collect_holidays(
     dates
 }
 
+/// Resolve a `fire_at_local` string (`NaiveDateTime`) to UTC using the given
+/// IANA timezone. Handles DST gaps by rolling forward to the next valid time.
+fn resolve_fire_at_local(local_str: &str, tz_name: &str) -> Option<DateTime<Utc>> {
+    use chrono::TimeZone;
+
+    let naive = NaiveDateTime::parse_from_str(local_str, "%Y-%m-%dT%H:%M:%S").ok()?;
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+
+    match tz.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+        chrono::LocalResult::Ambiguous(earliest, _) => {
+            // Fall-back (e.g. autumn DST): use the earlier interpretation.
+            Some(earliest.with_timezone(&Utc))
+        }
+        chrono::LocalResult::None => {
+            // Spring-forward gap: roll forward by trying +1 hour.
+            let rolled = naive + Duration::hours(1);
+            match tz.from_local_datetime(&rolled) {
+                chrono::LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+                chrono::LocalResult::Ambiguous(earliest, _) => Some(earliest.with_timezone(&Utc)),
+                chrono::LocalResult::None => None,
+            }
+        }
+    }
+}
+
 /// If the target lands on a weekend or holiday, advance to the next business day.
 fn skip_non_business_days(
     dt: DateTime<Utc>,
@@ -100,6 +135,8 @@ mod tests {
             business_days_only: false,
             jitter: None,
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(from, &delay, "UTC", None);
         let diff = result - from;
@@ -119,6 +156,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(sat, &delay, "UTC", None);
         assert_eq!(result.weekday(), Weekday::Mon);
@@ -137,6 +176,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(sun, &delay, "UTC", None);
         assert_eq!(result.weekday(), Weekday::Mon);
@@ -155,6 +196,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(mon, &delay, "UTC", None);
         assert_eq!(result.weekday(), Weekday::Mon);
@@ -168,6 +211,8 @@ mod tests {
             business_days_only: false,
             jitter: Some(StdDuration::from_mins(1)),
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         for _ in 0..100 {
             let result = calculate_next_fire_at(from, &delay, "UTC", None);
@@ -189,6 +234,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec!["2024-01-08".to_string()],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(mon, &delay, "UTC", None);
         assert_eq!(result.weekday(), Weekday::Tue);
@@ -207,6 +254,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec!["2024-01-05".to_string()],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(fri, &delay, "UTC", None);
         // Friday holiday → Saturday → Monday
@@ -226,6 +275,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec![],
+            fire_at_local: None,
+            timezone: None,
         };
         let config = serde_json::json!({"holidays": ["2024-01-09"]});
         let result = calculate_next_fire_at(tue, &delay, "UTC", Some(&config));
@@ -245,6 +296,8 @@ mod tests {
             business_days_only: true,
             jitter: None,
             holidays: vec!["2024-01-08".to_string(), "2024-01-09".to_string()],
+            fire_at_local: None,
+            timezone: None,
         };
         let result = calculate_next_fire_at(mon, &delay, "UTC", None);
         assert_eq!(result.weekday(), Weekday::Wed);
