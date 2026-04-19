@@ -104,11 +104,47 @@ interface SuiteResult {
   code: number;
 }
 
+// Short label for log prefixing — derived from filename, not the full path.
+function suiteLabel(suite: Suite): string {
+  const base = suite.file.split("/").pop() ?? suite.file;
+  return base.replace(/\.test\.ts$/, "");
+}
+
+// Maximum label width, so all prefixes align in a column.
+const LABEL_WIDTH = Math.max(...SUITES.map((s) => suiteLabel(s).length));
+
+/**
+ * Pipe one of the child's streams through a line-splitter, prefixing each
+ * line with the suite's label. Handles partial lines across chunks.
+ */
+function streamWithPrefix(
+  stream: NodeJS.ReadableStream,
+  out: NodeJS.WriteStream,
+  label: string,
+): void {
+  let buf = "";
+  stream.setEncoding("utf-8");
+  stream.on("data", (chunk: string) => {
+    buf += chunk;
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      out.write(`[${label.padEnd(LABEL_WIDTH)}] ${line}\n`);
+    }
+  });
+  stream.on("end", () => {
+    if (buf.length > 0) {
+      out.write(`[${label.padEnd(LABEL_WIDTH)}] ${buf}\n`);
+    }
+  });
+}
+
 function runSuite(suite: Suite): Promise<SuiteResult> {
   return new Promise((resolveP) => {
     const reporterArgs = process.env.ORCH8_E2E_REPORTER
       ? [`--test-reporter=${process.env.ORCH8_E2E_REPORTER}`]
       : [];
+    const label = suiteLabel(suite);
     const child = spawn(
       process.execPath,
       [
@@ -120,7 +156,10 @@ function runSuite(suite: Suite): Promise<SuiteResult> {
         resolve(__dirname, suite.file),
       ],
       {
-        stdio: "inherit",
+        // `pipe` so we can tag every line with the suite label — otherwise
+        // 5 parallel suites interleave line-by-line and the CI log is
+        // unreadable. Streams forwarded to the runner's stdout/stderr below.
+        stdio: ["ignore", "pipe", "pipe"],
         env: {
           ...process.env,
           ORCH8_E2E_PORT: String(suite.port),
@@ -131,6 +170,8 @@ function runSuite(suite: Suite): Promise<SuiteResult> {
         },
       },
     );
+    streamWithPrefix(child.stdout!, process.stdout, label);
+    streamWithPrefix(child.stderr!, process.stderr, label);
     child.on("exit", (c, sig) => {
       resolveP({ suite, code: c ?? (sig ? 1 : 0) });
     });
@@ -144,16 +185,28 @@ function runSuite(suite: Suite): Promise<SuiteResult> {
 console.log(
   `runner: dispatching ${SUITES.length} self-managed suite(s) in parallel`,
 );
+for (const s of SUITES) {
+  console.log(`  [${suiteLabel(s).padEnd(LABEL_WIDTH)}] ${s.file}`);
+}
 ensureDatabases(SUITES);
 
+const start = Date.now();
 const results = await Promise.all(SUITES.map(runSuite));
+const wallMs = Date.now() - start;
+
+// Concise summary at the bottom so CI reviewers can see status at a glance
+// without scrolling through the prefixed output above.
+console.log("");
+console.log("runner: ───────────── summary ─────────────");
+for (const r of results) {
+  const status = r.code === 0 ? "PASS" : `FAIL(${r.code})`;
+  console.log(`  ${status.padEnd(8)} ${suiteLabel(r.suite).padEnd(LABEL_WIDTH)}  ${r.suite.file}`);
+}
+console.log(`runner: wall time ${(wallMs / 1000).toFixed(1)}s`);
 
 const failed = results.filter((r) => r.code !== 0);
 if (failed.length > 0) {
-  console.error("runner: FAILED suites:");
-  for (const f of failed) {
-    console.error(`  ${f.suite.file} (exit ${f.code})`);
-  }
+  console.error(`runner: ${failed.length} suite(s) FAILED`);
   process.exit(1);
 }
 
