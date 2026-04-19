@@ -249,6 +249,7 @@ pub(crate) struct FailRequest {
         (status = 404, description = "Worker task not found"),
     )
 )]
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn fail_task(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -298,20 +299,20 @@ pub(crate) async fn fail_task(
         // Tree-based execution: look up the step's retry policy to decide
         // whether to retry (reset node to Pending) or exhaust (fail node).
         let can_retry = 'retry_check: {
-            let instance = match state.storage.get_instance(task.instance_id).await {
-                Ok(Some(inst)) => inst,
-                _ => break 'retry_check false,
+            let Ok(Some(instance)) = state.storage.get_instance(task.instance_id).await else {
+                break 'retry_check false;
             };
-            let seq = match state.storage.get_sequence(instance.sequence_id).await {
-                Ok(Some(s)) => s,
-                _ => break 'retry_check false,
+            let Ok(Some(seq)) = state.storage.get_sequence(instance.sequence_id).await else {
+                break 'retry_check false;
             };
             let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
             match block {
                 Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
                     if let Some(retry) = &step_def.retry {
-                        // attempt is 0-based; task.attempt (i16) tracks the current attempt.
-                        ((task.attempt + 1) as u32) < retry.max_attempts
+                        #[allow(clippy::cast_sign_loss)]
+                        {
+                            ((task.attempt + 1) as u32) < retry.max_attempts
+                        }
                     } else {
                         false // no retry policy → fail immediately
                     }
@@ -400,19 +401,20 @@ pub(crate) async fn fail_task(
         // create a new pending worker task with incremented attempt or fail
         // the instance directly when retries are exhausted / no policy.
         let can_retry = 'fp_retry: {
-            let instance = match state.storage.get_instance(task.instance_id).await {
-                Ok(Some(inst)) => inst,
-                _ => break 'fp_retry false,
+            let Ok(Some(instance)) = state.storage.get_instance(task.instance_id).await else {
+                break 'fp_retry false;
             };
-            let seq = match state.storage.get_sequence(instance.sequence_id).await {
-                Ok(Some(s)) => s,
-                _ => break 'fp_retry false,
+            let Ok(Some(seq)) = state.storage.get_sequence(instance.sequence_id).await else {
+                break 'fp_retry false;
             };
             let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
             match block {
                 Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
                     if let Some(retry) = &step_def.retry {
-                        ((task.attempt + 1) as u32) < retry.max_attempts
+                        #[allow(clippy::cast_sign_loss)]
+                        {
+                            ((task.attempt + 1) as u32) < retry.max_attempts
+                        }
                     } else {
                         false
                     }

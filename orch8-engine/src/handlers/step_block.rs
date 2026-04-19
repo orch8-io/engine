@@ -60,15 +60,12 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
 {
-    match handler_fn().await {
-        Ok(_output) => {
-            evaluator::complete_node(storage, node.id).await?;
-            Ok(true)
-        }
-        Err(orch8_types::error::StepError::Retryable { .. }) | Err(_) => {
-            evaluator::fail_node(storage, node.id).await?;
-            Ok(false)
-        }
+    if let Ok(_output) = handler_fn().await {
+        evaluator::complete_node(storage, node.id).await?;
+        Ok(true)
+    } else {
+        evaluator::fail_node(storage, node.id).await?;
+        Ok(false)
     }
 }
 

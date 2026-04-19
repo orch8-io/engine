@@ -187,8 +187,8 @@ async fn is_inside_cancellation_scope(ctx: &StepContext) -> bool {
     }
 }
 
-/// Check if the current step is inside a `finally` branch (branch_index == 2)
-/// of a TryCatch block. Steps inside finally must not be interrupted by cancel
+/// Check if the current step is inside a `finally` branch (`branch_index` == 2)
+/// of a `TryCatch` block. Steps inside finally must not be interrupted by cancel
 /// signals — the finally block must complete first.
 async fn is_inside_finally(ctx: &StepContext) -> bool {
     match ctx.storage.get_execution_tree(ctx.instance_id).await {
@@ -198,13 +198,11 @@ async fn is_inside_finally(ctx: &StepContext) -> bool {
             me.is_some_and(|n| {
                 let mut current = n;
                 loop {
-                    let parent_id = match current.parent_id {
-                        Some(pid) => pid,
-                        None => return false,
+                    let Some(parent_id) = current.parent_id else {
+                        return false;
                     };
-                    let parent = match tree.iter().find(|x| x.id == parent_id) {
-                        Some(p) => p,
-                        None => return false,
+                    let Some(parent) = tree.iter().find(|x| x.id == parent_id) else {
+                        return false;
                     };
                     if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
                         return true;

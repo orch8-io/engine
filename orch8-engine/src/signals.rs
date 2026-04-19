@@ -227,8 +227,8 @@ async fn cancel_scoped(
     Ok(has_non_cancellable_active)
 }
 
-/// Check if `node` is inside the `finally` branch (branch_index == 2) of a
-/// TryCatch block, OR is a TryCatch node with an active finally branch.
+/// Check if `node` is inside the `finally` branch (`branch_index` == 2) of a
+/// `TryCatch` block, OR is a `TryCatch` node with an active finally branch.
 /// In either case the node must not be cancelled so the finally block can
 /// run to completion.
 fn is_inside_finally_branch(
@@ -264,13 +264,11 @@ fn is_inside_finally_branch(
     // whose parent is a TryCatch.
     let mut current = node;
     loop {
-        let parent_id = match current.parent_id {
-            Some(pid) => pid,
-            None => return false,
+        let Some(parent_id) = current.parent_id else {
+            return false;
         };
-        let parent = match tree.iter().find(|n| n.id == parent_id) {
-            Some(p) => p,
-            None => return false,
+        let Some(parent) = tree.iter().find(|n| n.id == parent_id) else {
+            return false;
         };
         if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
             return true;

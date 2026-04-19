@@ -257,6 +257,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
 /// Evaluate the execution tree: dispatch actionable nodes until no more
 /// progress can be made within this tick.
 /// Returns `true` if there is more work to do (instance should be re-scheduled).
+#[allow(clippy::too_many_lines)]
 pub async fn evaluate(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -347,7 +348,7 @@ pub async fn evaluate(
                     if abort {
                         return Ok(false);
                     }
-                    tree = storage.get_execution_tree(instance.id).await?;
+                    let _updated = storage.get_execution_tree(instance.id).await?;
                     continue;
                 }
                 let node = root_nodes[idx];
@@ -433,8 +434,7 @@ fn find_all_running_composites<'a>(
         })
         .collect();
     // Sort deepest first (most ancestors → processed first).
-    composites
-        .sort_by(|(a, _), (b, _)| count_ancestors(tree, b.id).cmp(&count_ancestors(tree, a.id)));
+    composites.sort_by_key(|(b, _)| std::cmp::Reverse(count_ancestors(tree, b.id)));
     composites
 }
 
@@ -540,7 +540,7 @@ fn has_racing_composite_sibling(
                             c.branch_index != my_branch
                                 && c.state == NodeState::Running
                                 && find_block(blocks, &c.block_id)
-                                    .map_or(false, |b| !matches!(b, BlockDefinition::Step(_)))
+                                    .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
                         });
                     if sibling_composite_running {
                         return true;

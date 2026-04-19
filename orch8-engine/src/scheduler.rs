@@ -292,8 +292,10 @@ async fn enforce_concurrency_limits(
         // claim_due_instances already set them to Running). Subtract the batch
         // members to get the pre-existing running count.
         let total_running = storage.count_running_by_concurrency_key(key).await?;
+        #[allow(clippy::cast_possible_wrap)]
         let batch_count = indices.len() as i64;
         let already_running = total_running - batch_count;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let slots = i64::from(max).saturating_sub(already_running).max(0) as usize;
 
         // Keep the first `slots` instances (by batch order, which preserves
@@ -336,7 +338,7 @@ async fn enforce_concurrency_limits(
 /// Process signals for instances in paused/waiting state.
 ///
 /// `claim_due_instances` only picks up `scheduled` instances. Signals (resume,
-/// cancel, update_context) enqueued against paused or waiting instances would
+/// cancel, `update_context`) enqueued against paused or waiting instances would
 /// sit unprocessed indefinitely without this sweep. The function is cheap when
 /// no such signals exist (single indexed query returning empty).
 async fn process_signalled_instances(
@@ -402,17 +404,16 @@ async fn process_waiting_deadlines(
     let waiting = storage.list_instances(&filter, &pagination).await?;
 
     for instance in &waiting {
-        let seq = match get_sequence_cached(storage.as_ref(), sequence_cache, instance.sequence_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(seq) =
+            get_sequence_cached(storage.as_ref(), sequence_cache, instance.sequence_id).await
+        else {
+            continue;
         };
 
         for block in &seq.blocks {
             if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-                if step_def.deadline.is_some() {
-                    if check_step_deadline_waiting(
+                if step_def.deadline.is_some()
+                    && check_step_deadline_waiting(
                         storage,
                         handlers,
                         instance,
@@ -421,9 +422,8 @@ async fn process_waiting_deadlines(
                         cancel,
                     )
                     .await?
-                    {
-                        break; // Instance was failed — no need to check more steps.
-                    }
+                {
+                    break; // Instance was failed — no need to check more steps.
                 }
             }
         }
@@ -795,6 +795,7 @@ async fn wake_parent_if_child(
 /// The evaluator manages an execution tree (persisted in DB) and dispatches each
 /// node to its block-type handler (`Parallel`, `Race`, `Loop`, `ForEach`, `Router`, `TryCatch`, `Step`).
 /// Returns `true` from `evaluate()` when more work remains (re-schedule), `false` when done.
+#[allow(clippy::too_many_lines)]
 async fn process_instance_tree(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -1183,6 +1184,7 @@ async fn check_step_rate_limit(
 /// Check if a human-in-the-loop step has received its input signal.
 /// If the response signal exists, stores it as block output and returns `false` (continue).
 /// If not received yet, pauses the instance and returns `true` (deferred).
+#[allow(clippy::too_many_lines)]
 async fn check_human_input(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
