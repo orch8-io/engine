@@ -1,3 +1,6 @@
 ## 2024-11-20 - Removed synchronous eprintln! from async executor
 **Learning:** Found leftover debugging `eprintln!` statements inside core engine loops in `signals.rs` and `handlers/builtin.rs`. In a high-throughput async executor like Tokio, synchronous console I/O can block executor threads and degrade performance.
 **Action:** Replaced `eprintln!` with `tracing::debug!` which integrates cleanly with the existing tracing subscriber, honors logging levels in production, and avoids unexpected synchronous stalls in async functions.
+## 2026-04-19 - Avoided unnecessary cloning when building sqlx QueryBuilder
+**Learning:** In `orch8-storage/src/postgres`, multiple functions (like `apply_instance_filter`, `apply_worker_task_filter`) were cloning strings (`tid.0.clone()`, `ns.0.clone()`, etc.) when pushing bind parameters to `sqlx::QueryBuilder`. Since `QueryBuilder::push_bind` accepts references and internally binds the lifetime, the explicit `.clone()` is unnecessary and creates overhead.
+**Action:** Replaced `.push_bind(var.clone())` with `.push_bind(var)` (or `.push_bind(&var)` for inner properties) and updated the function signatures to include a named lifetime parameter `<'a>` to link the `QueryBuilder` and the filter reference.

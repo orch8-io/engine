@@ -610,12 +610,15 @@ pub(super) async fn bulk_reschedule(
 }
 
 /// Apply `InstanceFilter` conditions to a query builder.
-fn apply_instance_filter(qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>, filter: &InstanceFilter) {
+fn apply_instance_filter<'a>(
+    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+    filter: &'a InstanceFilter,
+) {
     if let Some(ref tid) = filter.tenant_id {
-        qb.push(" AND tenant_id = ").push_bind(tid.0.clone());
+        qb.push(" AND tenant_id = ").push_bind(&tid.0);
     }
     if let Some(ref ns) = filter.namespace {
-        qb.push(" AND namespace = ").push_bind(ns.0.clone());
+        qb.push(" AND namespace = ").push_bind(&ns.0);
     }
     if let Some(ref sid) = filter.sequence_id {
         qb.push(" AND sequence_id = ").push_bind(sid.0);
@@ -629,7 +632,7 @@ fn apply_instance_filter(qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>, filter
         }
     }
     if let Some(ref meta) = filter.metadata_filter {
-        qb.push(" AND metadata @> ").push_bind(meta.clone());
+        qb.push(" AND metadata @> ").push_bind(meta);
     }
     if let Some(ref p) = filter.priority {
         qb.push(" AND priority = ").push_bind(*p as i16);

@@ -259,13 +259,13 @@ pub(super) async fn stats(
 }
 
 /// Apply `WorkerTaskFilter` conditions to a query builder.
-fn apply_worker_task_filter(
-    qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
-    filter: &orch8_types::worker_filter::WorkerTaskFilter,
+fn apply_worker_task_filter<'a>(
+    qb: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>,
+    filter: &'a orch8_types::worker_filter::WorkerTaskFilter,
 ) {
     if let Some(ref tid) = filter.tenant_id {
         qb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
-            .push_bind(tid.0.clone())
+            .push_bind(&tid.0)
             .push(")");
     }
     if let Some(ref states) = filter.states {
@@ -277,12 +277,12 @@ fn apply_worker_task_filter(
         }
     }
     if let Some(ref handler) = filter.handler_name {
-        qb.push(" AND handler_name = ").push_bind(handler.clone());
+        qb.push(" AND handler_name = ").push_bind(handler);
     }
     if let Some(ref wid) = filter.worker_id {
-        qb.push(" AND worker_id = ").push_bind(wid.clone());
+        qb.push(" AND worker_id = ").push_bind(wid);
     }
     if let Some(ref queue) = filter.queue_name {
-        qb.push(" AND queue_name = ").push_bind(queue.clone());
+        qb.push(" AND queue_name = ").push_bind(queue);
     }
 }
