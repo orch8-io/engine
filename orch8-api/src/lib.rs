@@ -45,9 +45,12 @@ pub struct AppState {
 }
 
 /// Build the axum router with all routes.
+///
+/// Note: `health::routes()` is intentionally NOT included here so main.rs can
+/// merge it after the auth middleware — health/liveness probes must remain
+/// reachable regardless of the configured API key or tenant-header policy.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
-        .merge(health::routes())
         .merge(sequences::routes())
         .merge(instances::routes())
         .merge(cron::routes())

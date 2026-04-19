@@ -183,7 +183,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
         }))
-        .merge(orch8_api::webhooks::public_routes().with_state(app_state))
+        .merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()))
+        // Health probes live outside the auth layer so k8s/LB liveness checks
+        // keep working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
+        .merge(orch8_api::health::routes().with_state(app_state))
         .layer(cors);
 
     // Apply global concurrency limit if configured (caps in-flight requests).

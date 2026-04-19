@@ -94,6 +94,10 @@ const SELF_MANAGED_SUITES = new Set<string>([
   // Needs its own server started with ORCH8_ENCRYPTION_KEY set — the shared
   // attach-mode server was launched without a key.
   "encryption_at_rest.test.ts",
+  // Spawns its own server with ORCH8_API_KEY and
+  // ORCH8_REQUIRE_TENANT_HEADER set — shared attach-mode server has
+  // neither, so auth enforcement can't be observed there.
+  "api_key_auth_enforcement.test.ts",
 ]);
 
 // Directories whose tests are organizational scaffolding, not runnable yet.

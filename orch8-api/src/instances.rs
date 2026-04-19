@@ -427,6 +427,32 @@ pub(crate) async fn update_state(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
+    // If this instance is a SubSequence child and the external transition
+    // drove it to a terminal state, wake the parent so its SubSequence node
+    // can observe the child's final state on the next tick. Without this,
+    // cancelling a child via the API leaves the parent stuck in Waiting
+    // indefinitely — the scheduler's `wake_parent_if_child` is only invoked
+    // on engine-driven transitions.
+    if matches!(
+        req.state,
+        InstanceState::Failed | InstanceState::Cancelled | InstanceState::Completed
+    ) {
+        if let Some(parent_id) = instance.parent_instance_id {
+            if let Ok(Some(parent)) = state.storage.get_instance(parent_id).await {
+                if parent.state == InstanceState::Waiting {
+                    let _ = state
+                        .storage
+                        .update_instance_state(
+                            parent_id,
+                            InstanceState::Scheduled,
+                            Some(Utc::now()),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
     Ok(StatusCode::OK)
 }
 

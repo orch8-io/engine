@@ -525,6 +525,9 @@ async fn check_step_deadline_waiting(
     .await?;
     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
 
+    // Wake parent: SLA deadline breach on a waiting child → terminal Failed.
+    wake_parent_if_child(storage.as_ref(), instance).await;
+
     Ok(true)
 }
 
@@ -793,7 +796,7 @@ async fn process_instance(
     info!(instance_id = %instance_id, "instance completed all blocks");
 
     // Wake parent if this is a sub-sequence child.
-    wake_parent_if_child(storage, &instance).await;
+    wake_parent_if_child(storage.as_ref(), &instance).await;
 
     Ok(())
 }
@@ -802,7 +805,7 @@ async fn process_instance(
 /// `Waiting` → `Scheduled` so it is picked up on the next tick and can observe
 /// the child's terminal state.
 async fn wake_parent_if_child(
-    storage: &Arc<dyn StorageBackend>,
+    storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
 ) {
     if let Some(parent_id) = instance.parent_instance_id {
@@ -969,7 +972,7 @@ async fn process_instance_tree(
             }
 
             // Wake parent if this is a sub-sequence child that reached a terminal state.
-            wake_parent_if_child(storage, instance).await;
+            wake_parent_if_child(storage.as_ref(), instance).await;
         }
         Err(e) => {
             error!(instance_id = %instance_id, error = %e, "tree evaluation failed");
@@ -987,6 +990,12 @@ async fn process_instance_tree(
                     .await;
             }
             crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+
+            // Wake parent if this child's tree evaluation blew up mid-flight —
+            // otherwise a SubSequence parent would remain Waiting forever,
+            // since the Ok(false) branch above is the only other place that
+            // calls `wake_parent_if_child`.
+            wake_parent_if_child(storage.as_ref(), instance).await;
         }
     }
 
@@ -1132,6 +1141,9 @@ async fn check_step_deadline(
     )
     .await?;
     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+
+    // Wake parent: SLA deadline breach on a running child → terminal Failed.
+    wake_parent_if_child(storage.as_ref(), instance).await;
 
     Ok(true)
 }
@@ -1467,7 +1479,7 @@ async fn execute_step_block(
             );
             return fail_instance_with_error(
                 storage.as_ref(),
-                instance_id,
+                instance,
                 webhook_config,
                 cancel,
                 &tpl_err.to_string(),
@@ -1491,7 +1503,7 @@ async fn execute_step_block(
         );
         return fail_instance_with_error(
             storage.as_ref(),
-            instance_id,
+            instance,
             webhook_config,
             cancel,
             &step_err.to_string(),
@@ -1612,7 +1624,7 @@ async fn execute_step_block(
             }
             handle_retryable_failure(
                 storage.as_ref(),
-                instance_id,
+                instance,
                 step_def,
                 attempt,
                 webhook_config,
@@ -1644,6 +1656,12 @@ async fn execute_step_block(
                 cancel,
             );
 
+            // Wake parent if this child reached a terminal Failed state via a
+            // permanent step error — the tree-evaluator branches above are
+            // bypassed when the step handler itself returns
+            // `StepError::Permanent`.
+            wake_parent_if_child(storage.as_ref(), instance).await;
+
             Ok(StepOutcome::Failed)
         }
     }
@@ -1651,13 +1669,14 @@ async fn execute_step_block(
 
 async fn handle_retryable_failure(
     storage: &dyn StorageBackend,
-    instance_id: orch8_types::ids::InstanceId,
+    instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     attempt: u32,
     webhook_config: &WebhookConfig,
     message: &str,
     cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
+    let instance_id = instance.id;
     if let Some(retry) = &step_def.retry {
         // Check if max_attempts has been exhausted.
         if attempt >= retry.max_attempts {
@@ -1691,6 +1710,9 @@ async fn handle_retryable_failure(
                 ),
                 cancel,
             );
+
+            // Wake parent: max retries exhausted → terminal Failed.
+            wake_parent_if_child(storage, instance).await;
 
             return Ok(());
         }
@@ -1747,6 +1769,9 @@ async fn handle_retryable_failure(
         cancel,
     );
 
+    // Wake parent: no retry policy → terminal Failed.
+    wake_parent_if_child(storage, instance).await;
+
     Ok(())
 }
 
@@ -1757,11 +1782,12 @@ async fn handle_retryable_failure(
 /// so the instance is failed immediately.
 async fn fail_instance_with_error(
     storage: &dyn StorageBackend,
-    instance_id: orch8_types::ids::InstanceId,
+    instance: &orch8_types::instance::TaskInstance,
     webhook_config: &WebhookConfig,
     cancel: &CancellationToken,
     error: &str,
 ) -> Result<StepOutcome, EngineError> {
+    let instance_id = instance.id;
     crate::metrics::inc(crate::metrics::STEPS_FAILED);
     crate::lifecycle::transition_instance(
         storage,
@@ -1781,6 +1807,9 @@ async fn fail_instance_with_error(
         ),
         cancel,
     );
+
+    // Wake parent: template/credential resolution failure → terminal Failed.
+    wake_parent_if_child(storage, instance).await;
 
     Ok(StepOutcome::Failed)
 }
