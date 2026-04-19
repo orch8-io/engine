@@ -1078,6 +1078,30 @@ pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
     tree.iter().any(|n| n.state == NodeState::Waiting)
 }
 
+/// Activate all `Pending` children by flipping them to `Running`.
+///
+/// Every composite handler (`race`, `router`, `try_catch`, `parallel`, `loop`,
+/// `foreach`, `cancellation_scope`) needs the same "wake up pending descendants so the
+/// scheduler can dispatch them" step. Centralizing it here keeps the
+/// transition atomic and the tracing consistent, and lets handlers focus on
+/// their own branching/completion logic.
+///
+/// Silently skips any child not in `Pending`; caller decides whether to check
+/// terminal state beforehand.
+pub async fn activate_pending_children(
+    storage: &dyn StorageBackend,
+    children: &[&ExecutionNode],
+) -> Result<(), EngineError> {
+    for child in children {
+        if child.state == NodeState::Pending {
+            storage
+                .update_node_state(child.id, NodeState::Running)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -109,4 +109,70 @@ mod tests {
         inc(STEPS_EXECUTED);
         inc(STEPS_FAILED);
     }
+
+    #[test]
+    fn instances_completed_counter_increments() {
+        // Exercising the public API: no panic, and name constant is stable.
+        inc(INSTANCES_COMPLETED);
+        inc(INSTANCES_COMPLETED);
+        assert_eq!(INSTANCES_COMPLETED, "orch8_instances_completed_total");
+    }
+
+    #[test]
+    fn steps_executed_counter_increments_per_step() {
+        for _ in 0..5 {
+            inc(STEPS_EXECUTED);
+        }
+        assert_eq!(STEPS_EXECUTED, "orch8_steps_executed_total");
+    }
+
+    #[test]
+    fn tick_duration_histogram_records_values() {
+        observe(TICK_DURATION, 0.001);
+        observe(TICK_DURATION, 0.25);
+        assert_eq!(TICK_DURATION, "orch8_tick_duration_seconds");
+    }
+
+    #[test]
+    fn queue_depth_gauge_is_settable() {
+        set_gauge(QUEUE_DEPTH, 0.0);
+        set_gauge(QUEUE_DEPTH, 42.0);
+        set_gauge(QUEUE_DEPTH, 7.5);
+        assert_eq!(QUEUE_DEPTH, "orch8_queue_depth");
+    }
+
+    #[test]
+    fn timer_records_on_drop_even_for_very_short_spans() {
+        // Timer::drop must call `observe` with a finite non-negative duration.
+        // We can't read the histogram here, so we just verify Drop runs without
+        // panic for an immediately-dropped timer.
+        {
+            let _t = Timer::start(STEP_DURATION);
+        }
+        // Also with a small sleep to ensure elapsed() is > 0.
+        {
+            let t = Timer::start(STEP_DURATION);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            assert!(t.start.elapsed().as_nanos() > 0);
+            // `t` drops here, triggering observe.
+        }
+    }
+
+    #[test]
+    fn inc_by_zero_is_noop_and_positive_increments() {
+        // `inc_by(0)` is documented as a no-op and must not panic.
+        inc_by(STEPS_RETRIED, 0);
+        inc_by(STEPS_RETRIED, 3);
+    }
+
+    #[test]
+    fn inc_with_labels_does_not_panic() {
+        inc_with(
+            INSTANCES_FAILED,
+            &[
+                ("tenant", "t1".to_string()),
+                ("reason", "timeout".to_string()),
+            ],
+        );
+    }
 }

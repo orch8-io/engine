@@ -2479,3 +2479,345 @@ async fn context_access_filter_enforced_on_tree_path() {
     assert!(filtered.data.get("user_name").is_none());
     assert!(filtered.data.get("token").is_none());
 }
+
+// ===========================================================================
+// Rate Limiting (TEST_PLAN 263-265)
+// ===========================================================================
+
+#[tokio::test]
+async fn rate_limit_under_threshold_returns_allowed() {
+    let s = store().await;
+    let now = Utc::now();
+    let tenant = TenantId("rl_under".into());
+    let key = ResourceKey("endpoint:a".into());
+
+    s.upsert_rate_limit(&RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 5,
+        window_seconds: 60,
+        current_count: 0,
+        window_start: now,
+    })
+    .await
+    .unwrap();
+
+    // A single call under the threshold is Allowed.
+    let check = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    assert!(matches!(check, RateLimitCheck::Allowed));
+}
+
+#[tokio::test]
+async fn rate_limit_at_threshold_returns_exceeded_with_retry_after() {
+    let s = store().await;
+    let now = Utc::now();
+    let tenant = TenantId("rl_at".into());
+    let key = ResourceKey("endpoint:b".into());
+
+    s.upsert_rate_limit(&RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 2,
+        window_seconds: 30,
+        current_count: 0,
+        window_start: now,
+    })
+    .await
+    .unwrap();
+
+    // Consume the full budget.
+    for _ in 0..2 {
+        let c = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+        assert!(matches!(c, RateLimitCheck::Allowed));
+    }
+
+    // Next call must be Exceeded with a retry_after inside the window.
+    let check = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    match check {
+        RateLimitCheck::Exceeded { retry_after } => {
+            let expected_max = now + Duration::seconds(30);
+            assert!(retry_after > now);
+            assert!(retry_after <= expected_max + Duration::seconds(1));
+        }
+        RateLimitCheck::Allowed => panic!("expected Exceeded"),
+    }
+}
+
+#[tokio::test]
+async fn upsert_rate_limit_updates_window_on_conflict() {
+    let s = store().await;
+    let now = Utc::now();
+    let tenant = TenantId("rl_up".into());
+    let key = ResourceKey("endpoint:c".into());
+
+    s.upsert_rate_limit(&RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 1,
+        window_seconds: 60,
+        current_count: 0,
+        window_start: now,
+    })
+    .await
+    .unwrap();
+
+    // Consume the single slot so we're at capacity.
+    let c = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    assert!(matches!(c, RateLimitCheck::Allowed));
+    let c = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    assert!(matches!(c, RateLimitCheck::Exceeded { .. }));
+
+    // Upsert with a bigger budget; same (tenant, resource_key) conflicts and
+    // max_count/window_seconds should be updated (see ON CONFLICT DO UPDATE).
+    s.upsert_rate_limit(&RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 10,
+        window_seconds: 60,
+        current_count: 0,
+        window_start: now,
+    })
+    .await
+    .unwrap();
+
+    // With raised limit, the next check must be Allowed again.
+    let c = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    assert!(matches!(c, RateLimitCheck::Allowed));
+}
+
+// ===========================================================================
+// Concurrency (TEST_PLAN 266-270)
+// ===========================================================================
+
+#[tokio::test]
+async fn count_running_by_concurrency_key_accurate() {
+    let s = store().await;
+    let seq = make_sequence("t_cc");
+    s.create_sequence(&seq).await.unwrap();
+
+    let key = "payment:user:1";
+
+    // Seed: 2 Running + 1 Scheduled (must not be counted) + 1 Completed (skip).
+    for state in [
+        InstanceState::Running,
+        InstanceState::Running,
+        InstanceState::Scheduled,
+        InstanceState::Completed,
+    ] {
+        let mut inst = make_instance("t_cc", seq.id);
+        inst.state = state;
+        inst.concurrency_key = Some(key.into());
+        s.create_instance(&inst).await.unwrap();
+    }
+
+    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    assert_eq!(count, 2);
+
+    // An unrelated key returns 0.
+    assert_eq!(
+        s.count_running_by_concurrency_key("does-not-exist")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn concurrency_position_returns_queue_position() {
+    let s = store().await;
+    let seq = make_sequence("t_pos");
+    s.create_sequence(&seq).await.unwrap();
+    let key = "q:shared";
+
+    // Three running instances on the same key. Positions are 1-based and
+    // FIFO by (created_at, id).
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let mut inst = make_instance("t_pos", seq.id);
+        inst.state = InstanceState::Running;
+        inst.concurrency_key = Some(key.into());
+        // Space out created_at so ordering is deterministic.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        inst.created_at = Utc::now();
+        s.create_instance(&inst).await.unwrap();
+        ids.push(inst.id);
+    }
+
+    let positions: Vec<i64> = {
+        let mut ps = Vec::new();
+        for id in &ids {
+            ps.push(s.concurrency_position(*id, key).await.unwrap());
+        }
+        ps
+    };
+    assert_eq!(positions, vec![1, 2, 3]);
+
+    // An instance not running under this key returns 0 (absent).
+    let foreign = make_instance("t_pos", seq.id);
+    assert_eq!(s.concurrency_position(foreign.id, key).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn concurrency_count_empty_for_unused_key() {
+    // Item 268: instances without a concurrency_key must not be counted
+    // against any key, so there's no implicit limit applied.
+    let s = store().await;
+    let seq = make_sequence("t_nokey");
+    s.create_sequence(&seq).await.unwrap();
+
+    for _ in 0..5 {
+        let mut inst = make_instance("t_nokey", seq.id);
+        inst.state = InstanceState::Running;
+        inst.concurrency_key = None;
+        s.create_instance(&inst).await.unwrap();
+    }
+
+    // Querying any key returns 0 because none of these rows set it.
+    assert_eq!(
+        s.count_running_by_concurrency_key("anything")
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn max_concurrency_zero_blocks_all_positions() {
+    // Item 269: when max_concurrency=0, every candidate's position > max,
+    // meaning it must defer. Storage reports the true queue position; the
+    // scheduler's comparison `position > max` enforces "blocks all".
+    let s = store().await;
+    let seq = make_sequence("t_zero");
+    s.create_sequence(&seq).await.unwrap();
+    let key = "q:zero";
+
+    let mut inst = make_instance("t_zero", seq.id);
+    inst.state = InstanceState::Running;
+    inst.concurrency_key = Some(key.into());
+    inst.max_concurrency = Some(0);
+    s.create_instance(&inst).await.unwrap();
+
+    let pos = s.concurrency_position(inst.id, key).await.unwrap();
+    // Position is 1 (first in queue) — strictly greater than max=0, which is
+    // the defer condition.
+    assert_eq!(pos, 1);
+    assert!(i64::from(inst.max_concurrency.unwrap()) < pos);
+}
+
+#[tokio::test]
+async fn concurrent_claims_with_same_key_are_serialized() {
+    // Item 270: two tasks race to claim/update on the same concurrency key;
+    // the storage layer must not double-count. We verify that after parallel
+    // writes land, the count matches the number of rows written — i.e. no
+    // lost updates.
+    let s = std::sync::Arc::new(store().await);
+    let seq = make_sequence("t_race");
+    s.create_sequence(&seq).await.unwrap();
+    let key = "q:race";
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let s = s.clone();
+        let seq_id = seq.id;
+        let key = key.to_string();
+        handles.push(tokio::spawn(async move {
+            let mut inst = make_instance("t_race", seq_id);
+            inst.state = InstanceState::Running;
+            inst.concurrency_key = Some(key);
+            s.create_instance(&inst).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let count = s.count_running_by_concurrency_key(key).await.unwrap();
+    assert_eq!(count, 8, "each parallel claim contributed exactly once");
+}
+
+// ===========================================================================
+// Cron storage (TEST_PLAN 260-261)
+// ===========================================================================
+
+#[tokio::test]
+async fn cron_claim_due_and_update_fire_times() {
+    let s = store().await;
+    let seq = make_sequence("t_cron");
+    s.create_sequence(&seq).await.unwrap();
+
+    let now = Utc::now();
+    let past = now - Duration::seconds(5);
+    let future = now + Duration::hours(1);
+
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId("t_cron".into()),
+        namespace: Namespace("default".into()),
+        sequence_id: seq.id,
+        cron_expr: "0 * * * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: json!({}),
+        last_triggered_at: None,
+        next_fire_at: Some(past),
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_cron_schedule(&schedule).await.unwrap();
+
+    // Due now — must be returned.
+    let due = s.claim_due_cron_schedules(now).await.unwrap();
+    assert!(due.iter().any(|c| c.id == schedule.id));
+
+    // Advance fire times; claim with the same `now` again must now skip it.
+    s.update_cron_fire_times(schedule.id, now, future)
+        .await
+        .unwrap();
+    let reloaded = s.get_cron_schedule(schedule.id).await.unwrap().unwrap();
+    assert_eq!(
+        reloaded.last_triggered_at.map(|t| t.timestamp()),
+        Some(now.timestamp())
+    );
+    assert_eq!(
+        reloaded.next_fire_at.map(|t| t.timestamp()),
+        Some(future.timestamp())
+    );
+
+    let due2 = s.claim_due_cron_schedules(now).await.unwrap();
+    assert!(!due2.iter().any(|c| c.id == schedule.id));
+}
+
+#[tokio::test]
+async fn cron_disabled_is_not_claimed() {
+    let s = store().await;
+    let seq = make_sequence("t_dis");
+    s.create_sequence(&seq).await.unwrap();
+
+    let now = Utc::now();
+    let past = now - Duration::minutes(1);
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId("t_dis".into()),
+        namespace: Namespace("default".into()),
+        sequence_id: seq.id,
+        cron_expr: "0 * * * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: false,
+        metadata: json!({}),
+        last_triggered_at: None,
+        next_fire_at: Some(past),
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_cron_schedule(&schedule).await.unwrap();
+
+    let due = s.claim_due_cron_schedules(now).await.unwrap();
+    assert!(
+        !due.iter().any(|c| c.id == schedule.id),
+        "disabled cron must not be claimed"
+    );
+}

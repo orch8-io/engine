@@ -81,9 +81,12 @@ describe("Templating Fallback Chain", () => {
     );
   });
 
-  it("extra `|` segments are preserved in the fallback literal", async () => {
-    // Engine splits on first `|` only; `x.y|a|b|c` → fallback = `a|b|c`.
-    // This asserts the observable behaviour of the current engine.
+  it("chain stops at first non-template segment", async () => {
+    // Chain semantics: segments that look like template paths (rooted in
+    // `context.` or `outputs.`) are tried in order; the first non-template
+    // segment is returned as a literal default. Any trailing `|`-segments
+    // after a literal are therefore ignored — a literal can't have a
+    // fallback.
     const seq = testSequence("tpl-fallback-literal-chain", [
       step("s1", "log", {
         message: "{{context.data.missing|default_a|default_b|default_c}}",
@@ -104,8 +107,8 @@ describe("Templating Fallback Chain", () => {
     assert.ok(s1, "s1 output should exist");
     assert.equal(
       (s1.output as { message: string }).message,
-      "default_a|default_b|default_c",
-      "extra `|` segments should be treated as part of the fallback literal (single-fallback semantics)",
+      "default_a",
+      "first non-template segment becomes the literal default; subsequent `|` segments are ignored",
     );
   });
 });

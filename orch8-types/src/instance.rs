@@ -182,4 +182,92 @@ mod tests {
         assert!(!InstanceState::Running.is_terminal());
         assert!(!InstanceState::Scheduled.is_terminal());
     }
+
+    // --- TEST_PLAN items 63-74 — state machine coverage per transition. ---
+
+    #[test]
+    fn scheduled_to_running_is_valid() {
+        assert!(InstanceState::Scheduled.can_transition_to(InstanceState::Running));
+    }
+
+    #[test]
+    fn scheduled_to_completed_is_invalid() {
+        assert!(!InstanceState::Scheduled.can_transition_to(InstanceState::Completed));
+    }
+
+    #[test]
+    fn running_to_completed_is_valid() {
+        assert!(InstanceState::Running.can_transition_to(InstanceState::Completed));
+    }
+
+    #[test]
+    fn running_to_failed_is_valid() {
+        assert!(InstanceState::Running.can_transition_to(InstanceState::Failed));
+    }
+
+    #[test]
+    fn running_to_paused_is_valid() {
+        assert!(InstanceState::Running.can_transition_to(InstanceState::Paused));
+    }
+
+    #[test]
+    fn running_to_cancelled_is_valid() {
+        assert!(InstanceState::Running.can_transition_to(InstanceState::Cancelled));
+    }
+
+    #[test]
+    fn paused_to_scheduled_is_valid_resume() {
+        assert!(InstanceState::Paused.can_transition_to(InstanceState::Scheduled));
+    }
+
+    #[test]
+    fn paused_to_completed_is_invalid() {
+        assert!(!InstanceState::Paused.can_transition_to(InstanceState::Completed));
+    }
+
+    #[test]
+    fn waiting_to_running_is_valid() {
+        assert!(InstanceState::Waiting.can_transition_to(InstanceState::Running));
+    }
+
+    #[test]
+    fn completed_is_terminal_rejects_all_targets() {
+        for target in [
+            InstanceState::Scheduled,
+            InstanceState::Running,
+            InstanceState::Waiting,
+            InstanceState::Paused,
+            InstanceState::Failed,
+            InstanceState::Cancelled,
+            InstanceState::Completed,
+        ] {
+            assert!(
+                !InstanceState::Completed.can_transition_to(target),
+                "Completed -> {target:?} must be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_to_scheduled_is_valid_retry() {
+        assert!(InstanceState::Failed.can_transition_to(InstanceState::Scheduled));
+    }
+
+    #[test]
+    fn cancelled_is_terminal_rejects_all_targets() {
+        for target in [
+            InstanceState::Scheduled,
+            InstanceState::Running,
+            InstanceState::Waiting,
+            InstanceState::Paused,
+            InstanceState::Failed,
+            InstanceState::Completed,
+            InstanceState::Cancelled,
+        ] {
+            assert!(
+                !InstanceState::Cancelled.can_transition_to(target),
+                "Cancelled -> {target:?} must be invalid"
+            );
+        }
+    }
 }

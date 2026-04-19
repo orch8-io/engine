@@ -163,13 +163,7 @@ pub async fn execute_for_each(
         if let Some(item) = snapshot_items.get(index as usize) {
             bind_item_var(storage, instance, &fe_def.item_var, item.clone()).await?;
         }
-        for child in &children {
-            if child.state == NodeState::Pending {
-                storage
-                    .update_node_state(child.id, NodeState::Running)
-                    .await?;
-            }
-        }
+        evaluator::activate_pending_children(storage, &children).await?;
     }
 
     // End-of-iteration: if every body child is terminal, either fail (on

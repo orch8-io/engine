@@ -704,6 +704,82 @@ mod tests {
     }
 
     #[test]
+    fn eval_deeply_nested_path() {
+        let ctx = ExecutionContext {
+            data: json!({"a": {"b": {"c": {"d": "found"}}}}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("context.data.a.b.c.d", &ctx, &json!({})),
+            json!("found")
+        );
+    }
+
+    #[test]
+    fn eval_string_literal() {
+        assert_eq!(evaluate("\"hello\"", &ctx(), &outputs()), json!("hello"));
+    }
+
+    #[test]
+    fn eval_number_literal() {
+        assert_eq!(evaluate("42", &ctx(), &outputs()), json!(42.0));
+    }
+
+    #[test]
+    fn eval_bool_literal_true() {
+        assert_eq!(evaluate("true", &ctx(), &outputs()), json!(true));
+    }
+
+    #[test]
+    fn eval_null_literal() {
+        assert_eq!(evaluate("null", &ctx(), &outputs()), json!(null));
+    }
+
+    #[test]
+    fn eval_logical_and_false() {
+        assert_eq!(evaluate("true && false", &ctx(), &outputs()), json!(false));
+    }
+
+    #[test]
+    fn eval_logical_or_true() {
+        assert_eq!(evaluate("false || true", &ctx(), &outputs()), json!(true));
+    }
+
+    #[test]
+    fn eval_arithmetic_add_literal() {
+        assert_eq!(evaluate("3 + 4", &ctx(), &outputs()), json!(7.0));
+    }
+
+    #[test]
+    fn eval_arithmetic_sub_literal() {
+        assert_eq!(evaluate("10 - 3", &ctx(), &outputs()), json!(7.0));
+    }
+
+    #[test]
+    fn eval_arithmetic_mul_literal() {
+        assert_eq!(evaluate("3 * 4", &ctx(), &outputs()), json!(12.0));
+    }
+
+    #[test]
+    fn eval_operator_precedence() {
+        assert_eq!(evaluate("2 + 3 * 4", &ctx(), &outputs()), json!(14.0));
+    }
+
+    #[test]
+    fn eval_string_equality() {
+        assert_eq!(
+            evaluate("\"abc\" == \"abc\"", &ctx(), &outputs()),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn eval_empty_expression_returns_null() {
+        assert_eq!(evaluate("", &ctx(), &outputs()), json!(null));
+    }
+
+    #[test]
     fn condition_evaluation() {
         assert!(evaluate_condition(
             "context.data.active",

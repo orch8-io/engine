@@ -275,6 +275,43 @@ mod tests {
     }
 
     #[test]
+    fn hourly_expression_fires_at_top_of_hour_within_one_hour() {
+        use chrono::Timelike;
+        // Standard 5-field Unix cron "0 * * * *" = at minute 0 of every hour.
+        let schedule = mk_schedule("0 * * * *");
+        let next = calculate_next_fire(&schedule).expect("next fire time");
+        assert_eq!(next.minute(), 0);
+        assert_eq!(next.second(), 0);
+        let delta = (next - Utc::now()).num_seconds();
+        assert!(
+            (0..=3600).contains(&delta),
+            "expected next fire within 1 hour, got {delta}s",
+        );
+    }
+
+    #[test]
+    fn invalid_cron_expr_rejected_at_validation() {
+        // validate_cron_expr is the gate used when creating a schedule.
+        let err = validate_cron_expr("nonsense").unwrap_err();
+        assert!(!err.is_empty());
+        let err = validate_cron_expr("60 0 0 1 1 * *").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn five_field_unix_cron_normalizes_to_seven_fields() {
+        use chrono::{Datelike, Timelike, Weekday};
+        // "0 9 * * MON-FRI" (5-field Unix) must be accepted, since it is
+        // normalized to "0 0 9 * * MON-FRI *".
+        assert!(validate_cron_expr("0 9 * * MON-FRI").is_ok());
+        let schedule = mk_schedule("0 9 * * MON-FRI");
+        let next = calculate_next_fire(&schedule).expect("next fire time");
+        assert_eq!(next.hour(), 9);
+        assert_eq!(next.minute(), 0);
+        assert!(!matches!(next.weekday(), Weekday::Sat | Weekday::Sun));
+    }
+
+    #[test]
     fn calculate_next_fire_daily_at_midnight() {
         use chrono::Timelike;
         // Every day at 00:00:00 — next fire must be at a midnight in UTC.

@@ -21,15 +21,6 @@ pub(crate) fn permanent(message: impl Into<String>) -> StepError {
     }
 }
 
-/// Build a `StepError::Permanent` with structured details.
-#[allow(dead_code)]
-pub(crate) fn permanent_with_details(message: impl Into<String>, details: Value) -> StepError {
-    StepError::Permanent {
-        message: message.into(),
-        details: Some(details),
-    }
-}
-
 /// Parse an `InstanceId` from a params object field.
 ///
 /// Returns `StepError::Permanent` if the field is missing, not a string, or

@@ -716,6 +716,352 @@ mod tests {
         assert_eq!(stored.state, InstanceState::Paused);
     }
 
+    // ----- TEST_PLAN items 79, 85-89 -----
+
+    #[tokio::test]
+    async fn cancel_signal_on_running_cancels_instance() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r =
+            process_signals_prefetched(&storage, inst.id, InstanceState::Running, vec![sig], None)
+                .await
+                .unwrap();
+        assert!(r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn signal_delivery_marks_delivered_flag_set() {
+        // Item 89: after processing, the signal must be `delivered=true` and
+        // therefore must not appear in the next get_pending_signals call.
+        // (SQLite backend does not populate delivered_at — that column is
+        // surfaced by Postgres only; the delivered flag is the portable
+        // invariant.)
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Custom("ping".into()), json!({}));
+        let id = sig.id;
+        storage.enqueue_signal(&sig).await.unwrap();
+
+        // Sanity: visible in pending before processing.
+        let before = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(before.iter().any(|s| s.id == id));
+
+        process_signals_prefetched(&storage, inst.id, InstanceState::Scheduled, vec![sig], None)
+            .await
+            .unwrap();
+
+        let after = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(
+            after.iter().all(|s| s.id != id),
+            "delivered signal must be absent from pending list"
+        );
+    }
+
+    // ---- Scoped cancel helpers ----
+
+    fn mk_step_block(id: &str, cancellable: bool) -> orch8_types::sequence::BlockDefinition {
+        use orch8_types::ids::BlockId;
+        use orch8_types::sequence::{BlockDefinition, StepDef};
+        BlockDefinition::Step(StepDef {
+            id: BlockId(id.into()),
+            handler: "noop".into(),
+            params: json!({}),
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable,
+            wait_for_input: None,
+            queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
+        })
+    }
+
+    fn mk_sequence(blocks: Vec<orch8_types::sequence::BlockDefinition>) -> SequenceDefinition {
+        use orch8_types::ids::{Namespace, SequenceId, TenantId};
+        SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            name: "seq".into(),
+            version: 1,
+            deprecated: false,
+            blocks,
+            interceptors: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn insert_node(
+        storage: &SqliteStorage,
+        instance_id: InstanceId,
+        parent_id: Option<orch8_types::ids::ExecutionNodeId>,
+        block_id: &str,
+        block_type: orch8_types::execution::BlockType,
+        branch_index: Option<i16>,
+        state: NodeState,
+    ) -> orch8_types::execution::ExecutionNode {
+        use orch8_types::execution::ExecutionNode;
+        use orch8_types::ids::{BlockId, ExecutionNodeId};
+        let node = ExecutionNode {
+            id: ExecutionNodeId(uuid::Uuid::now_v7()),
+            instance_id,
+            parent_id,
+            block_id: BlockId(block_id.into()),
+            block_type,
+            branch_index,
+            state,
+            started_at: None,
+            completed_at: None,
+        };
+        storage.create_execution_node(&node).await.unwrap();
+        node
+    }
+
+    #[tokio::test]
+    async fn scoped_cancel_skips_non_cancellable_steps() {
+        // Item 85: a running step with `cancellable: false` must not be
+        // marked Cancelled; the instance stays Running and the signal is
+        // delivered so the evaluator can drain the non-cancellable work.
+        use orch8_types::execution::BlockType;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let seq = mk_sequence(vec![mk_step_block("s1", false)]);
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "s1",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(!r, "must not abort while non-cancellable step still active");
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Running);
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        let step = tree.iter().find(|n| n.block_id.0 == "s1").unwrap();
+        assert_eq!(step.state, NodeState::Running);
+    }
+
+    #[tokio::test]
+    async fn scoped_cancel_skips_cancellation_scope_children() {
+        // Item 86: nodes inside a CancellationScope are non-cancellable, even
+        // if their per-step flag says otherwise.
+        use orch8_types::execution::BlockType;
+        use orch8_types::sequence::{BlockDefinition, CancellationScopeDef};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let scope = BlockDefinition::CancellationScope(CancellationScopeDef {
+            id: orch8_types::ids::BlockId("scope".into()),
+            blocks: vec![mk_step_block("inner", true)],
+        });
+        let seq = mk_sequence(vec![scope]);
+
+        let scope_node = insert_node(
+            &storage,
+            inst.id,
+            None,
+            "scope",
+            BlockType::CancellationScope,
+            None,
+            NodeState::Running,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            Some(scope_node.id),
+            "inner",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Running);
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        for n in &tree {
+            assert_ne!(
+                n.state,
+                NodeState::Cancelled,
+                "node {:?} inside CancellationScope was cancelled",
+                n.block_id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_cancel_skips_try_catch_finally_nodes() {
+        // Item 87: try-catch finally branch (branch_index == 2) is
+        // non-cancellable so teardown steps always run.
+        use orch8_types::execution::BlockType;
+        use orch8_types::sequence::{BlockDefinition, TryCatchDef};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let tc = BlockDefinition::TryCatch(TryCatchDef {
+            id: orch8_types::ids::BlockId("tc".into()),
+            try_block: vec![mk_step_block("t", true)],
+            catch_block: vec![],
+            finally_block: Some(vec![mk_step_block("f", true)]),
+        });
+        let seq = mk_sequence(vec![tc]);
+
+        let tc_node = insert_node(
+            &storage,
+            inst.id,
+            None,
+            "tc",
+            BlockType::TryCatch,
+            None,
+            NodeState::Running,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            Some(tc_node.id),
+            "f",
+            BlockType::Step,
+            Some(2),
+            NodeState::Running,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(!r, "finally branch must keep the instance alive");
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Running);
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        let finally_node = tree.iter().find(|n| n.block_id.0 == "f").unwrap();
+        assert_eq!(finally_node.state, NodeState::Running);
+    }
+
+    #[tokio::test]
+    async fn cancel_with_all_nodes_non_cancellable_does_not_cancel_instance() {
+        // Item 88: if every active node is non-cancellable the instance
+        // must remain Running and the signal is consumed (delivered) but not
+        // escalated to a full cancellation.
+        use orch8_types::execution::BlockType;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let seq = mk_sequence(vec![mk_step_block("a", false), mk_step_block("b", false)]);
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "a",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "b",
+            BlockType::Step,
+            None,
+            NodeState::Pending,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        let sig_id = sig.id;
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Running);
+        // Signal is marked delivered so we don't reprocess forever.
+        let pending = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(pending.iter().all(|s| s.id != sig_id));
+    }
+
     #[tokio::test]
     async fn is_descendant_of_any_detects_chain() {
         use orch8_types::execution::{BlockType, ExecutionNode};

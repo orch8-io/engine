@@ -132,13 +132,7 @@ pub async fn execute_loop(
 
     // Start-of-iteration: activate any Pending body children so the next
     // evaluator tick will run them.
-    for child in &children {
-        if child.state == NodeState::Pending {
-            storage
-                .update_node_state(child.id, NodeState::Running)
-                .await?;
-        }
-    }
+    evaluator::activate_pending_children(storage, &children).await?;
 
     // End-of-iteration: if every body child is terminal, either fail (on
     // any child failure) or advance the counter and reset for the next

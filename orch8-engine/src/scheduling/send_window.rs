@@ -178,4 +178,116 @@ mod tests {
         let mid = make_utc(2024, 1, 8, 12, 0);
         assert!(check_window(mid, &window, "UTC").is_some());
     }
+
+    #[test]
+    fn empty_days_means_any_day_is_valid() {
+        let window = window_9_17();
+        // 2024-01-06 Saturday, 2024-01-07 Sunday, 2024-01-08 Monday — all 10:00 UTC.
+        for d in [6u32, 7, 8] {
+            let now = make_utc(2024, 1, d, 10, 0);
+            assert!(
+                check_window(now, &window, "UTC").is_none(),
+                "day {d} should be inside window when days is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn weekend_only_window_defers_weekday_to_saturday() {
+        let window = SendWindow {
+            start_hour: 9,
+            end_hour: 17,
+            days: vec![5, 6], // Sat, Sun
+        };
+        // Monday 2024-01-08 10:00 UTC — outside (weekday)
+        let now = make_utc(2024, 1, 8, 10, 0);
+        let next = check_window(now, &window, "UTC").unwrap();
+        let local = next.with_timezone(&chrono_tz::UTC);
+        assert_eq!(local.weekday(), chrono::Weekday::Sat);
+        assert_eq!(local.hour(), 9);
+    }
+
+    #[test]
+    fn start_equal_end_means_24h_window() {
+        let window = SendWindow {
+            start_hour: 9,
+            end_hour: 9,
+            days: vec![],
+        };
+        for h in [0u32, 8, 9, 15, 23] {
+            let now = make_utc(2024, 1, 8, h, 0);
+            assert!(
+                check_window(now, &window, "UTC").is_none(),
+                "hour {h} should be inside 24h window"
+            );
+        }
+    }
+
+    #[test]
+    fn timezone_conversion_est_vs_utc() {
+        // 2024-01-08 14:00 UTC = 09:00 EST (America/New_York is UTC-5 in January)
+        let now = make_utc(2024, 1, 8, 14, 0);
+        // In UTC terms, 14:00 is inside 9-17 window
+        assert!(check_window(now, &window_9_17(), "UTC").is_none());
+        // In EST terms, 14:00 UTC = 09:00 EST — also inside
+        assert!(check_window(now, &window_9_17(), "America/New_York").is_none());
+
+        // 13:00 UTC = 08:00 EST — outside EST window but inside UTC window
+        let borderline = make_utc(2024, 1, 8, 13, 0);
+        assert!(check_window(borderline, &window_9_17(), "UTC").is_none());
+        assert!(check_window(borderline, &window_9_17(), "America/New_York").is_some());
+    }
+
+    #[test]
+    fn next_window_calculation_crosses_week_boundary() {
+        // Window: Monday only, 9-17. Time is Sunday 2024-01-07 23:00 UTC →
+        // next open is Monday 2024-01-08 09:00 UTC.
+        let window = SendWindow {
+            start_hour: 9,
+            end_hour: 17,
+            days: vec![0], // Mon only
+        };
+        let sun_evening = make_utc(2024, 1, 7, 23, 0);
+        let next = check_window(sun_evening, &window, "UTC").unwrap();
+        let local = next.with_timezone(&chrono_tz::UTC);
+        assert_eq!(local.weekday(), chrono::Weekday::Mon);
+        assert_eq!(local.day(), 8);
+        assert_eq!(local.hour(), 9);
+
+        // And from Tuesday 2024-01-09 10:00 UTC → jump 6 days to Mon 2024-01-15 09:00 UTC.
+        let tue = make_utc(2024, 1, 9, 10, 0);
+        let next = check_window(tue, &window, "UTC").unwrap();
+        let local = next.with_timezone(&chrono_tz::UTC);
+        assert_eq!(local.weekday(), chrono::Weekday::Mon);
+        assert_eq!(local.day(), 15);
+        assert_eq!(local.hour(), 9);
+    }
+
+    #[test]
+    fn invalid_timezone_falls_back_to_utc() {
+        // Inside 9-17 in UTC terms → should be treated as inside.
+        let now = make_utc(2024, 1, 8, 10, 0);
+        assert!(check_window(now, &window_9_17(), "Not/A_Zone").is_none());
+
+        // Outside 9-17 UTC → should be outside (confirming UTC fallback was used).
+        let night = make_utc(2024, 1, 8, 3, 0);
+        assert!(check_window(night, &window_9_17(), "Not/A_Zone").is_some());
+    }
+
+    #[test]
+    fn single_valid_day_finds_correct_next_occurrence() {
+        // Only Wednesday (day=2). From Thursday 2024-01-11 10:00 UTC, next should be
+        // Wednesday 2024-01-17 09:00 UTC.
+        let window = SendWindow {
+            start_hour: 9,
+            end_hour: 17,
+            days: vec![2], // Wed only
+        };
+        let thu = make_utc(2024, 1, 11, 10, 0);
+        let next = check_window(thu, &window, "UTC").unwrap();
+        let local = next.with_timezone(&chrono_tz::UTC);
+        assert_eq!(local.weekday(), chrono::Weekday::Wed);
+        assert_eq!(local.day(), 17);
+        assert_eq!(local.hour(), 9);
+    }
 }

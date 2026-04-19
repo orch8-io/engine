@@ -27,13 +27,7 @@ pub async fn execute_try_catch(
     // Phase 1: Activate and wait for try block.
     if !try_children.is_empty() && !evaluator::all_terminal(&try_children) {
         // Activate pending try children.
-        for child in &try_children {
-            if child.state == NodeState::Pending {
-                storage
-                    .update_node_state(child.id, NodeState::Running)
-                    .await?;
-            }
-        }
+        evaluator::activate_pending_children(storage, &try_children).await?;
         return Ok(true);
     }
 
@@ -62,13 +56,7 @@ pub async fn execute_try_catch(
             }
 
             // Activate catch children.
-            for child in &catch_children {
-                if child.state == NodeState::Pending {
-                    storage
-                        .update_node_state(child.id, NodeState::Running)
-                        .await?;
-                }
-            }
+            evaluator::activate_pending_children(storage, &catch_children).await?;
             return Ok(true);
         }
     } else if !try_failed {
@@ -84,13 +72,7 @@ pub async fn execute_try_catch(
 
     // Phase 3: Finally block always runs.
     if !finally_children.is_empty() && !evaluator::all_terminal(&finally_children) {
-        for child in &finally_children {
-            if child.state == NodeState::Pending {
-                storage
-                    .update_node_state(child.id, NodeState::Running)
-                    .await?;
-            }
-        }
+        evaluator::activate_pending_children(storage, &finally_children).await?;
         return Ok(true);
     }
 

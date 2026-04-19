@@ -27,13 +27,7 @@ pub async fn execute_race(
     }
 
     // Activate all pending children so they can race.
-    for child in &children {
-        if child.state == NodeState::Pending {
-            storage
-                .update_node_state(child.id, NodeState::Running)
-                .await?;
-        }
-    }
+    evaluator::activate_pending_children(storage, &children).await?;
 
     // Check if any branch completed (winner).
     if evaluator::any_completed(&children) {

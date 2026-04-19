@@ -73,15 +73,45 @@ fn resolve_path(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> Result<serde_json::Value, EngineError> {
-    // Support fallback defaults: {{path|default_value}}
-    let (path, fallback) = if let Some(idx) = path.find('|') {
-        (path[..idx].trim(), Some(path[idx + 1..].trim()))
-    } else {
-        (path, None)
-    };
+    // Support fallback chain: {{path|next|...|literal}}.
+    // Segments that look like template paths (rooted in "context." or "outputs.")
+    // are tried as path lookups; the first non-null wins. Any segment that is
+    // not a known path root is treated as a literal string default.
+    let segments: Vec<&str> = path.split('|').map(str::trim).collect();
+    let first = segments[0];
 
-    // Walk the path as an iterator — avoids allocating a Vec<&str> per call,
-    // which matters on hot templating paths with many {{...}} expressions.
+    // Validate first segment is a known root (required — surfaces typos).
+    if !is_template_path(first) {
+        return Err(EngineError::TemplateError(format!(
+            "unknown template root: {first}"
+        )));
+    }
+
+    for segment in &segments {
+        if is_template_path(segment) {
+            if let Some(v) = try_resolve_single(segment, context, outputs)? {
+                if !v.is_null() {
+                    return Ok(v);
+                }
+            }
+        } else {
+            return Ok(serde_json::Value::String((*segment).to_string()));
+        }
+    }
+
+    Ok(serde_json::Value::Null)
+}
+
+fn is_template_path(s: &str) -> bool {
+    let root = s.split('.').next().unwrap_or("");
+    root == "context" || root == "outputs"
+}
+
+fn try_resolve_single(
+    path: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, EngineError> {
     let mut parts = path.split('.');
     let resolved = match parts.next() {
         Some("context") => {
@@ -98,23 +128,9 @@ fn resolve_path(
             navigate_json(source, parts)
         }
         Some("outputs") => navigate_json(outputs, parts),
-        _ => {
-            return Err(EngineError::TemplateError(format!(
-                "unknown template root: {path}"
-            )));
-        }
+        _ => return Ok(None),
     };
-
-    match resolved {
-        Some(v) if !v.is_null() => Ok(v.clone()),
-        _ => {
-            if let Some(default) = fallback {
-                Ok(serde_json::Value::String(default.to_string()))
-            } else {
-                Ok(serde_json::Value::Null)
-            }
-        }
-    }
+    Ok(resolved.cloned())
 }
 
 /// Walk a JSON value by path segments, returning a borrow of the terminal
@@ -324,6 +340,149 @@ mod tests {
             resolve(&json!("{{context.data.ratio}}"), &ctx, &json!({})).unwrap(),
             json!(2.5)
         );
+    }
+
+    #[test]
+    fn resolve_preserves_number_type_whole_string() {
+        let ctx = ExecutionContext {
+            data: json!({"n": 7}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.data.n}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!(7));
+        assert!(result.is_number());
+    }
+
+    #[test]
+    fn resolve_coerces_to_string_when_inlined() {
+        let ctx = ExecutionContext {
+            data: json!({"n": 7}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("count={{context.data.n}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("count=7"));
+    }
+
+    #[test]
+    fn resolve_preserves_object_type_whole_string() {
+        let ctx = ExecutionContext {
+            data: json!({"obj": {"x": 1, "y": 2}}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.data.obj}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!({"x": 1, "y": 2}));
+        assert!(result.is_object());
+    }
+
+    #[test]
+    fn resolve_deeply_nested_template() {
+        let ctx = ExecutionContext {
+            data: json!({"a": {"b": {"c": "deep"}}}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.data.a.b.c}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("deep"));
+    }
+
+    #[test]
+    fn resolve_multiple_templates_in_single_string() {
+        let ctx = ExecutionContext {
+            data: json!({"first": "Alice", "last": "Smith"}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let input = json!("{{context.data.first}} {{context.data.last}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("Alice Smith"));
+    }
+
+    #[test]
+    fn resolve_pipe_chain_uses_first_available() {
+        let ctx = ExecutionContext {
+            data: json!({"b": "from_b"}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let input = json!("{{context.data.a|context.data.b|literal_c}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("from_b"));
+    }
+
+    #[test]
+    fn resolve_unicode_characters_preserved() {
+        let ctx = ExecutionContext {
+            data: json!({"greeting": "héllo 日本語 🦀"}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.data.greeting}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("héllo 日本語 🦀"));
+    }
+
+    #[test]
+    fn resolve_special_chars_preserved() {
+        let ctx = ExecutionContext {
+            data: json!({"s": "he said \"hi\" and \\path\\"}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.data.s}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("he said \"hi\" and \\path\\"));
+    }
+
+    #[test]
+    fn resolve_with_empty_context_returns_fallback() {
+        let ctx = ExecutionContext {
+            data: json!({}),
+            config: json!({}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let input = json!("{{context.data.anything|fallback}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("fallback"));
+
+        let no_fallback = resolve(&json!("{{context.data.x}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(no_fallback, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn resolve_context_config_key() {
+        let ctx = ExecutionContext {
+            data: json!({}),
+            config: json!({"api_key": "sk_123"}),
+            audit: vec![],
+            runtime: orch8_types::context::RuntimeContext::default(),
+        };
+        let result = resolve(&json!("{{context.config.api_key}}"), &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("sk_123"));
+    }
+
+    #[test]
+    fn resolve_missing_root_returns_error() {
+        let ctx = test_context();
+        let err = resolve(&json!("{{foo.bar}}"), &ctx, &json!({})).unwrap_err();
+        assert!(matches!(err, EngineError::TemplateError(_)));
+    }
+
+    #[test]
+    fn resolve_missing_step_output_uses_fallback() {
+        let ctx = test_context();
+        let input = json!("{{outputs.missing_step.x|default}}");
+        let result = resolve(&input, &ctx, &json!({})).unwrap();
+        assert_eq!(result, json!("default"));
     }
 
     #[test]

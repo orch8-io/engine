@@ -31,6 +31,18 @@ pub struct FieldEncryptor {
     old_cipher: Option<Aes256Gcm>,
 }
 
+// `Aes256Gcm` does not implement Debug; we redact the cipher material
+// and only expose whether a rotation key is present.
+#[allow(clippy::missing_fields_in_debug)]
+impl std::fmt::Debug for FieldEncryptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldEncryptor")
+            .field("cipher", &"<redacted>")
+            .field("has_old_cipher", &self.old_cipher.is_some())
+            .finish()
+    }
+}
+
 const ENC_PREFIX: &str = "enc:v1:";
 
 impl FieldEncryptor {
@@ -297,6 +309,70 @@ mod tests {
         // New data should NOT be decryptable with key1 alone.
         let enc1_only = FieldEncryptor::from_bytes(&key1);
         assert!(enc1_only.decrypt_value(&encrypted).is_err());
+    }
+
+    #[test]
+    fn is_encrypted_detects_prefix() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let encrypted = enc.encrypt_value(&serde_json::json!("hello")).unwrap();
+        assert!(FieldEncryptor::is_encrypted(&encrypted));
+        // Also matches a bare string with the prefix.
+        assert!(FieldEncryptor::is_encrypted(&serde_json::Value::String(
+            format!("{ENC_PREFIX}anything")
+        )));
+    }
+
+    #[test]
+    fn is_encrypted_false_for_plain_values() {
+        assert!(!FieldEncryptor::is_encrypted(&serde_json::json!(
+            "plain string"
+        )));
+        assert!(!FieldEncryptor::is_encrypted(&serde_json::json!(42)));
+        assert!(!FieldEncryptor::is_encrypted(&serde_json::json!(null)));
+        assert!(!FieldEncryptor::is_encrypted(
+            &serde_json::json!({"k": "v"})
+        ));
+        assert!(!FieldEncryptor::is_encrypted(&serde_json::json!([1, 2, 3])));
+        // A string that merely contains the prefix mid-way is not encrypted.
+        assert!(!FieldEncryptor::is_encrypted(&serde_json::json!(
+            "not enc:v1: prefixed"
+        )));
+    }
+
+    #[test]
+    fn from_hex_key_rejects_wrong_length() {
+        // 62 hex chars -> 31 bytes, not 32.
+        let short = "00".repeat(31);
+        let err = FieldEncryptor::from_hex_key(&short).unwrap_err();
+        assert!(matches!(err, EncryptionError::InvalidKeyLength(31)));
+
+        // 66 hex chars -> 33 bytes.
+        let long = "00".repeat(33);
+        let err = FieldEncryptor::from_hex_key(&long).unwrap_err();
+        assert!(matches!(err, EncryptionError::InvalidKeyLength(33)));
+    }
+
+    #[test]
+    fn from_hex_key_rejects_invalid_hex_chars() {
+        // 64 chars, but contains non-hex characters.
+        let bad = "zz".repeat(32);
+        let err = FieldEncryptor::from_hex_key(&bad).unwrap_err();
+        assert!(matches!(err, EncryptionError::InvalidHex));
+
+        // Odd length triggers InvalidHex as well.
+        let err = FieldEncryptor::from_hex_key("0").unwrap_err();
+        assert!(matches!(err, EncryptionError::InvalidHex));
+    }
+
+    #[test]
+    fn with_old_key_rejects_invalid_hex() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        // Non-hex characters.
+        let res = enc.clone().with_old_key(&"zz".repeat(32));
+        assert!(matches!(res, Err(EncryptionError::InvalidHex)));
+        // Wrong length.
+        let res = enc.with_old_key(&"00".repeat(16));
+        assert!(matches!(res, Err(EncryptionError::InvalidKeyLength(16))));
     }
 
     #[test]

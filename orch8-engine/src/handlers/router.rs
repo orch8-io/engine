@@ -77,13 +77,7 @@ pub async fn execute_router(
     let branch_idx = i16::try_from(selected_branch).unwrap_or(0);
     let branch_children = evaluator::children_of(tree, node.id, Some(branch_idx));
 
-    for child in &branch_children {
-        if child.state == NodeState::Pending {
-            storage
-                .update_node_state(child.id, NodeState::Running)
-                .await?;
-        }
-    }
+    evaluator::activate_pending_children(storage, &branch_children).await?;
 
     if branch_children.is_empty() || evaluator::all_terminal(&branch_children) {
         if !branch_children.is_empty() && evaluator::any_failed(&branch_children) {

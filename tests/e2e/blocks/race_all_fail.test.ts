@@ -53,32 +53,28 @@ describe("Race: all branches fail", () => {
       namespace: "default",
     });
 
-    await client.waitForState(id, ["waiting", "running"], { timeoutMs: 5000 });
+    // Poll each branch in a loop until its worker task appears, then fail it.
+    // `waitForState(["waiting", "running"])` can return before the engine has
+    // created the per-branch tasks — polling unconditionally at that instant
+    // races the tick loop. Loop with a deadline, bailing early if the
+    // instance is already terminal.
+    const grabAndFail = async (handler: string, reason: string) => {
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const tasks = await client.pollWorkerTasks(handler, "worker-1");
+        if (tasks.length > 0) {
+          await client.failWorkerTask(tasks[0]!.id, "worker-1", reason, false);
+          return true;
+        }
+        const inst = await client.getInstance(id);
+        if (inst.state === "failed" || inst.state === "completed") return false;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return false;
+    };
 
-    // Fail branch A permanently.
-    const tasksA = await client.pollWorkerTasks("race_af_a", "worker-1");
-    if (tasksA.length > 0) {
-      await client.failWorkerTask(tasksA[0]!.id, "worker-1", "a failed", false);
-    }
-
-    // Branch B may still be pending. The instance may briefly transition back
-    // to waiting while B runs (or already be failed if branches are sequential).
-    await client.waitForState(id, ["waiting", "running", "failed"], {
-      timeoutMs: 5000,
-    });
-
-    // Poll up to a short deadline to grab B's task if it exists.
-    let tasksB = await client.pollWorkerTasks("race_af_b", "worker-1");
-    const deadline = Date.now() + 3000;
-    while (tasksB.length === 0 && Date.now() < deadline) {
-      const inst = await client.getInstance(id);
-      if (inst.state === "failed") break;
-      await new Promise((r) => setTimeout(r, 50));
-      tasksB = await client.pollWorkerTasks("race_af_b", "worker-1");
-    }
-    if (tasksB.length > 0) {
-      await client.failWorkerTask(tasksB[0]!.id, "worker-1", "b failed", false);
-    }
+    await grabAndFail("race_af_a", "a failed");
+    await grabAndFail("race_af_b", "b failed");
 
     const failed = await client.waitForState(id, "failed", { timeoutMs: 10_000 });
     assert.equal(failed.state, "failed");
