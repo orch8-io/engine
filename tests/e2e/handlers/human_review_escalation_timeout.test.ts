@@ -1,36 +1,9 @@
 /**
  * human_review handler with timeout escalation.
  *
- * BLOCKED BY: `RuntimeContext.started_at` is never populated in production.
- *   - `orch8-engine/src/scheduler.rs::check_human_input` at line 803 reads
- *     `instance.context.runtime.started_at` to compute elapsed time:
- *         if let Some(started) = instance.context.runtime.started_at { ... }
- *     If `None`, the timeout branch is skipped and the escalation path at
- *     lines 807–836 is never reached.
- *   - Grep across `orch8-engine/src/` shows no site that writes
- *     `runtime.started_at` outside unit-test fixtures (default is `None`).
- *   - Consequence: `wait_for_input.timeout` never fires; `escalation_handler`
- *     is never invoked. Nothing observable to assert.
- *
- * UNBLOCK (either option closes the gap):
- *   1. Populate `runtime.started_at = Some(Utc::now())` on the first
- *      `Scheduled → Running` transition inside
- *      `orch8-engine/src/lifecycle.rs::transition_instance` (the function
- *      that owns the instance-state edge).
- *   2. Rework `check_human_input` to derive elapsed time from the step's
- *      own `execution_tree` node `started_at` (already written by the
- *      evaluator) instead of the instance-level runtime marker.
- *
- * Once unblocked, flip `it.skip` → `it` — the body below runs against the
- * documented escalation BlockOutput shape produced by `check_human_input`
- * on timeout (see scheduler.rs lines 816–830: writes
- *   { "_escalated": true, "_escalation_handler": <name>, "_timeout_seconds": N }
- * as the step's BlockOutput).
- *
- * Runner note: this suite does NOT need to land in SELF_MANAGED_SUITES.
- * `human_review` is an in-process handler (see
- * `orch8-engine/src/handlers/human_review.rs`); it does not enqueue
- * worker_tasks rows, so it doesn't touch the globally-scoped worker queue.
+ * `runtime.started_at` is now populated on the first Scheduled→Running
+ * transition (scheduler.rs::process_instance). `check_human_input` reads
+ * this to compute elapsed time against `wait_for_input.timeout`.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -51,15 +24,7 @@ describe("Human Review Escalation on Timeout", () => {
     await stopServer(server);
   });
 
-  // BLOCKED BY: `RuntimeContext.started_at` never populated in prod — see
-  //   file header. `check_human_input` short-circuits before reaching the
-  //   timeout/escalation branch.
-  // UNBLOCK: set `runtime.started_at = Some(Utc::now())` on the first
-  //   `Scheduled → Running` edge inside
-  //   `orch8-engine/src/lifecycle.rs::transition_instance`, OR switch
-  //   `check_human_input` to read the step-node's own started_at from
-  //   `execution_tree`.
-  it.skip(
+  it(
     "invokes escalation handler when review exceeds deadline",
     async () => {
       const tenantId = `hri-${uuid().slice(0, 8)}`;

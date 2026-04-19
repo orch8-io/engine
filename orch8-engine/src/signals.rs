@@ -200,6 +200,11 @@ async fn cancel_scoped(
         let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
         let is_scope_node = node.block_type == BlockType::CancellationScope;
 
+        // Nodes inside a try-catch `finally` branch (branch_index == 2) are
+        // non-cancellable: the finally block must run to completion regardless
+        // of external signals. This mirrors Java/Python try-finally semantics.
+        let inside_finally = is_inside_finally_branch(&tree, node);
+
         // Check per-step cancellable flag.
         let step_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
             .and_then(|block| match block {
@@ -208,7 +213,7 @@ async fn cancel_scoped(
             })
             .unwrap_or(true);
 
-        let is_cancellable = step_cancellable && !inside_scope && !is_scope_node;
+        let is_cancellable = step_cancellable && !inside_scope && !is_scope_node && !inside_finally;
 
         if is_cancellable {
             storage
@@ -220,6 +225,58 @@ async fn cancel_scoped(
     }
 
     Ok(has_non_cancellable_active)
+}
+
+/// Check if `node` is inside the `finally` branch (branch_index == 2) of a
+/// TryCatch block, OR is a TryCatch node with an active finally branch.
+/// In either case the node must not be cancelled so the finally block can
+/// run to completion.
+fn is_inside_finally_branch(
+    tree: &[orch8_types::execution::ExecutionNode],
+    node: &orch8_types::execution::ExecutionNode,
+) -> bool {
+    use orch8_types::execution::BlockType;
+
+    // Case 1: The node itself is a TryCatch with active finally children.
+    // Cancelling it would orphan the finally branch.
+    if node.block_type == BlockType::TryCatch {
+        let finally_children: Vec<_> = tree
+            .iter()
+            .filter(|c| c.parent_id == Some(node.id) && c.branch_index == Some(2))
+            .collect();
+        let has_active_finally = finally_children.iter().any(|c| {
+            matches!(
+                c.state,
+                NodeState::Pending | NodeState::Running | NodeState::Waiting
+            )
+        });
+        if has_active_finally
+            || (!finally_children.is_empty()
+                && finally_children
+                    .iter()
+                    .all(|c| c.state == NodeState::Pending))
+        {
+            return true;
+        }
+    }
+
+    // Case 2: Walk up looking for an ancestor with branch_index == 2
+    // whose parent is a TryCatch.
+    let mut current = node;
+    loop {
+        let parent_id = match current.parent_id {
+            Some(pid) => pid,
+            None => return false,
+        };
+        let parent = match tree.iter().find(|n| n.id == parent_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
+            return true;
+        }
+        current = parent;
+    }
 }
 
 /// Check if `node` is a descendant of any node whose ID is in `ancestor_ids`.

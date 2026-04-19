@@ -187,6 +187,36 @@ async fn is_inside_cancellation_scope(ctx: &StepContext) -> bool {
     }
 }
 
+/// Check if the current step is inside a `finally` branch (branch_index == 2)
+/// of a TryCatch block. Steps inside finally must not be interrupted by cancel
+/// signals — the finally block must complete first.
+async fn is_inside_finally(ctx: &StepContext) -> bool {
+    match ctx.storage.get_execution_tree(ctx.instance_id).await {
+        Ok(tree) => {
+            use orch8_types::execution::BlockType;
+            let me = tree.iter().find(|n| n.block_id == ctx.block_id);
+            me.is_some_and(|n| {
+                let mut current = n;
+                loop {
+                    let parent_id = match current.parent_id {
+                        Some(pid) => pid,
+                        None => return false,
+                    };
+                    let parent = match tree.iter().find(|x| x.id == parent_id) {
+                        Some(p) => p,
+                        None => return false,
+                    };
+                    if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
+                        return true;
+                    }
+                    current = parent;
+                }
+            })
+        }
+        Err(_) => false,
+    }
+}
+
 /// Check for pending pause/cancel signals during a sleep and handle them.
 async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepError>> {
     let signals = ctx
@@ -314,7 +344,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         // from external cancel signals (`handlers/cancellation_scope.rs`).
         // The scheduler's regular signal path will defer the cancel until
         // the scope drains, matching `cancel_scoped`'s semantics.
-        if is_inside_cancellation_scope(&ctx).await {
+        if is_inside_cancellation_scope(&ctx).await || is_inside_finally(&ctx).await {
             continue;
         }
         if let Some(result) = check_sleep_signals(&ctx).await {

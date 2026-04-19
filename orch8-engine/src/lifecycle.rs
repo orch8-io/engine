@@ -9,6 +9,10 @@ use orch8_types::instance::InstanceState;
 use crate::error::EngineError;
 
 /// Transition an instance to a new state, validating the transition.
+///
+/// Automatically logs an audit entry for the transition. The `tenant_id`
+/// is fetched from storage if not already known — callers do NOT need to
+/// invoke [`audit_transition`] separately.
 pub async fn transition_instance(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -40,6 +44,11 @@ pub async fn transition_instance(
         to = %to,
         "instance state transitioned"
     );
+
+    // Best-effort audit logging. Fetch tenant_id from the instance row.
+    if let Ok(Some(inst)) = storage.get_instance(instance_id).await {
+        audit_transition(storage, instance_id, &inst.tenant_id, from, to, None).await;
+    }
 
     Ok(())
 }

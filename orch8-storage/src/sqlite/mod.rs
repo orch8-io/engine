@@ -3,12 +3,16 @@
 //! Supports both in-memory (for testing) and file-backed (for standalone deploys).
 //!
 //! Usage:
-//! ```ignore
+//! ```rust,no_run
+//! use orch8_storage::sqlite::SqliteStorage;
+//!
+//! # async fn example() {
 //! // In-memory (testing):
 //! let storage = SqliteStorage::in_memory().await.unwrap();
 //!
 //! // File-backed (standalone):
 //! let storage = SqliteStorage::file("./orch8.db").await.unwrap();
+//! # }
 //! ```
 #![allow(
     clippy::cast_possible_wrap,
@@ -409,6 +413,13 @@ impl StorageBackend for SqliteStorage {
 
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError> {
         signals::mark_delivered_batch(self, signal_ids).await
+    }
+
+    async fn get_signalled_instance_ids(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+        signals::get_signalled_instance_ids(self, limit).await
     }
 
     // === Idempotency ===

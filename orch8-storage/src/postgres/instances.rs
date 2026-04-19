@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
+use sqlx::Row;
 
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -132,63 +135,126 @@ pub(super) async fn claim_due(
     limit: u32,
     max_per_tenant: u32,
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let rows = if max_per_tenant > 0 {
-        // Noisy-neighbor protection: cap instances per tenant using ROW_NUMBER().
+    let mut tx = store.pool.begin().await?;
+
+    // Step 1: SELECT candidates with FOR UPDATE SKIP LOCKED (locks the rows
+    // but doesn't change state yet).
+    let candidate_rows = if max_per_tenant > 0 {
         sqlx::query_as::<_, InstanceRow>(
             r"
-            UPDATE task_instances
-            SET state = 'running', updated_at = $1
-            WHERE id IN (
-                SELECT id FROM (
-                    SELECT id,
-                           ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY priority DESC, next_fire_at ASC) AS rn
-                    FROM task_instances
-                    WHERE next_fire_at <= $1 AND state = 'scheduled'
-                    FOR UPDATE SKIP LOCKED
-                ) ranked
-                WHERE rn <= $3
-                ORDER BY rn, id
-                LIMIT $2
-            )
-            RETURNING id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                      priority, timezone, metadata, context,
-                      concurrency_key, max_concurrency, idempotency_key,
-                      session_id, parent_instance_id, created_at, updated_at
+            SELECT * FROM (
+                SELECT *,
+                       ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY priority DESC, next_fire_at ASC) AS rn
+                FROM task_instances
+                WHERE next_fire_at <= $1 AND state = 'scheduled'
+                FOR UPDATE SKIP LOCKED
+            ) ranked
+            WHERE rn <= $3
+            ORDER BY priority DESC, next_fire_at ASC
+            LIMIT $2
             ",
         )
         .bind(now)
         .bind(i64::from(limit))
         .bind(i64::from(max_per_tenant))
-        .fetch_all(&store.pool)
+        .fetch_all(&mut *tx)
         .await?
     } else {
-        // No per-tenant cap — original fast path.
         sqlx::query_as::<_, InstanceRow>(
             r"
-            UPDATE task_instances
-            SET state = 'running', updated_at = $1
-            WHERE id IN (
-                SELECT id FROM task_instances
-                WHERE next_fire_at <= $1 AND state = 'scheduled'
-                ORDER BY priority DESC, next_fire_at ASC
-                LIMIT $2
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING id, sequence_id, tenant_id, namespace, state, next_fire_at,
-                      priority, timezone, metadata, context,
-                      concurrency_key, max_concurrency, idempotency_key,
-                      session_id, parent_instance_id, created_at, updated_at
+            SELECT * FROM task_instances
+            WHERE next_fire_at <= $1 AND state = 'scheduled'
+            ORDER BY priority DESC, next_fire_at ASC
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
             ",
         )
         .bind(now)
         .bind(i64::from(limit))
-        .fetch_all(&store.pool)
+        .fetch_all(&mut *tx)
         .await?
     };
 
-    rows.into_iter()
+    let all_candidates: Vec<TaskInstance> = candidate_rows
+        .into_iter()
         .map(InstanceRow::into_instance)
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if all_candidates.is_empty() {
+        tx.commit().await?;
+        return Ok(Vec::new());
+    }
+
+    // Step 2: Filter by concurrency limits within the transaction.
+    let instances = filter_by_concurrency_pg(&mut tx, &all_candidates).await?;
+
+    if !instances.is_empty() {
+        // Step 3: Only update the filtered instances to Running.
+        let ids: Vec<uuid::Uuid> = instances.iter().map(|i| i.id.0).collect();
+        sqlx::query(
+            r"UPDATE task_instances SET state = 'running', updated_at = $1 WHERE id = ANY($2)",
+        )
+        .bind(now)
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    // Return instances with state updated to Running.
+    Ok(instances
+        .into_iter()
+        .map(|mut i| {
+            i.state = InstanceState::Running;
+            i
+        })
+        .collect())
+}
+
+/// Filter candidates by `concurrency_key` / `max_concurrency` within a transaction.
+async fn filter_by_concurrency_pg(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    candidates: &[TaskInstance],
+) -> Result<Vec<TaskInstance>, StorageError> {
+    let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, inst) in candidates.iter().enumerate() {
+        if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
+            keyed.entry(key.clone()).or_default().push(idx);
+        }
+    }
+
+    if keyed.is_empty() {
+        return Ok(candidates.to_vec());
+    }
+
+    let mut excluded = std::collections::HashSet::new();
+    for (key, indices) in &keyed {
+        let max = candidates[indices[0]].max_concurrency.unwrap_or(i32::MAX);
+
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM task_instances WHERE concurrency_key = $1 AND state = 'running'",
+        )
+        .bind(key)
+        .fetch_one(&mut **tx)
+        .await?;
+        let already_running: i64 = row.get("cnt");
+
+        #[allow(clippy::cast_possible_truncation)]
+        let slots = (i64::from(max) - already_running).max(0) as usize;
+        if slots < indices.len() {
+            for &idx in &indices[slots..] {
+                excluded.insert(idx);
+            }
+        }
+    }
+
+    Ok(candidates
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !excluded.contains(idx))
+        .map(|(_, inst)| inst.clone())
+        .collect())
 }
 
 pub(super) async fn update_state(

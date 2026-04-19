@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use tracing::instrument;
@@ -131,10 +133,17 @@ pub(super) async fn claim_due(
         .map_err(|e| StorageError::Query(e.to_string()))?
     };
 
-    let instances: Vec<TaskInstance> = rows
+    let all_candidates: Vec<TaskInstance> = rows
         .iter()
         .map(row_to_instance)
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Enforce concurrency limits WITHIN the transaction so instances that
+    // would exceed max_concurrency are never set to Running. This prevents
+    // a window where the test (or any observer) could see more Running
+    // instances than allowed.
+    let instances = filter_by_concurrency(&mut tx, &all_candidates).await?;
+
     if !instances.is_empty() {
         let ids: Vec<String> = instances.iter().map(|i| i.id.0.to_string()).collect();
         let placeholders: String = ids
@@ -158,6 +167,55 @@ pub(super) async fn claim_due(
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(instances)
+}
+
+/// Within a transaction, filter candidates by concurrency_key / max_concurrency.
+/// For each distinct key, count already-Running instances and only allow enough
+/// candidates through to fill the remaining slots.
+async fn filter_by_concurrency(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    candidates: &[TaskInstance],
+) -> Result<Vec<TaskInstance>, StorageError> {
+    // Group candidates by concurrency_key.
+    let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, inst) in candidates.iter().enumerate() {
+        if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
+            keyed.entry(key.clone()).or_default().push(idx);
+        }
+    }
+
+    if keyed.is_empty() {
+        return Ok(candidates.to_vec());
+    }
+
+    let mut excluded = std::collections::HashSet::new();
+    for (key, indices) in &keyed {
+        let max = candidates[indices[0]].max_concurrency.unwrap_or(i32::MAX);
+
+        // Count already-Running instances for this key (within the same transaction).
+        let row = sqlx::query(
+            "SELECT COUNT(*) as cnt FROM task_instances WHERE concurrency_key=?1 AND state='running'",
+        )
+        .bind(key)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
+        let already_running: i64 = row.get("cnt");
+
+        let slots = (i64::from(max) - already_running).max(0) as usize;
+        if slots < indices.len() {
+            for &idx in &indices[slots..] {
+                excluded.insert(idx);
+            }
+        }
+    }
+
+    Ok(candidates
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !excluded.contains(idx))
+        .map(|(_, inst)| inst.clone())
+        .collect())
 }
 
 pub(super) async fn update_state(

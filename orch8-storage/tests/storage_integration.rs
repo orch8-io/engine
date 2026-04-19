@@ -2452,11 +2452,30 @@ async fn merge_context_data_does_not_clobber_nested_object() {
 }
 
 #[tokio::test]
-#[ignore = "Bug §8.3 in docs/CONTEXT_MANAGEMENT.md — tree path doesn't apply context_access filter. Enable once fixed."]
 async fn context_access_filter_enforced_on_tree_path() {
-    // Regression guard for the documented gap between the fast path
-    // (scheduler.rs:930) and the tree path (handlers/step_block.rs). This
-    // test is a placeholder: fully exercising the tree path requires the
-    // engine layer, not the storage layer. When the fix lands, replace
-    // this with a scheduler-driven test in `orch8-engine/tests/`.
+    // The gap documented in Bug §8.3 (tree path not filtering context_access)
+    // is now fixed in handlers/step_block.rs via `context_for_step`. The
+    // tree-path context_access enforcement is exercised by the e2e suite;
+    // this test validates the underlying `filtered()` method that both
+    // paths rely on.
+    use orch8_types::context::{ExecutionContext, RuntimeContext};
+    use orch8_types::sequence::{ContextAccess, FieldAccess};
+    let ctx = ExecutionContext {
+        data: json!({ "user_email": "a@b.c", "user_name": "Alice", "token": "secret" }),
+        config: json!({}),
+        audit: vec![],
+        runtime: RuntimeContext::default(),
+    };
+    let access = ContextAccess {
+        data: FieldAccess::Fields {
+            fields: vec!["user_email".to_string()],
+        },
+        config: false,
+        audit: false,
+        runtime: false,
+    };
+    let filtered = ctx.filtered(&access);
+    assert_eq!(filtered.data["user_email"], json!("a@b.c"));
+    assert!(filtered.data.get("user_name").is_none());
+    assert!(filtered.data.get("token").is_none());
 }

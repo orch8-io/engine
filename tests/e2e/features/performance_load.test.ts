@@ -74,38 +74,32 @@ describe("Performance and Load Testing", () => {
       namespace: "default",
     });
 
-    // Wait for instance to go to waiting (all 3 external tasks)
-    await client.waitForState(id, "waiting", { timeoutMs: 5000 });
+    // Steps are dispatched sequentially: each one goes to a worker queue,
+    // the instance waits, the worker completes it, the scheduler picks up
+    // the next step. Poll-and-complete each task in order.
+    const handlers = ["external_task_1", "external_task_2", "external_task_3"];
+    for (const handler of handlers) {
+      // Wait for instance to go to waiting (next external task dispatched).
+      await client.waitForState(id, "waiting", { timeoutMs: 5000 });
 
-    // Create multiple workers that poll concurrently
-    const workerCount = 5;
-    const pollPromises = Array.from({ length: workerCount }, (_, i) =>
-      client.pollWorkerTasks("external_task_1", `worker-${i}`, 1)
-    );
+      // Poll with multiple workers concurrently — at most one should claim.
+      const workerCount = 5;
+      const pollPromises = Array.from({ length: workerCount }, (_, i) =>
+        client.pollWorkerTasks(handler, `worker-${i}`, 1)
+      );
+      const pollResults = await Promise.all(pollPromises);
+      const claimedTasks = pollResults.flat().filter(task => task.state === "claimed");
+      assert.ok(
+        claimedTasks.length <= 1,
+        `Expected at most 1 claimed task for ${handler}, got ${claimedTasks.length}`,
+      );
 
-    const pollResults = await Promise.all(pollPromises);
-
-    // Only one worker should get the task
-    const claimedTasks = pollResults.flat().filter(task => task.state === "claimed");
-    assert.ok(claimedTasks.length <= 1, `Expected at most 1 claimed task, got ${claimedTasks.length}`);
-
-    // Complete any claimed task
-    for (const task of claimedTasks) {
-      await client.completeWorkerTask(task.id, task.worker_id as string, { completed: true });
+      for (const task of claimedTasks) {
+        await client.completeWorkerTask(task.id, task.worker_id as string, { completed: true });
+      }
     }
 
-    // Poll for remaining tasks
-    const tasks2 = await client.pollWorkerTasks("external_task_2", "worker-1");
-    if (tasks2.length > 0) {
-      await client.completeWorkerTask(tasks2[0]!.id, "worker-1", { completed: true });
-    }
-
-    const tasks3 = await client.pollWorkerTasks("external_task_3", "worker-1");
-    if (tasks3.length > 0) {
-      await client.completeWorkerTask(tasks3[0]!.id, "worker-1", { completed: true });
-    }
-
-    // Instance should complete
+    // Instance should complete after all 3 tasks are done.
     const completed = await client.waitForState(id, "completed", { timeoutMs: 15_000 });
     assert.equal(completed.state, "completed");
   });
@@ -224,10 +218,18 @@ describe("Performance and Load Testing", () => {
     const instances = await Promise.all(instancePromises);
     console.log(`Created ${instances.length} mixed workload instances`);
 
-    // Handle external tasks
-    const externalTasks = await client.pollWorkerTasks("mixed_external_handler", "worker-1", 10);
-    for (const task of externalTasks) {
-      await client.completeWorkerTask(task.id, "worker-1", { external: true });
+    // Handle external tasks — poll multiple times since not all instances
+    // may have reached the worker queue yet.
+    let totalHandled = 0;
+    for (let attempt = 0; attempt < 10 && totalHandled < 5; attempt++) {
+      const externalTasks = await client.pollWorkerTasks("mixed_external_handler", "worker-1", 10);
+      for (const task of externalTasks) {
+        await client.completeWorkerTask(task.id, "worker-1", { external: true });
+        totalHandled++;
+      }
+      if (totalHandled < 5) {
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
 
     // Wait for all instances to complete (with generous timeout)

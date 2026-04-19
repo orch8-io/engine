@@ -383,6 +383,17 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Batch variant: mark multiple signals delivered in one query.
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 
+    /// Return `(instance_id, current_state)` pairs for instances in a
+    /// non-scheduled state (`paused`, `waiting`) that have undelivered signals.
+    ///
+    /// The scheduler calls this on each tick so that resume/cancel signals
+    /// queued against paused or waiting instances are processed promptly
+    /// instead of waiting for the instance to be claimed via `claim_due_instances`.
+    async fn get_signalled_instance_ids(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError>;
+
     // === Idempotency ===
 
     /// Find an instance by tenant + idempotency key.

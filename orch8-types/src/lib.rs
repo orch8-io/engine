@@ -70,8 +70,22 @@ pub mod serde_duration_opt {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-        let ms: Option<u64> = Option::deserialize(d)?;
-        Ok(ms.map(Duration::from_millis))
+        // Accept both integer (milliseconds) and float (seconds) values.
+        // Integers ≥ 1 are treated as milliseconds for backwards compatibility.
+        // Floats < 1.0 are treated as fractional seconds (e.g., 0.2 = 200ms).
+        let val: Option<serde_json::Value> = Option::deserialize(d)?;
+        Ok(val.and_then(|v| match v {
+            serde_json::Value::Number(n) => {
+                if let Some(ms) = n.as_u64() {
+                    Some(Duration::from_millis(ms))
+                } else {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    n.as_f64()
+                        .map(|f| Duration::from_millis((f * 1000.0) as u64))
+                }
+            }
+            _ => None,
+        }))
     }
 }
 

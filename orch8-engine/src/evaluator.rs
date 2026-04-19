@@ -27,6 +27,7 @@ pub async fn merged_blocks<'s>(
     let injected = storage.get_injected_blocks(instance_id).await?;
     match injected {
         Some(val) if val.is_array() => {
+            debug!(instance_id = %instance_id, "merged_blocks: found injected blocks");
             let extra: Vec<BlockDefinition> = match serde_json::from_value(val) {
                 Ok(v) => v,
                 Err(e) => {
@@ -273,6 +274,13 @@ pub async fn evaluate(
     // phases, etc. all make progress within a single scheduler tick.
     let max_iterations = 200;
     for _ in 0..max_iterations {
+        // Re-fetch instance to pick up context mutations from composite
+        // handlers (e.g. for_each::bind_item_var writes context.data).
+        let instance = &storage
+            .get_instance(instance.id)
+            .await?
+            .ok_or_else(|| EngineError::NotFound(format!("instance {}", instance.id)))?;
+
         // Re-fetch tree to see latest state after each dispatch.
         let mut tree = storage.get_execution_tree(instance.id).await?;
 
@@ -301,53 +309,91 @@ pub async fn evaluate(
             return Ok(false);
         }
 
-        // Phase 1: activate the first Pending root node.
-        if let Some(node) = root_nodes.iter().find(|n| n.state == NodeState::Pending) {
-            if let Some(block) = find_block(&blocks, &node.block_id) {
-                dispatch_block(storage, handlers, instance, node, block, &tree).await?;
-                continue;
+        // Phase 1: activate the first Pending root node, but only if all
+        // preceding roots are terminal. Root nodes execute sequentially —
+        // block N+1 must not start until block N completes.
+        let first_pending_idx = root_nodes
+            .iter()
+            .position(|n| n.state == NodeState::Pending);
+        if let Some(idx) = first_pending_idx {
+            // Only activate if all prior roots are done.
+            let all_prior_done = root_nodes[..idx].iter().all(|n| {
+                matches!(
+                    n.state,
+                    NodeState::Completed
+                        | NodeState::Failed
+                        | NodeState::Cancelled
+                        | NodeState::Skipped
+                )
+            });
+            if all_prior_done {
+                // Before activating new work, check if a cancel/pause signal
+                // arrived mid-tick (e.g. during a sleep inside a finally
+                // block). Process it now to avoid dispatching already-cancelled
+                // work.
+                let pending_signals = storage.get_pending_signals(instance.id).await?;
+                let has_cancel = pending_signals
+                    .iter()
+                    .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Cancel));
+                if has_cancel {
+                    let abort = crate::signals::process_signals_prefetched(
+                        storage.as_ref(),
+                        instance.id,
+                        instance.state,
+                        pending_signals,
+                        Some(sequence),
+                    )
+                    .await?;
+                    if abort {
+                        return Ok(false);
+                    }
+                    tree = storage.get_execution_tree(instance.id).await?;
+                    continue;
+                }
+                let node = root_nodes[idx];
+                if let Some(block) = find_block(&blocks, &node.block_id) {
+                    dispatch_block(storage, handlers, instance, node, block, &tree).await?;
+                    continue;
+                }
             }
         }
 
         // Phase 2: execute Running step nodes (leaf work first).
-        if let Some((node, block)) = find_running_step(&tree, &blocks) {
+        if let Some((node, block)) = find_running_step(&tree, &blocks, handlers) {
             dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
-            // Whether the step completed or deferred (external worker), continue
-            // the loop. Deferred steps are now in Waiting state and won't be
-            // found again by find_running_step. Other sibling steps can proceed.
             continue;
         }
 
         // Phase 3: re-evaluate Running composite nodes (parents check child completion,
         // activate next phases like catch/finally, dispatch pending children).
-        //
-        // A composite can be Running while all its relevant children are in
-        // Waiting (external worker) or Running (in-flight) — no actionable
-        // work. Re-dispatching such a composite is a no-op; without the
-        // change-detection below the evaluator would spin until
-        // `max_iterations` expired, starving every instance of progress and
-        // eventually stranding the workflow. Snapshot `(id, state)` before
-        // dispatch and bail if nothing changed — that's the correct signal
-        // that we're parked waiting for an external event (worker callback,
-        // signal, timer) and the outer scheduler should stop ticking.
-        if let Some((node, block)) = find_running_composite(&tree, &blocks) {
-            let pre_states: Vec<(ExecutionNodeId, NodeState)> =
-                tree.iter().map(|n| (n.id, n.state)).collect();
-            dispatch_block(storage, handlers, instance, &node, block, &tree).await?;
-            let post_tree = storage.get_execution_tree(instance.id).await?;
-            let post_states: Vec<(ExecutionNodeId, NodeState)> =
-                post_tree.iter().map(|n| (n.id, n.state)).collect();
-            if pre_states == post_states {
-                // No progress — parked waiting on external work. Break out
-                // rather than re-dispatch the same composite in a hot loop.
+        // Process deepest-first; if a composite produces no state change, try the
+        // next (shallower) composite before parking — a parent race may be able to
+        // complete even when a child try_catch inside it is stalled.
+        {
+            let composites = find_all_running_composites(&tree, &blocks);
+            let mut any_progressed = false;
+            for (node, block) in &composites {
+                let pre_states: Vec<(ExecutionNodeId, NodeState)> =
+                    tree.iter().map(|n| (n.id, n.state)).collect();
+                dispatch_block(storage, handlers, instance, node, block, &tree).await?;
+                let post_tree = storage.get_execution_tree(instance.id).await?;
+                let post_states: Vec<(ExecutionNodeId, NodeState)> =
+                    post_tree.iter().map(|n| (n.id, n.state)).collect();
+                if pre_states != post_states {
+                    any_progressed = true;
+                    break;
+                }
+            }
+            if !composites.is_empty() {
+                if any_progressed {
+                    continue;
+                }
                 debug!(
                     instance_id = %instance.id,
-                    composite = %node.block_id,
-                    "evaluate: composite re-entry produced no state change; parking tick"
+                    "evaluate: all composites re-entry produced no state change; parking tick"
                 );
                 return Ok(true);
             }
-            continue;
         }
 
         // No actionable work this tick — either waiting for external work or stuck.
@@ -368,39 +414,143 @@ pub async fn evaluate(
     Ok(true)
 }
 
-/// Find the first Running composite node (deepest first for proper nesting).
-fn find_running_composite<'a>(
+/// Return all Running composite nodes, deepest first, for iterative evaluation.
+fn find_all_running_composites<'a>(
     tree: &'a [ExecutionNode],
     blocks: &'a [BlockDefinition],
-) -> Option<(ExecutionNode, &'a BlockDefinition)> {
-    // Process deepest composite first (children before parents) so inner
-    // composites complete before their parents re-evaluate.
-    tree.iter()
-        .filter(|n| n.state == NodeState::Running)
+) -> Vec<(ExecutionNode, &'a BlockDefinition)> {
+    let mut composites: Vec<(ExecutionNode, &BlockDefinition)> = tree
+        .iter()
+        .filter(|n| {
+            n.state == NodeState::Running
+                || (n.state == NodeState::Waiting
+                    && n.block_type == orch8_types::execution::BlockType::SubSequence)
+        })
         .filter_map(|n| {
             find_block(blocks, &n.block_id)
                 .filter(|b| !matches!(b, BlockDefinition::Step(_)))
                 .map(|b| (n.clone(), b))
         })
-        .max_by_key(|(n, _)| count_ancestors(tree, n.id))
+        .collect();
+    // Sort deepest first (most ancestors → processed first).
+    composites
+        .sort_by(|(a, _), (b, _)| count_ancestors(tree, b.id).cmp(&count_ancestors(tree, a.id)));
+    composites
 }
 
 /// Find a Running step node that can be executed.
 fn find_running_step<'a>(
     tree: &'a [ExecutionNode],
     blocks: &'a [BlockDefinition],
+    handlers: &HandlerRegistry,
 ) -> Option<(ExecutionNode, &'a BlockDefinition)> {
     for node in tree {
         if node.state != NodeState::Running {
             continue;
         }
         if let Some(block) = find_block(blocks, &node.block_id) {
-            if matches!(block, BlockDefinition::Step(_)) {
+            if let BlockDefinition::Step(step_def) = block {
+                // Skip steps inside a race where another branch already won.
+                if is_inside_decided_race(tree, blocks, node) {
+                    continue;
+                }
+                // Defer *in-process* steps that race against a composite sibling
+                // branch that hasn't finished yet. Processing a blocking handler
+                // (e.g. sleep) inline would starve the composite branch. Let
+                // Phase 3 advance the composite first; once it completes, the
+                // race is decided and this step is either skipped (race lost) or
+                // dispatched next iteration.
+                //
+                // External worker steps (unregistered handlers) are NOT deferred
+                // because they dispatch asynchronously and return immediately —
+                // they don't block the evaluator.
+                if handlers.contains(&step_def.handler)
+                    && has_racing_composite_sibling(tree, blocks, node)
+                {
+                    continue;
+                }
                 return Some((node.clone(), block));
             }
         }
     }
     None
+}
+
+/// Check if a node is inside a Race composite that already has a winner
+/// (another branch's direct child is Completed). If so, this node's
+/// branch lost and should not be dispatched.
+fn is_inside_decided_race(
+    tree: &[ExecutionNode],
+    blocks: &[BlockDefinition],
+    node: &ExecutionNode,
+) -> bool {
+    let parent_map: std::collections::HashMap<ExecutionNodeId, Option<ExecutionNodeId>> =
+        tree.iter().map(|n| (n.id, n.parent_id)).collect();
+    // Walk up tracking which direct-child-of-race we came through.
+    let mut current_id = node.id;
+    while let Some(Some(parent_id)) = parent_map.get(&current_id) {
+        if let Some(parent_node) = tree.iter().find(|n| n.id == *parent_id) {
+            if let Some(parent_block) = find_block(blocks, &parent_node.block_id) {
+                if matches!(parent_block, BlockDefinition::Race(_)) {
+                    // `current_id` is the direct child of the race through
+                    // which our original node descends. Find its branch index.
+                    let my_branch = tree
+                        .iter()
+                        .find(|n| n.id == current_id)
+                        .and_then(|n| n.branch_index);
+                    // Check if a sibling branch's direct child already completed.
+                    let sibling_completed = children_of(tree, *parent_id, None).iter().any(|c| {
+                        c.branch_index != my_branch && matches!(c.state, NodeState::Completed)
+                    });
+                    if sibling_completed {
+                        return true;
+                    }
+                }
+            }
+        }
+        current_id = *parent_id;
+    }
+    false
+}
+
+/// Check if a step node is inside a Race and a sibling branch contains a
+/// Running composite. When true, the evaluator should defer executing this
+/// step to avoid blocking: the composite sibling may complete quickly (e.g.
+/// a try-catch that fails-and-recovers instantly), and executing the step
+/// inline (e.g. a 1000ms sleep) would starve the composite branch.
+fn has_racing_composite_sibling(
+    tree: &[ExecutionNode],
+    blocks: &[BlockDefinition],
+    node: &ExecutionNode,
+) -> bool {
+    let parent_map: std::collections::HashMap<ExecutionNodeId, Option<ExecutionNodeId>> =
+        tree.iter().map(|n| (n.id, n.parent_id)).collect();
+    let mut current_id = node.id;
+    while let Some(Some(parent_id)) = parent_map.get(&current_id) {
+        if let Some(parent_node) = tree.iter().find(|n| n.id == *parent_id) {
+            if let Some(parent_block) = find_block(blocks, &parent_node.block_id) {
+                if matches!(parent_block, BlockDefinition::Race(_)) {
+                    let my_branch = tree
+                        .iter()
+                        .find(|n| n.id == current_id)
+                        .and_then(|n| n.branch_index);
+                    // Check if a sibling branch's root is a Running composite.
+                    let sibling_composite_running =
+                        children_of(tree, *parent_id, None).iter().any(|c| {
+                            c.branch_index != my_branch
+                                && c.state == NodeState::Running
+                                && find_block(blocks, &c.block_id)
+                                    .map_or(false, |b| !matches!(b, BlockDefinition::Step(_)))
+                        });
+                    if sibling_composite_running {
+                        return true;
+                    }
+                }
+            }
+        }
+        current_id = *parent_id;
+    }
+    false
 }
 
 /// Count ancestors to determine tree depth.
@@ -1417,8 +1567,9 @@ mod tests {
                 None,
             ),
         ];
+        let handlers = crate::handlers::HandlerRegistry::new();
         let (found_node, found_block) =
-            find_running_step(&tree, &blocks).expect("should find the running step");
+            find_running_step(&tree, &blocks, &handlers).expect("should find the running step");
         assert_eq!(found_node.block_id.0, "s");
         assert!(matches!(found_block, BlockDefinition::Step(_)));
     }

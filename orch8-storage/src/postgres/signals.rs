@@ -152,3 +152,32 @@ pub(super) async fn mark_delivered_batch(
     .await?;
     Ok(())
 }
+
+/// Find instances in non-scheduled states (paused, waiting) that have pending
+/// (undelivered) signals. Returns `(instance_id, state)` so the scheduler can
+/// process their signals without waiting for `claim_due_instances`.
+pub(super) async fn get_signalled_instance_ids(
+    store: &PostgresStorage,
+    limit: u32,
+) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        r"
+        SELECT DISTINCT ti.id, ti.state
+        FROM task_instances ti
+        INNER JOIN signal_inbox si ON si.instance_id = ti.id
+        WHERE ti.state IN ('paused', 'waiting')
+          AND si.delivered = FALSE
+        LIMIT $1
+        ",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|(id, state_str)| {
+            let state = InstanceState::from_str(&state_str).map_err(StorageError::Query)?;
+            Ok((InstanceId(id), state))
+        })
+        .collect()
+}

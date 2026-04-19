@@ -1,18 +1,12 @@
 /**
  * ForEach iteration variable visibility in body templates.
  *
- * ForEachDef (orch8-types/src/sequence.rs) exposes `item_var` with default
- * "item". HOWEVER: inspecting orch8-engine/src/handlers/for_each.rs shows
- * the handler only activates body children and waits for them — it does
- * NOT inject the current item into the instance context or into the
- * `outputs.*` shape. The template resolver
- * (orch8-engine/src/template.rs :: resolve_path) only recognises the
- * roots `context` and `outputs` (anything else is a TemplateError, NOT
- * a silent empty value).
- *
- * Consequence: `{{item}}`, `{{context.item}}`, and `{{item_var}}` all
- * either error or fail to resolve. The iteration variable is not exposed
- * to the templating scope. Hence these tests are skipped with a note.
+ * The ForEach handler (orch8-engine/src/handlers/for_each.rs) binds the
+ * current iteration element to `context.data.<item_var>` (default "item")
+ * via `bind_item_var` before activating body children. Body steps can
+ * reference this via `{{context.data.item}}` (or whatever `item_var` is
+ * set to). The template resolver only recognises `context.*` and
+ * `outputs.*` roots — bare `{{item}}` would be an error.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -47,16 +41,13 @@ describe("Templating — forEach item variable", () => {
     await stopServer(server);
   });
 
-  // Skipped: ForEach handler in orch8-engine does not inject the iteration
-  // item into the instance's ExecutionContext or outputs map. The template
-  // engine only recognises `context.*` and `outputs.*` roots, so there is
-  // no {{item}} binding to reference from the body. Re-enable this test
-  // when the engine gains item-binding (e.g., writing
-  // context.runtime.<item_var> or similar).
-  it.skip("body can reference {{item}} for current iteration value", async () => {
+  it("body can reference {{item}} for current iteration value", async () => {
+    // The ForEach handler binds `item_var` (default "item") into
+    // `context.data.item`, so the correct template path is
+    // `{{context.data.item}}`.
     const seq = testSequence("tpl-foreach-item", [
       forEach("fe", "items", [
-        step("body", "log", { message: "item: {{item}}" }),
+        step("body", "log", { message: "item: {{context.data.item}}" }),
       ]),
     ]);
     await client.createSequence(seq);

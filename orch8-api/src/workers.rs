@@ -181,6 +181,29 @@ pub(crate) async fn complete_task(
         created_at: chrono::Utc::now(),
     };
 
+    // Merge step output into context.data BEFORE transitioning to Scheduled.
+    // This prevents a race where the scheduler claims the instance before
+    // the context is updated, causing downstream blocks (routers, loops)
+    // to evaluate conditions against stale context.
+    if let Ok(Some(mut instance)) = state.storage.get_instance(task.instance_id).await {
+        if let Some(obj) = block_output.output.as_object() {
+            // Ensure context.data is an object (it may be null/Null for
+            // instances created without initial context data).
+            if instance.context.data.is_null() || !instance.context.data.is_object() {
+                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(data_obj) = instance.context.data.as_object_mut() {
+                for (k, v) in obj {
+                    data_obj.insert(k.clone(), v.clone());
+                }
+                let _ = state
+                    .storage
+                    .update_instance_context(task.instance_id, &instance.context)
+                    .await;
+            }
+        }
+    }
+
     state
         .storage
         .save_output_and_transition(
@@ -271,22 +294,186 @@ pub(crate) async fn fail_task(
         .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
     let has_tree = !tree.is_empty();
 
-    if req.retryable {
-        state
-            .storage
-            .delete_worker_task(task_id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    if req.retryable && has_tree {
+        // Tree-based execution: look up the step's retry policy to decide
+        // whether to retry (reset node to Pending) or exhaust (fail node).
+        let can_retry = 'retry_check: {
+            let instance = match state.storage.get_instance(task.instance_id).await {
+                Ok(Some(inst)) => inst,
+                _ => break 'retry_check false,
+            };
+            let seq = match state.storage.get_sequence(instance.sequence_id).await {
+                Ok(Some(s)) => s,
+                _ => break 'retry_check false,
+            };
+            let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
+            match block {
+                Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
+                    if let Some(retry) = &step_def.retry {
+                        // attempt is 0-based; task.attempt (i16) tracks the current attempt.
+                        ((task.attempt + 1) as u32) < retry.max_attempts
+                    } else {
+                        false // no retry policy → fail immediately
+                    }
+                }
+                _ => false,
+            }
+        };
 
-        state
-            .storage
-            .update_instance_state(
-                task.instance_id,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        if can_retry {
+            // Reset for retry: delete old task, create a new pending task
+            // with incremented attempt, and reset the node to Pending so
+            // the evaluator re-dispatches on the next tick.
+            let retry_task = orch8_types::worker::WorkerTask {
+                id: Uuid::now_v7(),
+                instance_id: task.instance_id,
+                block_id: task.block_id.clone(),
+                handler_name: task.handler_name.clone(),
+                queue_name: task.queue_name.clone(),
+                params: task.params.clone(),
+                context: task.context.clone(),
+                attempt: task.attempt + 1,
+                timeout_ms: task.timeout_ms,
+                state: WorkerTaskState::Pending,
+                worker_id: None,
+                claimed_at: None,
+                heartbeat_at: None,
+                completed_at: None,
+                output: None,
+                error_message: None,
+                error_retryable: None,
+                created_at: chrono::Utc::now(),
+            };
+            state
+                .storage
+                .delete_worker_task(task_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            state
+                .storage
+                .create_worker_task(&retry_task)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            if let Some(node) = tree.iter().find(|n| {
+                n.block_id == task.block_id
+                    && matches!(n.state, NodeState::Running | NodeState::Waiting)
+            }) {
+                state
+                    .storage
+                    .update_node_state(node.id, NodeState::Pending)
+                    .await
+                    .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
+            }
+            state
+                .storage
+                .update_instance_state(
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        } else {
+            // Retries exhausted or no retry policy: fail the node.
+            if let Some(node) = tree.iter().find(|n| {
+                n.block_id == task.block_id
+                    && matches!(n.state, NodeState::Running | NodeState::Waiting)
+            }) {
+                state
+                    .storage
+                    .update_node_state(node.id, NodeState::Failed)
+                    .await
+                    .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
+            }
+            state
+                .storage
+                .update_instance_state(
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        }
+    } else if req.retryable {
+        // No tree (fast path): look up the step's retry policy and either
+        // create a new pending worker task with incremented attempt or fail
+        // the instance directly when retries are exhausted / no policy.
+        let can_retry = 'fp_retry: {
+            let instance = match state.storage.get_instance(task.instance_id).await {
+                Ok(Some(inst)) => inst,
+                _ => break 'fp_retry false,
+            };
+            let seq = match state.storage.get_sequence(instance.sequence_id).await {
+                Ok(Some(s)) => s,
+                _ => break 'fp_retry false,
+            };
+            let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
+            match block {
+                Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
+                    if let Some(retry) = &step_def.retry {
+                        ((task.attempt + 1) as u32) < retry.max_attempts
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        };
+
+        if can_retry {
+            let retry_task = orch8_types::worker::WorkerTask {
+                id: Uuid::now_v7(),
+                instance_id: task.instance_id,
+                block_id: task.block_id.clone(),
+                handler_name: task.handler_name.clone(),
+                queue_name: task.queue_name.clone(),
+                params: task.params.clone(),
+                context: task.context.clone(),
+                attempt: task.attempt + 1,
+                timeout_ms: task.timeout_ms,
+                state: WorkerTaskState::Pending,
+                worker_id: None,
+                claimed_at: None,
+                heartbeat_at: None,
+                completed_at: None,
+                output: None,
+                error_message: None,
+                error_retryable: None,
+                created_at: chrono::Utc::now(),
+            };
+            state
+                .storage
+                .delete_worker_task(task_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            state
+                .storage
+                .create_worker_task(&retry_task)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            state
+                .storage
+                .update_instance_state(
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        } else {
+            // Retries exhausted or no retry policy: fail immediately.
+            state
+                .storage
+                .delete_worker_task(task_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            state
+                .storage
+                .update_instance_state(task.instance_id, InstanceState::Failed, None)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        }
     } else if has_tree {
         if let Some(node) = tree.iter().find(|n| {
             n.block_id == task.block_id

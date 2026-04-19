@@ -378,6 +378,13 @@ impl StorageBackend for EncryptingStorage {
         self.inner.mark_signals_delivered(signal_ids).await
     }
 
+    async fn get_signalled_instance_ids(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(InstanceId, orch8_types::instance::InstanceState)>, StorageError> {
+        self.inner.get_signalled_instance_ids(limit).await
+    }
+
     // === Idempotency ===
 
     async fn find_by_idempotency_key(

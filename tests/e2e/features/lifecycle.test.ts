@@ -71,7 +71,7 @@ describe("Instance Lifecycle", () => {
     assert.equal((outputs[0]!.output as any).slept_ms, 50);
   });
 
-  it("should fail on unknown handler", async () => {
+  it("should dispatch unknown handler to external worker queue", async () => {
     const seq = testSequence("unknown-handler", [step("s1", "does_not_exist")]);
     await client.createSequence(seq);
 
@@ -81,8 +81,11 @@ describe("Instance Lifecycle", () => {
       namespace: "default",
     });
 
-    const instance = await client.waitForState(id, "failed");
-    assert.equal(instance.state, "failed");
+    // Unknown handlers are dispatched to external workers (using handler
+    // name as the implicit queue). The instance transitions to `waiting`
+    // until a worker picks up the task.
+    const instance = await client.waitForState(id, "waiting");
+    assert.equal(instance.state, "waiting");
   });
 
   it("should persist and retrieve outputs", async () => {

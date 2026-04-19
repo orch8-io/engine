@@ -42,8 +42,13 @@ pub async fn execute_router(
             Cow::Borrowed(&instance.context)
         };
 
+    // Load block outputs so route conditions can reference `outputs.step_id.field`.
+    let outputs = crate::handlers::param_resolve::build_outputs_shape(storage, instance.id)
+        .await
+        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+
     // Determine which branch to take.
-    let selected_branch = select_branch(router_def, ctx_for_conditions.as_ref());
+    let selected_branch = select_branch(router_def, ctx_for_conditions.as_ref(), &outputs);
 
     let all_children = evaluator::children_of(tree, node.id, None);
 
@@ -112,10 +117,10 @@ fn is_marker_present(ctx: &orch8_types::context::ExecutionContext) -> bool {
 fn select_branch(
     router_def: &RouterDef,
     context: &orch8_types::context::ExecutionContext,
+    outputs: &serde_json::Value,
 ) -> usize {
-    let empty_outputs = serde_json::Value::Object(serde_json::Map::new());
     for (i, route) in router_def.routes.iter().enumerate() {
-        if crate::expression::evaluate_condition(&route.condition, context, &empty_outputs) {
+        if crate::expression::evaluate_condition(&route.condition, context, outputs) {
             return i;
         }
     }
@@ -270,7 +275,7 @@ mod tests {
 
         // Before inflation, the condition compares against the marker object
         // and falls through to the default branch (index == routes.len()).
-        assert_eq!(select_branch(&router, &ctx), router.routes.len());
+        assert_eq!(select_branch(&router, &ctx, &empty()), router.routes.len());
 
         // After inflation, the first route matches.
         assert!(is_marker_present(&ctx));
@@ -278,7 +283,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inflated.data["status"], json!("active"));
-        assert_eq!(select_branch(&router, &inflated), 0);
+        assert_eq!(select_branch(&router, &inflated, &empty()), 0);
     }
 
     /// A missing externalized payload leaves the marker in place. The router
@@ -306,6 +311,9 @@ mod tests {
             .unwrap();
         // Marker is still present because payload was never written.
         assert!(is_marker_present(&resolved));
-        assert_eq!(select_branch(&router, &resolved), router.routes.len());
+        assert_eq!(
+            select_branch(&router, &resolved, &empty()),
+            router.routes.len()
+        );
     }
 }

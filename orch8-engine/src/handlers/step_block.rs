@@ -65,8 +65,7 @@ where
             evaluator::complete_node(storage, node.id).await?;
             Ok(true)
         }
-        Err(orch8_types::error::StepError::Retryable { .. }) => Ok(true),
-        Err(_) => {
+        Err(orch8_types::error::StepError::Retryable { .. }) | Err(_) => {
             evaluator::fail_node(storage, node.id).await?;
             Ok(false)
         }
@@ -209,7 +208,8 @@ pub async fn execute_step_node(
     }
 
     // If the handler is not registered in-process, dispatch to external worker queue.
-    if !handlers.contains(&step_def.handler) {
+    let handler_registered = handlers.contains(&step_def.handler);
+    if !handler_registered {
         return dispatch_step_to_external_worker(
             storage.as_ref(),
             instance,

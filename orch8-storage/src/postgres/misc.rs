@@ -155,8 +155,13 @@ pub(super) async fn inject_blocks(
     // Store injected blocks in instance metadata under `_injected_blocks`.
     sqlx::query(
         r"UPDATE task_instances
-          SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{_injected_blocks}',
-              COALESCE(metadata->'_injected_blocks', '[]'::jsonb) || $2),
+          SET metadata = jsonb_set(
+              CASE WHEN metadata IS NULL OR metadata = 'null'::jsonb THEN '{}'::jsonb ELSE metadata END,
+              '{_injected_blocks}',
+              COALESCE(
+                  CASE WHEN metadata IS NULL OR metadata = 'null'::jsonb THEN NULL ELSE metadata->'_injected_blocks' END,
+                  '[]'::jsonb
+              ) || $2),
               updated_at = NOW()
           WHERE id = $1",
     )

@@ -1,8 +1,11 @@
 //! Transparent AES-256-GCM encryption for sensitive JSON values stored at rest.
 //!
 //! Usage:
-//! ```ignore
-//! let enc = FieldEncryptor::from_hex_key("...64-char hex key...").unwrap();
+//! ```rust,no_run
+//! use orch8_types::encryption::FieldEncryptor;
+//! use serde_json::json;
+//!
+//! let enc = FieldEncryptor::from_hex_key("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
 //! let encrypted = enc.encrypt_value(&json!({"secret": "data"})).unwrap();
 //! let decrypted = enc.decrypt_value(&encrypted).unwrap();
 //! ```

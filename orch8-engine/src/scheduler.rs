@@ -90,6 +90,26 @@ pub async fn run_tick_loop(
                 ).await {
                     error!(error = %e, "tick processing failed");
                 }
+                // Process signals for paused/waiting instances that won't be
+                // picked up by claim_due_instances (which only claims
+                // scheduled instances). Without this, resume/cancel signals
+                // on paused instances would never be processed.
+                if let Err(e) = process_signalled_instances(&storage, batch_size).await {
+                    error!(error = %e, "signalled instance processing failed");
+                }
+                // Check SLA deadlines for waiting instances (external worker
+                // dispatch). These instances are not claimed by the normal
+                // tick, but deadlines should still fire.
+                if let Err(e) = process_waiting_deadlines(
+                    &storage,
+                    &handlers,
+                    &sequence_cache,
+                    &webhook_config,
+                    &cancel,
+                    batch_size,
+                ).await {
+                    error!(error = %e, "waiting deadline processing failed");
+                }
             }
         }
     }
@@ -132,13 +152,20 @@ async fn process_tick(
     let fetch_limit = std::cmp::min(batch_size, u32::try_from(available).unwrap_or(u32::MAX));
 
     let now = Utc::now();
-    let mut instances = storage
+    let instances = storage
         .claim_due_instances(now, fetch_limit, max_per_tenant)
         .await?;
 
     if instances.is_empty() {
         return Ok(());
     }
+
+    // Enforce concurrency limits BEFORE spawning tasks. `claim_due_instances`
+    // sets all claimed instances to Running in a single batch — if multiple
+    // instances share a concurrency_key, more than `max_concurrency` may be
+    // Running simultaneously. We put the excess back to Scheduled here,
+    // synchronously, so the observable Running count never exceeds the limit.
+    let mut instances = enforce_concurrency_limits(storage, instances).await?;
 
     let count = instances.len();
     tracing::Span::current().record("claimed", count);
@@ -230,6 +257,277 @@ async fn process_tick(
     Ok(())
 }
 
+/// Enforce per-concurrency-key limits on a batch of freshly claimed (Running)
+/// instances. For each distinct `concurrency_key`, we count how many instances
+/// with that key were *already* Running in the DB before this batch was claimed,
+/// then keep only enough from the batch to stay within `max_concurrency`. Excess
+/// instances are transitioned back to `Scheduled` with a short defer window so
+/// they are retried on a future tick.
+///
+/// Returns the filtered list of instances that should proceed to processing.
+async fn enforce_concurrency_limits(
+    storage: &Arc<dyn StorageBackend>,
+    instances: Vec<orch8_types::instance::TaskInstance>,
+) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
+    // Collect concurrency keys present in the batch.
+    let mut key_instances: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, inst) in instances.iter().enumerate() {
+        if let (Some(ref key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
+            key_instances.entry(key.clone()).or_default().push(idx);
+        }
+    }
+
+    if key_instances.is_empty() {
+        return Ok(instances);
+    }
+
+    // For each concurrency key, determine how many slots are available.
+    let mut deferred_indices = std::collections::HashSet::new();
+    for (key, indices) in &key_instances {
+        // All instances in the group share the same max_concurrency.
+        let max = instances[indices[0]].max_concurrency.unwrap_or(i32::MAX);
+
+        // Count how many instances with this key are currently Running in the
+        // DB. This count includes the instances we just claimed (since
+        // claim_due_instances already set them to Running). Subtract the batch
+        // members to get the pre-existing running count.
+        let total_running = storage.count_running_by_concurrency_key(key).await?;
+        let batch_count = indices.len() as i64;
+        let already_running = total_running - batch_count;
+        let slots = i64::from(max).saturating_sub(already_running).max(0) as usize;
+
+        // Keep the first `slots` instances (by batch order, which preserves
+        // priority ordering from claim_due_instances), defer the rest.
+        if slots < indices.len() {
+            for &idx in &indices[slots..] {
+                deferred_indices.insert(idx);
+            }
+        }
+    }
+
+    if deferred_indices.is_empty() {
+        return Ok(instances);
+    }
+
+    // Transition excess instances back to Scheduled.
+    let defer_at = Utc::now() + chrono::Duration::seconds(1);
+    for &idx in &deferred_indices {
+        let inst = &instances[idx];
+        debug!(
+            instance_id = %inst.id,
+            concurrency_key = %inst.concurrency_key.as_deref().unwrap_or(""),
+            "concurrency limit exceeded at claim time, deferring"
+        );
+        storage
+            .update_instance_state(inst.id, InstanceState::Scheduled, Some(defer_at))
+            .await?;
+    }
+
+    let kept: Vec<orch8_types::instance::TaskInstance> = instances
+        .into_iter()
+        .enumerate()
+        .filter(|(idx, _)| !deferred_indices.contains(idx))
+        .map(|(_, inst)| inst)
+        .collect();
+
+    Ok(kept)
+}
+
+/// Process signals for instances in paused/waiting state.
+///
+/// `claim_due_instances` only picks up `scheduled` instances. Signals (resume,
+/// cancel, update_context) enqueued against paused or waiting instances would
+/// sit unprocessed indefinitely without this sweep. The function is cheap when
+/// no such signals exist (single indexed query returning empty).
+async fn process_signalled_instances(
+    storage: &Arc<dyn StorageBackend>,
+    batch_size: u32,
+) -> Result<(), EngineError> {
+    let signalled = storage.get_signalled_instance_ids(batch_size).await?;
+    if signalled.is_empty() {
+        return Ok(());
+    }
+
+    debug!(
+        count = signalled.len(),
+        "processing signals for paused/waiting instances"
+    );
+
+    for (instance_id, current_state) in signalled {
+        let signals = storage.get_pending_signals(instance_id).await?;
+        if signals.is_empty() {
+            continue;
+        }
+        let abort = crate::signals::process_signals_prefetched(
+            storage.as_ref(),
+            instance_id,
+            current_state,
+            signals,
+            None,
+        )
+        .await?;
+        if abort {
+            debug!(
+                instance_id = %instance_id,
+                from_state = %current_state,
+                "signal processed for non-scheduled instance"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Check SLA deadlines for instances stuck in `Waiting` state (dispatched to
+/// external workers that never completed). Runs every tick with a bounded
+/// query to avoid overhead when no deadlines are configured.
+async fn process_waiting_deadlines(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    sequence_cache: &Cache<SequenceId, Arc<SequenceDefinition>>,
+    webhook_config: &WebhookConfig,
+    cancel: &CancellationToken,
+    batch_size: u32,
+) -> Result<(), EngineError> {
+    use orch8_types::filter::{InstanceFilter, Pagination};
+
+    let filter = InstanceFilter {
+        states: Some(vec![InstanceState::Waiting]),
+        ..Default::default()
+    };
+    let pagination = Pagination {
+        offset: 0,
+        limit: batch_size,
+    };
+    let waiting = storage.list_instances(&filter, &pagination).await?;
+
+    for instance in &waiting {
+        let seq = match get_sequence_cached(storage.as_ref(), sequence_cache, instance.sequence_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        for block in &seq.blocks {
+            if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
+                if step_def.deadline.is_some() {
+                    if check_step_deadline_waiting(
+                        storage,
+                        handlers,
+                        instance,
+                        step_def,
+                        webhook_config,
+                        cancel,
+                    )
+                    .await?
+                    {
+                        break; // Instance was failed — no need to check more steps.
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// SLA deadline check variant for instances in `Waiting` state.
+/// Mirrors `check_step_deadline` but transitions from `Waiting` instead of `Running`.
+async fn check_step_deadline_waiting(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    _webhook_config: &WebhookConfig,
+    _cancel: &CancellationToken,
+) -> Result<bool, EngineError> {
+    let Some(deadline) = step_def.deadline else {
+        return Ok(false);
+    };
+    let prev_output = storage.get_block_output(instance.id, &step_def.id).await?;
+    let baseline = prev_output
+        .as_ref()
+        .map(|o| o.created_at)
+        .or(instance.context.runtime.started_at);
+    let Some(baseline) = baseline else {
+        return Ok(false);
+    };
+    let elapsed = Utc::now() - baseline;
+    if elapsed < chrono::Duration::from_std(deadline).unwrap_or(chrono::TimeDelta::MAX) {
+        return Ok(false);
+    }
+
+    let instance_id = instance.id;
+    warn!(
+        instance_id = %instance_id,
+        block_id = %step_def.id,
+        deadline_ms = u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+        elapsed_ms = elapsed.num_milliseconds(),
+        "SLA deadline breached (waiting instance)"
+    );
+
+    // Invoke escalation handler if configured.
+    if let Some(ref escalation) = step_def.on_deadline_breach {
+        if let Some(handler) = handlers.get(&escalation.handler) {
+            let mut params = escalation.params.clone();
+            if let serde_json::Value::Object(ref mut map) = params {
+                map.insert("_breach_block_id".into(), serde_json::json!(step_def.id.0));
+                map.insert(
+                    "_breach_instance_id".into(),
+                    serde_json::json!(instance_id.0),
+                );
+                map.insert(
+                    "_breach_elapsed_ms".into(),
+                    serde_json::json!(elapsed.num_milliseconds()),
+                );
+                map.insert(
+                    "_breach_deadline_ms".into(),
+                    serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+                );
+            }
+            let step_ctx = crate::handlers::StepContext {
+                instance_id,
+                tenant_id: instance.tenant_id.clone(),
+                block_id: step_def.id.clone(),
+                params,
+                context: instance.context.clone(),
+                attempt: 0,
+                storage: Arc::clone(storage),
+            };
+            if let Err(e) = handler(step_ctx).await {
+                warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
+            }
+        }
+    }
+
+    let breach_output = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        block_id: step_def.id.clone(),
+        output: serde_json::json!({
+            "_error": "sla_deadline_breached",
+            "_deadline_ms": u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
+            "_elapsed_ms": elapsed.num_milliseconds(),
+        }),
+        output_ref: None,
+        output_size: 0,
+        attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
+        created_at: Utc::now(),
+    };
+    storage.save_block_output(&breach_output).await?;
+    crate::lifecycle::transition_instance(
+        storage.as_ref(),
+        instance_id,
+        InstanceState::Waiting,
+        InstanceState::Failed,
+        None,
+    )
+    .await?;
+    crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
+
+    Ok(true)
+}
+
 /// Build a map from `instance_id` to `PrefetchedData` from the batch query results.
 ///
 /// Consumes both inputs and merges them in place — no intermediate `HashSet`
@@ -300,6 +598,19 @@ async fn process_instance(
         get_sequence_cached(storage.as_ref(), sequence_cache, instance.sequence_id).await?;
 
     // claim_due_instances already set state to Running.
+    // Stamp runtime.started_at on the first run so timeout / escalation
+    // handlers (e.g. human_review) can compute elapsed time.
+    let instance = if instance.context.runtime.started_at.is_none() {
+        let mut ctx = instance.context.clone();
+        ctx.runtime.started_at = Some(Utc::now());
+        storage.update_instance_context(instance_id, &ctx).await?;
+        let mut inst = instance;
+        inst.context = ctx;
+        inst
+    } else {
+        instance
+    };
+
     // Process any pending signals (using pre-fetched data).
     if !prefetched.signals.is_empty() {
         let abort = crate::signals::process_signals_prefetched(
@@ -356,13 +667,25 @@ async fn process_instance(
         }
     }
 
-    // Decide execution path: if the sequence has any composite (non-Step) blocks,
-    // use the tree-based evaluator. Otherwise, use the fast step-only loop.
+    // Decide execution path: if the sequence has any composite (non-Step) blocks
+    // or any plugin handlers (ap://, grpc://, wasm://), use the tree-based
+    // evaluator. Plugin handlers are only dispatched correctly through the tree
+    // evaluator's step_block.rs which knows about all plugin prefixes.
     let has_composite = blocks
         .iter()
         .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)));
 
-    if has_composite {
+    let has_plugin_handler = blocks.iter().any(|b| {
+        if let orch8_types::sequence::BlockDefinition::Step(step) = b {
+            crate::handlers::activepieces::is_ap_handler(&step.handler)
+                || crate::handlers::grpc_plugin::is_grpc_handler(&step.handler)
+                || crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
+        } else {
+            false
+        }
+    });
+
+    if has_composite || has_plugin_handler {
         return process_instance_tree(
             storage,
             handlers,
@@ -428,7 +751,43 @@ async fn process_instance(
     );
 
     info!(instance_id = %instance_id, "instance completed all blocks");
+
+    // Wake parent if this is a sub-sequence child.
+    wake_parent_if_child(storage, &instance).await;
+
     Ok(())
+}
+
+/// If this instance has a `parent_instance_id`, transition the parent from
+/// `Waiting` → `Scheduled` so it is picked up on the next tick and can observe
+/// the child's terminal state.
+async fn wake_parent_if_child(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &orch8_types::instance::TaskInstance,
+) {
+    if let Some(parent_id) = instance.parent_instance_id {
+        if let Ok(Some(parent)) = storage.get_instance(parent_id).await {
+            if parent.state == InstanceState::Waiting {
+                if let Err(e) = storage
+                    .update_instance_state(parent_id, InstanceState::Scheduled, Some(Utc::now()))
+                    .await
+                {
+                    warn!(
+                        parent_id = %parent_id,
+                        child_id = %instance.id,
+                        error = %e,
+                        "failed to wake parent instance after child completion"
+                    );
+                } else {
+                    info!(
+                        parent_id = %parent_id,
+                        child_id = %instance.id,
+                        "woke parent instance after child reached terminal state"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Process an instance using the tree-based evaluator for composite blocks.
@@ -549,6 +908,9 @@ async fn process_instance_tree(
                 );
                 info!(instance_id = %instance_id, from = %current_state, "instance completed (tree evaluation)");
             }
+
+            // Wake parent if this is a sub-sequence child that reached a terminal state.
+            wake_parent_if_child(storage, instance).await;
         }
         Err(e) => {
             error!(instance_id = %instance_id, error = %e, "tree evaluation failed");
@@ -617,10 +979,18 @@ async fn check_step_deadline(
     let Some(deadline) = step_def.deadline else {
         return Ok(false);
     };
-    let Some(prev_output) = storage.get_block_output(instance.id, &step_def.id).await? else {
+    // Compute elapsed time: use previous output's created_at if available
+    // (retry scenario), otherwise fall back to instance runtime start time
+    // (external worker scenario where no output exists yet).
+    let prev_output = storage.get_block_output(instance.id, &step_def.id).await?;
+    let baseline = prev_output
+        .as_ref()
+        .map(|o| o.created_at)
+        .or(instance.context.runtime.started_at);
+    let Some(baseline) = baseline else {
         return Ok(false);
     };
-    let elapsed = Utc::now() - prev_output.created_at;
+    let elapsed = Utc::now() - baseline;
     if elapsed < chrono::Duration::from_std(deadline).unwrap_or(chrono::TimeDelta::MAX) {
         return Ok(false);
     }
@@ -685,7 +1055,7 @@ async fn check_step_deadline(
         }),
         output_ref: None,
         output_size: 0,
-        attempt: prev_output.attempt,
+        attempt: prev_output.as_ref().map_or(0, |o| o.attempt),
         created_at: Utc::now(),
     };
     storage.save_block_output(&breach_output).await?;
@@ -880,7 +1250,17 @@ async fn check_human_input(
                         created_at: chrono::Utc::now(),
                     };
                     storage.save_block_output(&output).await?;
-                    return Ok(false); // Continue — escalation handler proceeds
+                    // Re-schedule immediately so the next tick sees the block
+                    // output in completed_blocks and skips this step.
+                    crate::lifecycle::transition_instance(
+                        storage,
+                        instance.id,
+                        InstanceState::Running,
+                        InstanceState::Scheduled,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await?;
+                    return Ok(true); // Deferred — do NOT fall through to the step handler
                 }
                 return Err(EngineError::StepTimeout {
                     block_id: step_def.id.clone(),
@@ -891,7 +1271,22 @@ async fn check_human_input(
     }
 
     // Still waiting — re-schedule the instance for a future tick.
-    let check_interval = chrono::Duration::seconds(5);
+    // Use the shorter of 5s and the remaining timeout so escalation fires promptly.
+    let check_interval = if let Some(timeout) = human_def.timeout {
+        if let Some(started) = instance.context.runtime.started_at {
+            let remaining = chrono::Duration::from_std(timeout)
+                .unwrap_or(chrono::Duration::seconds(5))
+                - (chrono::Utc::now() - started);
+            let min_interval = chrono::Duration::milliseconds(100);
+            remaining
+                .max(min_interval)
+                .min(chrono::Duration::seconds(5))
+        } else {
+            chrono::Duration::seconds(5)
+        }
+    } else {
+        chrono::Duration::seconds(5)
+    };
     let next_check = chrono::Utc::now() + check_interval;
     crate::lifecycle::transition_instance(
         storage,
@@ -1039,7 +1434,9 @@ async fn execute_step_block(
         .await;
     }
 
-    // If the handler is not registered in-process, dispatch to external worker queue.
+    // If the handler is not registered in-process, dispatch to an external
+    // worker queue. This mirrors the tree evaluator path in `step_block.rs`
+    // which always dispatches unregistered handlers to external workers.
     if !handlers.contains(&step_def.handler) {
         return dispatch_to_external_worker(
             storage.as_ref(),
@@ -1070,9 +1467,63 @@ async fn execute_step_block(
 
     match result {
         Ok(block_output) => {
-            // Step succeeded — just save the output (no state transition yet).
-            // The caller will continue executing more blocks or complete the instance.
+            // Check for self-modify output: inject blocks into the instance.
+            // Mirrors the tree-evaluator path in `step_block.rs`.
+            let is_self_modify = block_output
+                .output
+                .get("_self_modify")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+
             storage.save_block_output(&block_output).await?;
+
+            if is_self_modify {
+                if let Some(blocks) = block_output.output.get("blocks").filter(|v| v.is_array()) {
+                    let position = block_output
+                        .output
+                        .get("position")
+                        .and_then(serde_json::Value::as_u64);
+                    let final_blocks = if let Some(pos) = position {
+                        let existing = storage
+                            .get_injected_blocks(instance_id)
+                            .await
+                            .unwrap_or(None);
+                        let mut arr = existing
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
+                        let new = blocks.as_array().cloned().unwrap_or_default();
+                        #[allow(clippy::cast_possible_truncation)]
+                        let at = (pos.min(usize::MAX as u64) as usize).min(arr.len());
+                        for (i, b) in new.into_iter().enumerate() {
+                            arr.insert(at + i, b);
+                        }
+                        serde_json::Value::Array(arr)
+                    } else {
+                        blocks.clone()
+                    };
+                    if let Err(e) = storage.inject_blocks(instance_id, &final_blocks).await {
+                        tracing::warn!(
+                            instance_id = %instance_id,
+                            error = %e,
+                            "failed to inject self-modify blocks"
+                        );
+                    }
+                }
+                // Transition back to Scheduled so the next tick picks up
+                // the instance again. `merged_blocks` will then see the
+                // newly injected steps. Use `now` as fire-at so the
+                // scheduler claims it immediately.
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    InstanceState::Running,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await?;
+                return Ok(StepOutcome::Deferred);
+            }
+
             Ok(StepOutcome::Completed)
         }
         Err(EngineError::StepFailed {
@@ -1604,11 +2055,14 @@ mod tests {
         seed_instance_with_context(storage.as_ref(), instance_id, ctx).await;
         let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
 
-        let step_def = mk_step_def(
+        let mut step_def = mk_step_def(
             "external",
             "not_registered_handler",
             serde_json::json!({"trigger_slug": "{{context.data.slug}}"}),
         );
+        // Explicit queue_name so the fast path dispatches to external workers
+        // instead of failing for unknown handler.
+        step_def.queue_name = Some("not_registered_handler".to_string());
 
         // Empty registry — forces the external-worker dispatch branch.
         let registry = HandlerRegistry::new();

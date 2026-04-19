@@ -205,3 +205,31 @@ pub(super) async fn mark_delivered_batch(
         .map_err(|e| StorageError::Query(e.to_string()))?;
     Ok(())
 }
+
+pub(super) async fn get_signalled_instance_ids(
+    storage: &SqliteStorage,
+    limit: u32,
+) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r"
+        SELECT DISTINCT ti.id, ti.state
+        FROM task_instances ti
+        INNER JOIN signal_inbox si ON si.instance_id = ti.id
+        WHERE ti.state IN ('paused', 'waiting')
+          AND si.delivered = 0
+        LIMIT ?1
+        ",
+    )
+    .bind(i64::from(limit))
+    .fetch_all(&storage.pool)
+    .await
+    .map_err(|e| StorageError::Query(e.to_string()))?;
+
+    rows.into_iter()
+        .map(|(id_str, state_str)| {
+            let id = Uuid::parse_str(&id_str).map_err(|e| StorageError::Query(e.to_string()))?;
+            let state = InstanceState::from_str(&state_str).map_err(StorageError::Query)?;
+            Ok((InstanceId(id), state))
+        })
+        .collect()
+}

@@ -94,13 +94,7 @@ describe("Composite Blocks", () => {
     assert.equal(completed.state, "completed");
   });
 
-  // BLOCKED BY: engine does not advance past branch[0] in multi-step parallel branches
-  // (see orch8-engine/src/handlers/parallel.rs:30-37 — `execute_parallel` flat-activates
-  // every child across every branch to `Running` at once, with no per-branch cursor.
-  // For intra-branch ordering `[a1, a2]`, a2 should only activate after a1 completes,
-  // but the handler has no notion of branch-local sequencing, so this hangs until the
-  // runner-level 15s timeout. Flip back to `it` once parallel gains branch cursors.)
-  it.skip("parallel: multi-step branches", async () => {
+  it("parallel: multi-step branches", async () => {
     const seq = testSequence("par-multi", [
       parallel("p1", [
         [step("a1", "noop"), step("a2", "log", { message: "branch-a" })],
