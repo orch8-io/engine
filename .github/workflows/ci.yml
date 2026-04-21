@@ -54,8 +54,30 @@ jobs:
       DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
       # Limit link parallelism to avoid OOM / bus-error on 2-core runners.
       CARGO_BUILD_JOBS: 2
+      # Shrink on-disk artifacts — the default debug info for tests has
+      # exhausted the runner's 14GB root disk during `cargo test
+      # --workspace`. Line-tables-only keeps backtraces usable while
+      # cutting test-binary size roughly in half, and disabling
+      # incremental prevents the duplicate object-file growth that
+      # compounds across crates.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+      # Frees ~30GB by removing preinstalled .NET / Android / Haskell /
+      # large apt packages + swap. Required because `cargo test
+      # --workspace` has been hitting "No space left on device" on the
+      # default ubuntu-latest image.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc
