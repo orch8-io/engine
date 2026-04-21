@@ -273,6 +273,18 @@ impl StorageBackend for EncryptingStorage {
             .await
     }
 
+    async fn conditional_update_instance_state(
+        &self,
+        id: InstanceId,
+        expected_state: orch8_types::instance::InstanceState,
+        new_state: orch8_types::instance::InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .conditional_update_instance_state(id, expected_state, new_state, next_fire_at)
+            .await
+    }
+
     async fn update_instance_context(
         &self,
         id: InstanceId,
@@ -322,30 +334,47 @@ impl StorageBackend for EncryptingStorage {
         // through last-writer-wins here. Callers relying on per-key
         // concurrent merges must layer their own coordination when
         // encryption is enabled.
-        // Mirror the base implementation's no-op-on-missing behaviour
-        // (see `merge_context_data_on_missing_instance_is_noop`).
-        let Some(mut instance) = self.inner.get_instance(id).await? else {
-            return Ok(());
-        };
-        // Decrypt the existing payload into plain JSON before merging.
-        self.decrypt_instance(&mut instance)?;
+        // Optimistic retry loop: read-decrypt-merge-write, retrying if a
+        // concurrent writer moved `updated_at` between our read and write.
+        // Caps at 3 attempts to avoid unbounded spinning under pathological
+        // contention; callers that need stronger guarantees should use
+        // per-instance coordination (e.g. the conditional state update).
+        const MAX_RETRIES: u32 = 3;
+        for attempt in 0..MAX_RETRIES {
+            let Some(mut instance) = self.inner.get_instance(id).await? else {
+                return Ok(());
+            };
+            let read_version = instance.updated_at;
+            self.decrypt_instance(&mut instance)?;
 
-        // Ensure `context.data` is an object so we can set the key. The
-        // CASE expression in the plain-path SQL normalises null→`{}`; we
-        // replicate that behaviour here so callers see identical semantics
-        // regardless of encryption state.
-        if !instance.context.data.is_object() {
-            instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-        }
-        if let Some(map) = instance.context.data.as_object_mut() {
-            map.insert(key.to_string(), value.clone());
-        }
+            if !instance.context.data.is_object() {
+                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = instance.context.data.as_object_mut() {
+                map.insert(key.to_string(), value.clone());
+            }
 
-        // Re-encrypt and write the full context back. Using
-        // `update_instance_context` (which our wrapper encrypts in the
-        // normal way) avoids threading the encrypt call through the inner
-        // trait's merge hook a second time.
-        self.update_instance_context(id, &instance.context).await
+            self.update_instance_context(id, &instance.context).await?;
+
+            // Verify: if `updated_at` advanced past our write, a concurrent
+            // writer landed between our read and write — retry.
+            if let Some(after) = self.inner.get_instance(id).await? {
+                if after.updated_at == read_version || attempt == MAX_RETRIES - 1 {
+                    // Either we won the race (our write was last) or this is
+                    // the final attempt — accept the outcome.
+                    return Ok(());
+                }
+                // Concurrent writer — retry with fresh state.
+                tracing::debug!(
+                    instance_id = %id,
+                    attempt = attempt,
+                    "encrypted merge_context_data detected concurrent write, retrying"
+                );
+            } else {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     async fn list_instances(

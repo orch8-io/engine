@@ -250,6 +250,14 @@ impl Orch8Service for Orch8GrpcService {
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
         let new_state: orch8_types::instance::InstanceState =
             from_json_str(&format!("\"{}\"", req.get_ref().new_state))?;
+        // Validate the transition — HTTP path checks `can_transition_to`;
+        // without this the gRPC path allows invalid moves like completed→running.
+        if !inst.state.can_transition_to(new_state) {
+            return Err(Status::failed_precondition(format!(
+                "invalid transition: {} -> {}",
+                inst.state, new_state
+            )));
+        }
         self.storage
             .update_instance_state(id, new_state, None)
             .await
@@ -546,12 +554,22 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         req: Request<proto::PollTasksRequest>,
     ) -> Result<Response<proto::PollTasksResponse>, Status> {
+        let scoped = crate::auth::caller_tenant(&req).cloned();
         let inner = req.into_inner();
-        let tasks = self
-            .storage
-            .claim_worker_tasks(&inner.handler_name, &inner.worker_id, inner.limit)
-            .await
-            .map_err(storage_err)?;
+        let limit = inner.limit.min(1000);
+        // Route through tenant-aware claim when caller is tenant-scoped,
+        // matching the HTTP path's isolation semantics.
+        let tasks = if let Some(ref tid) = scoped {
+            self.storage
+                .claim_worker_tasks_for_tenant(&inner.handler_name, &inner.worker_id, tid, limit)
+                .await
+                .map_err(storage_err)?
+        } else {
+            self.storage
+                .claim_worker_tasks(&inner.handler_name, &inner.worker_id, limit)
+                .await
+                .map_err(storage_err)?
+        };
         let json: Result<Vec<_>, _> = tasks.iter().map(|t| to_json_string(t)).collect();
         Ok(Response::new(proto::PollTasksResponse {
             tasks_json: json?,
@@ -565,10 +583,89 @@ impl Orch8Service for Orch8GrpcService {
         let inner = req.into_inner();
         let task_id = parse_uuid(&inner.task_id)?;
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
-        self.storage
+
+        let updated = self
+            .storage
             .complete_worker_task(task_id, &inner.worker_id, &output)
             .await
             .map_err(storage_err)?;
+        if !updated {
+            return Err(Status::not_found(format!("worker_task {task_id}")));
+        }
+
+        let task = self
+            .storage
+            .get_worker_task(task_id)
+            .await
+            .map_err(storage_err)?
+            .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
+
+        // Guard terminal instances — mirrors the HTTP path. A late completion
+        // must not resurrect a cancelled/failed instance.
+        if let Some(instance) = self
+            .storage
+            .get_instance(task.instance_id)
+            .await
+            .map_err(storage_err)?
+        {
+            if instance.state.is_terminal() {
+                tracing::info!(
+                    instance_id = %task.instance_id,
+                    state = %instance.state,
+                    "gRPC worker completion for terminal instance — skipping transition"
+                );
+                return Ok(Response::new(proto::Empty {}));
+            }
+        }
+
+        // Save block output — without this the step has no recorded result
+        // and downstream blocks see a missing output.
+        let output_json = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
+        let block_output = orch8_types::output::BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: task.instance_id,
+            block_id: task.block_id.clone(),
+            output,
+            output_ref: None,
+            output_size: i32::try_from(output_json.len()).unwrap_or(i32::MAX),
+            attempt: task.attempt,
+            created_at: chrono::Utc::now(),
+        };
+        self.storage
+            .save_block_output(&block_output)
+            .await
+            .map_err(storage_err)?;
+
+        // Update execution tree node to Completed if present.
+        let tree = self
+            .storage
+            .get_execution_tree(task.instance_id)
+            .await
+            .map_err(storage_err)?;
+        if let Some(node) = tree.iter().find(|n| {
+            n.block_id == task.block_id
+                && matches!(
+                    n.state,
+                    orch8_types::execution::NodeState::Running
+                        | orch8_types::execution::NodeState::Waiting
+                )
+        }) {
+            self.storage
+                .update_node_state(node.id, orch8_types::execution::NodeState::Completed)
+                .await
+                .map_err(storage_err)?;
+        }
+
+        // Reschedule the instance so the evaluator picks it up on the next tick.
+        self.storage
+            .update_instance_state(
+                task.instance_id,
+                orch8_types::instance::InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .map_err(storage_err)?;
+
         Ok(Response::new(proto::Empty {}))
     }
 
@@ -578,10 +675,69 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let inner = req.into_inner();
         let task_id = parse_uuid(&inner.task_id)?;
-        self.storage
+        let updated = self
+            .storage
             .fail_worker_task(task_id, &inner.worker_id, &inner.message, inner.retryable)
             .await
             .map_err(storage_err)?;
+        if !updated {
+            return Err(Status::not_found(format!("worker_task {task_id}")));
+        }
+
+        let task = self
+            .storage
+            .get_worker_task(task_id)
+            .await
+            .map_err(storage_err)?
+            .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
+
+        // Terminal guard — mirrors HTTP fail_task.
+        if let Some(inst) = self
+            .storage
+            .get_instance(task.instance_id)
+            .await
+            .map_err(storage_err)?
+        {
+            if inst.state.is_terminal() {
+                tracing::info!(
+                    instance_id = %task.instance_id,
+                    state = %inst.state,
+                    "gRPC worker failure for terminal instance — skipping transition"
+                );
+                return Ok(Response::new(proto::Empty {}));
+            }
+        }
+
+        // Update execution tree node to Failed if present.
+        let tree = self
+            .storage
+            .get_execution_tree(task.instance_id)
+            .await
+            .map_err(storage_err)?;
+        if let Some(node) = tree.iter().find(|n| {
+            n.block_id == task.block_id
+                && matches!(
+                    n.state,
+                    orch8_types::execution::NodeState::Running
+                        | orch8_types::execution::NodeState::Waiting
+                )
+        }) {
+            self.storage
+                .update_node_state(node.id, orch8_types::execution::NodeState::Failed)
+                .await
+                .map_err(storage_err)?;
+        }
+
+        // Reschedule so the evaluator handles the failure (retry/fail decision).
+        self.storage
+            .update_instance_state(
+                task.instance_id,
+                orch8_types::instance::InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .map_err(storage_err)?;
+
         Ok(Response::new(proto::Empty {}))
     }
 

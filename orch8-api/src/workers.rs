@@ -376,6 +376,29 @@ pub(crate) async fn fail_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
+    // Guard: if the instance has already reached a terminal state (completed,
+    // failed, cancelled), accept the failure report but skip state mutation.
+    // Without this, a late worker failure can resurrect or overwrite a terminal
+    // instance — the same race that `complete_task` guards against.
+    if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await {
+        if inst.state.is_terminal() {
+            tracing::info!(
+                instance_id = %task.instance_id,
+                state = %inst.state,
+                block_id = %task.block_id,
+                "external worker failure arrived for terminal instance — task accepted, transition skipped"
+            );
+            if let (Some(cb), Some(tenant)) =
+                (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
+            {
+                if orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name) {
+                    cb.record_failure(tenant, &task.handler_name);
+                }
+            }
+            return Ok(StatusCode::OK);
+        }
+    }
+
     let tree = state
         .storage
         .get_execution_tree(task.instance_id)
@@ -712,7 +735,7 @@ pub(crate) async fn list_tasks(
     };
 
     let pagination = Pagination {
-        limit: query.limit,
+        limit: query.limit.min(1000),
         offset: query.offset,
     };
 

@@ -172,6 +172,25 @@ pub trait StorageBackend: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Atomically update instance state only if the current state matches
+    /// `expected_state`. Returns `true` if the row was updated, `false` if
+    /// the state had already moved (concurrent writer won the race).
+    ///
+    /// Default implementation falls through to `update_instance_state`
+    /// without the guard — production backends override with
+    /// `WHERE id = $1 AND state = $expected`.
+    async fn conditional_update_instance_state(
+        &self,
+        id: InstanceId,
+        _expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        self.update_instance_state(id, new_state, next_fire_at)
+            .await?;
+        Ok(true)
+    }
+
     async fn update_instance_context(
         &self,
         id: InstanceId,

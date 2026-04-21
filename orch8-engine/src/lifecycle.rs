@@ -34,9 +34,25 @@ pub async fn transition_instance(
         });
     }
 
-    storage
-        .update_instance_state(instance_id, to, next_fire_at)
+    // Atomic CAS: only update if the row is still in `from` state.
+    // Prevents a concurrent cancel/fail from being silently overwritten
+    // by a late scheduler or worker callback.
+    let updated = storage
+        .conditional_update_instance_state(instance_id, from, to, next_fire_at)
         .await?;
+    if !updated {
+        warn!(
+            instance_id = %instance_id,
+            from = %from,
+            to = %to,
+            "state transition conflict — instance was already moved by a concurrent writer"
+        );
+        return Err(EngineError::InvalidTransition {
+            instance_id,
+            from,
+            to,
+        });
+    }
 
     info!(
         instance_id = %instance_id,

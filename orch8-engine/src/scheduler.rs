@@ -205,9 +205,24 @@ async fn process_tick(
     let prefetched = Arc::new(build_prefetch_map(signals_map, completed_map));
 
     for instance in instances {
+        // Reserve the permit synchronously BEFORE spawning so fast ticks
+        // cannot claim more rows than available concurrency slots. The permit
+        // is moved into the spawned task and released when processing completes.
+        let Ok(permit) = semaphore.clone().try_acquire_owned() else {
+            // All permits taken — defer this instance back to Scheduled so
+            // a future tick picks it up.
+            debug!(
+                instance_id = %instance.id,
+                "no semaphore permit available, deferring instance"
+            );
+            let _ = storage
+                .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
+                .await;
+            continue;
+        };
+
         let storage = Arc::clone(storage);
         let handlers = Arc::clone(handlers);
-        let semaphore = Arc::clone(semaphore);
         let webhooks = Arc::clone(webhook_config);
         let seq_cache = Arc::clone(sequence_cache);
         let prefetched = Arc::clone(&prefetched);
@@ -216,11 +231,8 @@ async fn process_tick(
         crate::metrics::inc(crate::metrics::INSTANCES_CLAIMED);
 
         tokio::spawn(async move {
-            // Acquire semaphore permit to bound concurrency.
-            let Ok(_permit) = semaphore.acquire().await else {
-                error!("semaphore closed unexpectedly");
-                return;
-            };
+            // Permit was acquired before spawn — hold it for the duration.
+            let _permit = permit;
 
             let _instance_timer = crate::metrics::Timer::start(crate::metrics::INSTANCE_DURATION);
             let instance_id = instance.id;

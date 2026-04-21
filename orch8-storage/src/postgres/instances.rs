@@ -325,6 +325,31 @@ pub(super) async fn update_state(
     Ok(())
 }
 
+/// Atomic CAS: update state only if current state matches `expected_state`.
+/// Returns `true` if the row was updated, `false` if the state had moved.
+pub(super) async fn conditional_update_state(
+    store: &PostgresStorage,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        r"
+        UPDATE task_instances
+        SET state = $2, next_fire_at = $3, updated_at = NOW()
+        WHERE id = $1 AND state = $4
+        ",
+    )
+    .bind(id.0)
+    .bind(new_state.to_string())
+    .bind(next_fire_at)
+    .bind(expected_state.to_string())
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 pub(super) async fn update_context(
     store: &PostgresStorage,
     id: InstanceId,

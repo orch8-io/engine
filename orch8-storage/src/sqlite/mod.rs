@@ -261,6 +261,16 @@ impl StorageBackend for SqliteStorage {
         instances::update_state(self, id, new_state, next_fire_at).await
     }
 
+    async fn conditional_update_instance_state(
+        &self,
+        id: InstanceId,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        instances::conditional_update_state(self, id, expected_state, new_state, next_fire_at).await
+    }
+
     async fn update_instance_context_externalized(
         &self,
         id: InstanceId,
