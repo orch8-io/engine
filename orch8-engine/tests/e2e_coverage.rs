@@ -199,7 +199,6 @@ async fn drive(
                     .await
                     .unwrap();
             }
-            InstanceState::Running => {}
             _ => {}
         }
         let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
