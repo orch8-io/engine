@@ -129,7 +129,7 @@ pub(super) async fn delete_for_blocks(
     qb.push(" AND block_id IN (");
     let mut sep = qb.separated(", ");
     for bid in block_ids {
-        sep.push_bind(bid.0.clone());
+        sep.push_bind(&bid.0);
     }
     sep.push_unseparated(")");
     let result = qb.build().execute(&storage.pool).await?;

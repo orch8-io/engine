@@ -352,7 +352,7 @@ pub(super) async fn cancel_for_blocks(
     qb.push(" AND block_id IN (");
     let mut sep = qb.separated(", ");
     for bid in block_ids {
-        sep.push_bind(bid.clone());
+        sep.push_bind(bid);
     }
     sep.push_unseparated(")");
     let result = qb.build().execute(&storage.pool).await?;
@@ -367,7 +367,7 @@ pub(super) async fn list(
     let mut qb = sqlx::QueryBuilder::new("SELECT * FROM worker_tasks WHERE 1=1");
     if let Some(ref tid) = filter.tenant_id {
         qb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
-        qb.push_bind(tid.0.clone());
+        qb.push_bind(&tid.0);
         qb.push(")");
     }
     if let Some(ref states) = filter.states {
@@ -382,15 +382,15 @@ pub(super) async fn list(
     }
     if let Some(ref handler) = filter.handler_name {
         qb.push(" AND handler_name=");
-        qb.push_bind(handler.clone());
+        qb.push_bind(handler);
     }
     if let Some(ref wid) = filter.worker_id {
         qb.push(" AND worker_id=");
-        qb.push_bind(wid.clone());
+        qb.push_bind(wid);
     }
     if let Some(ref queue) = filter.queue_name {
         qb.push(" AND queue_name=");
-        qb.push_bind(queue.clone());
+        qb.push_bind(queue);
     }
     qb.push(" ORDER BY created_at DESC");
 
