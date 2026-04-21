@@ -38,7 +38,7 @@ pub(super) async fn get(
     .bind(name)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(PluginRow::into_plugin))
+    row.map(PluginRow::into_plugin).transpose()
 }
 
 pub(super) async fn list(
@@ -64,7 +64,9 @@ pub(super) async fn list(
             .await?
         }
     };
-    Ok(rows.into_iter().map(PluginRow::into_plugin).collect())
+    rows.into_iter()
+        .map(PluginRow::into_plugin)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub(super) async fn update(
@@ -111,17 +113,19 @@ struct PluginRow {
 }
 
 impl PluginRow {
-    fn into_plugin(self) -> PluginDef {
-        PluginDef {
+    fn into_plugin(self) -> Result<PluginDef, StorageError> {
+        Ok(PluginDef {
             name: self.name,
-            plugin_type: PluginType::from_str_loose(&self.plugin_type).unwrap_or(PluginType::Wasm),
+            plugin_type: PluginType::from_str_loose(&self.plugin_type).ok_or_else(|| {
+                StorageError::Query(format!("unknown plugin type: {}", self.plugin_type))
+            })?,
             source: self.source,
             tenant_id: self.tenant_id,
             enabled: self.enabled,
-            config: serde_json::from_str(&self.config).unwrap_or_default(),
+            config: serde_json::from_str(&self.config).map_err(StorageError::Serialization)?,
             description: self.description,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }

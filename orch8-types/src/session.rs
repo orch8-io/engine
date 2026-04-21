@@ -27,6 +27,7 @@ pub struct Session {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SessionState {
     Active,
     /// Session temporarily suspended; resumable back to Active.

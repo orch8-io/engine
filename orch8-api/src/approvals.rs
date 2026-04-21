@@ -86,14 +86,51 @@ pub(crate) async fn list_approvals(
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 
+    // Perf: batch-fetch sequences and completed_block_ids concurrently
+    // instead of N+1 sequential round-trips.
+    let sequence_ids: Vec<_> = pairs.iter().map(|(i, _)| i.sequence_id).collect();
+    let instance_ids: Vec<_> = pairs.iter().map(|(i, _)| i.id).collect();
+
+    let (sequences_map, completed_map) = tokio::join!(
+        async {
+            // Deduplicate sequence IDs to avoid redundant fetches.
+            // TODO: add `get_sequences_batch` to StorageBackend for a true single-query batch.
+            let mut seen = std::collections::HashSet::new();
+            let mut map = std::collections::HashMap::new();
+            for sid in sequence_ids {
+                if !seen.insert(sid) {
+                    continue;
+                }
+                match state.storage.get_sequence(sid).await {
+                    Ok(Some(seq)) => {
+                        map.insert(sid, seq);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(sequence_id = %sid.0, error = %e, "approvals: failed to fetch sequence");
+                    }
+                }
+            }
+            map
+        },
+        async {
+            match state
+                .storage
+                .get_completed_block_ids_batch(&instance_ids)
+                .await
+            {
+                Ok(map) => map,
+                Err(e) => {
+                    tracing::warn!(error = %e, "approvals: failed to batch fetch completed blocks");
+                    std::collections::HashMap::new()
+                }
+            }
+        },
+    );
+
     let mut items = Vec::new();
     for (instance, tree) in pairs {
-        let Some(seq) = state
-            .storage
-            .get_sequence(instance.sequence_id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "sequence"))?
-        else {
+        let Some(seq) = sequences_map.get(&instance.sequence_id) else {
             continue;
         };
 
@@ -101,25 +138,21 @@ pub(crate) async fn list_approvals(
             // Flat-path instances have no execution tree nodes. Determine
             // the waiting step by finding the first step with `wait_for_input`
             // that hasn't produced a block output yet.
-            let completed = state
-                .storage
-                .get_completed_block_ids(instance.id)
-                .await
-                .unwrap_or_default();
+            let completed = completed_map.get(&instance.id).cloned().unwrap_or_default();
             for block in &seq.blocks {
                 if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
                     if completed.contains(&step_def.id) {
                         continue;
                     }
                     if let Some(human_def) = &step_def.wait_for_input {
-                        items.push(build_item_from_step(&instance, step_def, human_def, &seq));
+                        items.push(build_item_from_step(&instance, step_def, human_def, seq));
                         break; // flat path executes steps sequentially
                     }
                 }
             }
         } else {
             for node in &tree {
-                if let Some(item) = try_build_item(&instance, node, &seq) {
+                if let Some(item) = try_build_item(&instance, node, seq) {
                     items.push(item);
                 }
             }

@@ -336,6 +336,15 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<BlockOutput>, StorageError>;
 
+    /// Return block outputs created after the given timestamp.
+    /// Used by SSE streaming to avoid fetching the entire history on every poll.
+    /// When `after` is `None`, behaves like `get_all_outputs`.
+    async fn get_outputs_after_created_at(
+        &self,
+        instance_id: InstanceId,
+        after: Option<DateTime<Utc>>,
+    ) -> Result<Vec<BlockOutput>, StorageError>;
+
     /// Return just the block IDs that have outputs for this instance.
     /// Lighter than `get_all_outputs` — avoids deserializing full output JSON.
     async fn get_completed_block_ids(

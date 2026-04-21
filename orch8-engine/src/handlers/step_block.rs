@@ -227,7 +227,7 @@ pub async fn execute_step_node(
         storage.as_ref(),
         instance,
         &step_context,
-        step_def.params.clone(),
+        &step_def.params,
         outputs,
     )
     .await
@@ -375,9 +375,17 @@ pub async fn execute_step_node(
 
     // If the handler is a gRPC plugin, resolve via the plugin registry then dispatch.
     if super::grpc_plugin::is_grpc_handler(&step_def.handler) {
-        let endpoint = resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc)
-            .await
-            .unwrap_or_else(|| step_def.handler.clone());
+        let Some(endpoint) =
+            resolve_plugin_source(storage.as_ref(), &step_def.handler, PluginType::Grpc).await
+        else {
+            tracing::warn!(
+                instance_id = %instance.id,
+                handler = %step_def.handler,
+                "gRPC plugin not registered; failing node (raw-endpoint fallback is disabled)"
+            );
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        };
         let mut params = resolved_params;
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
         let ctx = super::StepContext {
@@ -474,9 +482,19 @@ pub async fn execute_step_node(
             // Check for self-modify output: inject blocks into the instance.
             // Shared helper keeps block-injection semantics identical to the
             // fast-path dispatch in `scheduler::step_exec`.
-            super::param_resolve::apply_self_modify(storage.as_ref(), instance.id, &output).await;
-            evaluator::complete_node(storage.as_ref(), node.id).await?;
-            Ok(true)
+            match super::param_resolve::apply_self_modify(storage.as_ref(), instance.id, &output)
+                .await
+            {
+                super::param_resolve::SelfModifyResult::Applied
+                | super::param_resolve::SelfModifyResult::NotApplicable => {
+                    evaluator::complete_node(storage.as_ref(), node.id).await?;
+                    Ok(true)
+                }
+                super::param_resolve::SelfModifyResult::Failed => {
+                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    Ok(false)
+                }
+            }
         }
         Err(EngineError::StepFailed {
             retryable: true,
@@ -564,6 +582,7 @@ pub async fn execute_step_node(
                 crate::lifecycle::transition_instance(
                     storage.as_ref(),
                     instance.id,
+                    Some(&instance.tenant_id),
                     orch8_types::instance::InstanceState::Running,
                     orch8_types::instance::InstanceState::Scheduled,
                     Some(fire_at),

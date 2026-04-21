@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::error::ApiError;
 use orch8_types::context::ExecutionContext;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority};
@@ -99,19 +100,21 @@ pub(crate) struct CountResponse {
 }
 
 /// Parse comma-separated state values.
-pub(crate) fn parse_states(s: &str) -> Vec<InstanceState> {
+pub(crate) fn parse_states(s: &str) -> Result<Vec<InstanceState>, ApiError> {
     s.split(',')
-        .filter_map(|part| {
+        .map(|part| {
             let trimmed = part.trim();
             match trimmed {
-                "scheduled" => Some(InstanceState::Scheduled),
-                "running" => Some(InstanceState::Running),
-                "waiting" => Some(InstanceState::Waiting),
-                "paused" => Some(InstanceState::Paused),
-                "completed" => Some(InstanceState::Completed),
-                "failed" => Some(InstanceState::Failed),
-                "cancelled" => Some(InstanceState::Cancelled),
-                _ => None,
+                "scheduled" => Ok(InstanceState::Scheduled),
+                "running" => Ok(InstanceState::Running),
+                "waiting" => Ok(InstanceState::Waiting),
+                "paused" => Ok(InstanceState::Paused),
+                "completed" => Ok(InstanceState::Completed),
+                "failed" => Ok(InstanceState::Failed),
+                "cancelled" => Ok(InstanceState::Cancelled),
+                other => Err(ApiError::InvalidArgument(format!(
+                    "unknown instance state: {other}"
+                ))),
             }
         })
         .collect()

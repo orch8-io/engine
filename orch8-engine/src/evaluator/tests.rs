@@ -543,8 +543,9 @@ fn find_running_step_prefers_step_over_composite() {
     ];
     let handlers = crate::handlers::HandlerRegistry::new();
     let pm = build_parent_map(&tree);
+    let block_map = flatten_blocks(&blocks);
     let (found_node, found_block) =
-        find_running_step(&tree, &blocks, &handlers, &pm).expect("should find the running step");
+        find_running_step(&tree, &block_map, &handlers, &pm).expect("should find the running step");
     assert_eq!(found_node.block_id.0, "s");
     assert!(matches!(found_block, BlockDefinition::Step(_)));
 }
@@ -883,7 +884,11 @@ fn is_inside_decided_race_no_winner() {
     ];
     let leaf = tree.iter().find(|n| n.id == leaf_id).unwrap();
     let pm = build_parent_map(&tree);
-    assert!(!is_inside_decided_race(&tree, &blocks, leaf, &pm));
+    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
+    let block_map = flatten_blocks(&blocks);
+    assert!(!is_inside_decided_race(
+        &tree, &block_map, leaf, &pm, &node_map
+    ));
 }
 
 // EV11: is_inside_decided_race returns true when sibling branch completed.
@@ -928,5 +933,9 @@ fn is_inside_decided_race_with_winner() {
     ];
     let loser = tree.iter().find(|n| n.id == br0_id).unwrap();
     let pm = build_parent_map(&tree);
-    assert!(is_inside_decided_race(&tree, &blocks, loser, &pm));
+    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
+    let block_map = flatten_blocks(&blocks);
+    assert!(is_inside_decided_race(
+        &tree, &block_map, loser, &pm, &node_map
+    ));
 }

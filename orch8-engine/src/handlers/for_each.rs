@@ -82,24 +82,41 @@ pub async fn execute_for_each(
 
     let prior_marker = storage.get_block_output(instance.id, &fe_def.id).await?;
 
+    let snapshot_ref_key = format!("inst:{}:foreach:{}:items", instance.id.0, fe_def.id.0);
+
     let (snapshot_items, index): (Vec<serde_json::Value>, u32) = if let Some(m) = &prior_marker {
-        // Subsequent tick — use the previously snapshotted items.
-        let items_snap = m
-            .output
-            .get("_items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        // Subsequent tick — resolve the snapshot from externalized_state
+        // instead of duplicating the full array inside every marker.
         let idx = m
             .output
             .get("_index")
             .and_then(serde_json::Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
+        let items_snap = match storage.get_externalized_state(&snapshot_ref_key).await {
+            Ok(Some(val)) => val.as_array().cloned().unwrap_or_default(),
+            Ok(None) => {
+                warn!(
+                    instance_id = %instance.id,
+                    block_id = %fe_def.id,
+                    "for_each snapshot missing from externalized_state — treating as empty"
+                );
+                Vec::new()
+            }
+            Err(e) => {
+                warn!(
+                    instance_id = %instance.id,
+                    block_id = %fe_def.id,
+                    error = %e,
+                    "failed to resolve for_each snapshot — treating as empty"
+                );
+                Vec::new()
+            }
+        };
         (items_snap, idx)
     } else {
-        // First visit — resolve live and persist a snapshot marker so
-        // subsequent ticks see a stable collection.
+        // First visit — resolve live, externalize the snapshot once, and
+        // persist a lightweight marker that only holds the ref key.
         let Some(items) = resolve_collection(&fe_def.collection, &instance.context) else {
             warn!(
                 instance_id = %instance.id,
@@ -114,8 +131,15 @@ pub async fn execute_for_each(
             evaluator::complete_node(storage, node.id).await?;
             return Ok(true);
         }
-        // Persist the initial snapshot so later ticks stay consistent
-        // with this exact collection, regardless of context mutation.
+        // Externalize the collection snapshot so later ticks stay consistent
+        // without duplicating the full array into every iteration marker.
+        storage
+            .save_externalized_state(
+                instance.id,
+                &snapshot_ref_key,
+                &serde_json::Value::Array(items.clone()),
+            )
+            .await?;
         let init_marker = BlockOutput {
             id: uuid::Uuid::now_v7(),
             instance_id: instance.id,
@@ -124,7 +148,7 @@ pub async fn execute_for_each(
                 "_index": 0,
                 "_total": items.len(),
                 "_item_var": fe_def.item_var,
-                "_items": items,
+                "_snapshot_ref": snapshot_ref_key,
             }),
             output_ref: None,
             output_size: 0,
@@ -184,7 +208,7 @@ pub async fn execute_for_each(
                 "_index": next_index,
                 "_total": snapshot_items.len(),
                 "_item_var": fe_def.item_var,
-                "_items": snapshot_items,
+                "_snapshot_ref": snapshot_ref_key,
             }),
             output_ref: None,
             output_size: 0,

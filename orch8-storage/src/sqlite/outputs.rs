@@ -52,6 +52,28 @@ pub(super) async fn get_all(
     rows.iter().map(row_to_output).collect()
 }
 
+pub(super) async fn get_after_created_at(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    after: Option<DateTime<Utc>>,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = if let Some(after) = after {
+        sqlx::query(
+            "SELECT * FROM block_outputs WHERE instance_id=?1 AND created_at > ?2 ORDER BY created_at"
+        )
+        .bind(instance_id.0.to_string())
+        .bind(ts(after))
+        .fetch_all(&storage.pool)
+        .await?
+    } else {
+        sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at")
+            .bind(instance_id.0.to_string())
+            .fetch_all(&storage.pool)
+            .await?
+    };
+    rows.iter().map(row_to_output).collect()
+}
+
 pub(super) async fn get_completed_ids(
     storage: &SqliteStorage,
     instance_id: InstanceId,

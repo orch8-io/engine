@@ -116,6 +116,7 @@ pub(super) async fn check_step_deadline(
     crate::lifecycle::transition_instance(
         storage.as_ref(),
         instance_id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -149,6 +150,7 @@ pub(super) async fn check_step_delay(
     crate::lifecycle::transition_instance(
         storage,
         instance.id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Scheduled,
         Some(fire_at),
@@ -183,6 +185,7 @@ pub(super) async fn check_send_window(
     crate::lifecycle::transition_instance(
         storage,
         instance.id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Scheduled,
         Some(next_open),
@@ -227,6 +230,7 @@ pub(super) async fn check_step_rate_limit(
         crate::lifecycle::transition_instance(
             storage,
             instance.id,
+            Some(&instance.tenant_id),
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(retry_after),
@@ -251,7 +255,9 @@ pub async fn check_human_input(
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
 ) -> Result<bool, EngineError> {
-    let signal_name = format!("human_input:{}", step_def.id.0);
+    let mut signal_name = String::with_capacity(12 + step_def.id.0.len());
+    signal_name.push_str("human_input:");
+    signal_name.push_str(&step_def.id.0);
 
     // Check if the response signal has already been delivered.
     let signals = storage.get_pending_signals(instance.id).await?;
@@ -297,8 +303,7 @@ pub async fn check_human_input(
                     block_id: step_def.id.clone(),
                     output: output_json.clone(),
                     output_ref: None,
-                    output_size: serde_json::to_vec(&output_json)
-                        .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX)),
+                    output_size: i32::try_from(output_json.to_string().len()).unwrap_or(i32::MAX),
                     attempt: 0,
                     created_at: chrono::Utc::now(),
                 };
@@ -359,6 +364,7 @@ pub async fn check_human_input(
                     crate::lifecycle::transition_instance(
                         storage,
                         instance.id,
+                        Some(&instance.tenant_id),
                         InstanceState::Running,
                         InstanceState::Scheduled,
                         Some(chrono::Utc::now()),
@@ -413,6 +419,7 @@ pub(super) async fn execute_step_block(
                 crate::lifecycle::transition_instance(
                     storage.as_ref(),
                     instance_id,
+                    Some(&instance.tenant_id),
                     InstanceState::Running,
                     InstanceState::Paused,
                     None,
@@ -444,6 +451,7 @@ pub(super) async fn execute_step_block(
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,
+                Some(&instance.tenant_id),
                 InstanceState::Running,
                 InstanceState::Waiting,
                 None,
@@ -484,7 +492,7 @@ pub(super) async fn execute_step_block(
         storage.as_ref(),
         instance,
         &step_context,
-        step_def.params.clone(),
+        &step_def.params,
         &outputs,
     )
     .await
@@ -568,6 +576,7 @@ pub(super) async fn execute_step_block(
                             crate::lifecycle::transition_instance(
                                 storage.as_ref(),
                                 instance_id,
+                                Some(&instance.tenant_id),
                                 InstanceState::Running,
                                 InstanceState::Scheduled,
                                 Some(fire_at),
@@ -596,6 +605,7 @@ pub(super) async fn execute_step_block(
                         crate::lifecycle::transition_instance(
                             storage.as_ref(),
                             instance_id,
+                            Some(&instance.tenant_id),
                             InstanceState::Running,
                             InstanceState::Scheduled,
                             Some(fire_at),
@@ -707,25 +717,30 @@ pub(super) async fn execute_step_block(
             // Shared helper keeps injection semantics identical to the tree
             // evaluator; fast path then transitions back to Scheduled so the
             // next tick sees the newly injected steps.
-            if crate::handlers::param_resolve::apply_self_modify(
+            match crate::handlers::param_resolve::apply_self_modify(
                 storage.as_ref(),
                 instance_id,
                 &block_output.output,
             )
             .await
             {
-                crate::lifecycle::transition_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    InstanceState::Running,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await?;
-                return Ok(StepOutcome::Deferred);
+                crate::handlers::param_resolve::SelfModifyResult::Applied => {
+                    crate::lifecycle::transition_instance(
+                        storage.as_ref(),
+                        instance_id,
+                        Some(&instance.tenant_id),
+                        InstanceState::Running,
+                        InstanceState::Scheduled,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await?;
+                    Ok(StepOutcome::Deferred)
+                }
+                crate::handlers::param_resolve::SelfModifyResult::NotApplicable => {
+                    Ok(StepOutcome::Completed)
+                }
+                crate::handlers::param_resolve::SelfModifyResult::Failed => Ok(StepOutcome::Failed),
             }
-
-            Ok(StepOutcome::Completed)
         }
         Err(EngineError::StepFailed {
             retryable: true,
@@ -810,6 +825,7 @@ pub(super) async fn execute_step_block(
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,
+                Some(&instance.tenant_id),
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,
@@ -861,6 +877,7 @@ pub(super) async fn handle_retryable_failure(
             crate::lifecycle::transition_instance(
                 storage,
                 instance_id,
+                Some(&instance.tenant_id),
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,
@@ -911,6 +928,7 @@ pub(super) async fn handle_retryable_failure(
         crate::lifecycle::transition_instance(
             storage,
             instance_id,
+            Some(&instance.tenant_id),
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(fire_at),
@@ -923,6 +941,7 @@ pub(super) async fn handle_retryable_failure(
     crate::lifecycle::transition_instance(
         storage,
         instance_id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -962,6 +981,7 @@ pub(super) async fn fail_instance_with_error(
     crate::lifecycle::transition_instance(
         storage,
         instance_id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
@@ -1015,7 +1035,14 @@ pub(super) async fn dispatch_to_external_worker(
         // process cannot be trusted to filter on its own.
         context: serde_json::to_value(&step_context)
             .map_err(orch8_types::error::StorageError::Serialization)?,
-        attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
+        attempt: i16::try_from(attempt).map_err(|_| {
+            tracing::warn!(
+                instance_id = %instance.id,
+                attempt = %attempt,
+                "attempt counter exceeds i16::MAX, saturating"
+            );
+            orch8_types::error::StorageError::Query("attempt counter overflow".into())
+        })?,
         timeout_ms: step_def
             .timeout
             .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
@@ -1036,6 +1063,7 @@ pub(super) async fn dispatch_to_external_worker(
     crate::lifecycle::transition_instance(
         storage,
         instance.id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Waiting,
         None,

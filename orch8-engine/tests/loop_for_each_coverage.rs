@@ -566,8 +566,18 @@ async fn for_each_first_tick_binds_item_var_and_activates_body() {
     assert_eq!(marker.output["_index"], json!(0));
     assert_eq!(marker.output["_total"], json!(3));
     assert_eq!(marker.output["_item_var"], json!("cur"));
+    let snapshot_ref = marker
+        .output
+        .get("_snapshot_ref")
+        .and_then(|v| v.as_str())
+        .expect("marker must carry _snapshot_ref");
+    let snap = storage
+        .get_externalized_state(snapshot_ref)
+        .await
+        .unwrap()
+        .expect("snapshot must be externalized");
     assert_eq!(
-        marker.output["_items"],
+        snap,
         json!(["alpha", "beta", "gamma"]),
         "collection snapshot must be cached on first visit"
     );
@@ -626,7 +636,17 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
         json!(2),
         "snapshot must not be re-resolved from the mutated context"
     );
-    assert_eq!(marker.output["_items"], json!(["a", "b"]));
+    let snapshot_ref = marker
+        .output
+        .get("_snapshot_ref")
+        .and_then(|v| v.as_str())
+        .expect("marker must carry _snapshot_ref");
+    let snap = storage
+        .get_externalized_state(snapshot_ref)
+        .await
+        .unwrap()
+        .expect("snapshot must be externalized");
+    assert_eq!(snap, json!(["a", "b"]));
 }
 
 // #162 — body child failure fails the for_each.

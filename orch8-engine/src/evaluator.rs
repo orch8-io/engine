@@ -88,9 +88,11 @@ pub async fn ensure_execution_tree(
     let existing = storage.get_execution_tree(instance.id).await?;
     if !existing.is_empty() {
         // Check for newly injected blocks that don't have execution nodes yet.
-        let existing_block_ids: std::collections::HashSet<&str> =
-            existing.iter().map(|n| n.block_id.0.as_str()).collect();
-        let mut new_nodes = Vec::new();
+        let mut existing_block_ids = std::collections::HashSet::with_capacity(existing.len());
+        for n in &existing {
+            existing_block_ids.insert(n.block_id.0.as_str());
+        }
+        let mut new_nodes = Vec::with_capacity(blocks.len());
         for block in blocks {
             let (bid, _) = block_meta(block);
             if !existing_block_ids.contains(bid.0.as_str()) {
@@ -118,7 +120,7 @@ pub async fn ensure_execution_tree(
     }
 
     // Build tree from blocks.
-    let mut nodes = Vec::new();
+    let mut nodes = Vec::with_capacity(blocks.len() * 2);
     build_nodes(instance.id, None, blocks, &mut nodes);
 
     if !nodes.is_empty() {
@@ -300,6 +302,10 @@ pub async fn evaluate(
     // Merge sequence blocks with any dynamically injected blocks.
     let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
 
+    // Build a flat block map once per evaluation — avoids O(n) recursive scans
+    // in find_block on the hot path.
+    let block_map: HashMap<&BlockId, &BlockDefinition> = flatten_blocks(&blocks);
+
     // Ensure the execution tree exists (creates on first call, adds new injected nodes).
     ensure_execution_tree(storage.as_ref(), instance, &blocks).await?;
 
@@ -431,7 +437,7 @@ pub async fn evaluate(
                     continue;
                 }
                 let node = root_nodes[idx];
-                if let Some(block) = find_block(&blocks, &node.block_id) {
+                if let Some(block) = block_map.get(&node.block_id).copied() {
                     dispatch_block(
                         storage,
                         handlers,
@@ -451,7 +457,7 @@ pub async fn evaluate(
         let parent_map = build_parent_map(&tree);
 
         // Phase 2: execute Running step nodes (leaf work first).
-        if let Some((node, block)) = find_running_step(&tree, &blocks, handlers, &parent_map) {
+        if let Some((node, block)) = find_running_step(&tree, &block_map, handlers, &parent_map) {
             dispatch_block(
                 storage,
                 handlers,
@@ -472,7 +478,7 @@ pub async fn evaluate(
         // next (shallower) composite before parking — a parent race may be able to
         // complete even when a child try_catch inside it is stalled.
         {
-            let composites = find_all_running_composites(&tree, &blocks, &parent_map);
+            let composites = find_all_running_composites(&tree, &block_map, &parent_map);
             if !composites.is_empty() {
                 // Snapshot node states before dispatching any composite. The
                 // `tree` vec is immutable within this iteration, so the
@@ -517,11 +523,18 @@ pub async fn evaluate(
         }
 
         // No actionable work this tick — either waiting for external work or stuck.
-        warn!(
-            instance_id = %instance.id,
-            nodes = ?tree.iter().map(|n| format!("{}:{}:{:?}", n.block_id, n.block_type, n.state)).collect::<Vec<_>>(),
-            "evaluate: no actionable work"
-        );
+        if tracing::enabled!(tracing::Level::WARN) {
+            warn!(
+                instance_id = %instance.id,
+                nodes = ?tree.iter().map(|n| format!("{}:{}:{:?}", n.block_id, n.block_type, n.state)).collect::<Vec<_>>(),
+                "evaluate: no actionable work"
+            );
+        } else {
+            warn!(
+                instance_id = %instance.id,
+                "evaluate: no actionable work"
+            );
+        }
         return Ok(EvalOutcome::MoreWork {
             has_waiting_nodes: tree.iter().any(|n| n.state == NodeState::Waiting),
         });
@@ -541,7 +554,7 @@ pub async fn evaluate(
 /// Return all Running composite nodes, deepest first, for iterative evaluation.
 fn find_all_running_composites<'a>(
     tree: &'a [ExecutionNode],
-    blocks: &'a [BlockDefinition],
+    block_map: &HashMap<&BlockId, &'a BlockDefinition>,
     parent_map: &ParentMap,
 ) -> Vec<(&'a ExecutionNode, &'a BlockDefinition)> {
     let mut composites: Vec<(&ExecutionNode, &BlockDefinition)> = tree
@@ -552,7 +565,9 @@ fn find_all_running_composites<'a>(
                     && n.block_type == orch8_types::execution::BlockType::SubSequence)
         })
         .filter_map(|n| {
-            find_block(blocks, &n.block_id)
+            block_map
+                .get(&n.block_id)
+                .copied()
                 .filter(|b| !matches!(b, BlockDefinition::Step(_)))
                 .map(|b| (n, b))
         })
@@ -565,18 +580,19 @@ fn find_all_running_composites<'a>(
 /// Find a Running step node that can be executed.
 fn find_running_step<'a>(
     tree: &'a [ExecutionNode],
-    blocks: &'a [BlockDefinition],
+    block_map: &HashMap<&BlockId, &'a BlockDefinition>,
     handlers: &HandlerRegistry,
     parent_map: &ParentMap,
 ) -> Option<(&'a ExecutionNode, &'a BlockDefinition)> {
+    let node_map: HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     for node in tree {
         if node.state != NodeState::Running {
             continue;
         }
-        if let Some(block) = find_block(blocks, &node.block_id) {
+        if let Some(block) = block_map.get(&node.block_id).copied() {
             if let BlockDefinition::Step(step_def) = block {
                 // Skip steps inside a race where another branch already won.
-                if is_inside_decided_race(tree, blocks, node, parent_map) {
+                if is_inside_decided_race(tree, block_map, node, parent_map, &node_map) {
                     continue;
                 }
                 // Defer *in-process* steps that race against a composite sibling
@@ -590,7 +606,7 @@ fn find_running_step<'a>(
                 // because they dispatch asynchronously and return immediately —
                 // they don't block the evaluator.
                 if handlers.contains(&step_def.handler)
-                    && has_racing_composite_sibling(tree, blocks, node, parent_map)
+                    && has_racing_composite_sibling(tree, block_map, node, parent_map, &node_map)
                 {
                     continue;
                 }
@@ -606,21 +622,22 @@ fn find_running_step<'a>(
 /// branch lost and should not be dispatched.
 fn is_inside_decided_race(
     tree: &[ExecutionNode],
-    blocks: &[BlockDefinition],
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
     node: &ExecutionNode,
     parent_map: &ParentMap,
+    node_map: &HashMap<ExecutionNodeId, &ExecutionNode>,
 ) -> bool {
     // Walk up tracking which direct-child-of-race we came through.
     let mut current_id = node.id;
     while let Some(Some(parent_id)) = parent_map.get(&current_id) {
-        if let Some(parent_node) = tree.iter().find(|n| n.id == *parent_id) {
-            if let Some(parent_block) = find_block(blocks, &parent_node.block_id) {
+        if let Some(parent_node) = node_map.get(parent_id).copied() {
+            if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
                 if matches!(parent_block, BlockDefinition::Race(_)) {
                     // `current_id` is the direct child of the race through
                     // which our original node descends. Find its branch index.
-                    let my_branch = tree
-                        .iter()
-                        .find(|n| n.id == current_id)
+                    let my_branch = node_map
+                        .get(&current_id)
+                        .copied()
                         .and_then(|n| n.branch_index);
                     // Check if a sibling branch's direct child already completed.
                     let sibling_completed = children_of(tree, *parent_id, None).iter().any(|c| {
@@ -644,25 +661,28 @@ fn is_inside_decided_race(
 /// inline (e.g. a 1000ms sleep) would starve the composite branch.
 fn has_racing_composite_sibling(
     tree: &[ExecutionNode],
-    blocks: &[BlockDefinition],
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
     node: &ExecutionNode,
     parent_map: &ParentMap,
+    node_map: &HashMap<ExecutionNodeId, &ExecutionNode>,
 ) -> bool {
     let mut current_id = node.id;
     while let Some(Some(parent_id)) = parent_map.get(&current_id) {
-        if let Some(parent_node) = tree.iter().find(|n| n.id == *parent_id) {
-            if let Some(parent_block) = find_block(blocks, &parent_node.block_id) {
+        if let Some(parent_node) = node_map.get(parent_id).copied() {
+            if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
                 if matches!(parent_block, BlockDefinition::Race(_)) {
-                    let my_branch = tree
-                        .iter()
-                        .find(|n| n.id == current_id)
+                    let my_branch = node_map
+                        .get(&current_id)
+                        .copied()
                         .and_then(|n| n.branch_index);
                     // Check if a sibling branch's root is a Running composite.
                     let sibling_composite_running =
                         children_of(tree, *parent_id, None).iter().any(|c| {
                             c.branch_index != my_branch
                                 && c.state == NodeState::Running
-                                && find_block(blocks, &c.block_id)
+                                && block_map
+                                    .get(&c.block_id)
+                                    .copied()
                                     .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
                         });
                     if sibling_composite_running {
@@ -684,6 +704,69 @@ fn count_ancestors(parent_map: &ParentMap, mut node_id: ExecutionNodeId) -> usiz
         node_id = *parent_id;
     }
     depth
+}
+
+/// Flatten a nested block tree into a `HashMap` for O(1) lookups.
+fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDefinition> {
+    fn walk<'b>(
+        blocks: &'b [BlockDefinition],
+        map: &mut HashMap<&'b BlockId, &'b BlockDefinition>,
+    ) {
+        for block in blocks {
+            let id = match block {
+                BlockDefinition::Step(s) => &s.id,
+                BlockDefinition::Parallel(p) => &p.id,
+                BlockDefinition::Race(r) => &r.id,
+                BlockDefinition::Loop(l) => &l.id,
+                BlockDefinition::ForEach(f) => &f.id,
+                BlockDefinition::Router(r) => &r.id,
+                BlockDefinition::TryCatch(tc) => &tc.id,
+                BlockDefinition::SubSequence(ss) => &ss.id,
+                BlockDefinition::ABSplit(ab) => &ab.id,
+                BlockDefinition::CancellationScope(cs) => &cs.id,
+            };
+            map.insert(id, block);
+            match block {
+                BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
+                BlockDefinition::Parallel(p) => {
+                    for branch in &p.branches {
+                        walk(branch, map);
+                    }
+                }
+                BlockDefinition::Race(r) => {
+                    for branch in &r.branches {
+                        walk(branch, map);
+                    }
+                }
+                BlockDefinition::Loop(l) => walk(&l.body, map),
+                BlockDefinition::ForEach(f) => walk(&f.body, map),
+                BlockDefinition::Router(r) => {
+                    for route in &r.routes {
+                        walk(&route.blocks, map);
+                    }
+                    if let Some(default) = &r.default {
+                        walk(default, map);
+                    }
+                }
+                BlockDefinition::TryCatch(tc) => {
+                    walk(&tc.try_block, map);
+                    walk(&tc.catch_block, map);
+                    if let Some(finally) = &tc.finally_block {
+                        walk(finally, map);
+                    }
+                }
+                BlockDefinition::ABSplit(ab) => {
+                    for variant in &ab.variants {
+                        walk(&variant.blocks, map);
+                    }
+                }
+                BlockDefinition::CancellationScope(cs) => walk(&cs.blocks, map),
+            }
+        }
+    }
+    let mut map = HashMap::with_capacity(blocks.len() * 2);
+    walk(blocks, &mut map);
+    map
 }
 
 /// Find a block definition by ID in the block tree.

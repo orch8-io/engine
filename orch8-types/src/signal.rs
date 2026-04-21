@@ -21,6 +21,7 @@ pub struct Signal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SignalType {
     Pause,
     Resume,
@@ -29,8 +30,12 @@ pub enum SignalType {
     Custom(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown signal type: {0}")]
+pub struct SignalTypeParseError(String);
+
 impl FromStr for SignalType {
-    type Err = std::convert::Infallible;
+    type Err = SignalTypeParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -39,9 +44,11 @@ impl FromStr for SignalType {
             "cancel" => Ok(Self::Cancel),
             "update_context" => Ok(Self::UpdateContext),
             other => {
-                // Display writes Custom(name) as "custom:{name}" — strip the
-                // prefix on the way back so the roundtrip is lossless.
-                let name = other.strip_prefix("custom:").unwrap_or(other);
+                // Require explicit "custom:" prefix so typos don't silently
+                // become custom signals (e.g. "puse" → error, not Custom).
+                let name = other
+                    .strip_prefix("custom:")
+                    .ok_or_else(|| SignalTypeParseError(other.to_string()))?;
                 Ok(Self::Custom(name.to_string()))
             }
         }

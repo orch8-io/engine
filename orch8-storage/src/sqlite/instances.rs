@@ -59,12 +59,40 @@ pub(super) async fn create_batch(
     storage: &SqliteStorage,
     instances: &[TaskInstance],
 ) -> Result<u64, StorageError> {
-    let mut tx = storage.pool.begin().await?;
-    for i in instances {
-        bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), i)?
-            .execute(&mut *tx)
-            .await?;
+    if instances.is_empty() {
+        return Ok(0);
     }
+
+    let mut tx = storage.pool.begin().await?;
+
+    for chunk in instances.chunks(500) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) ",
+        );
+        qb.push_values(chunk, |mut b, i| {
+            let metadata = serde_json::to_string(&i.metadata).unwrap_or_else(|_| "{}".to_string());
+            let context = serde_json::to_string(&i.context).unwrap_or_else(|_| "{}".to_string());
+            b.push_bind(i.id.0.to_string())
+                .push_bind(i.sequence_id.0.to_string())
+                .push_bind(&i.tenant_id.0)
+                .push_bind(&i.namespace.0)
+                .push_bind(i.state.to_string())
+                .push_bind(i.next_fire_at.map(ts))
+                .push_bind(i.priority as i16)
+                .push_bind(&i.timezone)
+                .push_bind(metadata)
+                .push_bind(context)
+                .push_bind(&i.concurrency_key)
+                .push_bind(i.max_concurrency)
+                .push_bind(&i.idempotency_key)
+                .push_bind(i.session_id.map(|u| u.to_string()))
+                .push_bind(i.parent_instance_id.map(|u| u.0.to_string()))
+                .push_bind(ts(i.created_at))
+                .push_bind(ts(i.updated_at));
+        });
+        qb.build().execute(&mut *tx).await?;
+    }
+
     tx.commit().await?;
     Ok(instances.len() as u64)
 }
@@ -198,19 +226,28 @@ async fn filter_by_concurrency(
         return Ok(candidates.to_vec());
     }
 
+    // Single batched COUNT query for all concurrency keys.
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE state='running' AND concurrency_key IN (",
+    );
+    let mut separated = qb.separated(",");
+    for key in keyed.keys() {
+        separated.push_bind(key);
+    }
+    separated.push_unseparated(") GROUP BY concurrency_key");
+
+    let rows = qb.build().fetch_all(&mut *conn).await?;
+    let mut running_counts: HashMap<String, i64> = HashMap::new();
+    for row in rows {
+        let key: String = row.get("concurrency_key");
+        let cnt: i64 = row.get("cnt");
+        running_counts.insert(key, cnt);
+    }
+
     let mut excluded = std::collections::HashSet::new();
     for (key, indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(i32::MAX);
-
-        // Count already-Running instances for this key (within the same transaction).
-        let row = sqlx::query(
-            "SELECT COUNT(*) as cnt FROM task_instances WHERE concurrency_key=?1 AND state='running'",
-        )
-        .bind(key)
-        .fetch_one(&mut *conn)
-        .await
-        ?;
-        let already_running: i64 = row.get("cnt");
+        let already_running = running_counts.get(key).copied().unwrap_or(0);
 
         let slots = (i64::from(max) - already_running).max(0) as usize;
         if slots < indices.len() {

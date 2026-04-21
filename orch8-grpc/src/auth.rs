@@ -53,9 +53,15 @@ pub struct CallerTenant(pub TenantId);
 ///   a tenant header is accepted and downstream handlers see no
 ///   `CallerTenant` extension (matches the HTTP "permissive" mode).
 pub fn auth_interceptor(
-    expected_api_key: Option<String>,
+    expected_api_key: Option<&str>,
     require_tenant: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
+    // Precompute the expected digest once at construction time so we don't
+    // re-hash the API key on every RPC.
+    let expected_digest: Option<[u8; 32]> = expected_api_key.map(|expected| {
+        let digest = Sha256::digest(expected.as_bytes());
+        digest.into()
+    });
     move |mut req: Request<()>| {
         // 1. API key: hash both provided and expected to a fixed-size
         //    digest, then compare constant-time. Earlier versions gated on
@@ -63,12 +69,11 @@ pub fn auth_interceptor(
         //    circuited on different lengths and leaked the expected key
         //    length via response timing. SHA-256 here is purely a
         //    length-normaliser — collision resistance is not load-bearing.
-        if let Some(expected) = expected_api_key.as_deref() {
+        if let Some(expected_digest) = expected_digest {
             let provided = req
                 .metadata()
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok());
-            let expected_digest = Sha256::digest(expected.as_bytes());
             let provided_digest = Sha256::digest(provided.unwrap_or("").as_bytes());
             let ok =
                 provided.is_some() && bool::from(provided_digest.ct_eq(expected_digest.as_slice()));
@@ -182,21 +187,21 @@ mod tests {
 
     #[test]
     fn interceptor_rejects_missing_api_key() {
-        let ic = auth_interceptor(Some("s3cret".into()), false);
+        let ic = auth_interceptor(Some("s3cret"), false);
         let err = ic(make_req(&[])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn interceptor_rejects_wrong_api_key() {
-        let ic = auth_interceptor(Some("s3cret".into()), false);
+        let ic = auth_interceptor(Some("s3cret"), false);
         let err = ic(make_req(&[("x-api-key", "nope123")])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn interceptor_accepts_matching_api_key() {
-        let ic = auth_interceptor(Some("s3cret".into()), false);
+        let ic = auth_interceptor(Some("s3cret"), false);
         assert!(ic(make_req(&[("x-api-key", "s3cret")])).is_ok());
     }
 

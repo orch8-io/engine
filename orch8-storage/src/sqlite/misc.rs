@@ -130,14 +130,20 @@ pub(super) async fn claim_worker_tasks_from_queue(
         t.claimed_at = Some(now_dt);
         t.heartbeat_at = Some(now_dt);
     }
-    for t in &tasks {
-        sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
-            .bind(t.id.to_string())
-            .bind(worker_id)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await
-            ?;
+    if !tasks.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
+        qb.push_bind(worker_id);
+        qb.push(", claimed_at=");
+        qb.push_bind(&now);
+        qb.push(", heartbeat_at=");
+        qb.push_bind(&now);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for t in &tasks {
+            separated.push_bind(t.id.to_string());
+        }
+        separated.push_unseparated(")");
+        qb.build().execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(tasks)
@@ -181,13 +187,20 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
         t.claimed_at = Some(now_dt);
         t.heartbeat_at = Some(now_dt);
     }
-    for t in &tasks {
-        sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
-            .bind(t.id.to_string())
-            .bind(worker_id)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+    if !tasks.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
+        qb.push_bind(worker_id);
+        qb.push(", claimed_at=");
+        qb.push_bind(&now);
+        qb.push(", heartbeat_at=");
+        qb.push_bind(&now);
+        qb.push(" WHERE id IN (");
+        let mut separated = qb.separated(",");
+        for t in &tasks {
+            separated.push_bind(t.id.to_string());
+        }
+        separated.push_unseparated(")");
+        qb.build().execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(tasks)

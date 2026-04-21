@@ -13,6 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
 
@@ -229,9 +230,12 @@ pub(crate) async fn fire_trigger(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let expected = secret.expose();
-        if provided.len() != expected.len()
-            || !bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
-        {
+        // Hash both sides before the constant-time compare so mismatched
+        // lengths don't short-circuit the timing path. SHA-256 is only a
+        // length-normaliser here — collision resistance is not load-bearing.
+        let provided_digest = Sha256::digest(provided.as_bytes());
+        let expected_digest = Sha256::digest(expected.as_bytes());
+        if !bool::from(provided_digest.ct_eq(expected_digest.as_slice())) {
             return Err(ApiError::Unauthorized);
         }
     }

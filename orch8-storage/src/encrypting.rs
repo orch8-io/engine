@@ -506,6 +506,16 @@ impl StorageBackend for EncryptingStorage {
         self.inner.get_all_outputs(instance_id).await
     }
 
+    async fn get_outputs_after_created_at(
+        &self,
+        instance_id: InstanceId,
+        after: Option<DateTime<Utc>>,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
+        self.inner
+            .get_outputs_after_created_at(instance_id, after)
+            .await
+    }
+
     async fn get_completed_block_ids(
         &self,
         instance_id: InstanceId,

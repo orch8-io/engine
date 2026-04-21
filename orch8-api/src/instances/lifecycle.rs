@@ -261,7 +261,7 @@ pub(crate) async fn list_instances(
         tenant_id,
         namespace: q.namespace.map(Namespace),
         sequence_id: q.sequence_id.map(SequenceId),
-        states: q.state.map(|s| parse_states(&s)),
+        states: q.state.as_deref().map(parse_states).transpose()?,
         metadata_filter: None,
         priority: None,
     };
@@ -338,14 +338,21 @@ pub(crate) async fn update_state(
         if let Some(parent_id) = instance.parent_instance_id {
             if let Ok(Some(parent)) = state.storage.get_instance(parent_id).await {
                 if parent.state == InstanceState::Waiting {
-                    let _ = state
+                    if let Err(e) = state
                         .storage
                         .update_instance_state(
                             parent_id,
                             InstanceState::Scheduled,
                             Some(Utc::now()),
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(
+                            parent_id = %parent_id.0,
+                            error = %e,
+                            "failed to wake parent instance after child terminal transition"
+                        );
+                    }
                 }
             }
         }

@@ -57,6 +57,13 @@ export class Orch8Client {
     return this.#get<SequenceDef>(`/sequences/${id}`);
   }
 
+  async listSequences(query: Record<string, unknown> = {}): Promise<SequenceDef[]> {
+    const res = await this.#get<{ items: SequenceDef[]; has_more: boolean }>(
+      `/sequences${toQuery(query)}`,
+    );
+    return res.items;
+  }
+
   async getSequenceByName(
     tenantId: string,
     namespace: string,
@@ -348,10 +355,10 @@ export class Orch8Client {
     // Webhooks with secrets require replay-protection headers.
     // Auto-inject them when the caller hasn't supplied them.
     const h = { ...headers };
-    if (!h["x-trigger-timestamp"]) {
+    if (h["x-trigger-timestamp"] === undefined) {
       h["x-trigger-timestamp"] = String(Math.floor(Date.now() / 1000));
     }
-    if (!h["x-trigger-nonce"]) {
+    if (h["x-trigger-nonce"] === undefined) {
       h["x-trigger-nonce"] = crypto.randomUUID();
     }
     return this.#rawJson(`/webhooks/${slug}`, "POST", body, h);

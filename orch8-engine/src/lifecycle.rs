@@ -16,6 +16,7 @@ use crate::error::EngineError;
 pub async fn transition_instance(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
+    tenant_id: Option<&TenantId>,
     from: InstanceState,
     to: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
@@ -61,9 +62,17 @@ pub async fn transition_instance(
         "instance state transitioned"
     );
 
-    // Best-effort audit logging. Fetch tenant_id from the instance row.
-    if let Ok(Some(inst)) = storage.get_instance(instance_id).await {
-        audit_transition(storage, instance_id, &inst.tenant_id, from, to, None).await;
+    // Best-effort audit logging. Use caller-supplied tenant_id if available;
+    // fall back to a DB fetch only when the caller didn't have it handy.
+    match tenant_id {
+        Some(tid) => {
+            audit_transition(storage, instance_id, tid, from, to, None).await;
+        }
+        None => {
+            if let Ok(Some(inst)) = storage.get_instance(instance_id).await {
+                audit_transition(storage, instance_id, &inst.tenant_id, from, to, None).await;
+            }
+        }
     }
 
     Ok(())
@@ -188,6 +197,7 @@ mod tests {
         transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Scheduled,
             InstanceState::Running,
             None,
@@ -210,6 +220,7 @@ mod tests {
         transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Scheduled,
             InstanceState::Running,
             None,
@@ -232,6 +243,7 @@ mod tests {
         let err = transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Completed, // pretend source
             InstanceState::Running,   // invalid target
             None,
@@ -258,6 +270,7 @@ mod tests {
         transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Running,
             InstanceState::Completed,
             None,
@@ -280,6 +293,7 @@ mod tests {
         transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Waiting,
             InstanceState::Running,
             None,
@@ -355,6 +369,7 @@ mod tests {
         transition_instance(
             &storage,
             inst.id,
+            Some(&inst.tenant_id),
             InstanceState::Running,
             InstanceState::Scheduled,
             Some(fire),
@@ -390,6 +405,7 @@ mod tests {
             transition_instance(
                 s1.as_ref(),
                 inst_id,
+                None,
                 InstanceState::Scheduled,
                 InstanceState::Running,
                 None,
@@ -400,6 +416,7 @@ mod tests {
             transition_instance(
                 s2.as_ref(),
                 inst_id,
+                None,
                 InstanceState::Scheduled,
                 InstanceState::Cancelled,
                 None,

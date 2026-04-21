@@ -350,7 +350,11 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
     let applied1 =
         orch8_engine::handlers::param_resolve::apply_self_modify(&*storage_dyn, instance.id, &out1)
             .await;
-    assert!(applied1, "first self_modify should apply");
+    assert_eq!(
+        applied1,
+        orch8_engine::handlers::param_resolve::SelfModifyResult::Applied,
+        "first self_modify should apply"
+    );
 
     // Second call, also with position = None — should APPEND `second`, not
     // replace `first`.
@@ -362,7 +366,11 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
     let applied2 =
         orch8_engine::handlers::param_resolve::apply_self_modify(&*storage_dyn, instance.id, &out2)
             .await;
-    assert!(applied2, "second self_modify should apply");
+    assert_eq!(
+        applied2,
+        orch8_engine::handlers::param_resolve::SelfModifyResult::Applied,
+        "second self_modify should apply"
+    );
 
     let injected = storage_dyn
         .get_injected_blocks(instance.id)

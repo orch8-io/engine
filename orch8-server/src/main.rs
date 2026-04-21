@@ -14,7 +14,6 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use orch8_api::circuit_breakers::CircuitBreakerState;
 use orch8_api::metrics::MetricsState;
 use orch8_api::openapi::ApiDoc;
 use orch8_api::{build_router, AppState};
@@ -52,6 +51,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configuration: TOML file (optional) -> env vars -> defaults.
     let config = load_config(&cli.config)?;
+    if let Err(errors) = config.validate() {
+        return Err(anyhow::anyhow!(
+            "configuration invalid: {}",
+            errors.join(", ")
+        ));
+    }
 
     // Initialize logging.
     init_logging(&config.logging);
@@ -147,9 +152,7 @@ async fn main() -> anyhow::Result<()> {
     // the registry logs and boots with an empty in-memory state.
     let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60).with_storage(storage.clone()));
     cb_registry.load_from_storage().await;
-    let cb_state = CircuitBreakerState {
-        registry: cb_registry.clone(),
-    };
+    // cb_registry is already inside app_state.circuit_breakers below.
     // Build HTTP router. `AppState` carries the breaker registry so the
     // worker-task HTTP handlers (`/workers/tasks/{id}/complete` and `/fail`)
     // can roll external-worker success/failure into the same registry the
@@ -195,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
     // third-party webhook callers (GitHub, Stripe, ...) authenticate via the
     // trigger's own HMAC secret, not via orch8's API key.
     let mut app = build_router(app_state.clone())
-        .merge(orch8_api::circuit_breakers::routes().with_state(cb_state))
+        .merge(orch8_api::circuit_breakers::routes().with_state(app_state.clone()))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(move |req, next| {
@@ -274,7 +277,8 @@ async fn main() -> anyhow::Result<()> {
 
     let grpc_service = Orch8GrpcService::new(storage.clone());
     let grpc_shutdown = shutdown_token.clone();
-    let grpc_interceptor = orch8_grpc::auth::auth_interceptor(grpc_api_key, grpc_require_tenant);
+    let grpc_interceptor =
+        orch8_grpc::auth::auth_interceptor(grpc_api_key.as_deref(), grpc_require_tenant);
     let grpc_handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()

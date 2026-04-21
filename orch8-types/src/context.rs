@@ -64,7 +64,8 @@ impl ExecutionContext {
 
         let mut counter = Counter::default();
         if serde_json::to_writer(&mut counter, self).is_err() {
-            return 0;
+            // Fail-safe: return max so the size check rejects the write.
+            return usize::MAX;
         }
         counter.0
     }

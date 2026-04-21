@@ -40,7 +40,7 @@ pub(super) async fn get(
     .bind(id)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(CredentialRow::into_credential))
+    row.map(CredentialRow::into_credential).transpose()
 }
 
 pub(super) async fn list(
@@ -66,10 +66,9 @@ pub(super) async fn list(
             .await?
         }
     };
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(CredentialRow::into_credential)
-        .collect())
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub(super) async fn update(
@@ -127,10 +126,9 @@ pub(super) async fn list_due_for_refresh(
     .bind(cutoff)
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(CredentialRow::into_credential)
-        .collect())
+        .collect::<Result<Vec<_>, _>>()
 }
 
 #[derive(sqlx::FromRow)]
@@ -150,12 +148,14 @@ struct CredentialRow {
 }
 
 impl CredentialRow {
-    fn into_credential(self) -> CredentialDef {
-        CredentialDef {
+    fn into_credential(self) -> Result<CredentialDef, StorageError> {
+        Ok(CredentialDef {
             id: self.id,
             tenant_id: self.tenant_id,
             name: self.name,
-            kind: CredentialKind::from_str_loose(&self.kind).unwrap_or_default(),
+            kind: CredentialKind::from_str_loose(&self.kind).ok_or_else(|| {
+                StorageError::Query(format!("unknown credential kind: {}", self.kind))
+            })?,
             value: orch8_types::config::SecretString::new(self.value),
             expires_at: self.expires_at,
             refresh_url: self.refresh_url,
@@ -166,6 +166,6 @@ impl CredentialRow {
             description: self.description,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }

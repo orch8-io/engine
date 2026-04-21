@@ -95,6 +95,11 @@ pub(crate) async fn create_pool(
     Ok((axum::http::StatusCode::CREATED, Json(pool)))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct ListPoolsQuery {
+    tenant_id: Option<String>,
+}
+
 #[utoipa::path(
     get, path = "/pools",
     params(("tenant_id" = String, Query, description = "Tenant ID")),
@@ -104,11 +109,10 @@ pub(crate) async fn create_pool(
 pub(crate) async fn list_pools(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(query): axum::extract::Query<ListPoolsQuery>,
 ) -> Result<Json<Vec<ResourcePool>>, ApiError> {
-    let tenant_id =
-        crate::auth::scoped_tenant_id(&tenant_ctx, params.get("tenant_id").map(String::as_str))
-            .unwrap_or_else(|| TenantId(String::new()));
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref())
+        .unwrap_or_else(|| TenantId(String::new()));
     let pools = state.storage.list_resource_pools(&tenant_id).await?;
     Ok(Json(pools))
 }

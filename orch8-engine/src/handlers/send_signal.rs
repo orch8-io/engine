@@ -23,7 +23,7 @@ use orch8_types::{
     signal::{Signal, SignalType},
 };
 
-use super::util::{check_same_tenant, map_storage_err, parse_instance_id, permanent};
+use super::util::{map_storage_err, parse_instance_id, permanent};
 use super::StepContext;
 
 pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepError> {
@@ -44,13 +44,19 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
     // Tenant check MUST happen before any write. Cross-tenant attempts must
     // never leave side effects or leak target existence — so we do this read
     // up front, even though the atomic path below re-checks state itself.
+    //
+    // SECURITY: not-found and cross-tenant MUST return the identical error so
+    // an attacker cannot probe foreign instance existence by comparing error
+    // messages.
     let target = storage
         .get_instance(target_id)
         .await
-        .map_err(|e| map_storage_err(&e))?
-        .ok_or_else(|| permanent("target instance not found"))?;
+        .map_err(|e| map_storage_err(&e))?;
 
-    check_same_tenant(&ctx.tenant_id, &target.tenant_id, "send_signal")?;
+    match target {
+        Some(ref t) if t.tenant_id == ctx.tenant_id => {}
+        _ => return Err(permanent("target instance not found")),
+    }
 
     let signal = Signal {
         id: Uuid::now_v7(),
@@ -231,10 +237,12 @@ mod tests {
             }),
         );
         let err = handle_send_signal(ctx).await.unwrap_err();
+        // SECURITY: cross-tenant returns the SAME error as not-found so
+        // existence cannot be probed.
         if let StepError::Permanent { message, .. } = &err {
             assert!(
-                message.contains("cross-tenant"),
-                "expected 'cross-tenant' in message, got: {message}"
+                message.contains("target instance not found"),
+                "expected opaque not-found message, got: {message}"
             );
             assert!(
                 !message.to_lowercase().contains("terminal")

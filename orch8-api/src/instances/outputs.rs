@@ -45,29 +45,42 @@ pub(crate) async fn get_outputs(
     // missing externalized ref on a single output must not fail the entire
     // endpoint — return what we have, log the failure, and leave the marker
     // visible so callers can detect partial results.
-    for out in &mut outputs {
-        let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) else {
-            continue;
-        };
-        match state.storage.get_externalized_state(ref_key).await {
-            Ok(Some(resolved)) => {
-                out.output = resolved;
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    instance_id = %id,
-                    block_id = %out.block_id,
-                    ref_key,
-                    "get_outputs: externalized payload missing — returning marker unchanged"
-                );
+    //
+    // Perf: collect all ref_keys and resolve them in a single batched query
+    // instead of N+1 round-trips.
+    let mut ref_keys = Vec::new();
+    let mut output_indices = Vec::new();
+    for (idx, out) in outputs.iter().enumerate() {
+        if let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) {
+            ref_keys.push(ref_key.to_string());
+            output_indices.push(idx);
+        }
+    }
+    if !ref_keys.is_empty() {
+        match state.storage.batch_get_externalized_state(&ref_keys).await {
+            Ok(resolved_map) => {
+                for (i, ref_key) in ref_keys.iter().enumerate() {
+                    let idx = output_indices[i];
+                    match resolved_map.get(ref_key) {
+                        Some(resolved) => {
+                            outputs[idx].output = resolved.clone();
+                        }
+                        None => {
+                            tracing::warn!(
+                                instance_id = %id,
+                                block_id = %outputs[idx].block_id,
+                                ref_key,
+                                "get_outputs: externalized payload missing — returning marker unchanged"
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     instance_id = %id,
-                    block_id = %out.block_id,
-                    ref_key,
                     error = %e,
-                    "get_outputs: failed to resolve externalized payload — returning marker unchanged"
+                    "get_outputs: batched externalized resolution failed — returning markers unchanged"
                 );
             }
         }

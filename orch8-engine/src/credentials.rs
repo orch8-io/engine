@@ -238,7 +238,12 @@ async fn refresh_credential(
         .map_err(|e| format!("credential '{}': refresh POST failed: {e}", credential.id))?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().await.map_err(|e| {
+            format!(
+                "credential '{}': refresh returned {status} and failed to read body: {e}",
+                credential.id
+            )
+        })?;
         return Err(format!(
             "credential '{}': refresh returned {status}: {body}",
             credential.id

@@ -36,7 +36,11 @@ pub async fn execute_ab_split(
         // Skip all non-chosen variants, activate the chosen one.
         for child in &children {
             let branch_idx = child.branch_index.unwrap_or(-1);
-            let chosen_i16 = i16::try_from(chosen_index).unwrap_or(i16::MAX);
+            let chosen_i16 = i16::try_from(chosen_index).map_err(|_| {
+                EngineError::InvalidConfig(format!(
+                    "ab_split chosen_index {chosen_index} exceeds i16 range"
+                ))
+            })?;
             if branch_idx == chosen_i16 {
                 storage
                     .update_node_state(child.id, NodeState::Running)

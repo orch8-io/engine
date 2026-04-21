@@ -92,6 +92,7 @@ async fn process_signals_inner(
                     crate::lifecycle::transition_instance(
                         storage,
                         instance_id,
+                        None,
                         current_state,
                         InstanceState::Paused,
                         None,
@@ -111,6 +112,7 @@ async fn process_signals_inner(
                     crate::lifecycle::transition_instance(
                         storage,
                         instance_id,
+                        None,
                         InstanceState::Paused,
                         InstanceState::Scheduled,
                         Some(Utc::now()),
@@ -153,6 +155,7 @@ async fn process_signals_inner(
                 crate::lifecycle::transition_instance(
                     storage,
                     instance_id,
+                    None,
                     current_state,
                     InstanceState::Cancelled,
                     None,
@@ -205,6 +208,7 @@ async fn process_signals_inner(
                         crate::lifecycle::transition_instance(
                             storage,
                             instance_id,
+                            None,
                             InstanceState::Waiting,
                             InstanceState::Scheduled,
                             Some(Utc::now()),
@@ -241,7 +245,7 @@ async fn cancel_scoped(
     let mut has_non_cancellable_active = false;
 
     // Collect IDs of CancellationScope nodes so we can check ancestry.
-    let scope_node_ids: Vec<_> = tree
+    let scope_node_ids: std::collections::HashSet<_> = tree
         .iter()
         .filter(|n| n.block_type == BlockType::CancellationScope)
         .map(|n| n.id)
@@ -344,14 +348,15 @@ fn is_inside_finally_branch(
 fn is_descendant_of_any(
     tree: &[orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
-    ancestor_ids: &[orch8_types::ids::ExecutionNodeId],
+    ancestor_ids: &std::collections::HashSet<orch8_types::ids::ExecutionNodeId>,
 ) -> bool {
+    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     let mut current_parent = node.parent_id;
     while let Some(pid) = current_parent {
         if ancestor_ids.contains(&pid) {
             return true;
         }
-        current_parent = tree.iter().find(|n| n.id == pid).and_then(|n| n.parent_id);
+        current_parent = node_map.get(&pid).copied().and_then(|n| n.parent_id);
     }
     false
 }
@@ -1148,15 +1153,16 @@ mod tests {
             completed_at: None,
         };
         let tree = vec![root.clone(), child.clone(), grandchild.clone()];
-        assert!(is_descendant_of_any(&tree, &grandchild, &[root.id]));
-        assert!(is_descendant_of_any(&tree, &child, &[root.id]));
+        let ancestors = std::collections::HashSet::from([root.id]);
+        assert!(is_descendant_of_any(&tree, &grandchild, &ancestors));
+        assert!(is_descendant_of_any(&tree, &child, &ancestors));
         // Root is not a descendant of itself.
-        assert!(!is_descendant_of_any(&tree, &root, &[root.id]));
+        assert!(!is_descendant_of_any(&tree, &root, &ancestors));
         // Unknown ancestor — returns false.
         assert!(!is_descendant_of_any(
             &tree,
             &grandchild,
-            &[ExecutionNodeId::new()]
+            &std::collections::HashSet::from([ExecutionNodeId::new()])
         ));
     }
 }

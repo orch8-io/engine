@@ -330,6 +330,14 @@ impl StorageBackend for PostgresStorage {
         outputs::get_all(self, instance_id).await
     }
 
+    async fn get_outputs_after_created_at(
+        &self,
+        instance_id: InstanceId,
+        after: Option<DateTime<Utc>>,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_after_created_at(self, instance_id, after).await
+    }
+
     async fn get_completed_block_ids(
         &self,
         instance_id: InstanceId,

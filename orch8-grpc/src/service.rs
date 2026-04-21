@@ -37,7 +37,8 @@ fn from_json_str<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, Status> {
     if s.len() > MAX_JSON_SIZE {
         return Err(Status::invalid_argument("JSON payload too large"));
     }
-    serde_json::from_str(s).map_err(|_| Status::invalid_argument("invalid JSON payload"))
+    serde_json::from_str(s)
+        .map_err(|e| Status::invalid_argument(format!("invalid JSON payload: {e}")))
 }
 
 fn storage_err(e: orch8_types::error::StorageError) -> Status {

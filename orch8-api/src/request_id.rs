@@ -14,12 +14,28 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// 1. Inserted into request extensions so handlers can access it.
 /// 2. Echoed back in the response `x-request-id` header.
 pub async fn request_id_middleware(mut request: Request, next: Next) -> Response {
-    let request_id = request
+    let raw_request_id = request
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
-        .map_or_else(|| Uuid::new_v4().to_string(), String::from);
+        .map(String::from);
+
+    // Sanitize client-provided IDs: keep only safe ASCII chars to prevent
+    // header injection and ensure HeaderValue::from_str always succeeds.
+    let request_id = raw_request_id
+        .and_then(|s| {
+            let sanitized: String = s
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     request
         .extensions_mut()
@@ -27,6 +43,8 @@ pub async fn request_id_middleware(mut request: Request, next: Next) -> Response
 
     let mut response = next.run(request).await;
 
+    // HeaderValue::from_str is now infallible because we sanitized above,
+    // but we keep the check as a defence-in-depth guard.
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(REQUEST_ID_HEADER, val);
     }

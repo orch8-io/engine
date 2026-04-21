@@ -89,9 +89,10 @@ pub(super) async fn get(
     }
 }
 
-/// Atomic batched save. Wraps N inserts in a single transaction so partial
+/// Atomic batched save. Wraps all inserts in a single transaction so partial
 /// failures never leave `task_instances.context` pointing at ref-keys that
-/// don't exist. Per-row compression branching mirrors [`save`].
+/// don't exist. Per-row compression branching mirrors [`save`], but rows are
+/// grouped by storage shape and inserted in two bulk statements.
 pub(super) async fn batch_save(
     storage: &SqliteStorage,
     instance_id: InstanceId,
@@ -101,42 +102,61 @@ pub(super) async fn batch_save(
         return Ok(());
     }
 
-    let mut tx = storage.pool.begin().await?;
+    let mut compressed: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    let mut inline: Vec<(String, String, i64)> = Vec::new();
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
         let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
         if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
-            let compressed = compress(payload)?;
-            sqlx::query(
-                "INSERT OR REPLACE INTO externalized_state \
-                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-                 VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
-            )
-            .bind(ref_key)
-            .bind(instance_id.0.to_string())
-            .bind(compressed)
-            .bind(raw_size)
-            .bind(ts(Utc::now()))
-            .execute(&mut *tx)
-            .await
-            ?;
+            let c = compress(payload)?;
+            compressed.push((ref_key.clone(), c, raw_size));
         } else {
-            sqlx::query(
-                "INSERT OR REPLACE INTO externalized_state \
-                 (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-                 VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
-            )
-            .bind(ref_key)
-            .bind(instance_id.0.to_string())
-            .bind(serde_json::to_string(payload).map_err(StorageError::Serialization)?)
-            .bind(raw_size)
-            .bind(ts(Utc::now()))
-            .execute(&mut *tx)
-            .await
-            ?;
+            let s = serde_json::to_string(payload).map_err(StorageError::Serialization)?;
+            inline.push((ref_key.clone(), s, raw_size));
         }
+    }
+
+    let now = ts(Utc::now());
+    let inst_id = instance_id.0.to_string();
+    let mut tx = storage.pool.begin().await?;
+
+    if !compressed.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT OR REPLACE INTO externalized_state \
+             (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) ",
+        );
+        qb.push_values(
+            &compressed,
+            |mut b, (ref_key, payload_bytes, size_bytes)| {
+                b.push_bind(ref_key)
+                    .push_bind(&inst_id)
+                    .push_bind(None::<String>)
+                    .push_bind(payload_bytes)
+                    .push_bind("zstd")
+                    .push_bind(size_bytes)
+                    .push_bind(&now);
+            },
+        );
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    if !inline.is_empty() {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT OR REPLACE INTO externalized_state \
+             (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) ",
+        );
+        qb.push_values(&inline, |mut b, (ref_key, payload, size_bytes)| {
+            b.push_bind(ref_key)
+                .push_bind(&inst_id)
+                .push_bind(payload)
+                .push_bind(None::<Vec<u8>>)
+                .push_bind(None::<String>)
+                .push_bind(size_bytes)
+                .push_bind(&now);
+        });
+        qb.build().execute(&mut *tx).await?;
     }
 
     tx.commit().await?;

@@ -95,11 +95,11 @@ pub(crate) async fn resolve_templates_in_params(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
     context: &ExecutionContext,
-    params: serde_json::Value,
+    params: &serde_json::Value,
     outputs: &OutputsSnapshot,
 ) -> Result<serde_json::Value, EngineError> {
     let outputs = outputs.get(storage, instance.id).await?;
-    crate::template::resolve(&params, context, outputs)
+    crate::template::resolve(params, context, outputs)
 }
 
 /// Compute the attempt number for a step from the latest prior
@@ -120,11 +120,20 @@ pub(crate) async fn compute_attempt(
     }
 }
 
+/// Result of attempting to apply a `_self_modify` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfModifyResult {
+    /// No `_self_modify` marker present — nothing to do.
+    NotApplicable,
+    /// Marker was present and blocks were injected successfully.
+    Applied,
+    /// Marker was present but injection failed (invalid data or storage error).
+    Failed,
+}
+
 /// If `output` carries the self-modify marker (`{"_self_modify": true,
 /// "blocks": [...], "position": …}`), inject the declared blocks into the
-/// instance's `injected_blocks`. Returns `true` when an injection was
-/// applied so the caller can decide whether to transition the instance
-/// (fast path) or simply mark the node complete (tree path).
+/// instance's `injected_blocks`.
 ///
 /// Inject failures are logged at `warn` level but not surfaced — the step
 /// already completed successfully, and the block list is additive (missing
@@ -133,16 +142,17 @@ pub async fn apply_self_modify(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     output: &serde_json::Value,
-) -> bool {
+) -> SelfModifyResult {
     if output
         .get("_self_modify")
         .and_then(serde_json::Value::as_bool)
         != Some(true)
     {
-        return false;
+        // No self-modify marker — this is the common success path.
+        return SelfModifyResult::NotApplicable;
     }
     let Some(blocks) = output.get("blocks").filter(|v| v.is_array()) else {
-        return false;
+        return SelfModifyResult::Failed;
     };
     let position = output.get("position").and_then(serde_json::Value::as_u64);
     // Both branches must start from the existing `injected_blocks` and merge
@@ -151,10 +161,17 @@ pub async fn apply_self_modify(
     // earlier self-modify output in the same instance. That broke the agent
     // pattern the handler was written to support: iterative self-extension
     // across multiple steps.
-    let existing = storage
-        .get_injected_blocks(instance_id)
-        .await
-        .unwrap_or(None);
+    let existing = match storage.get_injected_blocks(instance_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "failed to read injected blocks from storage"
+            );
+            return SelfModifyResult::Failed;
+        }
+    };
     let mut arr = existing
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
@@ -162,9 +179,8 @@ pub async fn apply_self_modify(
     let final_blocks = if let Some(pos) = position {
         #[allow(clippy::cast_possible_truncation)]
         let at = (pos.min(usize::MAX as u64) as usize).min(arr.len());
-        for (i, b) in new.into_iter().enumerate() {
-            arr.insert(at + i, b);
-        }
+        // Perf: use splice instead of repeated insert to avoid O(n×m) shifting.
+        let _: Vec<_> = arr.splice(at..at, new).collect();
         serde_json::Value::Array(arr)
     } else {
         // No position → true append at the end of the existing list.
@@ -177,8 +193,9 @@ pub async fn apply_self_modify(
             error = %e,
             "failed to inject self-modify blocks"
         );
+        return SelfModifyResult::Failed;
     }
-    true
+    SelfModifyResult::Applied
 }
 
 #[cfg(test)]
@@ -291,7 +308,7 @@ mod tests {
             ..ExecutionContext::default()
         };
         let params = json!({"greeting": "hi {{context.data.name}}", "n": "{{context.data.age}}"});
-        let out = resolve_templates_in_params(&s, &inst, &ctx, params, &OutputsSnapshot::new())
+        let out = resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new())
             .await
             .unwrap();
         assert_eq!(out["greeting"], "hi Alice");
@@ -307,7 +324,7 @@ mod tests {
         save_output(&s, inst.id, "step1", json!({"total": 42})).await;
         let ctx = ExecutionContext::default();
         let params = json!({"v": "{{outputs.step1.total}}"});
-        let out = resolve_templates_in_params(&s, &inst, &ctx, params, &OutputsSnapshot::new())
+        let out = resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new())
             .await
             .unwrap();
         assert_eq!(out["v"], 42);
@@ -321,10 +338,9 @@ mod tests {
         s.create_instance(&inst).await.unwrap();
         let ctx = ExecutionContext::default();
         let params = json!([1, "plain", {"k": "v"}, null, true]);
-        let out =
-            resolve_templates_in_params(&s, &inst, &ctx, params.clone(), &OutputsSnapshot::new())
-                .await
-                .unwrap();
+        let out = resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new())
+            .await
+            .unwrap();
         assert_eq!(out, params);
     }
 
@@ -337,7 +353,7 @@ mod tests {
         let ctx = ExecutionContext::default();
         let params = json!({"v": "{{bogus.root}}"});
         let result =
-            resolve_templates_in_params(&s, &inst, &ctx, params, &OutputsSnapshot::new()).await;
+            resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new()).await;
         assert!(result.is_err(), "unknown root should error, got {result:?}");
     }
 
@@ -356,7 +372,7 @@ mod tests {
                 "lvl2": ["{{context.data.user}}", {"deep": "{{context.data.user}}"}]
             }
         });
-        let out = resolve_templates_in_params(&s, &inst, &ctx, params, &OutputsSnapshot::new())
+        let out = resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new())
             .await
             .unwrap();
         assert_eq!(out["lvl1"]["lvl2"][0], "bob");

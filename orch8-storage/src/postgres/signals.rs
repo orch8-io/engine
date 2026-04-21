@@ -60,7 +60,7 @@ pub(super) async fn enqueue_if_active(
             .await?;
 
     let Some((state_str,)) = row else {
-        tx.rollback().await?;
+        let _ = tx.rollback().await;
         return Err(StorageError::NotFound {
             entity: "task_instance",
             id: signal.instance_id.0.to_string(),
@@ -69,7 +69,7 @@ pub(super) async fn enqueue_if_active(
 
     let state = InstanceState::from_str(&state_str).map_err(StorageError::Query)?;
     if state.is_terminal() {
-        tx.rollback().await?;
+        let _ = tx.rollback().await;
         return Err(StorageError::TerminalTarget {
             entity: "task_instance".to_string(),
             id: signal.instance_id.0.to_string(),

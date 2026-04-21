@@ -52,7 +52,11 @@ pub async fn execute_try_catch(
                 .merge_context_data(instance.id, "_error", &error_ctx)
                 .await
             {
-                debug!(error = %e, "failed to inject error context for catch block");
+                tracing::warn!(
+                    instance_id = %instance.id,
+                    error = %e,
+                    "failed to inject error context for catch block"
+                );
             }
 
             // Activate catch children.

@@ -66,7 +66,7 @@ pub(super) async fn list_versions(
     namespace: &Namespace,
     name: &str,
 ) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM sequences WHERE tenant_id=?1 AND namespace=?2 AND name=?3 ORDER BY version DESC")
+    let rows = sqlx::query("SELECT * FROM sequences WHERE tenant_id=?1 AND namespace=?2 AND name=?3 AND deprecated=0 ORDER BY version DESC")
         .bind(&tenant_id.0).bind(&namespace.0).bind(name)
         .fetch_all(&storage.pool).await?;
     rows.iter().map(row_to_sequence).collect()

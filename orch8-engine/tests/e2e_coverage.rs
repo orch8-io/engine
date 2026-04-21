@@ -200,6 +200,7 @@ async fn drive(
                     .unwrap();
             }
             InstanceState::Running => {}
+            _ => {}
         }
         let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
         let outcome = evaluator::evaluate(storage, handlers, &inst, sequence)

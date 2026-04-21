@@ -107,6 +107,11 @@ async fn get_session_by_key(
     tenant_ctx: crate::auth::OptionalTenant,
     Path((tenant_id, key)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if tenant_id.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "tenant_id exceeds maximum length of 128".into(),
+        ));
+    }
     let session = state
         .storage
         .get_session_by_key(&TenantId(tenant_id), &key)

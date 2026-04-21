@@ -79,7 +79,9 @@ pub(crate) async fn stream_instance(
     // with 503 instead of silently spawning another polling task. Without
     // this gate a single client could open arbitrarily many streams and
     // exhaust tokio tasks + DB pool connections.
-    let permit = std::sync::Arc::clone(&state.stream_limiter)
+    let permit = state
+        .stream_limiter
+        .clone()
         .try_acquire_owned()
         .map_err(|_| {
             ApiError::Unavailable("too many concurrent streaming clients; retry later".into())
@@ -106,7 +108,7 @@ pub(crate) async fn stream_instance(
         // automatically on return/panic, freeing a slot.
         let _permit = permit;
 
-        let mut last_output_count: usize = 0;
+        let mut last_output_at: Option<chrono::DateTime<chrono::Utc>> = None;
         let mut last_state: Option<InstanceState> = None;
         let mut ticker = tokio::time::interval(poll_interval);
         // Skip the immediate first tick so we don't double-query right after the prefetch above.
@@ -174,27 +176,41 @@ pub(crate) async fn stream_instance(
             }
 
             // Emit new block outputs.
-            match storage.get_all_outputs(instance_id).await {
+            // Use `get_outputs_after_created_at` to avoid fetching the entire
+            // history on every poll — critical for long-running instances that
+            // accumulate thousands of outputs.
+            match storage
+                .get_outputs_after_created_at(instance_id, last_output_at)
+                .await
+            {
                 Ok(outputs) => {
-                    let new_count = outputs.len();
-                    if new_count > last_output_count {
-                        for output in outputs.iter().skip(last_output_count) {
+                    if !outputs.is_empty() {
+                        for output in &outputs {
                             // Serialisation of owned `BlockOutput` is infallible in practice —
                             // if it ever fails, drop the payload but keep the stream alive.
-                            let payload =
-                                serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string());
+                            let payload = serde_json::to_string(output).unwrap_or_else(|e| {
+                                tracing::error!(
+                                    instance_id = %instance_id.0,
+                                    output_id = %output.id,
+                                    error = %e,
+                                    "failed to serialize output in SSE stream"
+                                );
+                                "{}".to_string()
+                            });
                             let event = Event::default().event("output").data(payload);
                             if tx.send(Ok(event)).await.is_err() {
                                 return;
                             }
+                            if last_output_at.is_none_or(|t| output.created_at > t) {
+                                last_output_at = Some(output.created_at);
+                            }
                         }
-                        last_output_count = new_count;
                     }
                     consecutive_errors = 0;
                 }
                 Err(e) => {
                     consecutive_errors = consecutive_errors.saturating_add(1);
-                    tracing::debug!(error = %e, instance_id = %instance_id.0, consecutive_errors, "stream: get_all_outputs failed, will back off");
+                    tracing::debug!(error = %e, instance_id = %instance_id.0, consecutive_errors, "stream: get_outputs_after_created_at failed, will back off");
                     continue;
                 }
             }

@@ -12,6 +12,7 @@ use crate::ids::{InstanceId, Namespace, SequenceId, TenantId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "instance_state", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum InstanceState {
     Scheduled,
     Running,
@@ -120,6 +121,7 @@ impl std::fmt::Display for InstanceState {
     ToSchema,
 )]
 #[repr(i16)]
+#[non_exhaustive]
 pub enum Priority {
     Low = 0,
     #[default]

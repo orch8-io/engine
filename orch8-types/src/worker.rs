@@ -10,6 +10,7 @@ use crate::ids::{BlockId, InstanceId};
 /// State of a worker task in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WorkerTaskState {
     Pending,
     Claimed,

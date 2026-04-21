@@ -111,6 +111,19 @@ impl std::fmt::Display for BlockId {
     }
 }
 
+impl TenantId {
+    /// Create a new validated `TenantId`.
+    /// Rejects empty strings so empty tenant IDs cannot be constructed.
+    pub fn new(s: impl Into<String>) -> Result<Self, String> {
+        let s = s.into();
+        if s.trim().is_empty() {
+            Err("tenant_id cannot be empty".to_string())
+        } else {
+            Ok(Self(s))
+        }
+    }
+}
+
 impl std::fmt::Display for TenantId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)

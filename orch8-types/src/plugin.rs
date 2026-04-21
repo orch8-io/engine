@@ -7,6 +7,7 @@ use utoipa::ToSchema;
 /// The kind of external plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PluginType {
     Wasm,
     Grpc,

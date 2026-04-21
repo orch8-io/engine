@@ -80,6 +80,32 @@ pub(super) async fn get_all(
     Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
 }
 
+pub(super) async fn get_after_created_at(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    after: Option<DateTime<Utc>>,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = if let Some(after) = after {
+        sqlx::query_as::<_, BlockOutputRow>(
+            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+               FROM block_outputs WHERE instance_id = $1 AND created_at > $2 ORDER BY created_at",
+        )
+        .bind(instance_id.0)
+        .bind(after)
+        .fetch_all(&store.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, BlockOutputRow>(
+            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+               FROM block_outputs WHERE instance_id = $1 ORDER BY created_at",
+        )
+        .bind(instance_id.0)
+        .fetch_all(&store.pool)
+        .await?
+    };
+    Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
+}
+
 /// Distinct `block_id`s that have produced at least one output for this
 /// instance. `DISTINCT` is required because under the write-append model a
 /// single block can have multiple rows (loop iterations, retries).

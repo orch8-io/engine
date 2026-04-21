@@ -326,7 +326,8 @@ async fn enforce_concurrency_limits(
     instances: Vec<orch8_types::instance::TaskInstance>,
 ) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
     // Collect concurrency keys present in the batch.
-    let mut key_instances: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut key_instances: HashMap<String, Vec<usize>> =
+        HashMap::with_capacity(instances.len() / 2);
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(ref key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
             key_instances.entry(key.clone()).or_default().push(idx);
@@ -381,12 +382,12 @@ async fn enforce_concurrency_limits(
             .await?;
     }
 
-    let kept: Vec<orch8_types::instance::TaskInstance> = instances
-        .into_iter()
-        .enumerate()
-        .filter(|(idx, _)| !deferred_indices.contains(idx))
-        .map(|(_, inst)| inst)
-        .collect();
+    let mut kept = instances;
+    let mut deferred_sorted: Vec<_> = deferred_indices.into_iter().collect();
+    deferred_sorted.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in deferred_sorted {
+        kept.swap_remove(idx);
+    }
 
     Ok(kept)
 }
@@ -525,6 +526,7 @@ async fn process_waiting_deadlines(
                                 crate::lifecycle::transition_instance(
                                     storage.as_ref(),
                                     instance.id,
+                                    Some(&instance.tenant_id),
                                     InstanceState::Waiting,
                                     InstanceState::Scheduled,
                                     Some(Utc::now()),
@@ -631,6 +633,7 @@ async fn check_step_deadline_waiting(
     crate::lifecycle::transition_instance(
         storage.as_ref(),
         instance_id,
+        Some(&instance.tenant_id),
         InstanceState::Waiting,
         InstanceState::Failed,
         None,
@@ -901,6 +904,7 @@ async fn process_instance(
     crate::lifecycle::transition_instance(
         storage.as_ref(),
         instance_id,
+        Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Completed,
         None,
@@ -996,6 +1000,7 @@ async fn process_instance_tree(
                 crate::lifecycle::transition_instance(
                     storage.as_ref(),
                     instance_id,
+                    Some(&instance.tenant_id),
                     InstanceState::Running,
                     InstanceState::Waiting,
                     None,
@@ -1081,6 +1086,7 @@ async fn process_instance_tree(
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,
+                Some(&instance.tenant_id),
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,

@@ -9,6 +9,7 @@ use crate::ids::TenantId;
 /// The kind of event source that fires a trigger.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TriggerType {
     #[default]
     Webhook,

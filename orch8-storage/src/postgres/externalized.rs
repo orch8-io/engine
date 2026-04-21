@@ -93,11 +93,10 @@ pub(super) async fn get(
     }
 }
 
-/// Atomic batched save. Opens a transaction, issues one INSERT per entry
-/// (each with the same `ON CONFLICT DO UPDATE` semantics as [`save`]), and
-/// commits. Per-row compression decisions are made in Rust because the
-/// zstd-vs-inline choice differs per payload — a single multi-row `VALUES`
-/// clause can't express both storage shapes cleanly.
+/// Atomic batched save. Opens a transaction, groups entries by storage
+/// shape (compressed vs inline), and issues one bulk `INSERT` per group
+/// using `QueryBuilder::push_values`. Each bulk statement carries the same
+/// `ON CONFLICT DO UPDATE` semantics as [`save`].
 ///
 /// Atomicity contract: if any single row fails to insert the transaction is
 /// rolled back so the caller's `task_instances.context` never references a
@@ -111,50 +110,73 @@ pub(super) async fn batch_save(
         return Ok(());
     }
 
-    let mut tx = store.pool.begin().await?;
+    let mut compressed: Vec<(String, Vec<u8>, i64)> = Vec::new();
+    let mut inline: Vec<(String, serde_json::Value, i64)> = Vec::new();
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
         let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
         if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
-            let compressed = compress(payload)?;
-            sqlx::query(
-                r"INSERT INTO externalized_state
-                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
-                  VALUES ($1, $2, $3, NULL, $4, 'zstd', $5, NOW())
-                  ON CONFLICT (ref_key) DO UPDATE
-                    SET payload = NULL,
-                        payload_bytes = EXCLUDED.payload_bytes,
-                        compression = 'zstd',
-                        size_bytes = EXCLUDED.size_bytes",
-            )
-            .bind(Uuid::now_v7())
-            .bind(instance_id.0)
-            .bind(ref_key)
-            .bind(&compressed)
-            .bind(raw_size)
-            .execute(&mut *tx)
-            .await?;
+            let c = compress(payload)?;
+            compressed.push((ref_key.clone(), c, raw_size));
         } else {
-            sqlx::query(
-                r"INSERT INTO externalized_state
-                      (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
-                  VALUES ($1, $2, $3, $4, NULL, NULL, $5, NOW())
-                  ON CONFLICT (ref_key) DO UPDATE
-                    SET payload = EXCLUDED.payload,
-                        payload_bytes = NULL,
-                        compression = NULL,
-                        size_bytes = EXCLUDED.size_bytes",
-            )
-            .bind(Uuid::now_v7())
-            .bind(instance_id.0)
-            .bind(ref_key)
-            .bind(payload)
-            .bind(raw_size)
-            .execute(&mut *tx)
-            .await?;
+            inline.push((ref_key.clone(), payload.clone(), raw_size));
         }
+    }
+
+    let mut tx = store.pool.begin().await?;
+
+    for chunk in compressed.chunks(500) {
+        let mut qb = sqlx::QueryBuilder::new(
+            r"INSERT INTO externalized_state
+                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+              VALUES ",
+        );
+        qb.push_values(chunk, |mut b, (ref_key, payload_bytes, size_bytes)| {
+            b.push_bind(Uuid::now_v7())
+                .push_bind(instance_id.0)
+                .push_bind(ref_key)
+                .push_bind(None::<serde_json::Value>)
+                .push_bind(payload_bytes)
+                .push_bind("zstd")
+                .push_bind(size_bytes)
+                .push_bind(chrono::Utc::now());
+        });
+        qb.push(
+            " ON CONFLICT (ref_key) DO UPDATE
+                SET payload = NULL,
+                    payload_bytes = EXCLUDED.payload_bytes,
+                    compression = 'zstd',
+                    size_bytes = EXCLUDED.size_bytes",
+        );
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    for chunk in inline.chunks(500) {
+        let mut qb = sqlx::QueryBuilder::new(
+            r"INSERT INTO externalized_state
+                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
+              VALUES ",
+        );
+        qb.push_values(chunk, |mut b, (ref_key, payload, size_bytes)| {
+            b.push_bind(Uuid::now_v7())
+                .push_bind(instance_id.0)
+                .push_bind(ref_key)
+                .push_bind(payload)
+                .push_bind(None::<Vec<u8>>)
+                .push_bind(None::<String>)
+                .push_bind(size_bytes)
+                .push_bind(chrono::Utc::now());
+        });
+        qb.push(
+            " ON CONFLICT (ref_key) DO UPDATE
+                SET payload = EXCLUDED.payload,
+                    payload_bytes = NULL,
+                    compression = NULL,
+                    size_bytes = EXCLUDED.size_bytes",
+        );
+        qb.build().execute(&mut *tx).await?;
     }
 
     tx.commit().await?;

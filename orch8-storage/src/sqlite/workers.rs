@@ -308,7 +308,7 @@ pub(super) async fn expire_timed_out(storage: &SqliteStorage) -> Result<u64, Sto
         "UPDATE worker_tasks
          SET state='failed',
              error_message='task timed out (timeout_ms exceeded)',
-             error_retryable='false',
+             error_retryable=0,
              completed_at=?1
          WHERE state IN ('pending','claimed')
            AND timeout_ms IS NOT NULL

@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use orch8_types::error::StepError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 
-use super::util::{check_same_tenant, map_storage_err, parse_instance_id};
+use super::util::{map_storage_err, parse_instance_id};
 use super::StepContext;
 
 /// Node states that count as "done" for the purpose of `current_node`
@@ -64,15 +64,17 @@ pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, Ste
 
     let storage = ctx.storage.as_ref();
 
-    let Some(target) = storage
+    let target = storage
         .get_instance(target_id)
         .await
-        .map_err(|e| map_storage_err(&e))?
-    else {
-        return Ok(json!({ "found": false }));
-    };
+        .map_err(|e| map_storage_err(&e))?;
 
-    check_same_tenant(&ctx.tenant_id, &target.tenant_id, "query_instance")?;
+    // SECURITY: not-found and cross-tenant MUST return the identical response
+    // so an attacker cannot probe foreign instance existence.
+    let target = match target {
+        Some(t) if t.tenant_id == ctx.tenant_id => t,
+        _ => return Ok(json!({ "found": false })),
+    };
 
     let completed_at = if target.state.is_terminal() {
         Some(target.updated_at)
@@ -328,15 +330,10 @@ mod tests {
             storage_dyn,
             json!({ "instance_id": target.id.0.to_string() }),
         );
-        let err = handle_query_instance(ctx).await.unwrap_err();
-
-        assert!(matches!(err, StepError::Permanent { .. }));
-        if let StepError::Permanent { message, .. } = &err {
-            assert!(
-                message.contains("cross-tenant"),
-                "expected 'cross-tenant' in message, got: {message}"
-            );
-        }
+        // SECURITY: cross-tenant returns the SAME response as not-found so
+        // existence cannot be probed.
+        let result = handle_query_instance(ctx).await.unwrap();
+        assert_eq!(result, json!({ "found": false }));
     }
 
     #[tokio::test]

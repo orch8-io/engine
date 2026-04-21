@@ -154,7 +154,10 @@ pub async fn handle_ap(ctx: StepContext, handler_name: &str) -> Result<Value, St
         })?;
 
     let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
+    let text = response.text().await.map_err(|e| StepError::Retryable {
+        message: format!("activepieces: failed to read response body from {url}: {e}"),
+        details: None,
+    })?;
 
     // Prefer the sidecar's own classification when it gave us a structured
     // envelope; fall back to HTTP status only when the body is missing or

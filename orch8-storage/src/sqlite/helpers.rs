@@ -23,21 +23,27 @@ pub(super) fn ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339()
 }
 
-pub(super) fn parse_ts(s: &str) -> DateTime<Utc> {
+pub(super) fn parse_ts(s: &str) -> Result<DateTime<Utc>, StorageError> {
     // Try RFC 3339 first (the canonical format written by ts()).
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-        return dt.with_timezone(&Utc);
+        return Ok(dt.with_timezone(&Utc));
     }
     // SQLite's datetime() returns "YYYY-MM-DD HH:MM:SS" (no timezone).
     if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
-        return chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+        return Ok(chrono::DateTime::<Utc>::from_naive_utc_and_offset(
+            naive, Utc,
+        ));
     }
-    tracing::warn!(value = s, "failed to parse timestamp, defaulting to epoch");
-    DateTime::default()
+    Err(StorageError::Query(format!(
+        "failed to parse timestamp: {s}"
+    )))
 }
 
-pub(super) fn parse_ts_opt(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.map(|v| parse_ts(&v))
+pub(super) fn parse_ts_opt(s: Option<String>) -> Result<Option<DateTime<Utc>>, StorageError> {
+    match s {
+        Some(v) => Ok(Some(parse_ts(&v)?)),
+        None => Ok(None),
+    }
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
@@ -58,7 +64,7 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
         // corruption, not a cue to silently resurrect the row as Scheduled.
         // Masking the corruption here let broken rows leak into claim cycles.
         state: InstanceState::from_str(row.get::<&str, _>("state")).map_err(StorageError::Query)?,
-        next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at")),
+        next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at"))?,
         priority: Priority::try_from(row.get::<i16, _>("priority")).unwrap_or(Priority::Normal),
         timezone: row.get::<String, _>("timezone"),
         metadata: parse_json(row.get::<&str, _>("metadata"))?,
@@ -73,8 +79,8 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
             .get::<Option<String>, _>("parent_instance_id")
             .and_then(|s| Uuid::parse_str(&s).ok())
             .map(InstanceId),
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
-        updated_at: parse_ts(row.get::<&str, _>("updated_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })
 }
 
@@ -91,8 +97,8 @@ pub(super) fn row_to_node(row: &sqlx::sqlite::SqliteRow) -> Result<ExecutionNode
             .unwrap_or(BlockType::Step),
         branch_index: row.get::<Option<i32>, _>("branch_index").map(|v| v as i16),
         state: NodeState::from_str(row.get::<&str, _>("state")).unwrap_or(NodeState::Pending),
-        started_at: parse_ts_opt(row.get::<Option<String>, _>("started_at")),
-        completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at")),
+        started_at: parse_ts_opt(row.get::<Option<String>, _>("started_at"))?,
+        completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at"))?,
     })
 }
 
@@ -110,7 +116,7 @@ pub(super) fn row_to_sequence(
         interceptors: row
             .get::<Option<String>, _>("interceptors")
             .and_then(|s| serde_json::from_str(&s).ok()),
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -123,7 +129,7 @@ pub(super) fn row_to_output(row: &sqlx::sqlite::SqliteRow) -> Result<BlockOutput
         output_ref: row.get::<Option<String>, _>("output_ref"),
         output_size: row.get::<i64, _>("output_size") as i32,
         attempt: row.get::<i64, _>("attempt") as i16,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -134,7 +140,7 @@ pub(super) fn row_to_signal(row: &sqlx::sqlite::SqliteRow) -> Result<Signal, Sto
         signal_type: parse_json(row.get::<&str, _>("signal_type"))?,
         payload: parse_json(row.get::<&str, _>("payload"))?,
         delivered: row.get::<i32, _>("delivered") != 0,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
         delivered_at: None,
     })
 }
@@ -149,10 +155,10 @@ pub(super) fn row_to_cron(row: &sqlx::sqlite::SqliteRow) -> Result<CronSchedule,
         timezone: row.get::<String, _>("timezone"),
         enabled: row.get::<i32, _>("enabled") != 0,
         metadata: parse_json(row.get::<&str, _>("metadata"))?,
-        next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at")),
-        last_triggered_at: parse_ts_opt(row.get::<Option<String>, _>("last_triggered_at")),
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
-        updated_at: parse_ts(row.get::<&str, _>("updated_at")),
+        next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at"))?,
+        last_triggered_at: parse_ts_opt(row.get::<Option<String>, _>("last_triggered_at"))?,
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })
 }
 
@@ -174,15 +180,15 @@ pub(super) fn row_to_worker_task(
         timeout_ms: row.get::<Option<i64>, _>("timeout_ms"),
         state,
         worker_id: row.get::<Option<String>, _>("worker_id"),
-        claimed_at: parse_ts_opt(row.get::<Option<String>, _>("claimed_at")),
-        heartbeat_at: parse_ts_opt(row.get::<Option<String>, _>("heartbeat_at")),
-        completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at")),
+        claimed_at: parse_ts_opt(row.get::<Option<String>, _>("claimed_at"))?,
+        heartbeat_at: parse_ts_opt(row.get::<Option<String>, _>("heartbeat_at"))?,
+        completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at"))?,
         output: row
             .get::<Option<String>, _>("output")
             .and_then(|s| serde_json::from_str(&s).ok()),
         error_message: row.get::<Option<String>, _>("error_message"),
         error_retryable: row.get::<Option<i32>, _>("error_retryable").map(|v| v != 0),
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -196,8 +202,8 @@ pub(super) fn row_to_pool(row: &sqlx::sqlite::SqliteRow) -> Result<ResourcePool,
         name: row.get::<String, _>("name"),
         strategy,
         round_robin_index: row.get::<i64, _>("round_robin_index") as u32,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
-        updated_at: parse_ts(row.get::<&str, _>("updated_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })
 }
 
@@ -221,7 +227,7 @@ pub(super) fn row_to_pool_resource(
             .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()),
         warmup_days: row.get::<i64, _>("warmup_days") as u32,
         warmup_start_cap: row.get::<i64, _>("warmup_start_cap") as u32,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -230,7 +236,7 @@ pub(super) fn row_to_checkpoint(row: &sqlx::sqlite::SqliteRow) -> Result<Checkpo
         id: parse_uuid(row.get::<&str, _>("id"))?,
         instance_id: InstanceId(parse_uuid(row.get::<&str, _>("instance_id"))?),
         checkpoint_data: parse_json(row.get::<&str, _>("checkpoint_data"))?,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -242,9 +248,9 @@ pub(super) fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<Session, S
         session_key: row.get::<String, _>("session_key"),
         data: parse_json(row.get::<&str, _>("data"))?,
         state,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
-        updated_at: parse_ts(row.get::<&str, _>("updated_at")),
-        expires_at: parse_ts_opt(row.get::<Option<String>, _>("expires_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
+        updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
+        expires_at: parse_ts_opt(row.get::<Option<String>, _>("expires_at"))?,
     })
 }
 
@@ -258,7 +264,7 @@ pub(super) fn row_to_audit(row: &sqlx::sqlite::SqliteRow) -> Result<AuditLogEntr
         to_state: row.get::<Option<String>, _>("to_state"),
         block_id: row.get::<Option<String>, _>("block_id"),
         details: parse_json(row.get::<&str, _>("details"))?,
-        created_at: parse_ts(row.get::<&str, _>("created_at")),
+        created_at: parse_ts(row.get::<&str, _>("created_at"))?,
     })
 }
 
@@ -270,8 +276,8 @@ pub(super) fn row_to_cluster_node(
         id: parse_uuid(row.get::<&str, _>("id"))?,
         name: row.get::<String, _>("name"),
         status,
-        registered_at: parse_ts(row.get::<&str, _>("registered_at")),
-        last_heartbeat_at: parse_ts(row.get::<&str, _>("last_heartbeat_at")),
+        registered_at: parse_ts(row.get::<&str, _>("registered_at"))?,
+        last_heartbeat_at: parse_ts(row.get::<&str, _>("last_heartbeat_at"))?,
         drain: row.get::<i32, _>("drain") != 0,
     })
 }

@@ -18,13 +18,10 @@ pub(super) async fn check_rate_limit(
     //
     // `BEGIN IMMEDIATE` acquires a RESERVED lock up-front, preventing
     // concurrent writers from interleaving between our SELECT and UPDATE.
-    let mut tx = storage.pool.begin().await?;
-
-    // Upgrade to an immediate (write) lock so no other connection can
-    // modify rate_limits between our read and write.
-    sqlx::query("SELECT 1 FROM rate_limits LIMIT 0")
-        .execute(&mut *tx)
-        .await?;
+    // sqlx's `begin()` always uses DEFERRED, so we acquire a raw connection
+    // and start the transaction manually.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     let now_str = ts(now);
 
@@ -54,11 +51,11 @@ pub(super) async fn check_rate_limit(
     .bind(&tenant_id.0)
     .bind(&resource_key.0)
     .bind(&now_str)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
 
     if result.rows_affected() > 0 {
-        tx.commit().await?;
+        sqlx::query("COMMIT").execute(&mut *conn).await?;
         return Ok(RateLimitCheck::Allowed);
     }
 
@@ -68,16 +65,16 @@ pub(super) async fn check_rate_limit(
     )
     .bind(&tenant_id.0)
     .bind(&resource_key.0)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await
     ?;
 
-    tx.commit().await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
 
     match row {
         None => Ok(RateLimitCheck::Allowed),
         Some(row) => {
-            let window_start = parse_ts(row.get::<&str, _>("window_start"));
+            let window_start = parse_ts(row.get::<&str, _>("window_start"))?;
             let window_seconds: i64 = row.get("window_seconds");
             let retry_after = window_start + chrono::Duration::seconds(window_seconds);
             Ok(RateLimitCheck::Exceeded { retry_after })

@@ -66,7 +66,7 @@ pub(super) async fn list_open(
                 }
             };
             let opened_at: Option<DateTime<Utc>> =
-                parse_ts_opt(row.get::<Option<String>, _>("opened_at"));
+                parse_ts_opt(row.get::<Option<String>, _>("opened_at"))?;
             Ok(CircuitBreakerState {
                 tenant_id: TenantId(row.get::<String, _>("tenant_id")),
                 handler: row.get::<String, _>("handler"),

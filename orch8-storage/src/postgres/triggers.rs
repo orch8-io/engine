@@ -41,7 +41,7 @@ pub(super) async fn get(
     .bind(slug)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(TriggerRow::into_trigger))
+    row.map(TriggerRow::into_trigger).transpose()
 }
 
 pub(super) async fn list(
@@ -67,7 +67,9 @@ pub(super) async fn list(
             .await?
         }
     };
-    Ok(rows.into_iter().map(TriggerRow::into_trigger).collect())
+    rows.into_iter()
+        .map(TriggerRow::into_trigger)
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub(super) async fn update(
@@ -119,13 +121,13 @@ struct TriggerRow {
 }
 
 impl TriggerRow {
-    fn into_trigger(self) -> TriggerDef {
+    fn into_trigger(self) -> Result<TriggerDef, StorageError> {
         let config = if self.config.is_empty() {
             serde_json::Value::Null
         } else {
-            serde_json::from_str(&self.config).unwrap_or(serde_json::Value::Null)
+            serde_json::from_str(&self.config).map_err(StorageError::Serialization)?
         };
-        TriggerDef {
+        Ok(TriggerDef {
             slug: self.slug,
             sequence_name: self.sequence_name,
             version: self.version,
@@ -133,10 +135,12 @@ impl TriggerRow {
             namespace: self.namespace,
             enabled: self.enabled,
             secret: self.secret.map(orch8_types::config::SecretString::new),
-            trigger_type: TriggerType::from_str_loose(&self.trigger_type).unwrap_or_default(),
+            trigger_type: TriggerType::from_str_loose(&self.trigger_type).ok_or_else(|| {
+                StorageError::Query(format!("unknown trigger type: {}", self.trigger_type))
+            })?,
             config,
             created_at: self.created_at,
             updated_at: self.updated_at,
-        }
+        })
     }
 }

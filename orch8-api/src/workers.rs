@@ -185,7 +185,9 @@ pub(crate) async fn complete_task(
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
 
-    let output_json = serde_json::to_string(&req.output).unwrap_or_else(|_| "{}".to_string());
+    let output_json = serde_json::to_string(&req.output).map_err(|e| {
+        ApiError::InvalidArgument(format!("failed to serialize worker output: {e}"))
+    })?;
     let task_block_id = task.block_id.clone();
     let block_output = BlockOutput {
         id: Uuid::now_v7(),
@@ -410,11 +412,19 @@ pub(crate) async fn fail_task(
         // Tree-based execution: look up the step's retry policy to decide
         // whether to retry (reset node to Pending) or exhaust (fail node).
         let can_retry = 'retry_check: {
-            let Ok(Some(instance)) = state.storage.get_instance(task.instance_id).await else {
-                break 'retry_check false;
+            let instance = match state.storage.get_instance(task.instance_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => break 'retry_check false,
+                Err(e) => {
+                    return Err(ApiError::from_storage(e, "worker_task_retry_lookup"));
+                }
             };
-            let Ok(Some(seq)) = state.storage.get_sequence(instance.sequence_id).await else {
-                break 'retry_check false;
+            let seq = match state.storage.get_sequence(instance.sequence_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => break 'retry_check false,
+                Err(e) => {
+                    return Err(ApiError::from_storage(e, "worker_task_retry_lookup"));
+                }
             };
             let block = orch8_engine::evaluator::find_block(&seq.blocks, &task.block_id);
             match block {

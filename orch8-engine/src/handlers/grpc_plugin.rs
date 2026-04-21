@@ -145,7 +145,10 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
         })?;
 
     let status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
+    let body = response.text().await.map_err(|e| StepError::Retryable {
+        message: format!("grpc plugin: failed to read response body from {url}: {e}"),
+        details: None,
+    })?;
 
     if status >= 500 {
         return Err(StepError::Retryable {

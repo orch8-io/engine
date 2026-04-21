@@ -9,6 +9,7 @@ use crate::ids::{BlockId, ExecutionNodeId, InstanceId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "node_state", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NodeState {
     Pending,
     Running,
@@ -55,6 +56,7 @@ impl std::fmt::Display for NodeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
 #[sqlx(type_name = "block_type", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BlockType {
     Step,
     Parallel,

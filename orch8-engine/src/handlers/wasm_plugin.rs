@@ -73,7 +73,7 @@ pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Val
 #[cfg(feature = "wasm")]
 pub(crate) mod cache {
     use std::collections::HashMap;
-    use std::sync::{LazyLock, RwLock};
+    use std::sync::{OnceLock, RwLock};
 
     use wasmtime::{Config, Engine, Module};
 
@@ -91,27 +91,45 @@ pub(crate) mod cache {
     /// Hard ceiling on table size (function-table entries).
     pub const WASM_MAX_TABLE_ELEMENTS: usize = 10_000;
 
-    static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
+    static ENGINE: OnceLock<Result<Engine, StepError>> = OnceLock::new();
+
+    fn init_engine() -> Result<Engine, StepError> {
         let mut config = Config::new();
         // Metered execution — a store out of fuel traps, caller converts to a retryable error.
         config.consume_fuel(true);
         // Epoch-based interruption: lets us cancel long-running stores cooperatively.
         config.epoch_interruption(true);
-        Engine::new(&config).expect("wasmtime Engine::new with valid Config must succeed")
-    });
+        Engine::new(&config).map_err(|e| StepError::Permanent {
+            message: format!("wasmtime engine init failed: {e}"),
+            details: None,
+        })
+    }
 
     // RwLock so multiple executors can read-compare the cache without contending.
     // Only misses take the write lock to insert.
-    static MODULES: LazyLock<RwLock<HashMap<String, Module>>> =
-        LazyLock::new(|| RwLock::new(HashMap::new()));
+    static MODULES: OnceLock<RwLock<HashMap<String, Module>>> = OnceLock::new();
 
-    pub fn engine() -> &'static Engine {
-        &ENGINE
+    pub fn engine() -> Result<&'static Engine, StepError> {
+        ENGINE.get_or_init(init_engine).as_ref().map_err(|e| {
+            // Clone the error so callers get an owned value; engine-init failures
+            // are rare and fatal, so the extra allocation is acceptable.
+            match e {
+                StepError::Permanent { message, details } => StepError::Permanent {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+                StepError::Retryable { message, details } => StepError::Retryable {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+            }
+        })
     }
 
     pub fn get_or_compile(path: &str) -> Result<Module, StepError> {
+        let modules = MODULES.get_or_init(|| RwLock::new(HashMap::new()));
         // Fast path: read lock, clone on hit.
-        match MODULES.read() {
+        match modules.read() {
             Ok(cache) => {
                 if let Some(m) = cache.get(path) {
                     return Ok(m.clone());
@@ -135,12 +153,25 @@ pub(crate) mod cache {
             }
         }
 
-        let module = Module::from_file(&ENGINE, path).map_err(|e| StepError::Permanent {
+        let engine = ENGINE
+            .get_or_init(init_engine)
+            .as_ref()
+            .map_err(|e| match e {
+                StepError::Permanent { message, details } => StepError::Permanent {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+                StepError::Retryable { message, details } => StepError::Retryable {
+                    message: message.clone(),
+                    details: details.clone(),
+                },
+            })?;
+        let module = Module::from_file(engine, path).map_err(|e| StepError::Permanent {
             message: format!("wasm plugin: failed to load module '{path}': {e}"),
             details: None,
         })?;
 
-        match MODULES.write() {
+        match modules.write() {
             Ok(mut cache) => {
                 cache.insert(path.to_string(), module.clone());
             }
@@ -200,7 +231,7 @@ fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepE
     use tracing::warn;
     use wasmtime::{Linker, Store};
 
-    let engine = cache::engine();
+    let engine = cache::engine()?;
     let module = cache::get_or_compile(wasm_path)?;
 
     let limits = WasmLimits {

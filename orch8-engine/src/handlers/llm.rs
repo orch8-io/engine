@@ -181,12 +181,20 @@ async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result
 /// Provider-specific fields (`provider`, `api_key`, `api_key_env`, `model`, `base_url`)
 /// from the provider config override the top-level params.
 fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value {
-    let mut merged = base_params.clone();
-
-    // Remove the `providers` key so downstream code doesn't see it.
-    if let Some(obj) = merged.as_object_mut() {
-        obj.remove("providers");
-    }
+    // Build incrementally: skip the `providers` key during construction
+    // instead of cloning the entire tree then removing it.
+    let mut merged = if let Some(base_obj) = base_params.as_object() {
+        let mut obj = serde_json::Map::with_capacity(base_obj.len());
+        for (k, v) in base_obj {
+            if k == "providers" {
+                continue;
+            }
+            obj.insert(k.clone(), v.clone());
+        }
+        serde_json::Value::Object(obj)
+    } else {
+        base_params.clone()
+    };
 
     // Overlay provider-specific fields.
     if let (Some(merged_obj), Some(config_obj)) =

@@ -60,19 +60,21 @@ pub(crate) async fn is_address_safe(addr: &str) -> bool {
                     || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                     || v4.is_link_local()     // 169.254.0.0/16 (includes 169.254.169.254)
                     || v4.is_unspecified()
+                    || v4.is_documentation()  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                    || v4.is_multicast()
+                // 224.0.0.0/4
                 {
                     return false;
                 }
             }
             std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback()  // ::1
+                if v6.is_loopback()              // ::1
                     || v6.is_unspecified()
+                    || v6.is_unicast_link_local() // fe80::/10
+                    || v6.is_multicast()          // ff00::/8
+                    || v6.is_unique_local()
+                // fc00::/7
                 {
-                    return false;
-                }
-                // fc00::/7 — unique local addresses
-                let segments = v6.segments();
-                if segments[0] & 0xfe00 == 0xfc00 {
                     return false;
                 }
             }
@@ -529,7 +531,10 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     })?;
 
     let status = resp.status().as_u16();
-    let response_body = resp.text().await.unwrap_or_default();
+    let response_body = resp.text().await.map_err(|e| StepError::Retryable {
+        message: format!("HTTP request failed reading body from {url}: {e}"),
+        details: None,
+    })?;
 
     if status >= 500 {
         return Err(StepError::Retryable {

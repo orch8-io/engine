@@ -389,15 +389,15 @@ impl Default for ApiConfig {
 }
 
 fn default_cors_origins() -> String {
-    "*".to_string()
+    String::new()
 }
 
 fn default_grpc_addr() -> String {
-    "0.0.0.0:50051".to_string()
+    "127.0.0.1:50051".to_string()
 }
 
 fn default_http_addr() -> String {
-    "0.0.0.0:8080".to_string()
+    "127.0.0.1:8080".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

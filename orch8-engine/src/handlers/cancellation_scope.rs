@@ -30,9 +30,7 @@ pub async fn execute_cancellation_scope(
     // If all children are terminal, the scope is done.
     if evaluator::all_terminal(&children) {
         if evaluator::any_failed(&children) {
-            storage
-                .update_node_state(node.id, NodeState::Failed)
-                .await?;
+            evaluator::fail_node(storage, node.id).await?;
         } else {
             evaluator::complete_node(storage, node.id).await?;
         }
