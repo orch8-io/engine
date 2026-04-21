@@ -180,9 +180,40 @@ cargo clippy --workspace -- -D warnings
 # Format
 cargo fmt --check
 
-# E2E tests (158 test files)
+# E2E tests (TypeScript)
 cd tests/e2e && npm ci && npm test
+
+# E2E tests (Rust)
+cargo test --test '*' --workspace
 ```
+
+## Test Coverage
+
+**1,663 tests** across three layers:
+
+| Layer | Tests | Scope |
+|-------|-------|-------|
+| **Rust unit + integration** | 1,251 | 33 test suites — storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, full engine integration |
+| **TypeScript E2E** | 412 | 94 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming |
+
+**Coverage by feature area:**
+
+| Area | Test files |
+|------|-----------|
+| Sequences | versioning, migration, deprecation, lookup, delete, interceptors |
+| Instances | lifecycle, batch create, state transitions, context update, retry, DLQ, priority, tree, filters |
+| Workers | polling, completion, failure, heartbeat, stats, dashboard, edge cases |
+| Scheduling | cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers |
+| Concurrency | rate limiting, resource pools, circuit breakers, bulk ops |
+| Signals | pause/resume/cancel, context update, terminal guards |
+| Multi-tenancy | tenant isolation CRUD, namespace filtering |
+| Approvals | workflow, listing |
+| Credentials | CRUD, encryption at rest, OAuth2 refresh, kind filtering |
+| Plugins | WASM/gRPC registration, type validation, edge cases |
+| Triggers & Webhooks | event triggers, webhook delivery, replay, secret validation |
+| Sessions | state updates, lookup, edge cases |
+| Observability | Prometheus metrics, audit log, health endpoints, SSE streaming |
+| Infrastructure | cluster nodes, checkpoints, API validation, performance/load |
 
 ## Project Structure
 
@@ -196,7 +227,7 @@ engine/
   orch8-server/       Server binary, config, startup
   orch8-storage/      Storage trait + Postgres + SQLite impls
   orch8-types/        Shared domain types and config
-  tests/e2e/          158 TypeScript E2E test files
+  tests/e2e/          94 TypeScript E2E test files (~400 test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard

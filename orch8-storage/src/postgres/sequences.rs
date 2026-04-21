@@ -90,7 +90,7 @@ pub(super) async fn list_versions(
     let rows = sqlx::query_as::<_, SequenceRow>(
         r"SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at
           FROM sequences
-          WHERE tenant_id = $1 AND namespace = $2 AND name = $3
+          WHERE tenant_id = $1 AND namespace = $2 AND name = $3 AND deprecated = false
           ORDER BY version DESC",
     )
     .bind(&tenant_id.0)
