@@ -28,7 +28,7 @@ const DEFAULT_BASE: string =
   `http://localhost:${process.env.ORCH8_E2E_PORT ?? "18080"}`;
 
 /** A loose JSON response shape — individual endpoints narrow as needed. */
-type ApiResponse = Record<string, unknown>;
+type ApiResponse = any;
 
 /** Translate a plain object into a URLSearchParams, skipping null/undefined. */
 function toQuery(query: Record<string, unknown>): string {
