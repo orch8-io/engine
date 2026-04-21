@@ -52,6 +52,8 @@ jobs:
     env:
       ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
       DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
+      # Limit link parallelism to avoid OOM / bus-error on 2-core runners.
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
