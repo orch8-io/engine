@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tokio_util::task::TaskTracker;
 
 use chrono::Utc;
 
@@ -72,6 +73,12 @@ pub struct CircuitBreakerRegistry {
     /// the registry behaves as pure in-memory (used by unit tests and in
     /// configurations where durability isn't required).
     storage: Option<Arc<dyn StorageBackend>>,
+    /// Tracks outstanding fire-and-forget persistence tasks so the server
+    /// can wait for them at shutdown via [`Self::flush`]. Without this the
+    /// bare `tokio::spawn` used previously could be aborted mid-write when
+    /// the Tokio runtime started shutting down — leaving persisted state
+    /// inconsistent with the in-memory registry the next process saw.
+    tracker: TaskTracker,
 }
 
 impl CircuitBreakerRegistry {
@@ -82,7 +89,21 @@ impl CircuitBreakerRegistry {
             default_threshold,
             default_cooldown_secs,
             storage: None,
+            tracker: TaskTracker::new(),
         }
+    }
+
+    /// Close the tracker and await every in-flight persistence task.
+    ///
+    /// Callers should invoke this during graceful shutdown *after* all
+    /// state-transition sources have stopped producing new writes. Once
+    /// closed the tracker rejects new tasks, so this is a one-shot drain;
+    /// subsequent `spawn_upsert` / `spawn_delete` calls become no-ops (the
+    /// tracker returns early) and only in-memory state remains authoritative
+    /// for the brief window before process exit.
+    pub async fn flush(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
     }
 
     /// Builder-style constructor that wires a storage backend for persistence
@@ -262,14 +283,16 @@ impl CircuitBreakerRegistry {
         }
     }
 
-    /// Fire-and-forget upsert of a breaker snapshot. Silent no-op when no
-    /// storage is wired (tests, non-durable configs).
+    /// Tracked fire-and-forget upsert of a breaker snapshot. Silent no-op
+    /// when no storage is wired (tests, non-durable configs). Once the
+    /// tracker has been closed (see [`Self::flush`]) new tasks are rejected,
+    /// which is the intended shutdown semantics.
     fn spawn_upsert(&self, snapshot: &CircuitBreakerState) {
         let Some(storage) = self.storage.clone() else {
             return;
         };
         let state = snapshot.clone();
-        tokio::spawn(async move {
+        self.tracker.spawn(async move {
             if let Err(err) = storage.upsert_circuit_breaker(&state).await {
                 tracing::warn!(
                     tenant_id = %state.tenant_id,
@@ -281,14 +304,14 @@ impl CircuitBreakerRegistry {
         });
     }
 
-    /// Fire-and-forget delete of a breaker snapshot's persisted row.
+    /// Tracked fire-and-forget delete of a breaker snapshot's persisted row.
     fn spawn_delete(&self, snapshot: &CircuitBreakerState) {
         let Some(storage) = self.storage.clone() else {
             return;
         };
         let tenant = snapshot.tenant_id.clone();
         let handler = snapshot.handler.clone();
-        tokio::spawn(async move {
+        self.tracker.spawn(async move {
             if let Err(err) = storage.delete_circuit_breaker(&tenant, &handler).await {
                 tracing::warn!(
                     tenant_id = %tenant,
@@ -469,5 +492,36 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].state, BreakerState::Closed);
         assert_eq!(all[0].failure_count, 0);
+    }
+
+    /// Stab#15: shutdown path must drain pending persistence writes.
+    /// Pre-fix, `spawn_upsert` was a raw `tokio::spawn` with no handle —
+    /// on runtime teardown those tasks could be aborted mid-write, leaving
+    /// the DB lagging the in-memory state that the next process hydrated
+    /// against at boot. `flush` closes the tracker and awaits all
+    /// outstanding writes so the persisted row is guaranteed on disk.
+    #[tokio::test]
+    async fn flush_drains_pending_persistence_writes() {
+        use orch8_storage::sqlite::SqliteStorage;
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let cb = CircuitBreakerRegistry::new(2, 30).with_storage(storage.clone());
+        let t = tid("t");
+        // Trip the breaker — this triggers `spawn_upsert` on the tracker.
+        cb.record_failure(&t, "payment_api");
+        cb.record_failure(&t, "payment_api");
+        assert!(cb.check(&t, "payment_api").is_err());
+
+        // Flush: must complete after the tracked upsert has finished.
+        cb.flush().await;
+
+        // The persisted row is now visible — a fresh registry rehydrating
+        // from the same storage sees Open state and preserves isolation.
+        let rehydrated = CircuitBreakerRegistry::new(2, 30).with_storage(storage);
+        rehydrated.load_from_storage().await;
+        let s = rehydrated.get(&t, "payment_api").expect("row persisted");
+        assert!(matches!(
+            s.state,
+            BreakerState::Open | BreakerState::HalfOpen
+        ));
     }
 }

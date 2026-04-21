@@ -54,13 +54,23 @@ pub async fn execute_router(
     // Determine which branch to take.
     let selected_branch = select_branch(router_def, ctx_for_conditions.as_ref(), outputs_val);
 
+    // Ref#3: the execution-tree schema stores `branch_index` as i16, so a
+    // router with more than 32 767 branches cannot be addressed. Rather than
+    // silently falling back to `unwrap_or(0)` (which would skip every selected
+    // branch past the cap), fail the node permanently with a diagnostic.
+    let branch_idx = i16::try_from(selected_branch).map_err(|_| {
+        EngineError::InvalidConfig(format!(
+            "router selected branch {selected_branch} exceeds the execution-tree \
+             branch_index range (max {}). Split the router or widen the schema.",
+            i16::MAX
+        ))
+    })?;
+
     let all_children = evaluator::children_of(tree, node.id, None);
 
     // Skip all non-selected branches.
     for child in &all_children {
-        let is_selected = child
-            .branch_index
-            .is_some_and(|bi| bi == i16::try_from(selected_branch).unwrap_or(0));
+        let is_selected = child.branch_index.is_some_and(|bi| bi == branch_idx);
 
         if !is_selected
             && !matches!(
@@ -78,7 +88,6 @@ pub async fn execute_router(
     }
 
     // Activate selected branch children.
-    let branch_idx = i16::try_from(selected_branch).unwrap_or(0);
     let branch_children = evaluator::children_of(tree, node.id, Some(branch_idx));
 
     evaluator::activate_pending_children(storage, &branch_children).await?;

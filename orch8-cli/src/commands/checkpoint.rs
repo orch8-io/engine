@@ -3,7 +3,7 @@ use clap::Subcommand;
 use reqwest::Client;
 use uuid::Uuid;
 
-use crate::print_response;
+use crate::{print_response, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum CheckpointCmd {
@@ -19,21 +19,26 @@ pub enum CheckpointCmd {
     },
 }
 
-pub async fn run(client: &Client, base: &str, cmd: CheckpointCmd) -> Result<()> {
+pub async fn run(
+    client: &Client,
+    base: &str,
+    cmd: CheckpointCmd,
+    format: OutputFormat,
+) -> Result<()> {
     match cmd {
         CheckpointCmd::List { instance_id } => {
             let resp = client
                 .get(format!("{base}/instances/{instance_id}/checkpoints"))
                 .send()
                 .await?;
-            print_response(resp).await?;
+            print_response(resp, format).await?;
         }
         CheckpointCmd::Latest { instance_id } => {
             let resp = client
                 .get(format!("{base}/instances/{instance_id}/checkpoints/latest"))
                 .send()
                 .await?;
-            print_response(resp).await?;
+            print_response(resp, format).await?;
         }
         CheckpointCmd::Prune { instance_id, keep } => {
             let resp = client
@@ -41,7 +46,7 @@ pub async fn run(client: &Client, base: &str, cmd: CheckpointCmd) -> Result<()> 
                 .json(&serde_json::json!({ "keep": keep }))
                 .send()
                 .await?;
-            print_response(resp).await?;
+            print_response(resp, format).await?;
         }
     }
     Ok(())

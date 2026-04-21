@@ -24,13 +24,16 @@ pub(super) fn ts(dt: DateTime<Utc>) -> String {
 }
 
 pub(super) fn parse_ts(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s).map_or_else(
-        |_| {
-            tracing::warn!(value = s, "failed to parse timestamp, defaulting to epoch");
-            DateTime::default()
-        },
-        |dt| dt.with_timezone(&Utc),
-    )
+    // Try RFC 3339 first (the canonical format written by ts()).
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt.with_timezone(&Utc);
+    }
+    // SQLite's datetime() returns "YYYY-MM-DD HH:MM:SS" (no timezone).
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc);
+    }
+    tracing::warn!(value = s, "failed to parse timestamp, defaulting to epoch");
+    DateTime::default()
 }
 
 pub(super) fn parse_ts_opt(s: Option<String>) -> Option<DateTime<Utc>> {
@@ -51,8 +54,10 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
         sequence_id: SequenceId(parse_uuid(row.get::<&str, _>("sequence_id"))?),
         tenant_id: TenantId(row.get::<String, _>("tenant_id")),
         namespace: Namespace(row.get::<String, _>("namespace")),
-        state: InstanceState::from_str(row.get::<&str, _>("state"))
-            .unwrap_or(InstanceState::Scheduled),
+        // Match Postgres semantics: an unrecognised state string is row
+        // corruption, not a cue to silently resurrect the row as Scheduled.
+        // Masking the corruption here let broken rows leak into claim cycles.
+        state: InstanceState::from_str(row.get::<&str, _>("state")).map_err(StorageError::Query)?,
         next_fire_at: parse_ts_opt(row.get::<Option<String>, _>("next_fire_at")),
         priority: Priority::try_from(row.get::<i16, _>("priority")).unwrap_or(Priority::Normal),
         timezone: row.get::<String, _>("timezone"),

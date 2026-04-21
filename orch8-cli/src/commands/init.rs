@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rand::RngCore;
 
 pub fn run(dir: &str) -> Result<()> {
     let base = Path::new(dir);
@@ -18,6 +19,15 @@ pub fn run(dir: &str) -> Result<()> {
     println!("  sequence.json       Example sequence definition");
     println!("  docker-compose.yml  Engine + Postgres stack");
     println!();
+    // Check if default port is already in use.
+    if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:8080") {
+        drop(listener);
+    } else {
+        eprintln!("  warning: port 8080 is already in use.");
+        eprintln!("  Consider changing api.http_addr in orch8.toml before starting the server.");
+        eprintln!();
+    }
+
     println!("Quick start with SQLite (no Docker needed):");
     println!("  orch8-server --config orch8.toml");
     println!();
@@ -32,10 +42,22 @@ pub fn run(dir: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_scaffolds(base: &Path) -> Result<()> {
-    write_if_absent(
-        &base.join("orch8.toml"),
-        r#"# Orch8.io Engine Configuration
+/// Generate a 32-byte random token rendered as hex so the scaffold ships
+/// with a real API key rather than a commented-out placeholder. The old
+/// template had `# api_key = ""` with `cors_origins = "*"`, producing a
+/// publicly-reachable unauthenticated server on first boot — the
+/// default-insecure-by-omission path the review called out.
+fn generate_api_key() -> String {
+    use std::fmt::Write as _;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
+}
+
+const ORCH8_TOML_TEMPLATE: &str = r#"# Orch8.io Engine Configuration
 # Docs: https://github.com/orch8-io/engine
 
 [database]
@@ -55,20 +77,24 @@ stale_threshold_secs = 300
 [api]
 http_addr = "0.0.0.0:8080"
 grpc_addr = "0.0.0.0:50051"
-cors_origins = "*"
-# api_key = ""                             # set to enable auth
-require_tenant_header = false
-rate_limit_rps = 0                         # 0 = unlimited
+# CORS: default to same-origin only. Widen to specific origins before
+# serving a browser SPA ("https://app.example.com,https://staging.example.com").
+# `"*"` disables the origin check entirely — only safe for short-lived
+# local development; never ship it to production.
+cors_origins = ""
+# API key: generated at scaffold time. Rotate before production use and
+# store in a secrets manager. The server refuses to boot without a key
+# unless `--insecure` is passed explicitly.
+api_key = "{api_key}"
+require_tenant_header = true
+max_concurrent_requests = 0                # 0 = unlimited (in-flight cap, not RPS)
 
 [logging]
 level = "info"                             # trace, debug, info, warn, error
 json = true                                # true = JSON logs, false = pretty
-"#,
-    )?;
+"#;
 
-    write_if_absent(
-        &base.join("sequence.json"),
-        r#"{
+const SEQUENCE_JSON_TEMPLATE: &str = r#"{
   "tenant_id": "demo",
   "namespace": "default",
   "name": "hello-world",
@@ -94,12 +120,9 @@ json = true                                # true = JSON logs, false = pretty
     }
   ]
 }
-"#,
-    )?;
+"#;
 
-    write_if_absent(
-        &base.join("docker-compose.yml"),
-        r#"services:
+const DOCKER_COMPOSE_TEMPLATE: &str = r#"services:
   postgres:
     image: postgres:16-alpine
     environment:
@@ -132,8 +155,14 @@ json = true                                # true = JSON logs, false = pretty
 
 volumes:
   pgdata:
-"#,
-    )
+"#;
+
+fn write_scaffolds(base: &Path) -> Result<()> {
+    let api_key = generate_api_key();
+    let orch8_toml = ORCH8_TOML_TEMPLATE.replace("{api_key}", &api_key);
+    write_if_absent(&base.join("orch8.toml"), &orch8_toml)?;
+    write_if_absent(&base.join("sequence.json"), SEQUENCE_JSON_TEMPLATE)?;
+    write_if_absent(&base.join("docker-compose.yml"), DOCKER_COMPOSE_TEMPLATE)
 }
 
 fn write_if_absent(path: &Path, content: &str) -> Result<()> {

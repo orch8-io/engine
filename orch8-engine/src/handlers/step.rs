@@ -43,7 +43,14 @@ pub async fn execute_step_dry(
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
         {
-            if existing.attempt == i16::try_from(exec.attempt).unwrap_or(i16::MAX) {
+            // Ref#4: attempts past i16::MAX can no longer be represented in
+            // the block_outputs.attempt column. Refuse to memoize rather than
+            // clamping — a clamp would make every retry past 32 767 collide
+            // against the same row and silently replay a stale output.
+            let matches_memoized = i16::try_from(exec.attempt)
+                .ok()
+                .is_some_and(|a| existing.attempt == a);
+            if matches_memoized {
                 info!(
                     instance_id = %exec.instance_id,
                     block_id = %exec.block_id,
@@ -54,9 +61,17 @@ pub async fn execute_step_dry(
         }
     }
 
-    let handler = handlers
-        .get(&exec.handler_name)
-        .ok_or_else(|| EngineError::HandlerNotFound(exec.handler_name.clone()))?;
+    let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
+        let names = handlers.handler_names();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &name_refs);
+        match suggestion {
+            Some(s) => {
+                EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
+            }
+            None => EngineError::HandlerNotFound(exec.handler_name.clone()),
+        }
+    })?;
 
     let instance_id = exec.instance_id;
     let block_id = exec.block_id.clone();
@@ -139,7 +154,14 @@ pub async fn execute_step(
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
         {
-            if existing.attempt == i16::try_from(exec.attempt).unwrap_or(i16::MAX) {
+            // Ref#4: attempts past i16::MAX can no longer be represented in
+            // the block_outputs.attempt column. Refuse to memoize rather than
+            // clamping — a clamp would make every retry past 32 767 collide
+            // against the same row and silently replay a stale output.
+            let matches_memoized = i16::try_from(exec.attempt)
+                .ok()
+                .is_some_and(|a| existing.attempt == a);
+            if matches_memoized {
                 info!(
                     instance_id = %exec.instance_id,
                     block_id = %exec.block_id,
@@ -150,9 +172,17 @@ pub async fn execute_step(
         }
     }
 
-    let handler = handlers
-        .get(&exec.handler_name)
-        .ok_or_else(|| EngineError::HandlerNotFound(exec.handler_name.clone()))?;
+    let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
+        let names = handlers.handler_names();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &name_refs);
+        match suggestion {
+            Some(s) => {
+                EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
+            }
+            None => EngineError::HandlerNotFound(exec.handler_name.clone()),
+        }
+    })?;
 
     // Save fields needed after move into step_ctx.
     let instance_id = exec.instance_id;

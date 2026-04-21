@@ -41,6 +41,7 @@ impl fmt::Display for CredentialKind {
 }
 
 impl CredentialKind {
+    #[must_use]
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s {
             "api_key" => Some(Self::ApiKey),

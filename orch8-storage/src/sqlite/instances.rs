@@ -88,8 +88,39 @@ pub(super) async fn claim_due(
     max_per_tenant: u32,
 ) -> Result<Vec<TaskInstance>, StorageError> {
     let now_s = ts(now);
-    let mut tx = storage.pool.begin().await?;
 
+    // Acquire the write lock up-front with BEGIN IMMEDIATE. The sqlx default
+    // is BEGIN DEFERRED, which only upgrades to a write lock when the first
+    // UPDATE executes — by that time two concurrent workers can have already
+    // run the SELECT and picked the same scheduled rows. The loser then gets
+    // SQLITE_BUSY on COMMIT and that worker's tick is wasted. IMMEDIATE
+    // serialises claim_due calls, which is the closest SQLite analogue to
+    // Postgres' `FOR UPDATE SKIP LOCKED`.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result = claim_due_inner(&mut conn, &now_s, limit, max_per_tenant).await;
+
+    match result {
+        Ok(instances) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(instances)
+        }
+        Err(e) => {
+            // Best-effort rollback — if it fails the connection is returned
+            // to the pool and sqlx will reset it on next acquire.
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+async fn claim_due_inner(
+    conn: &mut sqlx::SqliteConnection,
+    now_s: &str,
+    limit: u32,
+    max_per_tenant: u32,
+) -> Result<Vec<TaskInstance>, StorageError> {
     let rows = if max_per_tenant > 0 {
         // Noisy-neighbor protection: cap instances per tenant using ROW_NUMBER().
         sqlx::query(
@@ -102,10 +133,10 @@ pub(super) async fn claim_due(
             ORDER BY priority DESC, next_fire_at ASC
             LIMIT ?2"
         )
-        .bind(&now_s)
+        .bind(now_s)
         .bind(limit as i64)
         .bind(max_per_tenant as i64)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await
         ?
     } else {
@@ -113,9 +144,9 @@ pub(super) async fn claim_due(
         sqlx::query(
             "SELECT * FROM task_instances WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2"
         )
-        .bind(&now_s)
+        .bind(now_s)
         .bind(limit as i64)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await
         ?
     };
@@ -129,12 +160,12 @@ pub(super) async fn claim_due(
     // would exceed max_concurrency are never set to Running. This prevents
     // a window where the test (or any observer) could see more Running
     // instances than allowed.
-    let instances = filter_by_concurrency(&mut tx, &all_candidates).await?;
+    let instances = filter_by_concurrency(&mut *conn, &all_candidates).await?;
 
     if !instances.is_empty() {
         let mut qb =
             sqlx::QueryBuilder::new("UPDATE task_instances SET state='running', updated_at=");
-        qb.push_bind(&now_s);
+        qb.push_bind(now_s);
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");
         for i in &instances {
@@ -142,17 +173,17 @@ pub(super) async fn claim_due(
         }
         separated.push_unseparated(")");
 
-        qb.build().execute(&mut *tx).await?;
+        qb.build().execute(&mut *conn).await?;
     }
-    tx.commit().await?;
     Ok(instances)
 }
 
-/// Within a transaction, filter candidates by concurrency_key / max_concurrency.
-/// For each distinct key, count already-Running instances and only allow enough
-/// candidates through to fill the remaining slots.
+/// Within an open transaction on `conn`, filter candidates by
+/// concurrency_key / max_concurrency. For each distinct key, count
+/// already-Running instances and only allow enough candidates through to
+/// fill the remaining slots.
 async fn filter_by_concurrency(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    conn: &mut sqlx::SqliteConnection,
     candidates: &[TaskInstance],
 ) -> Result<Vec<TaskInstance>, StorageError> {
     // Group candidates by concurrency_key.
@@ -176,7 +207,7 @@ async fn filter_by_concurrency(
             "SELECT COUNT(*) as cnt FROM task_instances WHERE concurrency_key=?1 AND state='running'",
         )
         .bind(key)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *conn)
         .await
         ?;
         let already_running: i64 = row.get("cnt");
@@ -530,7 +561,9 @@ pub(super) async fn bulk_reschedule(
 ) -> Result<u64, StorageError> {
     let mut qb =
         sqlx::QueryBuilder::new("UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ");
-    qb.push_bind(format!("+{offset_secs} seconds"));
+    // SQLite's datetime() does not accept positional parameters (?1) for
+    // modifiers — they must be literal strings. Inline the modifier safely.
+    qb.push(format!("\"+{offset_secs} seconds\""));
     qb.push("), updated_at=");
     qb.push_bind(ts(Utc::now()));
     qb.push(" WHERE state='scheduled'");

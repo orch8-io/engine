@@ -1,6 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use orch8_storage::StorageBackend;
@@ -115,10 +113,18 @@ fn select_variant(
         return 0;
     }
 
-    let mut hasher = DefaultHasher::new();
-    instance.id.0.hash(&mut hasher);
-    block_id.0.hash(&mut hasher);
-    let hash_val = hasher.finish();
+    // Ref#2: use SHA-256 instead of `DefaultHasher`. `DefaultHasher` is
+    // explicitly undefined-stable across Rust releases, which means a compiler
+    // bump silently reshuffles every running A/B assignment. SHA-256 is a
+    // deterministic, stable hash — slower than SipHash but negligible next to
+    // the sequence-tick cost. We hash the instance + block bytes separated
+    // by a NUL so "ab" + "c" cannot collide with "a" + "bc".
+    let mut hasher = Sha256::new();
+    hasher.update(instance.id.0.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(block_id.0.as_bytes());
+    let digest = hasher.finalize();
+    let hash_val = u64::from_be_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
     let target = hash_val % total_weight;
 
     let mut cumulative: u64 = 0;

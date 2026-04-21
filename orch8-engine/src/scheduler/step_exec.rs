@@ -686,7 +686,22 @@ pub(super) async fn execute_step_block(
             // The sentinel served its purpose (preventing double-execution if
             // the process crashed during handler execution). Leaving it would
             // double the output count visible to callers of `get_all_outputs`.
-            let _ = storage.delete_block_output_by_id(sentinel.id).await;
+            //
+            // Swallowing the error was convenient but hid a real operational
+            // problem — if this delete keeps failing, `block_outputs` grows
+            // unboundedly with `__in_progress__` rows that never get
+            // reclaimed. A warn-log makes the leak observable without
+            // failing the step (the real output is already saved — the
+            // instance must advance even if the sentinel lingers).
+            if let Err(err) = storage.delete_block_output_by_id(sentinel.id).await {
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    sentinel_id = %sentinel.id,
+                    error = %err,
+                    "failed to delete in-progress sentinel after step success — leaked row"
+                );
+            }
 
             // Check for self-modify output: inject blocks into the instance.
             // Shared helper keeps injection semantics identical to the tree
@@ -730,9 +745,23 @@ pub(super) async fn execute_step_block(
             // Handler returned cleanly with a retryable error — the side
             // effect either didn't happen or is idempotent. Remove the
             // in-progress sentinel so the block is eligible for retry.
-            let _ = storage
+            //
+            // Log failures rather than silently dropping them: if this
+            // delete fails the retry cycle still works (the sentinel was
+            // only there to block re-execution after a crash), but the
+            // `block_outputs` table accumulates orphan rows that no cleanup
+            // path will ever reclaim — surface the pattern to operators.
+            if let Err(err) = storage
                 .delete_block_outputs(instance_id, &step_def.id)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    error = %err,
+                    "failed to delete in-progress sentinel after retryable failure — leaked row"
+                );
+            }
 
             // If a step handler drove a pause/cancel transition mid-flight
             // (see `handle_sleep` in `handlers/builtin.rs`), the instance

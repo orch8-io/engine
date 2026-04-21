@@ -312,13 +312,13 @@ pub(super) async fn stats(
     }
 
     // Active workers
+    let worker_tenant_clause = if tenant_id.is_some() {
+        " AND instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
+    } else {
+        ""
+    };
     let workers_sql = format!(
-        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{}",
-        if tenant_id.is_some() {
-            " AND instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
-        } else {
-            ""
-        }
+        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{worker_tenant_clause}"
     );
     let mut wq = sqlx::query_as::<_, (String,)>(&workers_sql);
     if let Some(tid) = tenant_id {

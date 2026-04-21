@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::ids::TenantId;
 use crate::worker::WorkerTaskState;
@@ -14,7 +15,7 @@ pub struct WorkerTaskFilter {
     pub queue_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, ToSchema)]
 pub struct WorkerTaskStats {
     pub by_state: HashMap<String, u64>,
     pub by_handler: HashMap<String, HashMap<String, u64>>,

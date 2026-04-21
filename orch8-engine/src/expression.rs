@@ -1,5 +1,46 @@
 use orch8_types::context::ExecutionContext;
 
+/// Expression evaluation error with position information.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExprError {
+    pub message: String,
+    pub position: usize,
+    pub expr: String,
+}
+
+impl std::fmt::Display for ExprError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "expression error at position {}: {} in \"{}\"",
+            self.position, self.message, self.expr
+        )
+    }
+}
+
+/// Evaluate an expression, returning a detailed error on parse failure.
+pub fn try_evaluate(
+    expr: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+) -> Result<serde_json::Value, ExprError> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let tokens = tokenize(trimmed);
+    let mut parser = Parser::new(&tokens, context, outputs);
+    let result = parser.parse_or();
+    if parser.pos < tokens.len() {
+        return Err(ExprError {
+            message: format!("unexpected token {:?}", tokens[parser.pos]),
+            position: parser.pos,
+            expr: expr.to_string(),
+        });
+    }
+    Ok(result)
+}
+
 /// Evaluate a simple expression against context and outputs.
 ///
 /// Supported syntax:
@@ -1000,5 +1041,37 @@ mod tests {
             &ctx(),
             &outputs()
         ));
+    }
+
+    #[test]
+    fn try_evaluate_valid_expression_returns_ok() {
+        let result = try_evaluate("context.data.count + 1", &ctx(), &outputs());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), json!(6.0));
+    }
+
+    #[test]
+    fn try_evaluate_empty_returns_null() {
+        let result = try_evaluate("", &ctx(), &outputs());
+        assert_eq!(result.unwrap(), json!(null));
+    }
+
+    #[test]
+    fn try_evaluate_error_includes_position() {
+        // "5 5" — the second 5 is unconsumed
+        let result = try_evaluate("5 5", &ctx(), &outputs());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("unexpected token"));
+        assert_eq!(err.position, 1);
+    }
+
+    #[test]
+    fn try_evaluate_error_display_includes_expr() {
+        let result = try_evaluate("5 5", &ctx(), &outputs());
+        let err = result.unwrap_err();
+        let display = err.to_string();
+        assert!(display.contains("position 1"), "got: {display}");
+        assert!(display.contains("5 5"), "got: {display}");
     }
 }

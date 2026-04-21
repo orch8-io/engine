@@ -122,6 +122,38 @@ impl SqliteStorage {
 
     async fn create_tables(&self) -> Result<(), StorageError> {
         sqlx::query(schema::SCHEMA).execute(&self.pool).await?;
+        self.record_schema_version().await?;
+        Ok(())
+    }
+
+    /// Record the bundled schema version in `schema_versions` and warn if the
+    /// DB has a newer version applied (suggesting a downgrade). Ref#15.
+    async fn record_schema_version(&self) -> Result<(), StorageError> {
+        let current = schema::SCHEMA_VERSION;
+
+        let max_version: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(version) FROM schema_versions")
+                .fetch_optional(&self.pool)
+                .await?
+                .flatten();
+
+        if let Some(existing) = max_version {
+            if existing > current {
+                tracing::warn!(
+                    db_version = existing,
+                    binary_version = current,
+                    "sqlite schema: database was previously migrated past this binary's \
+                     bundled schema version — this binary may be an older build"
+                );
+            }
+        }
+
+        // `INSERT OR IGNORE` so repeated boots at the same version don't
+        // produce duplicate rows.
+        sqlx::query("INSERT OR IGNORE INTO schema_versions (version) VALUES (?)")
+            .bind(current)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 }
@@ -394,6 +426,25 @@ impl StorageBackend for SqliteStorage {
     ) -> Result<(), StorageError> {
         outputs::save_output_and_transition(self, output, instance_id, new_state, next_fire_at)
             .await
+    }
+
+    async fn save_output_merge_context_and_transition(
+        &self,
+        output: &BlockOutput,
+        instance_id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        outputs::save_output_merge_context_and_transition(
+            self,
+            output,
+            instance_id,
+            context,
+            new_state,
+            next_fire_at,
+        )
+        .await
     }
 
     async fn delete_block_outputs(
@@ -920,6 +971,15 @@ impl StorageBackend for SqliteStorage {
         blocks_json: &serde_json::Value,
     ) -> Result<(), StorageError> {
         misc::inject_blocks(self, instance_id, blocks_json).await
+    }
+
+    async fn inject_blocks_at_position(
+        &self,
+        instance_id: InstanceId,
+        new_blocks_json: &serde_json::Value,
+        position: Option<usize>,
+    ) -> Result<serde_json::Value, StorageError> {
+        misc::inject_blocks_at_position(self, instance_id, new_blocks_json, position).await
     }
 
     async fn get_injected_blocks(

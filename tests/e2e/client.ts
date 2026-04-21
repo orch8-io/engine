@@ -85,7 +85,10 @@ export class Orch8Client {
   }
 
   async listInstances(query: ListInstancesQuery = {}): Promise<Instance[]> {
-    return this.#get<Instance[]>(`/instances${toQuery(query)}`);
+    const res = await this.#get<{ items: Instance[]; has_more: boolean }>(
+      `/instances${toQuery(query)}`,
+    );
+    return res.items;
   }
 
   async updateState(
@@ -342,7 +345,16 @@ export class Orch8Client {
     body: Record<string, unknown> = {},
     headers: Record<string, string> = {},
   ): Promise<ApiResponse> {
-    return this.#rawJson(`/webhooks/${slug}`, "POST", body, headers);
+    // Webhooks with secrets require replay-protection headers.
+    // Auto-inject them when the caller hasn't supplied them.
+    const h = { ...headers };
+    if (!h["x-trigger-timestamp"]) {
+      h["x-trigger-timestamp"] = String(Math.floor(Date.now() / 1000));
+    }
+    if (!h["x-trigger-nonce"]) {
+      h["x-trigger-nonce"] = crypto.randomUUID();
+    }
+    return this.#rawJson(`/webhooks/${slug}`, "POST", body, h);
   }
 
   // --- Credentials ---

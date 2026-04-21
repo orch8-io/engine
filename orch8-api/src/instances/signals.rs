@@ -32,6 +32,13 @@ pub(crate) async fn send_signal(
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId(id);
 
+    // Tenant enforcement still needs the current instance row. This read is
+    // the TOCTOU window — between reading here and persisting the signal
+    // below, the instance can transition to a terminal state. We close the
+    // window by persisting via `enqueue_signal_if_active`, which re-checks
+    // state inside the same transaction as the INSERT. The tenant check
+    // below stays read-side because the tenant_id is immutable for the
+    // life of an instance, so no race is possible.
     let instance = state
         .storage
         .get_instance(instance_id)
@@ -45,13 +52,6 @@ pub(crate) async fn send_signal(
         &format!("instance {id}"),
     )?;
 
-    if instance.state.is_terminal() {
-        return Err(ApiError::InvalidArgument(format!(
-            "cannot send signal to instance in {} state",
-            instance.state
-        )));
-    }
-
     let signal = Signal {
         id: Uuid::now_v7(),
         instance_id,
@@ -62,11 +62,24 @@ pub(crate) async fn send_signal(
         delivered_at: None,
     };
 
+    // Atomic enqueue: fails with `TerminalTarget` if the instance
+    // transitioned to Completed / Failed / Cancelled while we were
+    // preparing the signal. Map that to a 400 here (not the default 409)
+    // so the handler surfaces the same "cannot send signal to terminal
+    // instance" shape the pre-check used to return.
     state
         .storage
-        .enqueue_signal(&signal)
+        .enqueue_signal_if_active(&signal)
         .await
-        .map_err(|e| ApiError::from_storage(e, "signal"))?;
+        .map_err(|e| match e {
+            orch8_types::error::StorageError::TerminalTarget { .. } => ApiError::InvalidArgument(
+                format!("cannot send signal to instance {id}: target is in a terminal state"),
+            ),
+            orch8_types::error::StorageError::NotFound { .. } => {
+                ApiError::NotFound(format!("instance {id}"))
+            }
+            other => ApiError::from_storage(other, "signal"),
+        })?;
 
     // Wake the instance if it's sitting in Scheduled with a future next_fire_at.
     // This is critical for HITL flows where check_human_input defers the instance

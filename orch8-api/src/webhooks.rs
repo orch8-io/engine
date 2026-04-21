@@ -14,17 +14,39 @@
 //! Only triggers with `trigger_type = "webhook"` are accepted. `event` and
 //! `nats` types are rejected with 404 (they're never meant for public entry).
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
 use axum::extract::{Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
+use moka::future::Cache;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use orch8_types::trigger::TriggerType;
 
 use crate::error::ApiError;
 use crate::AppState;
+
+/// Maximum skew permitted between the caller's `x-trigger-timestamp` and
+/// the server clock. Matches the default window most `SaaS` webhook senders
+/// (Stripe, GitHub) use — large enough to tolerate NTP drift, small enough
+/// that a captured payload can't be replayed the next day.
+const REPLAY_WINDOW_SECS: i64 = 300;
+
+/// Nonces seen within the replay window. Keyed by `{slug}:{nonce}` so two
+/// triggers sharing a nonce space don't collide. TTL matches the replay
+/// window — once a captured request is outside the window the timestamp
+/// check rejects it independently, so the nonce entry can expire.
+static SEEN_NONCES: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
+    Cache::builder()
+        .time_to_live(Duration::from_secs((REPLAY_WINDOW_SECS as u64) + 60))
+        .max_capacity(100_000)
+        .build()
+});
 
 /// Public router — merged into the server *after* auth middleware so these
 /// routes are reachable without a tenant header or API key.
@@ -42,7 +64,16 @@ pub fn public_routes() -> Router<AppState> {
 /// Rejects with 401 if:
 /// - The trigger has a `secret` configured but no `x-trigger-secret` header
 ///   was provided, or the provided secret doesn't match.
-async fn public_webhook(
+#[utoipa::path(post, path = "/webhooks/{slug}", tag = "webhooks",
+    params(("slug" = String, Path, description = "Webhook slug (the trigger slug)")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Instance created from webhook payload"),
+        (status = 401, description = "Missing or invalid `x-trigger-secret`"),
+        (status = 404, description = "Unknown slug, disabled trigger, or non-webhook trigger type"),
+    )
+)]
+pub(crate) async fn public_webhook(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     headers: HeaderMap,
@@ -81,11 +112,59 @@ async fn public_webhook(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let expected = secret.expose();
-    if provided.len() != expected.len()
-        || !bool::from(provided.as_bytes().ct_eq(expected.as_bytes()))
-    {
+    // Hash both sides before the constant-time compare so mismatched
+    // lengths don't short-circuit the timing path. SHA-256 is only a
+    // length-normaliser here — collision resistance is not load-bearing.
+    let provided_digest = Sha256::digest(provided.as_bytes());
+    let expected_digest = Sha256::digest(expected.as_bytes());
+    if !bool::from(provided_digest.ct_eq(expected_digest.as_slice())) {
         return Err(ApiError::Unauthorized);
     }
+
+    // Replay protection: require `x-trigger-timestamp` within the window
+    // AND a unique `x-trigger-nonce` that we haven't seen recently. The
+    // timestamp bounds the replay window; the nonce prevents repeated
+    // delivery inside the window (e.g. an attacker capturing a single
+    // request and replaying it milliseconds later).
+    //
+    // Headers are optional when the trigger has no secret — but we already
+    // rejected secret-less triggers above, so here a configured secret
+    // implies replay protection is active. Any third-party sender that
+    // adopted orch8 webhooks before this change will need to send these
+    // headers; we surface a clear 401 so the failure mode is obvious rather
+    // than silent success.
+    let ts_hdr = headers
+        .get("x-trigger-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok());
+    let Some(ts) = ts_hdr else {
+        tracing::warn!(slug = %slug, "webhook rejected: missing/invalid x-trigger-timestamp");
+        return Err(ApiError::Unauthorized);
+    };
+    let now = chrono::Utc::now().timestamp();
+    if (now - ts).abs() > REPLAY_WINDOW_SECS {
+        tracing::warn!(
+            slug = %slug,
+            skew = now - ts,
+            "webhook rejected: timestamp outside replay window"
+        );
+        return Err(ApiError::Unauthorized);
+    }
+
+    let nonce = headers
+        .get("x-trigger-nonce")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if nonce.is_empty() {
+        tracing::warn!(slug = %slug, "webhook rejected: missing x-trigger-nonce");
+        return Err(ApiError::Unauthorized);
+    }
+    let nonce_key = format!("{slug}:{nonce}");
+    if SEEN_NONCES.get(&nonce_key).await.is_some() {
+        tracing::warn!(slug = %slug, "webhook rejected: nonce reuse detected");
+        return Err(ApiError::Unauthorized);
+    }
+    SEEN_NONCES.insert(nonce_key, ()).await;
 
     let meta = serde_json::json!({
         "source": "public_webhook",

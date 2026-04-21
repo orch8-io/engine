@@ -211,6 +211,54 @@ pub(super) async fn save_output_and_transition(
     Ok(())
 }
 
+/// Atomic: `INSERT block_outputs` + `UPDATE task_instances` (context, state,
+/// `next_fire_at`) in a single transaction.
+///
+/// Closes the external-worker completion crash window where the previous
+/// sequence (`update_instance_context` then `save_output_and_transition`)
+/// could leave an instance with merged context but no state transition.
+pub(super) async fn save_output_merge_context_and_transition(
+    store: &PostgresStorage,
+    output: &BlockOutput,
+    instance_id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
+    let ctx_json = serde_json::to_value(context)?;
+    let mut tx = store.pool.begin().await?;
+
+    sqlx::query(
+        r"
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ",
+    )
+    .bind(output.id)
+    .bind(output.instance_id.0)
+    .bind(&output.block_id.0)
+    .bind(&output.output)
+    .bind(&output.output_ref)
+    .bind(output.output_size)
+    .bind(output.attempt)
+    .bind(output.created_at)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE task_instances SET context = $2, state = $3, next_fire_at = $4, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(instance_id.0)
+    .bind(&ctx_json)
+    .bind(new_state.to_string())
+    .bind(next_fire_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Delete only sentinel rows (`output_ref = '__in_progress__'`) for an instance.
 pub(super) async fn delete_sentinels_for_instance(
     store: &PostgresStorage,

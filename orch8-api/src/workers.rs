@@ -236,7 +236,13 @@ pub(crate) async fn complete_task(
     // This prevents a race where the scheduler claims the instance before
     // the context is updated, causing downstream blocks (routers, loops)
     // to evaluate conditions against stale context.
-    if let Some(obj) = block_output.output.as_object() {
+    //
+    // Crash-safety: when there is a context merge we go through the atomic
+    // `save_output_merge_context_and_transition` so output INSERT + context
+    // UPDATE + state transition commit together. A process crash between
+    // the two legacy calls could leave merged context but the old state
+    // (`Running`), stranding the instance until manual intervention.
+    let merged_context = if let Some(obj) = block_output.output.as_object() {
         // Ensure context.data is an object (it may be null/Null for
         // instances created without initial context data).
         if instance.context.data.is_null() || !instance.context.data.is_object() {
@@ -246,28 +252,38 @@ pub(crate) async fn complete_task(
             for (k, v) in obj {
                 data_obj.insert(k.clone(), v.clone());
             }
-            // Propagate the merge failure — silently swallowing it would
-            // let the scheduler advance with stale context, making downstream
-            // routers/loops evaluate against pre-merge data (the very race
-            // the comment above warns about).
-            state
-                .storage
-                .update_instance_context(task.instance_id, &instance.context)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "instance"))?;
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
 
-    state
-        .storage
-        .save_output_and_transition(
-            &block_output,
-            task.instance_id,
-            InstanceState::Scheduled,
-            Some(chrono::Utc::now()),
-        )
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    if merged_context {
+        state
+            .storage
+            .save_output_merge_context_and_transition(
+                &block_output,
+                task.instance_id,
+                &instance.context,
+                InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    } else {
+        state
+            .storage
+            .save_output_and_transition(
+                &block_output,
+                task.instance_id,
+                InstanceState::Scheduled,
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    }
 
     let tree = state
         .storage
@@ -667,6 +683,18 @@ fn parse_states(raw: &str) -> Result<Vec<WorkerTaskState>, ApiError> {
         .collect()
 }
 
+#[utoipa::path(get, path = "/workers/tasks", tag = "workers",
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("state" = Option<String>, Query, description = "Comma-separated worker task states"),
+        ("handler_name" = Option<String>, Query, description = "Filter by handler name"),
+        ("worker_id" = Option<String>, Query, description = "Filter by claiming worker id"),
+        ("queue_name" = Option<String>, Query, description = "Filter by queue name"),
+        ("limit" = u32, Query, description = "Max rows to return (≤ 1000)"),
+        ("offset" = u32, Query, description = "Skip N rows"),
+    ),
+    responses((status = 200, description = "Worker tasks", body = Vec<orch8_types::worker::WorkerTask>))
+)]
 pub(crate) async fn list_tasks(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -697,6 +725,9 @@ pub(crate) async fn list_tasks(
     Ok(Json(tasks))
 }
 
+#[utoipa::path(get, path = "/workers/tasks/stats", tag = "workers",
+    responses((status = 200, description = "Aggregate worker task stats", body = orch8_types::worker_filter::WorkerTaskStats))
+)]
 pub(crate) async fn task_stats(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,

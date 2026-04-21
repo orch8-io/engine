@@ -26,6 +26,7 @@
 //! contract only gives it access to metadata + extensions — the typed body
 //! is threaded through untouched.
 
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tonic::{Request, Status};
 
@@ -56,19 +57,21 @@ pub fn auth_interceptor(
     require_tenant: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
     move |mut req: Request<()>| {
-        // 1. API key: constant-time comparison, length-gated so ct_eq
-        //    doesn't see mixed-length inputs.
+        // 1. API key: hash both provided and expected to a fixed-size
+        //    digest, then compare constant-time. Earlier versions gated on
+        //    `key.len() == expected.len()` before ct_eq, which short-
+        //    circuited on different lengths and leaked the expected key
+        //    length via response timing. SHA-256 here is purely a
+        //    length-normaliser — collision resistance is not load-bearing.
         if let Some(expected) = expected_api_key.as_deref() {
             let provided = req
                 .metadata()
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok());
-            let ok = match provided {
-                Some(k) => {
-                    k.len() == expected.len() && bool::from(k.as_bytes().ct_eq(expected.as_bytes()))
-                }
-                None => false,
-            };
+            let expected_digest = Sha256::digest(expected.as_bytes());
+            let provided_digest = Sha256::digest(provided.unwrap_or("").as_bytes());
+            let ok =
+                provided.is_some() && bool::from(provided_digest.ct_eq(expected_digest.as_slice()));
             if !ok {
                 return Err(Status::unauthenticated("invalid or missing x-api-key"));
             }

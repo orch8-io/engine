@@ -41,6 +41,18 @@ fn is_terminal(state: InstanceState) -> bool {
 }
 
 /// SSE stream for instance progress.
+#[utoipa::path(get, path = "/instances/{id}/stream", tag = "instances",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Instance ID"),
+        ("poll_ms" = Option<u64>, Query, description = "Poll interval in ms (min 100ms)"),
+    ),
+    responses(
+        (status = 200, description = "Server-Sent Events stream of instance state/tree/output changes", content_type = "text/event-stream"),
+        (status = 404, description = "Instance not found"),
+        (status = 503, description = "Too many concurrent streams"),
+    )
+)]
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn stream_instance(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -62,6 +74,25 @@ pub(crate) async fn stream_instance(
         &format!("instance {id}"),
     )?;
 
+    // Perf#3: acquire a concurrency permit before spawning. Each live stream
+    // owns a permit for its lifetime; when the semaphore is exhausted, reject
+    // with 503 instead of silently spawning another polling task. Without
+    // this gate a single client could open arbitrarily many streams and
+    // exhaust tokio tasks + DB pool connections.
+    let permit = std::sync::Arc::clone(&state.stream_limiter)
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::Unavailable("too many concurrent streaming clients; retry later".into())
+        })?;
+
+    // Perf#2: exponential backoff on consecutive storage errors. The
+    // previous shape `continue`d on error, which still waited for the
+    // next poll tick but hammered the DB at the configured cadence
+    // during an outage. On repeated failures we extend the wait,
+    // capped at ~30s, and reset on success.
+    #[allow(clippy::items_after_statements)]
+    const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
     let poll_interval = Duration::from_millis(query.poll_ms.clamp(100, 5000));
 
     // Channel depth: one slot per event type we may emit per tick (state, outputs batch, done).
@@ -71,6 +102,10 @@ pub(crate) async fn stream_instance(
     let storage = state.storage.clone();
 
     tokio::spawn(async move {
+        // Hold the permit for the lifetime of the stream task; dropped
+        // automatically on return/panic, freeing a slot.
+        let _permit = permit;
+
         let mut last_output_count: usize = 0;
         let mut last_state: Option<InstanceState> = None;
         let mut ticker = tokio::time::interval(poll_interval);
@@ -78,12 +113,31 @@ pub(crate) async fn stream_instance(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
 
+        let mut consecutive_errors: u32 = 0;
+
         loop {
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => break,
                 () = tx.closed() => break,
                 _ = ticker.tick() => {}
+            }
+
+            // If the last iterations failed, wait an extra backoff period
+            // BEFORE issuing the next query. Backoff doubles per failure
+            // (capped), and sits on top of the normal poll interval.
+            if consecutive_errors > 0 {
+                // `poll_interval` is clamped to ≤ 5000ms so `as_millis()`
+                // comfortably fits in a u64 before the multiplier applies.
+                let base_ms = u64::try_from(poll_interval.as_millis()).unwrap_or(u64::MAX);
+                let extra_ms = base_ms.saturating_mul(1u64 << consecutive_errors.min(8));
+                let extra = Duration::from_millis(extra_ms).min(MAX_BACKOFF);
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => break,
+                    () = tx.closed() => break,
+                    () = tokio::time::sleep(extra) => {}
+                }
             }
 
             // Fetch instance.
@@ -98,7 +152,8 @@ pub(crate) async fn stream_instance(
                     break;
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, instance_id = %instance_id.0, "stream: get_instance failed, will retry");
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    tracing::debug!(error = %e, instance_id = %instance_id.0, consecutive_errors, "stream: get_instance failed, will back off");
                     continue;
                 }
             };
@@ -135,9 +190,12 @@ pub(crate) async fn stream_instance(
                         }
                         last_output_count = new_count;
                     }
+                    consecutive_errors = 0;
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, instance_id = %instance_id.0, "stream: get_all_outputs failed, will retry");
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    tracing::debug!(error = %e, instance_id = %instance_id.0, consecutive_errors, "stream: get_all_outputs failed, will back off");
+                    continue;
                 }
             }
 

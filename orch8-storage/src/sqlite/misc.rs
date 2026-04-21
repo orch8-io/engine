@@ -119,10 +119,17 @@ pub(super) async fn claim_worker_tasks_from_queue(
         .fetch_all(&mut *tx)
         .await
         ?;
-    let tasks: Vec<WorkerTask> = rows
+    let mut tasks: Vec<WorkerTask> = rows
         .iter()
         .map(row_to_worker_task)
         .collect::<Result<Vec<_>, _>>()?;
+    let now_dt = chrono::Utc::now();
+    for t in &mut tasks {
+        t.state = orch8_types::worker::WorkerTaskState::Claimed;
+        t.worker_id = Some(worker_id.to_string());
+        t.claimed_at = Some(now_dt);
+        t.heartbeat_at = Some(now_dt);
+    }
     for t in &tasks {
         sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
             .bind(t.id.to_string())
@@ -163,10 +170,17 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     .bind(&tenant_id.0)
     .fetch_all(&mut *tx)
     .await?;
-    let tasks: Vec<WorkerTask> = rows
+    let mut tasks: Vec<WorkerTask> = rows
         .iter()
         .map(row_to_worker_task)
         .collect::<Result<Vec<_>, _>>()?;
+    let now_dt = chrono::Utc::now();
+    for t in &mut tasks {
+        t.state = orch8_types::worker::WorkerTaskState::Claimed;
+        t.worker_id = Some(worker_id.to_string());
+        t.claimed_at = Some(now_dt);
+        t.heartbeat_at = Some(now_dt);
+    }
     for t in &tasks {
         sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id=?2, claimed_at=?3, heartbeat_at=?3 WHERE id=?1")
             .bind(t.id.to_string())
@@ -205,6 +219,49 @@ pub(super) async fn get_injected_blocks(
     Ok(row
         .map(|r| serde_json::from_str(r.get::<&str, _>("blocks")))
         .transpose()?)
+}
+
+pub(super) async fn inject_blocks_at_position(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    new_blocks_json: &serde_json::Value,
+    position: Option<usize>,
+) -> Result<serde_json::Value, StorageError> {
+    let mut tx = storage.pool.begin().await?;
+
+    let final_value = if let Some(pos) = position {
+        // Read current injected blocks within the transaction so a concurrent
+        // writer's snapshot can't slip in between our read and our write.
+        let row = sqlx::query("SELECT blocks FROM injected_blocks WHERE instance_id=?1")
+            .bind(instance_id.0.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let existing: Option<serde_json::Value> = row
+            .map(|r| serde_json::from_str::<serde_json::Value>(r.get::<&str, _>("blocks")))
+            .transpose()?;
+
+        let mut arr = existing
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+
+        let new_arr = new_blocks_json.as_array().cloned().unwrap_or_default();
+        let insert_at = pos.min(arr.len());
+        for (i, block) in new_arr.into_iter().enumerate() {
+            arr.insert(insert_at + i, block);
+        }
+        serde_json::Value::Array(arr)
+    } else {
+        new_blocks_json.clone()
+    };
+
+    sqlx::query("INSERT OR REPLACE INTO injected_blocks (instance_id, blocks) VALUES (?1, ?2)")
+        .bind(instance_id.0.to_string())
+        .bind(serde_json::to_string(&final_value)?)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(final_value)
 }
 
 // === Emit Event Dedupe ===

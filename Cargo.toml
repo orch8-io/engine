@@ -77,6 +77,7 @@ rand = "0.8"
 cron = "0.15"
 moka = { version = "0.12", features = ["future"] }
 subtle = "2"
+sha2 = "0.10"
 tikv-jemallocator = "0.6"
 async-nats = "0.38"
 notify = { version = "7", features = ["serde"] }

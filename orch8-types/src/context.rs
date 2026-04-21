@@ -39,13 +39,34 @@ pub struct ContextTooLarge {
 }
 
 impl ExecutionContext {
-    /// Serialized byte size of this context when written to JSON. Cheap — just
-    /// walks the value, doesn't allocate the full string.
+    /// Serialized byte size of this context when written to JSON.
+    ///
+    /// Perf#6: serializes through a byte-counting `io::Write` sink instead
+    /// of allocating the full `Vec<u8>` the way `serde_json::to_vec` does.
+    /// For a 1 MiB context the counter allocates zero bytes for the output;
+    /// the previous implementation would allocate and memcpy the whole
+    /// serialized form every time `check_size` ran on a write path.
     #[must_use]
     pub fn serialized_size(&self) -> usize {
-        // `serde_json::to_vec` is the simplest reliable way; value is small
-        // enough that we don't need a streaming byte counter.
-        serde_json::to_vec(self).map_or(0, |v| v.len())
+        /// `io::Write` sink that discards bytes but tracks the count —
+        /// keeps `serialized_size` off the allocator's hot path.
+        #[derive(Default)]
+        struct Counter(usize);
+        impl std::io::Write for Counter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0 += buf.len();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut counter = Counter::default();
+        if serde_json::to_writer(&mut counter, self).is_err() {
+            return 0;
+        }
+        counter.0
     }
 
     /// Reject contexts whose serialized form exceeds `max_bytes`.

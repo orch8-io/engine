@@ -127,6 +127,19 @@ impl HandlerRegistry {
         self.mocks.contains_key(name) || self.handlers.contains_key(name)
     }
 
+    /// Return all registered handler names (both real and mock).
+    pub fn handler_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .handlers
+            .keys()
+            .chain(self.mocks.keys())
+            .cloned()
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Install a mock handler that always returns a fixed JSON value.
     /// The mock takes precedence over any real handler with the same name.
     pub fn set_mock(&mut self, name: &str, response: serde_json::Value) {

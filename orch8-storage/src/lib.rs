@@ -340,6 +340,28 @@ pub trait StorageBackend: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Atomic: save block output + overwrite instance context + update state
+    /// in a single transaction.
+    ///
+    /// Closes the crash-safety gap in external-worker completion where the
+    /// previous sequence (`update_instance_context` → `save_output_and_transition`)
+    /// could leave an instance with merged context but no state transition
+    /// if the server crashed between the two calls, or — in the reversed
+    /// ordering — could let the scheduler advance on stale context.
+    ///
+    /// Every backend MUST implement this — no default impl so a missing
+    /// implementation fails at compile time rather than silently falling
+    /// back to the non-atomic path (same convention as
+    /// [`Self::enqueue_signal_if_active`]).
+    async fn save_output_merge_context_and_transition(
+        &self,
+        output: &BlockOutput,
+        instance_id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
     /// Delete every `block_outputs` row for `(instance_id, block_id)`.
     ///
     /// Returns the number of rows actually removed.
@@ -881,6 +903,24 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
         blocks_json: &serde_json::Value,
     ) -> Result<(), StorageError>;
+
+    /// Atomically merge new blocks into an instance's existing injected-blocks
+    /// array at the given position, inside a single transaction.
+    ///
+    /// If `position` is `None`, `new_blocks_json` replaces any prior value
+    /// (equivalent to `inject_blocks`). If `position` is `Some(pos)`, the
+    /// current injected blocks are read, `new_blocks_json`'s entries are
+    /// inserted at `pos` (clamped to the current length), and the resulting
+    /// array is written back — all within one transaction so two concurrent
+    /// calls cannot lose each other's writes.
+    ///
+    /// Returns the final injected-blocks array actually persisted.
+    async fn inject_blocks_at_position(
+        &self,
+        instance_id: InstanceId,
+        new_blocks_json: &serde_json::Value,
+        position: Option<usize>,
+    ) -> Result<serde_json::Value, StorageError>;
 
     /// Get injected blocks for an instance.
     async fn get_injected_blocks(

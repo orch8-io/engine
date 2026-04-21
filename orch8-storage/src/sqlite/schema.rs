@@ -286,4 +286,18 @@ CREATE TABLE IF NOT EXISTS emit_event_dedupe (
 );
 CREATE INDEX IF NOT EXISTS idx_emit_event_dedupe_created_at
     ON emit_event_dedupe(created_at);
+
+-- Ref#15: lightweight schema version registry. Full per-migration history
+-- isn't implemented yet; this table at least records which version of the
+-- bundled `SCHEMA` string was applied so downgrades / skew can be detected
+-- and surfaced in logs at boot time.
+CREATE TABLE IF NOT EXISTS schema_versions (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ";
+
+/// Current bundled schema version. Bump when the `SCHEMA` string above is
+/// edited in a non-idempotent way (e.g. adding a new column whose default
+/// matters for code that reads the column).
+pub(super) const SCHEMA_VERSION: i64 = 1;

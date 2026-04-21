@@ -517,6 +517,24 @@ pub enum SequenceValidationError {
     InvalidHumanInput { block_id: String, message: String },
 }
 
+/// Known built-in handler names shipped with the engine. Used for
+/// create-time validation warnings when a sequence references an
+/// unknown handler (likely a typo).
+pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
+    "noop",
+    "log",
+    "sleep",
+    "fail",
+    "http_request",
+    "llm_call",
+    "tool_call",
+    "human_review",
+    "self_modify",
+    "emit_event",
+    "send_signal",
+    "query_instance",
+];
+
 impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
     /// reaches storage). Currently checks that every `BlockId` in the
@@ -529,6 +547,107 @@ impl SequenceDefinition {
             walk_block_ids(block, &mut seen)?;
         }
         Ok(())
+    }
+
+    /// Collect all handler names referenced by Step blocks in the sequence.
+    pub fn handler_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for block in &self.blocks {
+            collect_handler_names(block, &mut names);
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Check for handler names that are not in the built-in list and
+    /// return suggestions using fuzzy matching.
+    pub fn unknown_handler_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for name in self.handler_names() {
+            if !BUILTIN_HANDLER_NAMES.contains(&name.as_str()) {
+                let suggestion = crate::suggest::did_you_mean(&name, BUILTIN_HANDLER_NAMES);
+                match suggestion {
+                    Some(s) => warnings.push(format!(
+                        "unknown handler \"{name}\" (did you mean \"{s}\"?)"
+                    )),
+                    None => warnings.push(format!(
+                        "unknown handler \"{name}\" — not a built-in; ensure a custom handler is registered"
+                    )),
+                }
+            }
+        }
+        warnings
+    }
+}
+
+fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
+    match block {
+        BlockDefinition::Step(s) => {
+            names.push(s.handler.clone());
+        }
+        BlockDefinition::Parallel(p) => {
+            for branch in &p.branches {
+                for b in branch {
+                    collect_handler_names(b, names);
+                }
+            }
+        }
+        BlockDefinition::Race(r) => {
+            for branch in &r.branches {
+                for b in branch {
+                    collect_handler_names(b, names);
+                }
+            }
+        }
+        BlockDefinition::Loop(l) => {
+            for b in &l.body {
+                collect_handler_names(b, names);
+            }
+        }
+        BlockDefinition::ForEach(fe) => {
+            for b in &fe.body {
+                collect_handler_names(b, names);
+            }
+        }
+        BlockDefinition::Router(r) => {
+            for route in &r.routes {
+                for b in &route.blocks {
+                    collect_handler_names(b, names);
+                }
+            }
+            if let Some(default) = &r.default {
+                for b in default {
+                    collect_handler_names(b, names);
+                }
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            for b in &tc.try_block {
+                collect_handler_names(b, names);
+            }
+            for b in &tc.catch_block {
+                collect_handler_names(b, names);
+            }
+            if let Some(finally) = &tc.finally_block {
+                for b in finally {
+                    collect_handler_names(b, names);
+                }
+            }
+        }
+        BlockDefinition::SubSequence(_) => {}
+        BlockDefinition::ABSplit(ab) => {
+            for variant in &ab.variants {
+                for b in &variant.blocks {
+                    collect_handler_names(b, names);
+                }
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => {
+            for b in &cs.blocks {
+                collect_handler_names(b, names);
+            }
+        }
     }
 }
 
@@ -1071,5 +1190,37 @@ mod tests {
         let c = d.effective_choices();
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].value, "approve");
+    }
+
+    #[test]
+    fn handler_names_collects_from_steps() {
+        let seq = sample_seq(vec![step("a"), step("b")]);
+        let names = seq.handler_names();
+        assert_eq!(names, vec!["noop"]); // step() helper uses "noop"
+    }
+
+    #[test]
+    fn unknown_handler_warnings_detects_typo() {
+        let mut seq = sample_seq(vec![step("a")]);
+        // Manually change the handler to a typo
+        if let BlockDefinition::Step(ref mut s) = seq.blocks[0] {
+            s.handler = "http_requst".into(); // typo for http_request
+        }
+        let warnings = seq.unknown_handler_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("http_request"), "got: {}", warnings[0]);
+    }
+
+    #[test]
+    fn unknown_handler_warnings_empty_for_builtins() {
+        let seq = sample_seq(vec![step("a")]);
+        assert!(seq.unknown_handler_warnings().is_empty());
+    }
+
+    #[test]
+    fn builtin_handler_names_includes_expected() {
+        assert!(BUILTIN_HANDLER_NAMES.contains(&"noop"));
+        assert!(BUILTIN_HANDLER_NAMES.contains(&"http_request"));
+        assert!(BUILTIN_HANDLER_NAMES.contains(&"human_review"));
     }
 }

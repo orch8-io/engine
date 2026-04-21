@@ -52,6 +52,18 @@ use utoipa::OpenApi;
         crate::workers::complete_task,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
+        crate::workers::list_tasks,
+        crate::workers::task_stats,
+        // Triggers
+        crate::triggers::create_trigger,
+        crate::triggers::list_triggers,
+        crate::triggers::get_trigger,
+        crate::triggers::delete_trigger,
+        crate::triggers::fire_trigger,
+        // Webhooks
+        crate::webhooks::public_webhook,
+        // Streaming
+        crate::streaming::stream_instance,
         // Cluster
         crate::cluster::list_nodes,
         crate::cluster::drain_node,
@@ -164,6 +176,12 @@ use utoipa::OpenApi;
         orch8_types::credential::CredentialKind,
         crate::credentials::CreateCredentialRequest,
         crate::credentials::UpdateCredentialRequest,
+        // Triggers
+        orch8_types::trigger::TriggerDef,
+        orch8_types::trigger::TriggerType,
+        crate::triggers::CreateTriggerRequest,
+        // Worker stats
+        orch8_types::worker_filter::WorkerTaskStats,
     )),
     tags(
         (name = "health", description = "Health check endpoints"),
@@ -176,6 +194,7 @@ use utoipa::OpenApi;
         (name = "pools", description = "Resource pool management"),
         (name = "cluster", description = "Multi-node cluster management"),
         (name = "credentials", description = "Shared secrets referenced by step params via credentials://<id>"),
+        (name = "triggers", description = "Trigger definitions that convert inbound events into instance creations"),
         (name = "webhooks", description = "Public, unauthenticated webhook ingestion (HMAC-protected via trigger secret)"),
     )
 )]

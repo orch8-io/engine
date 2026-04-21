@@ -61,6 +61,7 @@ impl FieldEncryptor {
     }
 
     /// Create an encryptor from raw 32 bytes.
+    #[must_use]
     pub fn from_bytes(key: &[u8; 32]) -> Self {
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(key);
         Self {

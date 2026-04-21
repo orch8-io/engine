@@ -89,11 +89,25 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
     }
 }
 
+/// Default per-provider timeout in failover mode. Without this cap a single
+/// hung provider would burn the full 5-minute client timeout before failing
+/// over — multiplying latency across every remaining provider.
+const DEFAULT_PER_PROVIDER_TIMEOUT: Duration = Duration::from_mins(1);
+
 /// Failover logic: iterate through providers, try each one, stop on first success.
 async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
     if providers.is_empty() {
         return Err(permanent("providers array is empty".to_string()));
     }
+
+    // Perf#9: apply a short per-provider timeout in failover mode so a single
+    // slow provider can't eat the whole budget. Callers can override with
+    // `per_provider_timeout_secs`; 0 disables the cap (back to the client-level
+    // 5-minute ceiling).
+    let per_attempt_timeout = params
+        .get("per_provider_timeout_secs")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_PER_PROVIDER_TIMEOUT, Duration::from_secs);
 
     let mut tried: Vec<String> = Vec::new();
     let mut last_error: Option<StepError> = None;
@@ -120,10 +134,23 @@ async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result
 
         let base = resolve_base_url(&merged, provider_name);
 
-        let result = if provider_name == "anthropic" {
-            call_anthropic(&merged, &api_key, &base).await
+        let attempt = async {
+            if provider_name == "anthropic" {
+                call_anthropic(&merged, &api_key, &base).await
+            } else {
+                call_openai_compat(&merged, &api_key, &base, provider_name).await
+            }
+        };
+
+        let result = if per_attempt_timeout.is_zero() {
+            attempt.await
         } else {
-            call_openai_compat(&merged, &api_key, &base, provider_name).await
+            match tokio::time::timeout(per_attempt_timeout, attempt).await {
+                Ok(r) => r,
+                Err(_) => Err(retryable(format!(
+                    "provider {provider_name} timed out after {per_attempt_timeout:?}"
+                ))),
+            }
         };
 
         match result {

@@ -577,6 +577,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ff7a1dccbdd8b078c2bdebff47e404615151534d5043da397ec50286816f9cb"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2549,12 +2558,14 @@ dependencies = [
  "axum 0.8.9",
  "chrono",
  "metrics-exporter-prometheus",
+ "moka",
  "orch8-engine",
  "orch8-storage",
  "orch8-types",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -2575,11 +2586,17 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_complete",
+ "orch8-types",
+ "owo-colors",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
+ "strsim",
  "tabled",
  "tokio",
+ "toml",
  "uuid",
 ]
 
@@ -2603,6 +2620,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2626,6 +2644,7 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tokio",
  "tonic",
@@ -2696,11 +2715,18 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "strsim",
  "subtle",
  "thiserror 2.0.18",
  "utoipa",
  "uuid",
 ]
+
+[[package]]
+name = "owo-colors"
+version = "4.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d211803b9b6b570f68772237e415a029d5a50c65d382910b879fb19d3271f94d"
 
 [[package]]
 name = "papergrid"

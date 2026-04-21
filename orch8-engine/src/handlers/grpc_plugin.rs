@@ -35,19 +35,50 @@ static GRPC_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 /// Check if a handler name is a gRPC plugin handler.
+///
+/// Accepts both `grpc://` (plaintext) and `grpcs://` (TLS) prefixes.
 pub fn is_grpc_handler(handler_name: &str) -> bool {
-    handler_name.starts_with("grpc://")
+    handler_name.starts_with("grpc://") || handler_name.starts_with("grpcs://")
 }
 
-/// Parse endpoint from handler name: `grpc://host:port/service.Method`
-fn parse_endpoint(handler: &str) -> Result<(&str, &str), StepError> {
-    let stripped = handler.strip_prefix("grpc://").unwrap_or(handler);
-    stripped.split_once('/').ok_or_else(|| StepError::Permanent {
+/// Endpoint scheme selected by the handler prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
+/// Parse endpoint from handler name.
+///
+/// Supports:
+/// - `grpc://host:port/service.Method`  → plaintext HTTP/2
+/// - `grpcs://host:port/service.Method` → TLS (HTTPS/2)
+fn parse_endpoint(handler: &str) -> Result<(Scheme, &str, &str), StepError> {
+    let (scheme, stripped) = if let Some(rest) = handler.strip_prefix("grpcs://") {
+        (Scheme::Https, rest)
+    } else if let Some(rest) = handler.strip_prefix("grpc://") {
+        (Scheme::Http, rest)
+    } else {
+        // Tolerate raw `host:port/method` for backward compat with existing
+        // callers that pass unprefixed endpoints.
+        (Scheme::Http, handler)
+    };
+    let (addr, method) = stripped.split_once('/').ok_or_else(|| StepError::Permanent {
         message: format!(
-            "grpc plugin: invalid endpoint format '{handler}', expected 'grpc://host:port/service.Method'"
+            "grpc plugin: invalid endpoint format '{handler}', expected '[grpc|grpcs]://host:port/service.Method'"
         ),
         details: None,
-    })
+    })?;
+    Ok((scheme, addr, method))
 }
 
 /// Execute a step by calling an external gRPC-compatible endpoint.
@@ -64,7 +95,7 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
             details: None,
         })?;
 
-    let (addr, method) = parse_endpoint(endpoint)?;
+    let (scheme, addr, method) = parse_endpoint(endpoint)?;
 
     // SSRF guard: the gRPC endpoint is ultimately POSTed to via reqwest, so
     // it shares the HTTP handler's threat model. `is_url_safe` only accepts
@@ -100,7 +131,7 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
         "attempt": ctx.attempt,
     });
 
-    let url = format!("http://{addr}/{method}");
+    let url = format!("{scheme}://{addr}/{method}", scheme = scheme.as_str());
 
     let response = GRPC_CLIENT
         .post(&url)
@@ -144,13 +175,16 @@ mod tests {
     #[test]
     fn is_grpc_handler_detects_prefix() {
         assert!(is_grpc_handler("grpc://localhost:50051/MyService.Execute"));
+        assert!(is_grpc_handler("grpcs://localhost:50051/MyService.Execute"));
         assert!(!is_grpc_handler("http_request"));
         assert!(!is_grpc_handler("noop"));
     }
 
     #[test]
     fn parse_endpoint_extracts_parts() {
-        let (addr, method) = parse_endpoint("grpc://localhost:50051/MyService.Execute").unwrap();
+        let (scheme, addr, method) =
+            parse_endpoint("grpc://localhost:50051/MyService.Execute").unwrap();
+        assert_eq!(scheme, Scheme::Http);
         assert_eq!(addr, "localhost:50051");
         assert_eq!(method, "MyService.Execute");
     }
@@ -162,7 +196,8 @@ mod tests {
 
     #[test]
     fn parse_endpoint_with_nested_path() {
-        let (addr, method) = parse_endpoint("grpc://10.0.0.1:9090/pkg.Svc/Method").unwrap();
+        let (scheme, addr, method) = parse_endpoint("grpc://10.0.0.1:9090/pkg.Svc/Method").unwrap();
+        assert_eq!(scheme, Scheme::Http);
         assert_eq!(addr, "10.0.0.1:9090");
         assert_eq!(method, "pkg.Svc/Method");
     }
@@ -172,13 +207,27 @@ mod tests {
         assert!(!is_grpc_handler("wasm://my-plugin"));
         assert!(!is_grpc_handler(""));
         assert!(is_grpc_handler("grpc://"));
+        assert!(is_grpc_handler("grpcs://"));
     }
 
     #[test]
     fn parse_endpoint_strips_prefix() {
-        // Even without grpc:// prefix, parse_endpoint still works on raw input.
-        let (addr, method) = parse_endpoint("host:50051/Svc.Run").unwrap();
+        // Even without grpc:// prefix, parse_endpoint still works on raw input
+        // and defaults to plaintext HTTP.
+        let (scheme, addr, method) = parse_endpoint("host:50051/Svc.Run").unwrap();
+        assert_eq!(scheme, Scheme::Http);
         assert_eq!(addr, "host:50051");
         assert_eq!(method, "Svc.Run");
+    }
+
+    #[test]
+    fn parse_endpoint_grpcs_selects_https() {
+        // Ref#12: `grpcs://` prefix must route through TLS so deployments with
+        // mTLS or external gateways aren't forced onto plaintext HTTP/2.
+        let (scheme, addr, method) = parse_endpoint("grpcs://secure.svc:443/Auth.Verify").unwrap();
+        assert_eq!(scheme, Scheme::Https);
+        assert_eq!(scheme.as_str(), "https");
+        assert_eq!(addr, "secure.svc:443");
+        assert_eq!(method, "Auth.Verify");
     }
 }

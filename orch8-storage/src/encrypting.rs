@@ -504,6 +504,30 @@ impl StorageBackend for EncryptingStorage {
             .await
     }
 
+    async fn save_output_merge_context_and_transition(
+        &self,
+        output: &orch8_types::output::BlockOutput,
+        instance_id: InstanceId,
+        context: &ExecutionContext,
+        new_state: orch8_types::instance::InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        // Mirrors `update_instance_context`: encrypt the context's `data` field
+        // before persisting. The inner backend performs the single-tx INSERT
+        // + UPDATE; we just wrap the encryption around it so crash safety and
+        // encryption-at-rest compose cleanly.
+        let encrypted = self.encrypt_context(context)?;
+        self.inner
+            .save_output_merge_context_and_transition(
+                output,
+                instance_id,
+                encrypted.as_ref(),
+                new_state,
+                next_fire_at,
+            )
+            .await
+    }
+
     async fn delete_block_outputs(
         &self,
         instance_id: InstanceId,
@@ -1075,6 +1099,17 @@ impl StorageBackend for EncryptingStorage {
         blocks_json: &serde_json::Value,
     ) -> Result<(), StorageError> {
         self.inner.inject_blocks(instance_id, blocks_json).await
+    }
+
+    async fn inject_blocks_at_position(
+        &self,
+        instance_id: InstanceId,
+        new_blocks_json: &serde_json::Value,
+        position: Option<usize>,
+    ) -> Result<serde_json::Value, StorageError> {
+        self.inner
+            .inject_blocks_at_position(instance_id, new_blocks_json, position)
+            .await
     }
 
     async fn get_injected_blocks(

@@ -87,31 +87,12 @@ pub(crate) async fn inject_blocks(
 
     let block_ids = validate_injected_blocks(&body.blocks)?;
 
-    // If position is specified, merge with existing injected blocks at that index.
-    let final_blocks = if let Some(pos) = body.position {
-        let existing = state
-            .storage
-            .get_injected_blocks(InstanceId(id))
-            .await
-            .map_err(|e| ApiError::from_storage(e, "instance"))?;
-
-        let mut arr = existing
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
-
-        let new_blocks = body.blocks.as_array().cloned().unwrap_or_default();
-        let insert_at = pos.min(arr.len());
-        for (i, block) in new_blocks.into_iter().enumerate() {
-            arr.insert(insert_at + i, block);
-        }
-        serde_json::Value::Array(arr)
-    } else {
-        body.blocks
-    };
-
-    state
+    // Merge + write in a single storage transaction so two concurrent
+    // position-targeted injections can't both read the same pre-image and
+    // clobber each other on the write-back.
+    let final_blocks = state
         .storage
-        .inject_blocks(InstanceId(id), &final_blocks)
+        .inject_blocks_at_position(InstanceId(id), &body.blocks, body.position)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
 

@@ -22,6 +22,7 @@ impl fmt::Display for PluginType {
 }
 
 impl PluginType {
+    #[must_use]
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s {
             "wasm" => Some(Self::Wasm),

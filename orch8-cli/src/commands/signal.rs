@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::print_response;
+use crate::{print_response, OutputFormat};
 
 pub async fn run(
     client: &Client,
@@ -11,6 +11,7 @@ pub async fn run(
     instance_id: Uuid,
     signal_type: String,
     payload: Option<String>,
+    format: OutputFormat,
 ) -> Result<()> {
     let payload_val: Value = payload
         .map(|p| serde_json::from_str(&p))
@@ -26,6 +27,6 @@ pub async fn run(
         }))
         .send()
         .await?;
-    print_response(resp).await?;
+    print_response(resp, format).await?;
     Ok(())
 }

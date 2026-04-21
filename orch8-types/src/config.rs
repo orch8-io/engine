@@ -11,6 +11,7 @@ pub struct SecretString(String);
 pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 
 impl SecretString {
+    #[must_use]
     pub fn new(s: String) -> Self {
         Self(s)
     }
@@ -32,6 +33,7 @@ impl SecretString {
         }
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -363,9 +365,14 @@ pub struct ApiConfig {
     /// tenant isolation. Requests without the header get `400 Bad Request`.
     #[serde(default)]
     pub require_tenant_header: bool,
-    /// Maximum API requests per second (global). 0 means no limit (default).
-    #[serde(default)]
-    pub rate_limit_rps: u64,
+    /// Maximum in-flight HTTP requests (global concurrency cap). 0 disables the cap.
+    ///
+    /// Perf#10: this is a concurrency limit (tower `ConcurrencyLimitLayer`),
+    /// not an RPS rate limiter. The `rate_limit_rps` alias is accepted for
+    /// backward compatibility with older configs and the
+    /// `ORCH8_RATE_LIMIT_RPS` env var.
+    #[serde(default, alias = "rate_limit_rps")]
+    pub max_concurrent_requests: u64,
 }
 
 impl Default for ApiConfig {
@@ -376,7 +383,7 @@ impl Default for ApiConfig {
             cors_origins: default_cors_origins(),
             api_key: SecretString::default(),
             require_tenant_header: false,
-            rate_limit_rps: 0,
+            max_concurrent_requests: 0,
         }
     }
 }
@@ -412,6 +419,61 @@ impl Default for LoggingConfig {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+impl EngineConfig {
+    /// Validate configuration values, returning all errors found.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        // Database
+        match self.database.backend.as_str() {
+            "postgres" | "sqlite" => {}
+            other => errors.push(format!(
+                "database.backend: unknown backend \"{other}\" (expected \"postgres\" or \"sqlite\")"
+            )),
+        }
+        if self.database.max_connections == 0 {
+            errors.push("database.max_connections must be > 0".into());
+        }
+
+        // Engine / scheduler
+        if self.engine.tick_interval_ms == 0 {
+            errors.push("engine.tick_interval_ms must be > 0".into());
+        }
+        if self.engine.batch_size == 0 {
+            errors.push("engine.batch_size must be > 0".into());
+        }
+        if self.engine.max_concurrent_steps == 0 {
+            errors.push("engine.max_concurrent_steps must be > 0".into());
+        }
+        if self.engine.stale_instance_threshold_secs > 0
+            && self.engine.tick_interval_ms > 0
+            && self.engine.stale_instance_threshold_secs * 1000 <= self.engine.tick_interval_ms
+        {
+            errors.push(
+                "engine.stale_instance_threshold_secs must be greater than tick_interval_ms".into(),
+            );
+        }
+        if !self.engine.encryption_key.is_empty() && self.engine.encryption_key.expose().len() != 64
+        {
+            errors.push("engine.encryption_key must be exactly 64 hex characters".into());
+        }
+
+        // Logging
+        match self.logging.level.as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" => {}
+            other => errors.push(format!(
+                "logging.level: unknown level \"{other}\" (expected trace/debug/info/warn/error)"
+            )),
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +601,23 @@ mod tests {
     }
 
     #[test]
+    fn api_config_accepts_legacy_rate_limit_rps_alias() {
+        // Perf#10: the field was renamed to `max_concurrent_requests` but the
+        // old `rate_limit_rps` spelling must still deserialize to the new
+        // field so existing orch8.toml files keep working.
+        let json = r#"{ "rate_limit_rps": 500 }"#;
+        let cfg: ApiConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_concurrent_requests, 500);
+    }
+
+    #[test]
+    fn api_config_prefers_canonical_name() {
+        let json = r#"{ "max_concurrent_requests": 750 }"#;
+        let cfg: ApiConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_concurrent_requests, 750);
+    }
+
+    #[test]
     fn externalization_mode_default_is_threshold_64k() {
         let cfg = SchedulerConfig::default();
         assert!(matches!(
@@ -579,5 +658,74 @@ mod tests {
         assert!(ExternalizationMode::AlwaysOutputs.always_externalize_outputs());
         assert!(!ExternalizationMode::Never.always_externalize_outputs());
         assert!(!ExternalizationMode::Threshold { bytes: 1024 }.always_externalize_outputs());
+    }
+
+    #[test]
+    fn validate_default_config_passes() {
+        let cfg = EngineConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_catches_zero_tick_interval() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.tick_interval_ms = 0;
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("tick_interval_ms")));
+    }
+
+    #[test]
+    fn validate_catches_zero_batch_size() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.batch_size = 0;
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("batch_size")));
+    }
+
+    #[test]
+    fn validate_catches_unknown_backend() {
+        let mut cfg = EngineConfig::default();
+        cfg.database.backend = "mysql".into();
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("mysql")));
+    }
+
+    #[test]
+    fn validate_catches_bad_log_level() {
+        let mut cfg = EngineConfig::default();
+        cfg.logging.level = "verbose".into();
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("verbose")));
+    }
+
+    #[test]
+    fn validate_catches_bad_encryption_key_length() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.encryption_key = SecretString::from("tooshort");
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("encryption_key")));
+    }
+
+    #[test]
+    fn validate_catches_stale_less_than_tick() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.tick_interval_ms = 5000;
+        cfg.engine.stale_instance_threshold_secs = 4; // 4s = 4000ms < 5000ms tick
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("stale_instance_threshold")));
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.tick_interval_ms = 0;
+        cfg.engine.batch_size = 0;
+        cfg.database.backend = "mysql".into();
+        let errs = cfg.validate().unwrap_err();
+        assert!(
+            errs.len() >= 3,
+            "expected at least 3 errors, got {}",
+            errs.len()
+        );
     }
 }

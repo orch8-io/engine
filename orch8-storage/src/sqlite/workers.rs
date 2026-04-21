@@ -89,7 +89,7 @@ pub(super) async fn claim(
         }
     };
 
-    let tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
+    let mut tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
         Ok(t) => t,
         Err(e) => {
             rollback_quiet(&mut conn).await;
@@ -98,6 +98,15 @@ pub(super) async fn claim(
     };
 
     if !tasks.is_empty() {
+        // Reflect the state change in the returned objects so callers don't
+        // see stale 'pending' values after a successful claim.
+        let now_dt = chrono::Utc::now();
+        for t in &mut tasks {
+            t.state = orch8_types::worker::WorkerTaskState::Claimed;
+            t.worker_id = Some(worker_id.to_string());
+            t.claimed_at = Some(now_dt);
+            t.heartbeat_at = Some(now_dt);
+        }
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
         qb.push_bind(worker_id);
         qb.push(", claimed_at=");
@@ -161,7 +170,7 @@ pub(super) async fn claim_for_tenant(
         }
     };
 
-    let tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
+    let mut tasks: Vec<WorkerTask> = match rows.iter().map(row_to_worker_task).collect() {
         Ok(t) => t,
         Err(e) => {
             rollback_quiet(&mut conn).await;
@@ -170,6 +179,13 @@ pub(super) async fn claim_for_tenant(
     };
 
     if !tasks.is_empty() {
+        let now_dt = chrono::Utc::now();
+        for t in &mut tasks {
+            t.state = orch8_types::worker::WorkerTaskState::Claimed;
+            t.worker_id = Some(worker_id.to_string());
+            t.claimed_at = Some(now_dt);
+            t.heartbeat_at = Some(now_dt);
+        }
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
         qb.push_bind(worker_id);
         qb.push(", claimed_at=");
@@ -350,7 +366,7 @@ pub(super) async fn list(
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut qb = sqlx::QueryBuilder::new("SELECT * FROM worker_tasks WHERE 1=1");
     if let Some(ref tid) = filter.tenant_id {
-        qb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        qb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
         qb.push_bind(tid.0.clone());
         qb.push(")");
     }
@@ -397,7 +413,7 @@ pub(super) async fn stats(
     let mut cqb =
         sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
     if let Some(tid) = tenant_id {
-        cqb.push(" WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        cqb.push(" WHERE instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
         cqb.push_bind(&tid.0);
         cqb.push(")");
     }
@@ -425,7 +441,7 @@ pub(super) async fn stats(
         "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
     );
     if let Some(tid) = tenant_id {
-        wqb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id=");
+        wqb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id=");
         wqb.push_bind(&tid.0);
         wqb.push(")");
     }

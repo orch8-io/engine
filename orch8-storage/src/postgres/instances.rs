@@ -702,11 +702,15 @@ pub(super) async fn bulk_reschedule(
     filter: &InstanceFilter,
     offset_secs: i64,
 ) -> Result<u64, StorageError> {
+    // Perf#8: bind offset_secs as i64 and multiply by INTERVAL '1 second'
+    // so we don't round-trip through f64. `make_interval(secs => ...)` accepts
+    // only `double precision`, which silently truncates i64 values past 2^53 —
+    // not a practical concern for seconds, but binding the native type is
+    // simpler to reason about than an annotated precision-loss cast.
     let mut qb = sqlx::QueryBuilder::new(
-        "UPDATE task_instances SET next_fire_at = next_fire_at + make_interval(secs => ",
+        "UPDATE task_instances SET next_fire_at = next_fire_at + (INTERVAL '1 second' * ",
     );
-    #[allow(clippy::cast_precision_loss)] // offset_secs is bounded to practical ranges
-    qb.push_bind(offset_secs as f64);
+    qb.push_bind(offset_secs);
     qb.push("), updated_at = NOW() WHERE state = 'scheduled'");
     apply_instance_filter(&mut qb, filter);
 

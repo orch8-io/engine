@@ -56,6 +56,9 @@ pub async fn spawn_test_server() -> TestServer {
         max_context_bytes: 0,
         externalization_mode: ExternalizationMode::default(),
         circuit_breakers: None,
+        stream_limiter: Arc::new(tokio::sync::Semaphore::new(
+            crate::DEFAULT_MAX_CONCURRENT_STREAMS,
+        )),
     };
 
     // Attach tenant middleware (require_tenant = false) so `X-Tenant-Id`
@@ -73,11 +76,26 @@ pub async fn spawn_test_server() -> TestServer {
     let base_url = format!("http://{addr}");
 
     let cancel_child = shutdown.clone();
+    // Ref#9: the listener is already bound (so incoming SYNs hit the kernel
+    // backlog), but the spawned task may not have been scheduled by the time
+    // the first test request fires. Send a oneshot from the serve task so we
+    // can await readiness deterministically instead of relying on a sleep.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
+        // Handing the listener to `axum::serve` is the last thing before the
+        // accept loop starts. Signalling ready *just before* the await point
+        // guarantees the serve future has polled at least once by the time
+        // the channel completes.
+        let _ = ready_tx.send(());
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move { cancel_child.cancelled().await })
             .await;
     });
+    // A dropped sender means the server task never started — surface the
+    // failure rather than hanging on a retry loop inside the test.
+    ready_rx
+        .await
+        .expect("test server task failed to start before first request");
 
     TestServer {
         base_url,

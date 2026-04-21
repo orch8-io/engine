@@ -7,12 +7,40 @@
 //! - `fail` — always fails with a configurable message (for testing and
 //!   explicit force-fail steps in user sequences)
 
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use moka::future::Cache;
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
 use orch8_types::error::StepError;
 
 use super::{HandlerRegistry, StepContext};
+
+/// Perf#5: process-wide TTL cache for `is_url_safe` results keyed by the
+/// full URL string. DNS lookups inside `is_address_safe` are a significant
+/// per-step cost on tight loops or handlers that re-check the same
+/// destination (retries, parallel fan-out, `tool_call` invocations against
+/// the same endpoint).
+///
+/// TTL is deliberately short — 30s — so the cache absorbs burst traffic
+/// but does not give DNS-rebinding attackers a long window in which to
+/// swap a resolved public IP for a private one. Negative results are not
+/// cached at all: a transient DNS failure should not pin an otherwise
+/// legitimate URL as unsafe for the next half-minute.
+const URL_SAFETY_TTL: Duration = Duration::from_secs(30);
+const URL_SAFETY_CAPACITY: u64 = 4_096;
+
+fn url_safety_cache() -> &'static Cache<String, bool> {
+    static CACHE: OnceLock<Cache<String, bool>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(URL_SAFETY_CAPACITY)
+            .time_to_live(URL_SAFETY_TTL)
+            .build()
+    })
+}
 
 /// Check whether a resolved `host:port` address is safe to contact
 /// (not a private/internal/metadata target).
@@ -57,7 +85,15 @@ pub(crate) async fn is_address_safe(addr: &str) -> bool {
 ///
 /// Returns `true` if the URL uses http/https and resolves to a public IP address.
 /// Returns `false` for private, loopback, link-local, and cloud metadata addresses.
+///
+/// Successful results are memoized for [`URL_SAFETY_TTL`]; parse failures and
+/// unsafe-classifications are NOT cached, so a transient DNS failure does not
+/// become a short-term denylist.
 pub(crate) async fn is_url_safe(url: &str) -> bool {
+    if let Some(hit) = url_safety_cache().get(url).await {
+        return hit;
+    }
+
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
@@ -73,7 +109,11 @@ pub(crate) async fn is_url_safe(url: &str) -> bool {
 
     let port = parsed.port_or_known_default().unwrap_or(80);
     let addr_str = format!("{host}:{port}");
-    is_address_safe(&addr_str).await
+    let safe = is_address_safe(&addr_str).await;
+    if safe {
+        url_safety_cache().insert(url.to_string(), true).await;
+    }
+    safe
 }
 
 /// Register all built-in handlers on the given registry.
@@ -329,6 +369,14 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(json!({ "slept_ms": duration_ms }));
     }
 
+    // Perf#1: whether this sleep is inside a cancellation scope or a `finally`
+    // branch is a *static* property of its position in the execution tree —
+    // it cannot change while we're asleep. The previous loop re-queried the
+    // full execution tree every 250ms, producing ~14,400 DB round-trips per
+    // hour of sleep per in-flight instance. Resolve both flags once up front.
+    let suppress_signals =
+        is_inside_cancellation_scope(&ctx).await || is_inside_finally(&ctx).await;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
     loop {
         let now = std::time::Instant::now();
@@ -347,7 +395,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         // from external cancel signals (`handlers/cancellation_scope.rs`).
         // The scheduler's regular signal path will defer the cancel until
         // the scope drains, matching `cancel_scoped`'s semantics.
-        if is_inside_cancellation_scope(&ctx).await || is_inside_finally(&ctx).await {
+        if suppress_signals {
             continue;
         }
         if let Some(result) = check_sleep_signals(&ctx).await {

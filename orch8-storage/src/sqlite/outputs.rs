@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::collections::HashMap;
 
+use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 use orch8_types::instance::InstanceState;
@@ -174,6 +175,50 @@ pub(super) async fn save_output_and_transition(
         .bind(ts(chrono::Utc::now()))
         .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomic: INSERT block_outputs + UPDATE task_instances (context, state,
+/// next_fire_at) in a single transaction.
+///
+/// Used by the external-worker completion path to close the window where
+/// the previous two-call sequence (update_instance_context then
+/// save_output_and_transition) could crash between calls and leave the
+/// instance with merged context but the old state.
+pub(super) async fn save_output_merge_context_and_transition(
+    storage: &SqliteStorage,
+    output: &BlockOutput,
+    instance_id: InstanceId,
+    context: &ExecutionContext,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
+    )
+    .bind(output.id.to_string())
+    .bind(output.instance_id.0.to_string())
+    .bind(&output.block_id.0)
+    .bind(serde_json::to_string(&output.output)?)
+    .bind(&output.output_ref)
+    .bind(output.output_size as i64)
+    .bind(output.attempt as i64)
+    .bind(ts(output.created_at))
+    .execute(&mut *tx).await?;
+
+    sqlx::query(
+        "UPDATE task_instances SET context=?2, state=?3, next_fire_at=?4, updated_at=?5 WHERE id=?1",
+    )
+    .bind(instance_id.0.to_string())
+    .bind(serde_json::to_string(context)?)
+    .bind(new_state.to_string())
+    .bind(next_fire_at.map(ts))
+    .bind(ts(chrono::Utc::now()))
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok(())

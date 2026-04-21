@@ -73,7 +73,7 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 | `cors_origins` | string | `"*"` | CORS `Access-Control-Allow-Origin` value. Use `*` to allow all origins or a comma-separated list of specific origins |
 | `api_key` | string | `""` | If set, all requests must include `Authorization: Bearer <key>`. Empty means no authentication |
 | `require_tenant_header` | bool | `false` | If `true`, all requests must include `X-Tenant-Id`. Requests without it receive `400 Bad Request` |
-| `rate_limit_rps` | integer | `0` | Global API rate limit in requests per second (0 = unlimited) |
+| `max_concurrent_requests` | integer | `0` | Global cap on in-flight HTTP requests (0 = unlimited). This is a concurrency limit, not an RPS limiter. Accepts the legacy alias `rate_limit_rps`. |
 
 ---
 
@@ -120,7 +120,7 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_CORS_ORIGINS` | `*` | CORS allowed origins |
 | `ORCH8_API_KEY` | — | Set to enable API key authentication |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `false` | Enforce `X-Tenant-Id` header |
-| `ORCH8_RATE_LIMIT_RPS` | `0` | Global API rate limit (0 = unlimited) |
+| `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
 
 ### Logging
 
@@ -156,7 +156,7 @@ http_addr = "127.0.0.1:8080"
 grpc_addr = "127.0.0.1:50051"
 cors_origins = "*"
 require_tenant_header = false
-rate_limit_rps = 0
+max_concurrent_requests = 0
 
 [logging]
 level = "debug"
@@ -196,7 +196,7 @@ grpc_addr = "0.0.0.0:50051"
 cors_origins = "https://app.example.com,https://admin.example.com"
 api_key = ""  # set via ORCH8_API_KEY env var
 require_tenant_header = true
-rate_limit_rps = 500
+max_concurrent_requests = 500
 
 [logging]
 level = "info"
@@ -237,7 +237,7 @@ externalize_output_threshold = 65536  # externalize outputs > 64 KiB
 http_addr = "0.0.0.0:8080"
 grpc_addr = "0.0.0.0:50051"
 cors_origins = "*"
-rate_limit_rps = 0
+max_concurrent_requests = 0
 
 [logging]
 level = "warn"

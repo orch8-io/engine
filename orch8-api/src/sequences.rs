@@ -46,16 +46,20 @@ pub(crate) async fn create_sequence(
     seq.validate()
         .map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
 
+    let warnings = seq.unknown_handler_warnings();
+
     state
         .storage
         .create_sequence(&seq)
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
 
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "id": seq.id })),
-    ))
+    let mut body = serde_json::json!({ "id": seq.id });
+    if !warnings.is_empty() {
+        body["warnings"] = serde_json::json!(warnings);
+    }
+
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 #[utoipa::path(get, path = "/sequences/{id}", tag = "sequences",
@@ -258,7 +262,7 @@ pub(crate) async fn list_sequences(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListSequencesQuery>,
-) -> Result<Json<Vec<SequenceDefinition>>, ApiError> {
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     // Tenant scoping: if caller is a tenant-scoped key, force their tenant as
     // the filter. Anonymous/global callers may pass tenant_id to filter, or
     // omit it to see all sequences across all tenants.
@@ -279,7 +283,7 @@ pub(crate) async fn list_sequences(
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
 
-    Ok(Json(sequences))
+    Ok(Json(crate::PaginatedResponse::from_vec(sequences, limit)))
 }
 
 /// Hot migration: rebind a running instance to a different sequence version.
@@ -328,12 +332,24 @@ pub(crate) async fn migrate_instance(
     }
 
     // Validate the target sequence exists.
-    let _target_seq = state
+    let target_seq = state
         .storage
         .get_sequence(SequenceId(req.target_sequence_id))
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
         .ok_or_else(|| ApiError::NotFound(format!("sequence {}", req.target_sequence_id)))?;
+
+    // Tenant isolation: forbid migrating an instance onto a sequence owned
+    // by a different tenant. Without this a tenant could pivot their
+    // instance onto another tenant's sequence definition — the scheduler
+    // would then execute their instance against the foreign tenant's
+    // blocks/handlers/params, crossing the isolation boundary.
+    if target_seq.tenant_id != instance.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "sequence {} belongs to a different tenant than instance {}",
+            req.target_sequence_id, req.instance_id
+        )));
+    }
 
     // Rebind: update the instance's sequence_id to the new version.
     state

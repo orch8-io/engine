@@ -345,6 +345,25 @@ impl StorageBackend for PostgresStorage {
             .await
     }
 
+    async fn save_output_merge_context_and_transition(
+        &self,
+        output: &BlockOutput,
+        instance_id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        outputs::save_output_merge_context_and_transition(
+            self,
+            output,
+            instance_id,
+            context,
+            new_state,
+            next_fire_at,
+        )
+        .await
+    }
+
     async fn delete_block_outputs(
         &self,
         instance_id: InstanceId,
@@ -869,6 +888,15 @@ impl StorageBackend for PostgresStorage {
         blocks_json: &serde_json::Value,
     ) -> Result<(), StorageError> {
         misc::inject_blocks(self, instance_id, blocks_json).await
+    }
+
+    async fn inject_blocks_at_position(
+        &self,
+        instance_id: InstanceId,
+        new_blocks_json: &serde_json::Value,
+        position: Option<usize>,
+    ) -> Result<serde_json::Value, StorageError> {
+        misc::inject_blocks_at_position(self, instance_id, new_blocks_json, position).await
     }
 
     async fn get_injected_blocks(

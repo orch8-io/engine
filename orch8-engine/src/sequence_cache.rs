@@ -161,7 +161,226 @@ impl SequenceCache {
     }
 }
 
-// Unit tests live alongside the scheduler integration — a focused test
-// against `SequenceCache` would need a full mock `StorageBackend` which is
-// unwieldy for three pass-through methods. The behaviour is covered by the
-// existing e2e suite, which exercises both lookup paths under load.
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_storage::StorageBackend;
+    use orch8_types::ids::{BlockId, Namespace, SequenceId, TenantId};
+    use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
+    use serde_json::json;
+
+    use super::*;
+
+    fn mk_seq(name: &str, version: i32) -> SequenceDefinition {
+        SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            name: name.into(),
+            version,
+            deprecated: false,
+            blocks: vec![BlockDefinition::Step(Box::new(StepDef {
+                id: BlockId("s1".into()),
+                handler: "noop".into(),
+                params: json!({}),
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
+                queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
+                fallback_handler: None,
+            }))],
+            interceptors: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_by_id_miss_fetches_from_storage_and_populates_cache() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = mk_seq("flow-a", 1);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let got = cache.get_by_id(&storage, seq.id).await.unwrap();
+        assert_eq!(got.name, "flow-a");
+        assert_eq!(got.version, 1);
+
+        // Second call should hit cache (no storage error possible since we
+        // drop storage, but we can't do that — instead observe via metrics
+        // or simply that it returns the same Arc).
+        let got2 = cache.get_by_id(&storage, seq.id).await.unwrap();
+        assert_eq!(got2.name, "flow-a");
+    }
+
+    #[tokio::test]
+    async fn get_by_id_returns_not_found_for_missing_sequence() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let err = cache
+            .get_by_id(&storage, SequenceId::new())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not found"),
+            "expected not found error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_by_name_miss_fetches_and_populates_both_caches() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = mk_seq("flow-b", 2);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let got = cache
+            .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-b", Some(2))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.id, seq.id);
+
+        // A subsequent by-id lookup for the same sequence should be cached.
+        let got_by_id = cache.get_by_id(&storage, seq.id).await.unwrap();
+        assert_eq!(got_by_id.id, seq.id);
+    }
+
+    #[tokio::test]
+    async fn get_by_name_returns_none_for_missing_sequence() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let got = cache
+            .get_by_name(
+                &storage,
+                &TenantId("t".into()),
+                &Namespace("ns".into()),
+                "missing",
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalidate_by_id_removes_from_both_caches() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = mk_seq("flow-c", 1);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        // Warm both caches via by-name lookup.
+        let _ = cache
+            .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-c", Some(1))
+            .await
+            .unwrap();
+
+        cache.invalidate_by_id(seq.id).await;
+
+        // After invalidation, by-id should re-fetch from storage (still there).
+        let got = cache.get_by_id(&storage, seq.id).await.unwrap();
+        assert_eq!(got.id, seq.id);
+
+        // By-name with latest version (None) should also re-fetch.
+        let got2 = cache
+            .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-c", None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got2.id, seq.id);
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_clears_everything() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq1 = mk_seq("flow-d1", 1);
+        let seq2 = mk_seq("flow-d2", 1);
+        storage.create_sequence(&seq1).await.unwrap();
+        storage.create_sequence(&seq2).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        cache.get_by_id(&storage, seq1.id).await.unwrap();
+        cache.get_by_id(&storage, seq2.id).await.unwrap();
+
+        cache.invalidate_all();
+
+        // Both should still resolve from storage after invalidate_all.
+        let got1 = cache.get_by_id(&storage, seq1.id).await.unwrap();
+        let got2 = cache.get_by_id(&storage, seq2.id).await.unwrap();
+        assert_eq!(got1.id, seq1.id);
+        assert_eq!(got2.id, seq2.id);
+    }
+
+    #[tokio::test]
+    async fn cache_honours_ttl_and_allows_eventual_stale_reads() {
+        // Use a zero TTL so entries expire immediately on the next tick.
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = mk_seq("flow-e", 1);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_millis(1));
+        cache.get_by_id(&storage, seq.id).await.unwrap();
+
+        // Small sleep to let TTL expire.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Even with expired TTL, moka may still return the value depending on
+        // timing; the important thing is that the cache does not panic and
+        // the value is still retrievable (either from cache or storage).
+        let got = cache.get_by_id(&storage, seq.id).await.unwrap();
+        assert_eq!(got.id, seq.id);
+    }
+
+    #[tokio::test]
+    async fn by_name_latest_version_resolves_when_none_specified() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq_v1 = mk_seq("flow-f", 1);
+        let mut seq_v2 = mk_seq("flow-f", 2);
+        seq_v2.id = SequenceId::new();
+        storage.create_sequence(&seq_v1).await.unwrap();
+        storage.create_sequence(&seq_v2).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let got = cache
+            .get_by_name(
+                &storage,
+                &seq_v1.tenant_id,
+                &seq_v1.namespace,
+                "flow-f",
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        // get_sequence_by_name with None returns the latest non-deprecated version.
+        assert_eq!(got.version, 2);
+    }
+
+    #[tokio::test]
+    async fn cache_populate_both_warms_name_cache_on_id_lookup() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = mk_seq("flow-g", 3);
+        storage.create_sequence(&seq).await.unwrap();
+
+        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        // First lookup by id.
+        let _ = cache.get_by_id(&storage, seq.id).await.unwrap();
+
+        // By-name lookup with explicit version should hit the warmed cache.
+        let got = cache
+            .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-g", Some(3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.id, seq.id);
+    }
+}

@@ -40,17 +40,36 @@ pub(crate) async fn get_outputs(
 
     // Inflate externalization markers in-place so API consumers see real data.
     // See `docs/CONTEXT_MANAGEMENT.md` §8.5.
+    //
+    // Ref#7: tolerate per-output resolution failures. A storage error or a
+    // missing externalized ref on a single output must not fail the entire
+    // endpoint — return what we have, log the failure, and leave the marker
+    // visible so callers can detect partial results.
     for out in &mut outputs {
-        if let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) {
-            if let Some(resolved) = state
-                .storage
-                .get_externalized_state(ref_key)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "externalized_state"))?
-            {
+        let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) else {
+            continue;
+        };
+        match state.storage.get_externalized_state(ref_key).await {
+            Ok(Some(resolved)) => {
                 out.output = resolved;
             }
-            // Missing payload: leave marker visible so callers can detect.
+            Ok(None) => {
+                tracing::warn!(
+                    instance_id = %id,
+                    block_id = %out.block_id,
+                    ref_key,
+                    "get_outputs: externalized payload missing — returning marker unchanged"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    instance_id = %id,
+                    block_id = %out.block_id,
+                    ref_key,
+                    error = %e,
+                    "get_outputs: failed to resolve externalized payload — returning marker unchanged"
+                );
+            }
         }
     }
 

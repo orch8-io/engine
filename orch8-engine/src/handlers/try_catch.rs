@@ -76,8 +76,8 @@ pub async fn execute_try_catch(
         return Ok(true);
     }
 
-    // All phases complete. Node succeeds if try succeeded, or if the try
-    // failure was handled by a catch branch. Recovery means one of:
+    // All phases complete. Node succeeds if try succeeded (or catch recovered)
+    // AND finally did not fail. Recovery means one of:
     //   - catch children exist and none failed (catch logic ran successfully)
     //   - catch block is declared (even empty) and no catch children exist,
     //     i.e. the author wrote `catch: []` as an explicit "swallow errors"
@@ -85,13 +85,20 @@ pub async fn execute_try_catch(
     // A try failure without *any* catch declaration propagates, but since
     // `TryCatchDef.catch_block` is always present, the empty-vec case is the
     // canonical "ignore errors" pattern.
+    //
+    // Finally-failure semantics: if the finally block itself throws, the
+    // try_catch fails — a failed cleanup is a programming error and must
+    // not be silently absorbed, regardless of whether try or catch succeeded.
+    // Matches Java/JS: a finally exception overrides an earlier try/catch
+    // result.
     let catch_recovered = if catch_children.is_empty() {
         // No catch children in tree — treat as swallowed (empty catch body).
         true
     } else {
         !evaluator::any_failed(&catch_children)
     };
-    if try_failed && !catch_recovered {
+    let finally_failed = evaluator::any_failed(&finally_children);
+    if finally_failed || (try_failed && !catch_recovered) {
         evaluator::fail_node(storage, node.id).await?;
     } else {
         evaluator::complete_node(storage, node.id).await?;
@@ -101,6 +108,7 @@ pub async fn execute_try_catch(
         instance_id = %instance.id,
         block_id = %tc_def.id,
         try_failed = try_failed,
+        finally_failed = finally_failed,
         "try-catch-finally completed"
     );
 
@@ -802,5 +810,101 @@ mod tests {
             "non-terminal catch node must be skipped when try succeeds",
         );
         assert_eq!(node_by_block(&after, "tc").state, NodeState::Completed);
+    }
+
+    // TC13: Finally failure overrides a successful try/catch. A failed
+    // cleanup is treated as a programming error and must fail the
+    // enclosing try_catch block — mirrors Java/JS "finally throws".
+    #[tokio::test]
+    async fn tc13_finally_failure_fails_node_even_when_try_succeeded() {
+        let inst_id = InstanceId::new();
+        let tc = mk_node(
+            inst_id,
+            "tc",
+            BlockType::TryCatch,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let try_ok = mk_node(
+            inst_id,
+            "try_ok",
+            BlockType::Step,
+            Some(tc.id),
+            Some(0),
+            NodeState::Completed,
+        );
+        let finally_bad = mk_node(
+            inst_id,
+            "finally_bad",
+            BlockType::Step,
+            Some(tc.id),
+            Some(2),
+            NodeState::Failed,
+        );
+        let (s, tree) = setup(vec![tc.clone(), try_ok, finally_bad], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let tc_node = node_by_block(&tree, "tc").clone();
+
+        execute_try_catch(&s, &registry, &inst, &tc_node, &tc_def("tc"), &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(
+            node_by_block(&after, "tc").state,
+            NodeState::Failed,
+            "finally failure must fail the try_catch node",
+        );
+    }
+
+    // TC14: Finally failure also overrides a catch-recovered try failure.
+    #[tokio::test]
+    async fn tc14_finally_failure_fails_node_even_when_catch_recovered() {
+        let inst_id = InstanceId::new();
+        let tc = mk_node(
+            inst_id,
+            "tc",
+            BlockType::TryCatch,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let try_bad = mk_node(
+            inst_id,
+            "try_bad",
+            BlockType::Step,
+            Some(tc.id),
+            Some(0),
+            NodeState::Failed,
+        );
+        let catch_ok = mk_node(
+            inst_id,
+            "catch_ok",
+            BlockType::Step,
+            Some(tc.id),
+            Some(1),
+            NodeState::Completed,
+        );
+        let finally_bad = mk_node(
+            inst_id,
+            "finally_bad",
+            BlockType::Step,
+            Some(tc.id),
+            Some(2),
+            NodeState::Failed,
+        );
+        let (s, tree) = setup(vec![tc.clone(), try_bad, catch_ok, finally_bad], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let tc_node = node_by_block(&tree, "tc").clone();
+
+        execute_try_catch(&s, &registry, &inst, &tc_node, &tc_def("tc"), &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(node_by_block(&after, "tc").state, NodeState::Failed);
     }
 }

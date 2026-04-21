@@ -52,7 +52,14 @@ pub struct TriggerQuery {
     pub tenant_id: Option<String>,
 }
 
-async fn create_trigger(
+#[utoipa::path(post, path = "/triggers", tag = "triggers",
+    request_body = CreateTriggerRequest,
+    responses(
+        (status = 201, description = "Trigger created", body = orch8_types::trigger::TriggerDef),
+        (status = 400, description = "Invalid input"),
+    )
+)]
+pub(crate) async fn create_trigger(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<CreateTriggerRequest>,
@@ -100,7 +107,11 @@ async fn create_trigger(
     Ok((StatusCode::CREATED, Json(trigger)))
 }
 
-async fn list_triggers(
+#[utoipa::path(get, path = "/triggers", tag = "triggers",
+    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
+    responses((status = 200, description = "Triggers", body = Vec<orch8_types::trigger::TriggerDef>))
+)]
+pub(crate) async fn list_triggers(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TriggerQuery>,
@@ -114,7 +125,14 @@ async fn list_triggers(
     Ok(Json(triggers))
 }
 
-async fn get_trigger(
+#[utoipa::path(get, path = "/triggers/{slug}", tag = "triggers",
+    params(("slug" = String, Path, description = "Trigger slug")),
+    responses(
+        (status = 200, description = "Trigger", body = orch8_types::trigger::TriggerDef),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub(crate) async fn get_trigger(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,
@@ -133,7 +151,14 @@ async fn get_trigger(
     Ok(Json(trigger))
 }
 
-async fn delete_trigger(
+#[utoipa::path(delete, path = "/triggers/{slug}", tag = "triggers",
+    params(("slug" = String, Path, description = "Trigger slug")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub(crate) async fn delete_trigger(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,
@@ -163,7 +188,16 @@ async fn delete_trigger(
 /// Fire a trigger: create a new instance from the trigger's sequence.
 ///
 /// The request body becomes the initial `context.data` for the instance.
-async fn fire_trigger(
+#[utoipa::path(post, path = "/triggers/{slug}/fire", tag = "triggers",
+    params(("slug" = String, Path, description = "Trigger slug")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Instance created"),
+        (status = 400, description = "Trigger disabled or bad secret"),
+        (status = 404, description = "Not found"),
+    )
+)]
+pub(crate) async fn fire_trigger(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(slug): Path<String>,

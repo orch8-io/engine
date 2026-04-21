@@ -1190,6 +1190,63 @@ async fn save_output_and_transition_atomic() {
     assert_eq!(outputs.len(), 1);
 }
 
+/// Exercises the Stab#12 atomic combined method. Prior to this, the worker
+/// completion path was split across `update_instance_context` and
+/// `save_output_and_transition`. A crash in between could leave an instance
+/// with merged context but an unchanged state (Running), stranding it.
+/// This test proves the three writes commit together.
+#[tokio::test]
+async fn save_output_merge_context_and_transition_atomic() {
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+    let mut inst = make_instance("t1", seq.id);
+    inst.state = InstanceState::Running;
+    inst.next_fire_at = None;
+    // Seed context.data with a pre-existing key so we can assert the merge
+    // preserves earlier context and layers new fields on top.
+    inst.context.data = json!({ "existing": "keep" });
+    s.create_instance(&inst).await.unwrap();
+
+    let out = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId("s1".into()),
+        output: json!({"answer": 42}),
+        output_ref: None,
+        output_size: 13,
+        attempt: 1,
+        created_at: Utc::now(),
+    };
+
+    // Build the merged context the same way workers.rs does.
+    let mut merged = inst.context.clone();
+    let obj = merged.data.as_object_mut().unwrap();
+    obj.insert("answer".into(), json!(42));
+
+    let next = Utc::now();
+    s.save_output_merge_context_and_transition(
+        &out,
+        inst.id,
+        &merged,
+        InstanceState::Scheduled,
+        Some(next),
+    )
+    .await
+    .unwrap();
+
+    // All three writes landed.
+    let fetched = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(fetched.state, InstanceState::Scheduled);
+    assert_eq!(fetched.context.data["existing"], json!("keep"));
+    assert_eq!(fetched.context.data["answer"], json!(42));
+    assert!(fetched.next_fire_at.is_some());
+
+    let outputs = s.get_all_outputs(inst.id).await.unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].block_id.0, "s1");
+}
+
 #[tokio::test]
 async fn completed_block_ids_batch() {
     let s = store().await;
@@ -1639,6 +1696,59 @@ async fn dynamic_step_injection() {
     s.inject_blocks(inst_id, &blocks).await.unwrap();
     let fetched = s.get_injected_blocks(inst_id).await.unwrap().unwrap();
     assert_eq!(fetched, blocks);
+}
+
+/// Stab#17: `inject_blocks` used to be a read-modify-write sequence in the
+/// HTTP handler — two concurrent position-targeted calls could both read the
+/// same pre-image array, each merge their new blocks, and the second write
+/// would clobber the first's additions. `inject_blocks_at_position` performs
+/// the read + merge + write inside a single transaction so interleaved calls
+/// cannot lose writes.
+#[tokio::test]
+async fn inject_blocks_at_position_preserves_sequential_writes() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+
+    // First call: append block `a` at position 0 into an empty array.
+    let blocks_a = json!([{"type": "step", "id": "a", "handler": "noop"}]);
+    let after_a = s
+        .inject_blocks_at_position(inst_id, &blocks_a, Some(0))
+        .await
+        .unwrap();
+    assert_eq!(after_a.as_array().unwrap().len(), 1);
+
+    // Second call: insert block `b` at position 0. Result must contain BOTH
+    // entries — `b` at index 0, `a` shifted to index 1 — proving that the
+    // method re-reads the current state instead of overwriting.
+    let blocks_b = json!([{"type": "step", "id": "b", "handler": "noop"}]);
+    let after_b = s
+        .inject_blocks_at_position(inst_id, &blocks_b, Some(0))
+        .await
+        .unwrap();
+    let arr = after_b.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["id"], "b");
+    assert_eq!(arr[1]["id"], "a");
+
+    // Third call: append `c` at out-of-range position; should clamp to end.
+    let blocks_c = json!([{"type": "step", "id": "c", "handler": "noop"}]);
+    let after_c = s
+        .inject_blocks_at_position(inst_id, &blocks_c, Some(999))
+        .await
+        .unwrap();
+    let arr = after_c.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[2]["id"], "c");
+
+    // None position means "replace the full blob" (legacy semantics).
+    let blocks_replace = json!([{"type": "step", "id": "z", "handler": "noop"}]);
+    let after_replace = s
+        .inject_blocks_at_position(inst_id, &blocks_replace, None)
+        .await
+        .unwrap();
+    let arr = after_replace.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], "z");
 }
 
 #[tokio::test]

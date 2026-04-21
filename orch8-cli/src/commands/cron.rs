@@ -5,7 +5,7 @@ use serde_json::Value;
 use tabled::{Table, Tabled};
 use uuid::Uuid;
 
-use crate::{print_response, val_str};
+use crate::{humanize_time, print_response, val_str, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum CronCmd {
@@ -29,7 +29,7 @@ struct CronRow {
     next_fire: String,
 }
 
-pub async fn run(client: &Client, base: &str, cmd: CronCmd) -> Result<()> {
+pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat) -> Result<()> {
     match cmd {
         CronCmd::List { tenant_id } => {
             let mut params = vec![];
@@ -43,29 +43,36 @@ pub async fn run(client: &Client, base: &str, cmd: CronCmd) -> Result<()> {
                 .await?;
             let body: Value = resp.json().await?;
 
-            if let Some(arr) = body.as_array() {
-                if arr.is_empty() {
-                    println!("No cron schedules found.");
-                } else {
-                    let rows: Vec<CronRow> = arr
-                        .iter()
-                        .map(|v| CronRow {
-                            id: val_str(v, "id"),
-                            tenant: val_str(v, "tenant_id"),
-                            expression: val_str(v, "cron_expression"),
-                            enabled: val_str(v, "enabled"),
-                            next_fire: val_str(v, "next_fire_at"),
-                        })
-                        .collect();
-                    println!("{}", Table::new(rows));
+            match format {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&body)?);
                 }
-            } else {
-                println!("{}", serde_json::to_string_pretty(&body)?);
+                OutputFormat::Table => {
+                    if let Some(arr) = body.as_array() {
+                        if arr.is_empty() {
+                            println!("No cron schedules found.");
+                        } else {
+                            let rows: Vec<CronRow> = arr
+                                .iter()
+                                .map(|v| CronRow {
+                                    id: val_str(v, "id"),
+                                    tenant: val_str(v, "tenant_id"),
+                                    expression: val_str(v, "cron_expr"),
+                                    enabled: val_str(v, "enabled"),
+                                    next_fire: humanize_time(&val_str(v, "next_fire_at")),
+                                })
+                                .collect();
+                            println!("{}", Table::new(rows));
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&body)?);
+                    }
+                }
             }
         }
         CronCmd::Get { id } => {
             let resp = client.get(format!("{base}/cron/{id}")).send().await?;
-            print_response(resp).await?;
+            print_response(resp, format).await?;
         }
         CronCmd::Delete { id } => {
             let resp = client.delete(format!("{base}/cron/{id}")).send().await?;

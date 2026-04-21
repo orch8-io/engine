@@ -262,9 +262,40 @@ fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepE
             details: None,
         })?;
 
+    // Ref#13: validate the allocator's return value before casting to usize.
+    // A malicious or buggy guest can return a negative pointer (→ huge usize
+    // after the cast) or a pointer whose end exceeds linear memory — either
+    // would panic inside `copy_from_slice` and tear down the executor thread
+    // instead of returning a classified step error.
+    if input_ptr < 0 {
+        return Err(StepError::Permanent {
+            message: format!(
+                "wasm plugin: alloc returned negative pointer {input_ptr}; guest is misbehaving"
+            ),
+            details: None,
+        });
+    }
     #[allow(clippy::cast_sign_loss)]
     let offset = input_ptr as usize;
-    memory.data_mut(&mut store)[offset..offset + input_bytes.len()].copy_from_slice(input_bytes);
+    let end = offset
+        .checked_add(input_bytes.len())
+        .ok_or_else(|| StepError::Permanent {
+            message: format!(
+                "wasm plugin: alloc offset {offset} + input len {} overflows usize",
+                input_bytes.len()
+            ),
+            details: None,
+        })?;
+    let mem_len = memory.data(&store).len();
+    if end > mem_len {
+        return Err(StepError::Permanent {
+            message: format!(
+                "wasm plugin: alloc range {offset}..{end} exceeds linear memory size {mem_len}"
+            ),
+            details: None,
+        });
+    }
+    memory.data_mut(&mut store)[offset..end].copy_from_slice(input_bytes);
 
     // Call handle. Fuel exhaustion or resource-limit hits surface as traps here.
     let result_packed = handle

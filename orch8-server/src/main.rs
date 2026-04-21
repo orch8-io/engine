@@ -56,8 +56,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging.
     init_logging(&config.logging);
 
-    tracing::info!("Starting Orch8.io engine v{}", env!("CARGO_PKG_VERSION"));
-    tracing::info!("License: BUSL-1.1 | Managed cloud: https://orch8.io/pricing");
+    print_startup_banner(&config, cli.insecure);
 
     // Connect to storage backend.
     let storage: Arc<dyn StorageBackend> = if config.database.backend == "sqlite" {
@@ -161,6 +160,9 @@ async fn main() -> anyhow::Result<()> {
         max_context_bytes: config.engine.max_context_bytes,
         externalization_mode: config.engine.externalization_mode,
         circuit_breakers: Some(cb_registry.clone()),
+        stream_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            orch8_api::DEFAULT_MAX_CONCURRENT_STREAMS,
+        )),
     };
     let cors = build_cors_layer(&config.api.cors_origins);
     let api_key = config.api.api_key.expose().to_string();
@@ -206,11 +208,14 @@ async fn main() -> anyhow::Result<()> {
         // Health probes live outside the auth layer so k8s/LB liveness checks
         // keep working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
         .merge(orch8_api::health::routes().with_state(app_state))
+        .layer(axum::middleware::from_fn(
+            orch8_api::request_id::request_id_middleware,
+        ))
         .layer(cors);
 
     // Apply global concurrency limit if configured (caps in-flight requests).
-    if config.api.rate_limit_rps > 0 {
-        let limit = config.api.rate_limit_rps;
+    if config.api.max_concurrent_requests > 0 {
+        let limit = config.api.max_concurrent_requests;
         tracing::info!(max_concurrent = limit, "API concurrency limiting enabled");
         #[allow(clippy::cast_possible_truncation)]
         let concurrency_limit = limit.min(usize::MAX as u64) as usize;
@@ -293,7 +298,7 @@ async fn main() -> anyhow::Result<()> {
     // hit the same in-memory state the scheduler consults — and so the
     // engine's check/record_* calls roll up into the rows persisted by the
     // inspection endpoints.
-    let handlers = handlers.with_circuit_breakers(cb_registry);
+    let handlers = handlers.with_circuit_breakers(cb_registry.clone());
     let engine = Engine::new(
         storage.clone(),
         config.engine.clone(),
@@ -318,10 +323,17 @@ async fn main() -> anyhow::Result<()> {
         .context("HTTP server error")?;
 
     // Wait for engine and gRPC to finish draining (with timeout).
+    // Circuit-breaker persistence lives inside a TaskTracker owned by
+    // `cb_registry`; we drain it *after* the engine stops so no new
+    // transitions land during the flush. Without this flush, fire-and-forget
+    // upserts could be aborted when the Tokio runtime tore down, leaving
+    // persisted breaker state lagging the in-memory state the next process
+    // rehydrated against at boot.
     let drain_timeout = tokio::time::Duration::from_secs(30);
     if tokio::time::timeout(drain_timeout, async {
         let _ = engine_handle.await;
         let _ = grpc_handle.await;
+        cb_registry.flush().await;
     })
     .await
     .is_err()
@@ -415,9 +427,13 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();
     }
-    if let Ok(val) = std::env::var("ORCH8_RATE_LIMIT_RPS") {
+    // `ORCH8_MAX_CONCURRENT_REQUESTS` is the preferred name; the older
+    // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10).
+    if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_REQUESTS")
+        .or_else(|_| std::env::var("ORCH8_RATE_LIMIT_RPS"))
+    {
         if let Ok(n) = val.parse() {
-            config.api.rate_limit_rps = n;
+            config.api.max_concurrent_requests = n;
         }
     }
     if let Ok(val) = std::env::var("ORCH8_REQUIRE_TENANT_HEADER") {
@@ -450,6 +466,39 @@ fn init_logging(config: &orch8_types::config::LoggingConfig) {
     }
 }
 
+fn print_startup_banner(config: &EngineConfig, insecure: bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let backend = &config.database.backend;
+    let http = &config.api.http_addr;
+    let grpc = &config.api.grpc_addr;
+    let auth = if insecure {
+        "disabled (--insecure)"
+    } else if config.api.api_key.is_empty() {
+        "none"
+    } else {
+        "api-key"
+    };
+    let encryption = if config.engine.encryption_key.is_empty() {
+        "off"
+    } else {
+        "AES-256-GCM"
+    };
+    let tenant = if config.api.require_tenant_header {
+        "required"
+    } else {
+        "optional"
+    };
+    let tick = config.engine.tick_interval_ms;
+    let batch = config.engine.batch_size;
+    let concurrency = config.engine.max_concurrent_steps;
+
+    tracing::info!("Starting Orch8.io engine v{version}");
+    tracing::info!("  storage={backend}  http={http}  grpc={grpc}");
+    tracing::info!("  auth={auth}  encryption={encryption}  tenant-header={tenant}");
+    tracing::info!("  tick={tick}ms  batch={batch}  max-concurrent-steps={concurrency}");
+    tracing::info!("License: BUSL-1.1 | Managed cloud: https://orch8.io/pricing");
+}
+
 fn build_cors_layer(origins: &str) -> CorsLayer {
     use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE};
     use http::Method;
@@ -467,6 +516,17 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             CONTENT_TYPE,
             AUTHORIZATION,
             HeaderName::from_static("x-api-key"),
+            // Tenant header is required by `tenant_middleware` — browsers
+            // that don't see it in the preflight `Access-Control-Allow-Headers`
+            // response strip it from the actual request and the API returns
+            // 400 BAD_REQUEST, which looks like an auth bug to the SPA.
+            HeaderName::from_static("x-tenant-id"),
+            // Trigger secret + replay-protection headers — webhooks called
+            // from browsers (dashboard test fire, SaaS-embedded widgets) need
+            // these to survive the preflight.
+            HeaderName::from_static("x-trigger-secret"),
+            HeaderName::from_static("x-trigger-timestamp"),
+            HeaderName::from_static("x-trigger-nonce"),
         ]);
 
     if origins.trim() == "*" {

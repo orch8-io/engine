@@ -225,6 +225,61 @@ pub(super) async fn get_injected_blocks(
         .and_then(|v| if v.is_null() { None } else { Some(v) }))
 }
 
+pub(super) async fn inject_blocks_at_position(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    new_blocks_json: &serde_json::Value,
+    position: Option<usize>,
+) -> Result<serde_json::Value, StorageError> {
+    let mut tx = store.pool.begin().await?;
+
+    let final_value = if let Some(pos) = position {
+        // Lock the instance row for the duration of this transaction so a
+        // concurrent inject_blocks_at_position call cannot observe the same
+        // pre-image and clobber our write.
+        let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
+            "SELECT metadata->'_injected_blocks' FROM task_instances WHERE id = $1 FOR UPDATE",
+        )
+        .bind(instance_id.0)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let existing = row
+            .and_then(|(v,)| v)
+            .and_then(|v| if v.is_null() { None } else { Some(v) });
+
+        let mut arr = existing
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default();
+
+        let new_arr = new_blocks_json.as_array().cloned().unwrap_or_default();
+        let insert_at = pos.min(arr.len());
+        for (i, block) in new_arr.into_iter().enumerate() {
+            arr.insert(insert_at + i, block);
+        }
+        serde_json::Value::Array(arr)
+    } else {
+        new_blocks_json.clone()
+    };
+
+    sqlx::query(
+        r"UPDATE task_instances
+          SET metadata = jsonb_set(
+              CASE WHEN metadata IS NULL OR metadata = 'null'::jsonb THEN '{}'::jsonb ELSE metadata END,
+              '{_injected_blocks}',
+              $2),
+              updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(instance_id.0)
+    .bind(&final_value)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(final_value)
+}
+
 // === Emit Event Dedupe ===
 
 pub(super) async fn record_or_get_emit_dedupe(

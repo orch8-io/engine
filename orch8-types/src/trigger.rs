@@ -33,6 +33,7 @@ impl fmt::Display for TriggerType {
 }
 
 impl TriggerType {
+    #[must_use]
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s {
             "webhook" => Some(Self::Webhook),

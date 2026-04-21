@@ -4,12 +4,26 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use crate::auth::{enforce_tenant_access, OptionalTenant};
 use crate::error::ApiError;
 
 use std::sync::Arc;
 
 use orch8_engine::circuit_breaker::CircuitBreakerRegistry;
 use orch8_types::ids::TenantId;
+
+/// If the caller has a tenant header set, ensure the path's `tenant_id`
+/// matches it. Otherwise any authenticated caller could list/reset/read
+/// another tenant's breaker state simply by changing the URL segment.
+///
+/// Returns `NotFound` (not `Forbidden`) on mismatch to mirror
+/// `enforce_tenant_access` elsewhere in the API — avoids leaking which
+/// tenants have breakers registered.
+fn guard_tenant(tenant_ctx: &OptionalTenant, url_tenant_id: &str) -> Result<TenantId, ApiError> {
+    let url_tid = TenantId(url_tenant_id.to_string());
+    enforce_tenant_access(tenant_ctx, &url_tid, "circuit_breaker")?;
+    Ok(url_tid)
+}
 
 #[derive(Clone)]
 pub struct CircuitBreakerState {
@@ -41,7 +55,16 @@ pub fn routes() -> Router<CircuitBreakerState> {
     path = "/circuit-breakers",
     responses((status = 200, body = Vec<orch8_types::circuit_breaker::CircuitBreakerState>))
 )]
-async fn list_all_breakers(State(state): State<CircuitBreakerState>) -> impl IntoResponse {
+async fn list_all_breakers(
+    State(state): State<CircuitBreakerState>,
+    tenant_ctx: OptionalTenant,
+) -> impl IntoResponse {
+    // A caller with an `x-tenant-id` header should see their tenant's
+    // breakers only — `list_all` would otherwise leak cross-tenant
+    // handler names and state via the unscoped admin endpoint.
+    if let Some(axum::Extension(ctx)) = tenant_ctx {
+        return Json(state.registry.list_for_tenant(&ctx.tenant_id));
+    }
     Json(state.registry.list_all())
 }
 
@@ -53,9 +76,11 @@ async fn list_all_breakers(State(state): State<CircuitBreakerState>) -> impl Int
 )]
 async fn list_breakers_for_tenant(
     State(state): State<CircuitBreakerState>,
+    tenant_ctx: OptionalTenant,
     Path(tenant_id): Path<String>,
-) -> impl IntoResponse {
-    Json(state.registry.list_for_tenant(&TenantId(tenant_id)))
+) -> Result<impl IntoResponse, ApiError> {
+    let tid = guard_tenant(&tenant_ctx, &tenant_id)?;
+    Ok(Json(state.registry.list_for_tenant(&tid)))
 }
 
 #[utoipa::path(
@@ -72,11 +97,13 @@ async fn list_breakers_for_tenant(
 )]
 async fn get_breaker(
     State(state): State<CircuitBreakerState>,
+    tenant_ctx: OptionalTenant,
     Path((tenant_id, handler)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tid = guard_tenant(&tenant_ctx, &tenant_id)?;
     state
         .registry
-        .get(&TenantId(tenant_id), &handler)
+        .get(&tid, &handler)
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("circuit_breaker {handler}")))
 }
@@ -92,8 +119,10 @@ async fn get_breaker(
 )]
 async fn reset_breaker(
     State(state): State<CircuitBreakerState>,
+    tenant_ctx: OptionalTenant,
     Path((tenant_id, handler)): Path<(String, String)>,
-) -> impl IntoResponse {
-    state.registry.reset(&TenantId(tenant_id), &handler);
-    StatusCode::OK
+) -> Result<impl IntoResponse, ApiError> {
+    let tid = guard_tenant(&tenant_ctx, &tenant_id)?;
+    state.registry.reset(&tid, &handler);
+    Ok(StatusCode::OK)
 }

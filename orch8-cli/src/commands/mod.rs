@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub mod config;
 pub mod cron;
 pub mod health;
 pub mod init;

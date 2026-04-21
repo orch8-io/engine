@@ -22,6 +22,17 @@ pub enum InstanceState {
     Cancelled,
 }
 
+/// All valid instance state names, used for fuzzy matching in error messages.
+pub const INSTANCE_STATE_NAMES: &[&str] = &[
+    "scheduled",
+    "running",
+    "waiting",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+];
+
 impl FromStr for InstanceState {
     type Err = String;
 
@@ -34,7 +45,15 @@ impl FromStr for InstanceState {
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             "cancelled" => Ok(Self::Cancelled),
-            other => Err(format!("unknown instance state: {other}")),
+            other => {
+                let suggestion = crate::suggest::did_you_mean(other, INSTANCE_STATE_NAMES);
+                match suggestion {
+                    Some(s) => Err(format!(
+                        "unknown instance state: {other} (did you mean: {s}?)"
+                    )),
+                    None => Err(format!("unknown instance state: {other}")),
+                }
+            }
         }
     }
 }
@@ -251,6 +270,29 @@ mod tests {
     #[test]
     fn failed_to_scheduled_is_valid_retry() {
         assert!(InstanceState::Failed.can_transition_to(InstanceState::Scheduled));
+    }
+
+    #[test]
+    fn from_str_typo_suggests_correction() {
+        let err = "runing".parse::<InstanceState>().unwrap_err();
+        assert!(err.contains("did you mean: running?"), "got: {err}");
+    }
+
+    #[test]
+    fn from_str_garbage_no_suggestion() {
+        let err = "foobar".parse::<InstanceState>().unwrap_err();
+        assert!(!err.contains("did you mean"), "got: {err}");
+        assert!(err.contains("unknown instance state: foobar"), "got: {err}");
+    }
+
+    #[test]
+    fn from_str_valid_states_all_parse() {
+        for name in INSTANCE_STATE_NAMES {
+            assert!(
+                name.parse::<InstanceState>().is_ok(),
+                "failed to parse: {name}"
+            );
+        }
     }
 
     #[test]

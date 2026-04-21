@@ -22,6 +22,8 @@ chrono.workspace = true
 utoipa.workspace = true
 utoipa-swagger-ui.workspace = true
 subtle.workspace = true
+sha2.workspace = true
+moka.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 

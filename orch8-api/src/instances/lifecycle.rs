@@ -27,23 +27,15 @@ use crate::AppState;
 )]
 pub(crate) async fn create_instance(
     State(state): State<AppState>,
-    tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = Utc::now();
 
-    // Enforce tenant isolation: if X-Tenant-Id header was provided, use it
-    // and reject requests that try to write to a different tenant.
-    let tenant_id = if let Some(axum::Extension(ctx)) = &tenant_ctx {
-        if !req.tenant_id.0.is_empty() && req.tenant_id != ctx.tenant_id {
-            return Err(ApiError::Forbidden(
-                "tenant_id in body does not match X-Tenant-Id header".into(),
-            ));
-        }
-        ctx.tenant_id.clone()
-    } else {
-        req.tenant_id.clone()
-    };
+    // Ref#5: delegate header/body tenant reconciliation to the shared helper
+    // instead of re-implementing the rule inline (the inline copy drifted from
+    // `enforce_tenant_create` once already).
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &req.tenant_id)?;
 
     // Reject empty tenant / namespace up-front. Without this the DB happily
     // accepts the blank strings and the resulting row leaks into the default
@@ -147,9 +139,23 @@ pub(crate) async fn create_instances_batch(
 
     // Enforce tenant isolation and context size for each item in the batch.
     // Also collect unique sequence_ids to validate they exist before inserting.
+    //
+    // Mirrors the single-instance create checks — batch must not be a loophole
+    // that lets blank tenant/namespace rows leak into the default tenant's
+    // view (tenant isolation requires non-empty scoping values).
     let mut sequence_ids = std::collections::HashSet::new();
     for (i, r) in req.instances.iter().enumerate() {
         crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
+        if r.tenant_id.0.trim().is_empty() {
+            return Err(ApiError::InvalidArgument(format!(
+                "instances[{i}]: tenant_id must not be empty"
+            )));
+        }
+        if r.namespace.0.trim().is_empty() {
+            return Err(ApiError::InvalidArgument(format!(
+                "instances[{i}]: namespace must not be empty"
+            )));
+        }
         r.context
             .check_size(state.max_context_bytes)
             .map_err(|e| ApiError::PayloadTooLarge(format!("instances[{i}]: {e}")))?;
@@ -266,13 +272,14 @@ pub(crate) async fn list_instances(
     }
     .capped();
 
+    let limit = pagination.limit;
     let instances = state
         .storage
         .list_instances(&filter, &pagination)
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 
-    Ok(Json(instances))
+    Ok(Json(crate::PaginatedResponse::from_vec(instances, limit)))
 }
 
 #[utoipa::path(patch, path = "/instances/{id}/state", tag = "instances",

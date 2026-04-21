@@ -104,4 +104,77 @@ describe("Instance List Filters", () => {
       "tenant B instance should not appear in tenant A listing",
     );
   });
+
+  it("filtering by sequence_id returns only instances for that sequence", async () => {
+    const tenantId = `filt-seq-${uuid().slice(0, 8)}`;
+
+    const seqA = testSequence("filt-seq-a", [step("s", "noop")], { tenantId });
+    const seqB = testSequence("filt-seq-b", [step("s", "noop")], { tenantId });
+    await client.createSequence(seqA);
+    await client.createSequence(seqB);
+
+    const { id: idA } = await client.createInstance({
+      sequence_id: seqA.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    const { id: idB } = await client.createInstance({
+      sequence_id: seqB.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+
+    await client.waitForState(idA, "completed", { timeoutMs: 5_000 });
+    await client.waitForState(idB, "completed", { timeoutMs: 5_000 });
+
+    const filtered = await client.listInstances({
+      tenant_id: tenantId,
+      sequence_id: seqA.id,
+    });
+    assert.ok(
+      filtered.every((i) => i.sequence_id === seqA.id),
+      "all results should belong to sequence A",
+    );
+    assert.ok(
+      filtered.some((i) => i.id === idA),
+      "instance A should appear in filtered results",
+    );
+    assert.ok(
+      !filtered.some((i) => i.id === idB),
+      "instance B should not appear in sequence A filter",
+    );
+  });
+
+  it("filtering by namespace returns only instances in that namespace", async () => {
+    const tenantId = `filt-ns-${uuid().slice(0, 8)}`;
+    const seq = testSequence("filt-ns", [step("s", "noop")], { tenantId });
+    await client.createSequence(seq);
+
+    const { id: idA } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "ns-alpha",
+    });
+    const { id: idB } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "ns-beta",
+    });
+
+    await client.waitForState(idA, "completed", { timeoutMs: 5_000 });
+    await client.waitForState(idB, "completed", { timeoutMs: 5_000 });
+
+    const alpha = await client.listInstances({
+      tenant_id: tenantId,
+      namespace: "ns-alpha",
+    });
+    assert.ok(
+      alpha.some((i) => i.id === idA),
+      "alpha instance should appear in ns-alpha filter",
+    );
+    assert.ok(
+      !alpha.some((i) => i.id === idB),
+      "beta instance should not appear in ns-alpha filter",
+    );
+  });
 });

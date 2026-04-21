@@ -10,14 +10,20 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+clap_complete = "4"
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
 reqwest = { version = "0.12", features = ["json"] }
 anyhow.workspace = true
 tabled = "0.17"
+rand.workspace = true
+owo-colors = "4"
+strsim = "0.11"
+toml.workspace = true
+orch8-types = { path = "../orch8-types" }
 
 [lints]
 workspace = true
