@@ -45,7 +45,6 @@ struct Cli {
 }
 
 #[tokio::main]
-#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -64,125 +63,37 @@ async fn main() -> anyhow::Result<()> {
     print_startup_banner(&config, cli.insecure);
 
     // Connect to storage backend.
-    let storage: Arc<dyn StorageBackend> = if config.database.backend == "sqlite" {
-        let url = config.database.url.expose();
-        let sqlite = if url == "sqlite::memory:" || url.is_empty() {
-            SqliteStorage::in_memory()
-                .await
-                .context("Failed to create in-memory SQLite storage")?
-        } else {
-            SqliteStorage::file(url)
-                .await
-                .context("Failed to open SQLite database")?
-        };
-        tracing::info!("Connected to SQLite");
-        Arc::new(sqlite)
-    } else {
-        if config.database.url.is_empty() {
-            anyhow::bail!(
-                "database.url is empty. Set ORCH8_DATABASE_URL (or database.url in the config \
-                 file) to a PostgreSQL connection string, or set backend=\"sqlite\" for local use."
-            );
-        }
-        let pg = PostgresStorage::new(
-            config.database.url.expose(),
-            config.database.max_connections,
-        )
-        .await
-        .context("Failed to connect to PostgreSQL")?;
-
-        tracing::info!("Connected to PostgreSQL");
-
-        if config.database.run_migrations {
-            pg.run_migrations()
-                .await
-                .context("Failed to run migrations")?;
-            tracing::info!("Migrations applied");
-        }
-        Arc::new(pg)
-    };
-
-    // Wrap storage with encryption layer if an encryption key is configured.
-    let storage: Arc<dyn StorageBackend> = {
-        let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
-        let key = if config.engine.encryption_key.is_empty() {
-            &env_key
-        } else {
-            config.engine.encryption_key.expose()
-        };
-        if key.is_empty() {
-            storage
-        } else {
-            let mut encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(key)
-                .context("Invalid encryption key (expected 64 hex chars for AES-256-GCM)")?;
-
-            // Support key rotation: when ORCH8_OLD_ENCRYPTION_KEY is set, the
-            // encryptor will try the old key as a fallback during decryption,
-            // allowing reads of rows encrypted with the previous key.
-            let old_env_key = std::env::var("ORCH8_OLD_ENCRYPTION_KEY").unwrap_or_default();
-            if !old_env_key.is_empty() {
-                encryptor = encryptor.with_old_key(&old_env_key).context(
-                    "Invalid old encryption key (expected 64 hex chars for AES-256-GCM)",
-                )?;
-                tracing::info!(
-                    "Encryption key rotation enabled: new writes use primary key, \
-                     old key retained for decryption"
-                );
-            }
-
-            tracing::info!("Encryption at rest enabled for context.data and credentials");
-            Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
-                storage, encryptor,
-            ))
-        }
-    };
+    let storage = init_storage(&config).await?;
+    let storage = wrap_encryption(storage, &config)?;
 
     // Install Prometheus metrics recorder.
-    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = prometheus_handle.handle();
-    metrics::set_global_recorder(prometheus_handle).expect("failed to install Prometheus recorder");
+    let metrics_state = init_prometheus();
 
     // Graceful shutdown token. Shared with HTTP, gRPC, engine, and any long-lived
     // request handlers (SSE streams) via `AppState`.
     let shutdown_token = CancellationToken::new();
 
-    let metrics_state = MetricsState { handle };
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
     // the registry logs and boots with an empty in-memory state.
     let cb_registry = Arc::new(CircuitBreakerRegistry::new(5, 60).with_storage(storage.clone()));
     cb_registry.load_from_storage().await;
+
     // cb_registry is already inside app_state.circuit_breakers below.
     // Build HTTP router. `AppState` carries the breaker registry so the
     // worker-task HTTP handlers (`/workers/tasks/{id}/complete` and `/fail`)
     // can roll external-worker success/failure into the same registry the
     // scheduler and inspection API share.
-    let app_state = AppState {
-        storage: storage.clone(),
-        shutdown: shutdown_token.clone(),
-        max_context_bytes: config.engine.max_context_bytes,
-        externalization_mode: config.engine.externalization_mode,
-        circuit_breakers: Some(cb_registry.clone()),
-        stream_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            orch8_api::DEFAULT_MAX_CONCURRENT_STREAMS,
-        )),
-    };
+    let app_state = build_app_state(
+        storage.clone(),
+        &config,
+        shutdown_token.clone(),
+        cb_registry.clone(),
+    );
     let cors = build_cors_layer(&config.api.cors_origins);
     let api_key = config.api.api_key.expose().to_string();
-    if api_key.is_empty() {
-        if !cli.insecure {
-            anyhow::bail!(
-                "No API key configured. Set ORCH8_API_KEY (or api.api_key in the config file) \
-                 to enable authentication, or pass --insecure to explicitly run without auth."
-            );
-        }
-        tracing::warn!(
-            "Running with --insecure: all endpoints are unauthenticated. \
-             Never use this flag in production."
-        );
-    } else if config.api.cors_origins.trim() == "*" {
-        tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
-    }
+    validate_auth_config(&api_key, cli.insecure, &config.api.cors_origins)?;
+
     let require_tenant = config.api.require_tenant_header;
     // gRPC shares the same API-key / tenant-header contract as HTTP. Capture
     // the values here (before `api_key` is moved into the HTTP middleware
@@ -193,10 +104,7 @@ async fn main() -> anyhow::Result<()> {
         Some(api_key.clone())
     };
     let grpc_require_tenant = require_tenant;
-    // Public webhook routes are deliberately merged AFTER the auth middleware
-    // layers below so they bypass both the tenant header and API key checks —
-    // third-party webhook callers (GitHub, Stripe, ...) authenticate via the
-    // trigger's own HMAC secret, not via orch8's API key.
+
     let mut app = build_router(app_state.clone())
         .merge(orch8_api::circuit_breakers::routes().with_state(app_state.clone()))
         .merge(orch8_api::metrics::routes().with_state(metrics_state))
@@ -243,7 +151,160 @@ async fn main() -> anyhow::Result<()> {
 
     // Graceful shutdown — `shutdown_token` is the single cancellation source
     // shared across HTTP, gRPC, engine, and long-lived handlers.
-    let token = shutdown_token.clone();
+    spawn_signal_handler(shutdown_token.clone());
+
+    let grpc_handle = spawn_grpc_server(
+        storage.clone(),
+        &config,
+        shutdown_token.clone(),
+        grpc_api_key.as_deref(),
+        grpc_require_tenant,
+    );
+
+    let engine_handle = spawn_engine(
+        storage.clone(),
+        &config,
+        shutdown_token.clone(),
+        cb_registry.clone(),
+    );
+
+    tracing::info!("Engine ready");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_token.cancelled().await;
+            tracing::info!("Shutting down gracefully...");
+        })
+        .await
+        .context("HTTP server error")?;
+
+    drain_shutdown(engine_handle, grpc_handle, cb_registry).await;
+
+    tracing::info!("Shutdown complete");
+    Ok(())
+}
+
+fn build_app_state(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+    shutdown: CancellationToken,
+    cb_registry: Arc<CircuitBreakerRegistry>,
+) -> AppState {
+    AppState {
+        storage,
+        shutdown,
+        max_context_bytes: config.engine.max_context_bytes,
+        externalization_mode: config.engine.externalization_mode,
+        circuit_breakers: Some(cb_registry),
+        stream_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            orch8_api::DEFAULT_MAX_CONCURRENT_STREAMS,
+        )),
+    }
+}
+
+fn validate_auth_config(api_key: &str, insecure: bool, cors_origins: &str) -> anyhow::Result<()> {
+    if api_key.is_empty() {
+        if !insecure {
+            anyhow::bail!(
+                "No API key configured. Set ORCH8_API_KEY (or api.api_key in the config file) \
+                 to enable authentication, or pass --insecure to explicitly run without auth."
+            );
+        }
+        tracing::warn!(
+            "Running with --insecure: all endpoints are unauthenticated. \
+             Never use this flag in production."
+        );
+    } else if cors_origins.trim() == "*" {
+        tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
+    }
+    Ok(())
+}
+
+async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBackend>> {
+    if config.database.backend == "sqlite" {
+        let url = config.database.url.expose();
+        let sqlite = if url == "sqlite::memory:" || url.is_empty() {
+            SqliteStorage::in_memory()
+                .await
+                .context("Failed to create in-memory SQLite storage")?
+        } else {
+            SqliteStorage::file(url)
+                .await
+                .context("Failed to open SQLite database")?
+        };
+        tracing::info!("Connected to SQLite");
+        Ok(Arc::new(sqlite))
+    } else {
+        if config.database.url.is_empty() {
+            anyhow::bail!(
+                "database.url is empty. Set ORCH8_DATABASE_URL (or database.url in the config \
+                 file) to a PostgreSQL connection string, or set backend=\"sqlite\" for local use."
+            );
+        }
+        let pg = PostgresStorage::new(
+            config.database.url.expose(),
+            config.database.max_connections,
+        )
+        .await
+        .context("Failed to connect to PostgreSQL")?;
+
+        tracing::info!("Connected to PostgreSQL");
+
+        if config.database.run_migrations {
+            pg.run_migrations()
+                .await
+                .context("Failed to run migrations")?;
+            tracing::info!("Migrations applied");
+        }
+        Ok(Arc::new(pg))
+    }
+}
+
+fn wrap_encryption(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+) -> anyhow::Result<Arc<dyn StorageBackend>> {
+    let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
+    let key = if config.engine.encryption_key.is_empty() {
+        &env_key
+    } else {
+        config.engine.encryption_key.expose()
+    };
+    if key.is_empty() {
+        return Ok(storage);
+    }
+
+    let mut encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(key)
+        .context("Invalid encryption key (expected 64 hex chars for AES-256-GCM)")?;
+
+    // Support key rotation: when ORCH8_OLD_ENCRYPTION_KEY is set, the
+    // encryptor will try the old key as a fallback during decryption,
+    // allowing reads of rows encrypted with the previous key.
+    let old_env_key = std::env::var("ORCH8_OLD_ENCRYPTION_KEY").unwrap_or_default();
+    if !old_env_key.is_empty() {
+        encryptor = encryptor
+            .with_old_key(&old_env_key)
+            .context("Invalid old encryption key (expected 64 hex chars for AES-256-GCM)")?;
+        tracing::info!(
+            "Encryption key rotation enabled: new writes use primary key, \
+             old key retained for decryption"
+        );
+    }
+
+    tracing::info!("Encryption at rest enabled for context.data and credentials");
+    Ok(Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
+        storage, encryptor,
+    )))
+}
+
+fn init_prometheus() -> MetricsState {
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = prometheus_handle.handle();
+    metrics::set_global_recorder(prometheus_handle).expect("failed to install Prometheus recorder");
+    MetricsState { handle }
+}
+
+fn spawn_signal_handler(shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         #[cfg(unix)]
         {
@@ -265,21 +326,26 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Received Ctrl+C");
             }
         }
-        token.cancel();
-    });
+        shutdown.cancel();
+    })
+}
 
-    // Start gRPC server.
+fn spawn_grpc_server(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+    shutdown: CancellationToken,
+    api_key: Option<&str>,
+    require_tenant: bool,
+) -> tokio::task::JoinHandle<()> {
     let grpc_addr: std::net::SocketAddr = config
         .api
         .grpc_addr
         .parse()
-        .context("Invalid gRPC listen address")?;
+        .expect("Invalid gRPC listen address");
 
-    let grpc_service = Orch8GrpcService::new(storage.clone());
-    let grpc_shutdown = shutdown_token.clone();
-    let grpc_interceptor =
-        orch8_grpc::auth::auth_interceptor(grpc_api_key.as_deref(), grpc_require_tenant);
-    let grpc_handle = tokio::spawn(async move {
+    let grpc_service = Orch8GrpcService::new(storage);
+    let grpc_interceptor = orch8_grpc::auth::auth_interceptor(api_key, require_tenant);
+    tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(Orch8ServiceServer::with_interceptor(
@@ -287,45 +353,42 @@ async fn main() -> anyhow::Result<()> {
                 grpc_interceptor,
             ))
             .serve_with_shutdown(grpc_addr, async move {
-                grpc_shutdown.cancelled().await;
+                shutdown.cancelled().await;
             })
             .await
         {
             tracing::error!(error = %e, "gRPC server error");
         }
-    });
+    })
+}
 
-    // Build and start the scheduling engine.
+fn spawn_engine(
+    storage: Arc<dyn StorageBackend>,
+    config: &EngineConfig,
+    shutdown: CancellationToken,
+    cb_registry: Arc<CircuitBreakerRegistry>,
+) -> tokio::task::JoinHandle<()> {
     let mut handlers = HandlerRegistry::new();
     orch8_engine::handlers::builtin::register_builtins(&mut handlers);
     // Share the same breaker registry the HTTP API exposes, so admin resets
     // hit the same in-memory state the scheduler consults — and so the
     // engine's check/record_* calls roll up into the rows persisted by the
     // inspection endpoints.
-    let handlers = handlers.with_circuit_breakers(cb_registry.clone());
-    let engine = Engine::new(
-        storage.clone(),
-        config.engine.clone(),
-        handlers,
-        shutdown_token.clone(),
-    );
+    let handlers = handlers.with_circuit_breakers(cb_registry);
+    let engine = Engine::new(storage, config.engine.clone(), handlers, shutdown);
 
-    let engine_handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         if let Err(e) = engine.run().await {
             tracing::error!(error = %e, "Engine tick loop exited with error");
         }
-    });
+    })
+}
 
-    tracing::info!("Engine ready");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_token.cancelled().await;
-            tracing::info!("Shutting down gracefully...");
-        })
-        .await
-        .context("HTTP server error")?;
-
+async fn drain_shutdown(
+    engine_handle: tokio::task::JoinHandle<()>,
+    grpc_handle: tokio::task::JoinHandle<()>,
+    cb_registry: Arc<CircuitBreakerRegistry>,
+) {
     // Wait for engine and gRPC to finish draining (with timeout).
     // Circuit-breaker persistence lives inside a TaskTracker owned by
     // `cb_registry`; we drain it *after* the engine stops so no new
@@ -344,9 +407,6 @@ async fn main() -> anyhow::Result<()> {
     {
         tracing::warn!("Shutdown drain timed out after {drain_timeout:?}, forcing exit");
     }
-
-    tracing::info!("Shutdown complete");
-    Ok(())
 }
 
 fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
