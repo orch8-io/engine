@@ -149,9 +149,22 @@ impl CircuitBreakerRegistry {
     pub fn check(&self, tenant_id: &TenantId, handler: &str) -> Result<(), u64> {
         let now = Utc::now();
         let key: Key = (tenant_id.clone(), handler.to_string());
+
+        // Fast path: acquire a read lock. In the vast majority of cases (healthy
+        // circuit), we can authorize execution without acquiring a write lock
+        // on the DashMap shard, avoiding severe contention on the hot path.
+        if let Some(breaker) = self.breakers.get(&key) {
+            if matches!(breaker.state, BreakerState::Closed | BreakerState::HalfOpen) {
+                return Ok(());
+            }
+        }
+
+        // Slow path: if the breaker is Open (or doesn't exist yet), we acquire
+        // a write lock to potentially mutate it (e.g. initialize it, or check
+        // if cooldown elapsed and transition to HalfOpen).
         let mut breaker = self
             .breakers
-            .entry(key.clone())
+            .entry(key)
             .or_insert_with(|| self.default_breaker(tenant_id, handler));
 
         match breaker.state {
@@ -190,6 +203,16 @@ impl CircuitBreakerRegistry {
     /// row is removed so a subsequent crash doesn't revive it.
     pub fn record_success(&self, tenant_id: &TenantId, handler: &str) {
         let key: Key = (tenant_id.clone(), handler.to_string());
+
+        // Fast path: if the breaker is already completely healthy (Closed with 0 failures),
+        // we can skip acquiring a write lock entirely. This makes the standard success
+        // path effectively free of lock contention.
+        if let Some(breaker) = self.breakers.get(&key) {
+            if breaker.state == BreakerState::Closed && breaker.failure_count == 0 {
+                return;
+            }
+        }
+
         let mut delete_snapshot = None;
         if let Some(mut breaker) = self.breakers.get_mut(&key) {
             let was_open = matches!(breaker.state, BreakerState::Open | BreakerState::HalfOpen);
