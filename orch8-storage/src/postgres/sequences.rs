@@ -160,7 +160,17 @@ pub(super) async fn delete(store: &PostgresStorage, id: SequenceId) -> Result<()
             "worker_tasks",
             "externalized_state",
         ] {
-            sqlx::query(&format!("DELETE FROM {table} WHERE instance_id = ANY($1)"))
+            let sql = match *table {
+                "block_outputs" => "DELETE FROM block_outputs WHERE instance_id = ANY($1)",
+                "execution_tree" => "DELETE FROM execution_tree WHERE instance_id = ANY($1)",
+                "signal_inbox" => "DELETE FROM signal_inbox WHERE instance_id = ANY($1)",
+                "worker_tasks" => "DELETE FROM worker_tasks WHERE instance_id = ANY($1)",
+                "externalized_state" => {
+                    "DELETE FROM externalized_state WHERE instance_id = ANY($1)"
+                }
+                _ => continue,
+            };
+            sqlx::query(sql)
                 .bind(&instance_ids)
                 .execute(&mut *tx)
                 .await?;
