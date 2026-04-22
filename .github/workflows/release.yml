@@ -109,46 +109,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  npm-publish:
-    name: Publish Node SDKs to npm
-    runs-on: ubuntu-latest
-    # Opt-in: set the NPM_PUBLISH_ENABLED repo variable to "true" (Settings →
-    # Variables) once NPM_TOKEN is configured. Until then this job is skipped,
-    # so release.yml stays green for the first engine-only releases.
-    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          registry-url: https://registry.npmjs.org
-
-      - name: Extract version (strip leading v)
-        id: version
-        run: echo "tag=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-
-      - name: Publish @orch8/worker-sdk
-        working-directory: worker-sdk-node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          PKG_VERSION: ${{ steps.version.outputs.tag }}
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
-          npm publish --access public
-
-      - name: Publish @orch8/workflow-sdk
-        working-directory: workflow-sdk-node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          PKG_VERSION: ${{ steps.version.outputs.tag }}
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-          npm version "$PKG_VERSION" --no-git-tag-version --allow-same-version
-          npm publish --access public
-
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
