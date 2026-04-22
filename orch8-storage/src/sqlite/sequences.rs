@@ -142,8 +142,15 @@ pub(super) async fn delete(storage: &SqliteStorage, id: SequenceId) -> Result<()
             "worker_tasks",
             "externalized_state",
         ] {
-            let mut qb =
-                sqlx::QueryBuilder::new(format!("DELETE FROM {table} WHERE instance_id IN ("));
+            let sql = match *table {
+                "block_outputs" => "DELETE FROM block_outputs WHERE instance_id IN (",
+                "execution_tree" => "DELETE FROM execution_tree WHERE instance_id IN (",
+                "signal_inbox" => "DELETE FROM signal_inbox WHERE instance_id IN (",
+                "worker_tasks" => "DELETE FROM worker_tasks WHERE instance_id IN (",
+                "externalized_state" => "DELETE FROM externalized_state WHERE instance_id IN (",
+                _ => continue,
+            };
+            let mut qb = sqlx::QueryBuilder::new(sql);
             let mut sep = qb.separated(", ");
             for iid in &instance_ids {
                 sep.push_bind(iid);
