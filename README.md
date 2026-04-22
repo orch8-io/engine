@@ -26,22 +26,36 @@ Single binary. One dependency: PostgreSQL (or SQLite for dev/embedded).
 
 **Security** — AES-256-GCM encryption at rest for context and credentials, OAuth2 credential refresh, API key authentication, CORS configuration
 
+## Install
+
+```bash
+# One-liner (downloads binary, starts engine, runs a sample sequence)
+curl -fsSL https://orch8.io/start.sh | sh
+
+# Homebrew
+brew tap orch8-io/orch8 && brew install orch8-server
+
+# Docker
+docker run -d -p 8080:8080 ghcr.io/orch8-io/engine:latest
+
+# Binary release
+curl -fsSL https://raw.githubusercontent.com/orch8-io/engine/main/install.sh | sh
+```
+
 ## Quick Start
 
 ### With SQLite (zero dependencies)
 
 ```bash
-cargo build --release
-
 # Initialize a project
-./target/release/orch8 init my-project
+orch8 init my-project
 cd my-project
 
 # Start the engine (--insecure skips API key requirement)
-../target/release/orch8-server --insecure
+orch8-server --insecure
 ```
 
-### With Docker
+### With Docker Compose
 
 ```bash
 docker compose up -d   # starts Postgres + engine
