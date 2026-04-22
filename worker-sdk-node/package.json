@@ -7,12 +7,15 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": ["orch8", "workflow", "worker", "task-queue"],
   "license": "BUSL-1.1",
   "devDependencies": {
     "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "vitest": "^1.6.0"
   }
 }
