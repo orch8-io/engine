@@ -10,7 +10,7 @@
     "webhook": "tsx --env-file=.env webhook.ts"
   },
   "dependencies": {
-    "@orch8/worker-sdk": "workspace:*"
+    "@orch8.io/sdk": "^0.1.0"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

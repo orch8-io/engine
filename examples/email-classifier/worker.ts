@@ -10,7 +10,7 @@
  *
  * Run: npm run worker
  */
-import { Orch8Worker } from "../../worker-sdk-node/dist/index.js";
+import { Orch8Worker } from "@orch8.io/sdk";
 
 const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080";
 
