@@ -17,7 +17,7 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use axum::extract::{Json, Path, State};
+use axum::extract::{DefaultBodyLimit, Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -50,10 +50,17 @@ fn nonce_cache_for_slug(_slug: &str) -> Cache<String, ()> {
         .build()
 }
 
+/// Maximum body size for public webhooks. Webhook payloads are small event
+/// notifications (GitHub, Stripe, etc.) — anything larger is suspicious and
+/// should be rejected to prevent memory exhaustion / JSON parse `DoS`.
+const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024; // 1 MB
+
 /// Public router — merged into the server *after* auth middleware so these
 /// routes are reachable without a tenant header or API key.
 pub fn public_routes() -> Router<AppState> {
-    Router::new().route("/webhooks/{slug}", post(public_webhook))
+    Router::new()
+        .route("/webhooks/{slug}", post(public_webhook))
+        .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_SIZE))
 }
 
 /// Accept an inbound webhook POST and create a new instance from its body.

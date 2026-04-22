@@ -102,8 +102,8 @@ pub(super) async fn batch_save(
         return Ok(());
     }
 
-    let mut compressed: Vec<(String, Vec<u8>, i64)> = Vec::new();
-    let mut inline: Vec<(String, String, i64)> = Vec::new();
+    let mut compressed: Vec<(String, Vec<u8>, i64)> = Vec::with_capacity(entries.len());
+    let mut inline: Vec<(String, String, i64)> = Vec::with_capacity(entries.len());
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;

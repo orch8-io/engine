@@ -46,7 +46,9 @@ pub async fn preload_externalized_markers(
     // Phase 1: scan every claimed instance for top-level marker ref_keys.
     // Dedup globally so the same payload referenced by multiple instances
     // (fan-in pattern) is fetched once.
-    let mut ref_keys: Vec<String> = Vec::new();
+    // Upper-bound capacity: every instance could have every top-level field as a
+    // ref key. In practice ref keys are sparse, so this is a generous reserve.
+    let mut ref_keys: Vec<String> = Vec::with_capacity(instances.len() * 4);
     for inst in instances.iter() {
         if let Some(obj) = inst.context.data.as_object() {
             for value in obj.values() {

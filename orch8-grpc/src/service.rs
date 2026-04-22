@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
+use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::sequence::{BlockDefinition, StepDef};
+use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 use crate::auth::{enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
@@ -59,6 +62,151 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
             tracing::error!(error = %other, "internal storage error");
             Status::internal("internal error")
         }
+    }
+}
+
+async fn get_worker_task_checked<T>(
+    storage: &Arc<dyn StorageBackend>,
+    req: &Request<T>,
+    task_id: Uuid,
+) -> Result<(WorkerTask, TaskInstance), Status> {
+    let task = storage
+        .get_worker_task(task_id)
+        .await
+        .map_err(storage_err)?
+        .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
+    let instance = storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(storage_err)?
+        .ok_or_else(|| Status::not_found("instance not found"))?;
+    enforce_tenant_match(req, &instance.tenant_id, "worker_task")?;
+    Ok((task, instance))
+}
+
+async fn worker_task_can_retry(
+    storage: &Arc<dyn StorageBackend>,
+    task: &WorkerTask,
+) -> Result<bool, Status> {
+    let Some(instance) = storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(storage_err)?
+    else {
+        return Ok(false);
+    };
+    let Some(seq) = storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(storage_err)?
+    else {
+        return Ok(false);
+    };
+    let Some(step_def) = find_step_block(&seq.blocks, &task.block_id) else {
+        return Ok(false);
+    };
+    let Some(retry) = &step_def.retry else {
+        return Ok(false);
+    };
+    let next_attempt_i32 = i32::from(task.attempt).saturating_add(1);
+    let next_attempt = u32::try_from(next_attempt_i32).unwrap_or(u32::MAX);
+    Ok(next_attempt < retry.max_attempts)
+}
+
+fn find_step_block<'a>(
+    blocks: &'a [BlockDefinition],
+    block_id: &orch8_types::ids::BlockId,
+) -> Option<&'a StepDef> {
+    for block in blocks {
+        match block {
+            BlockDefinition::Step(step) if step.id == *block_id => return Some(step.as_ref()),
+            BlockDefinition::Parallel(def) => {
+                for branch in &def.branches {
+                    if let Some(step) = find_step_block(branch, block_id) {
+                        return Some(step);
+                    }
+                }
+            }
+            BlockDefinition::Race(def) => {
+                for branch in &def.branches {
+                    if let Some(step) = find_step_block(branch, block_id) {
+                        return Some(step);
+                    }
+                }
+            }
+            BlockDefinition::Loop(def) => {
+                if let Some(step) = find_step_block(&def.body, block_id) {
+                    return Some(step);
+                }
+            }
+            BlockDefinition::ForEach(def) => {
+                if let Some(step) = find_step_block(&def.body, block_id) {
+                    return Some(step);
+                }
+            }
+            BlockDefinition::Router(def) => {
+                for route in &def.routes {
+                    if let Some(step) = find_step_block(&route.blocks, block_id) {
+                        return Some(step);
+                    }
+                }
+                if let Some(default) = &def.default {
+                    if let Some(step) = find_step_block(default, block_id) {
+                        return Some(step);
+                    }
+                }
+            }
+            BlockDefinition::TryCatch(def) => {
+                if let Some(step) = find_step_block(&def.try_block, block_id) {
+                    return Some(step);
+                }
+                if let Some(step) = find_step_block(&def.catch_block, block_id) {
+                    return Some(step);
+                }
+                if let Some(finally_block) = &def.finally_block {
+                    if let Some(step) = find_step_block(finally_block, block_id) {
+                        return Some(step);
+                    }
+                }
+            }
+            BlockDefinition::ABSplit(def) => {
+                for variant in &def.variants {
+                    if let Some(step) = find_step_block(&variant.blocks, block_id) {
+                        return Some(step);
+                    }
+                }
+            }
+            BlockDefinition::CancellationScope(def) => {
+                if let Some(step) = find_step_block(&def.blocks, block_id) {
+                    return Some(step);
+                }
+            }
+            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
+        }
+    }
+    None
+}
+
+fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
+    WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: task.instance_id,
+        block_id: task.block_id.clone(),
+        handler_name: task.handler_name.clone(),
+        queue_name: task.queue_name.clone(),
+        params: task.params.clone(),
+        context: task.context.clone(),
+        attempt: task.attempt.saturating_add(1),
+        timeout_ms: task.timeout_ms,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: chrono::Utc::now(),
     }
 }
 
@@ -581,8 +729,10 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         req: Request<proto::CompleteTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
+        let task_id = parse_uuid(&req.get_ref().task_id)?;
+        let (_pre_task, _pre_instance) =
+            get_worker_task_checked(&self.storage, &req, task_id).await?;
         let inner = req.into_inner();
-        let task_id = parse_uuid(&inner.task_id)?;
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
 
         let updated = self
@@ -601,26 +751,36 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(storage_err)?
             .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
 
-        // Guard terminal instances — mirrors the HTTP path. A late completion
-        // must not resurrect a cancelled/failed instance.
-        if let Some(instance) = self
+        let Some(mut instance) = self
             .storage
             .get_instance(task.instance_id)
             .await
             .map_err(storage_err)?
-        {
-            if instance.state.is_terminal() {
-                tracing::info!(
-                    instance_id = %task.instance_id,
-                    state = %instance.state,
-                    "gRPC worker completion for terminal instance — skipping transition"
-                );
-                return Ok(Response::new(proto::Empty {}));
+        else {
+            return Ok(Response::new(proto::Empty {}));
+        };
+        if instance.state.is_terminal() {
+            tracing::info!(
+                instance_id = %task.instance_id,
+                state = %instance.state,
+                "gRPC worker completion for terminal instance; task accepted, transition skipped"
+            );
+            return Ok(Response::new(proto::Empty {}));
+        }
+
+        let mut merged_context = false;
+        if let Some(obj) = output.as_object() {
+            if instance.context.data.is_null() || !instance.context.data.is_object() {
+                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(data_obj) = instance.context.data.as_object_mut() {
+                for (k, v) in obj {
+                    data_obj.insert(k.clone(), v.clone());
+                }
+                merged_context = true;
             }
         }
 
-        // Save block output — without this the step has no recorded result
-        // and downstream blocks see a missing output.
         let output_json = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
         let block_output = orch8_types::output::BlockOutput {
             id: Uuid::now_v7(),
@@ -632,10 +792,28 @@ impl Orch8Service for Orch8GrpcService {
             attempt: task.attempt,
             created_at: chrono::Utc::now(),
         };
-        self.storage
-            .save_block_output(&block_output)
-            .await
-            .map_err(storage_err)?;
+        if merged_context {
+            self.storage
+                .save_output_merge_context_and_transition(
+                    &block_output,
+                    task.instance_id,
+                    &instance.context,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(storage_err)?;
+        } else {
+            self.storage
+                .save_output_and_transition(
+                    &block_output,
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(storage_err)?;
+        }
 
         // Update execution tree node to Completed if present.
         let tree = self
@@ -657,16 +835,6 @@ impl Orch8Service for Orch8GrpcService {
                 .map_err(storage_err)?;
         }
 
-        // Reschedule the instance so the evaluator picks it up on the next tick.
-        self.storage
-            .update_instance_state(
-                task.instance_id,
-                orch8_types::instance::InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(storage_err)?;
-
         Ok(Response::new(proto::Empty {}))
     }
 
@@ -674,8 +842,10 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         req: Request<proto::FailTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
+        let task_id = parse_uuid(&req.get_ref().task_id)?;
+        let (_pre_task, _pre_instance) =
+            get_worker_task_checked(&self.storage, &req, task_id).await?;
         let inner = req.into_inner();
-        let task_id = parse_uuid(&inner.task_id)?;
         let updated = self
             .storage
             .fail_worker_task(task_id, &inner.worker_id, &inner.message, inner.retryable)
@@ -692,48 +862,82 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(storage_err)?
             .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
 
-        // Terminal guard — mirrors HTTP fail_task.
-        if let Some(inst) = self
+        let Some(inst) = self
             .storage
             .get_instance(task.instance_id)
             .await
             .map_err(storage_err)?
-        {
-            if inst.state.is_terminal() {
-                tracing::info!(
-                    instance_id = %task.instance_id,
-                    state = %inst.state,
-                    "gRPC worker failure for terminal instance — skipping transition"
-                );
-                return Ok(Response::new(proto::Empty {}));
-            }
+        else {
+            return Ok(Response::new(proto::Empty {}));
+        };
+        if inst.state.is_terminal() {
+            tracing::info!(
+                instance_id = %task.instance_id,
+                state = %inst.state,
+                "gRPC worker failure for terminal instance; task accepted, transition skipped"
+            );
+            return Ok(Response::new(proto::Empty {}));
         }
 
-        // Update execution tree node to Failed if present.
         let tree = self
             .storage
             .get_execution_tree(task.instance_id)
             .await
             .map_err(storage_err)?;
-        if let Some(node) = tree.iter().find(|n| {
-            n.block_id == task.block_id
-                && matches!(
-                    n.state,
-                    orch8_types::execution::NodeState::Running
-                        | orch8_types::execution::NodeState::Waiting
-                )
-        }) {
+        let active_node_id = tree
+            .iter()
+            .find(|n| {
+                n.block_id == task.block_id
+                    && matches!(
+                        n.state,
+                        orch8_types::execution::NodeState::Running
+                            | orch8_types::execution::NodeState::Waiting
+                    )
+            })
+            .map(|n| n.id);
+        let has_tree = !tree.is_empty();
+
+        if inner.retryable && worker_task_can_retry(&self.storage, &task).await? {
+            let retry_task = retry_worker_task(&task);
             self.storage
-                .update_node_state(node.id, orch8_types::execution::NodeState::Failed)
+                .delete_worker_task(task_id)
                 .await
                 .map_err(storage_err)?;
+            self.storage
+                .create_worker_task(&retry_task)
+                .await
+                .map_err(storage_err)?;
+            if let Some(node_id) = active_node_id {
+                self.storage
+                    .update_node_state(node_id, orch8_types::execution::NodeState::Pending)
+                    .await
+                    .map_err(storage_err)?;
+            }
+        } else if has_tree {
+            if let Some(node_id) = active_node_id {
+                self.storage
+                    .update_node_state(node_id, orch8_types::execution::NodeState::Failed)
+                    .await
+                    .map_err(storage_err)?;
+            }
+        } else {
+            if inner.retryable {
+                self.storage
+                    .delete_worker_task(task_id)
+                    .await
+                    .map_err(storage_err)?;
+            }
+            self.storage
+                .update_instance_state(task.instance_id, InstanceState::Failed, None)
+                .await
+                .map_err(storage_err)?;
+            return Ok(Response::new(proto::Empty {}));
         }
 
-        // Reschedule so the evaluator handles the failure (retry/fail decision).
         self.storage
             .update_instance_state(
                 task.instance_id,
-                orch8_types::instance::InstanceState::Scheduled,
+                InstanceState::Scheduled,
                 Some(chrono::Utc::now()),
             )
             .await
@@ -746,12 +950,17 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         req: Request<proto::HeartbeatTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
+        let task_id = parse_uuid(&req.get_ref().task_id)?;
+        let (_task, _instance) = get_worker_task_checked(&self.storage, &req, task_id).await?;
         let inner = req.into_inner();
-        let task_id = parse_uuid(&inner.task_id)?;
-        self.storage
+        let updated = self
+            .storage
             .heartbeat_worker_task(task_id, &inner.worker_id)
             .await
             .map_err(storage_err)?;
+        if !updated {
+            return Err(Status::not_found(format!("worker_task {task_id}")));
+        }
         Ok(Response::new(proto::Empty {}))
     }
 

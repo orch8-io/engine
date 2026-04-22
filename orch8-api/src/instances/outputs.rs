@@ -48,8 +48,8 @@ pub(crate) async fn get_outputs(
     //
     // Perf: collect all ref_keys and resolve them in a single batched query
     // instead of N+1 round-trips.
-    let mut ref_keys = Vec::new();
-    let mut output_indices = Vec::new();
+    let mut ref_keys = Vec::with_capacity(outputs.len());
+    let mut output_indices = Vec::with_capacity(outputs.len());
     for (idx, out) in outputs.iter().enumerate() {
         if let Some(ref_key) = orch8_engine::externalized::extract_ref_key(&out.output) {
             ref_keys.push(ref_key.to_string());

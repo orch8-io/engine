@@ -288,6 +288,14 @@ impl StorageBackend for SqliteStorage {
         instances::update_context(self, id, context).await
     }
 
+    async fn update_instance_started_at(
+        &self,
+        id: InstanceId,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        instances::update_started_at(self, id, started_at).await
+    }
+
     async fn update_instance_sequence(
         &self,
         id: InstanceId,

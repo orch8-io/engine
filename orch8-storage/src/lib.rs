@@ -197,6 +197,24 @@ pub trait StorageBackend: Send + Sync + 'static {
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError>;
 
+    /// Update only the `runtime.started_at` field for an instance.
+    /// Avoids the full context clone + deserialization that
+    /// `update_instance_context` incurs when all we need is stamp the start
+    /// time on the first run.
+    async fn update_instance_started_at(
+        &self,
+        id: InstanceId,
+        started_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        // Default impl for test/memory backends: fall back to the full-path.
+        let mut inst = self
+            .get_instance(id)
+            .await?
+            .ok_or_else(|| StorageError::Query(format!("instance not found: {id}")))?;
+        inst.context.runtime.started_at = Some(started_at);
+        self.update_instance_context(id, &inst.context).await
+    }
+
     /// Persist `context` with top-level `data` fields >= `threshold_bytes`
     /// swapped for externalization markers. The payloads are written to
     /// `externalized_state` and the mutated context lands in

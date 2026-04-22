@@ -721,11 +721,12 @@ async fn process_instance(
     // Stamp runtime.started_at on the first run so timeout / escalation
     // handlers (e.g. human_review) can compute elapsed time.
     let instance = if instance.context.runtime.started_at.is_none() {
-        let mut ctx = instance.context.clone();
-        ctx.runtime.started_at = Some(Utc::now());
-        storage.update_instance_context(instance_id, &ctx).await?;
+        let started_at = Utc::now();
+        storage
+            .update_instance_started_at(instance_id, started_at)
+            .await?;
         let mut inst = instance;
-        inst.context = ctx;
+        inst.context.runtime.started_at = Some(started_at);
         inst
     } else {
         instance

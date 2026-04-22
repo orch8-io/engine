@@ -249,7 +249,7 @@ async fn filter_by_concurrency_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidates: &[TaskInstance],
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut keyed: HashMap<String, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed.entry(key.clone()).or_default().push(idx);
@@ -361,6 +361,28 @@ pub(super) async fn update_context(
         .bind(&ctx_json)
         .execute(&store.pool)
         .await?;
+    Ok(())
+}
+
+/// Update only `context.runtime.started_at` via `jsonb_set` so the scheduler
+/// doesn't have to clone + re-serialize the entire context just to stamp the
+/// first-run timestamp.
+pub(super) async fn update_started_at(
+    store: &PostgresStorage,
+    id: InstanceId,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let started_at_json = serde_json::to_value(started_at)?;
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = jsonb_set(context, ARRAY['runtime', 'started_at'], $2), \
+             updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(id.0)
+    .bind(started_at_json)
+    .execute(&store.pool)
+    .await?;
     Ok(())
 }
 

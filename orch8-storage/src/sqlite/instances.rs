@@ -215,7 +215,7 @@ async fn filter_by_concurrency(
     candidates: &[TaskInstance],
 ) -> Result<Vec<TaskInstance>, StorageError> {
     // Group candidates by concurrency_key.
-    let mut keyed: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut keyed: HashMap<String, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed.entry(key.clone()).or_default().push(idx);
@@ -312,6 +312,29 @@ pub(super) async fn update_context(
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await?;
+    Ok(())
+}
+
+/// Update only `context.runtime.started_at` via `json_set` so the scheduler
+/// doesn't have to clone + re-serialize the entire context just to stamp the
+/// first-run timestamp.
+pub(super) async fn update_started_at(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let started_at_json = serde_json::to_value(started_at)?;
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = json_set(context, '$.runtime.started_at', ?2), \
+             updated_at = ?3 \
+         WHERE id = ?1",
+    )
+    .bind(id.0.to_string())
+    .bind(started_at_json)
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await?;
     Ok(())
 }
 
