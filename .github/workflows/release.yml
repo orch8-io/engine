@@ -146,12 +146,14 @@ jobs:
         run: |
           mkdir -p "$INSTALL_DIR"
           # The release was just created — give GitHub's API a moment to surface it.
-          for i in 1 2 3 4 5; do
-            if curl -fsSL https://api.github.com/repos/orch8-io/engine/releases/latest \
+          # Up to 2 minutes (12 x 10s) to handle API propagation delays.
+          for i in $(seq 1 12); do
+            if curl -sSL https://api.github.com/repos/orch8-io/engine/releases/latest 2>/dev/null \
               | grep -q '"tag_name"'; then
               break
             fi
-            sleep 5
+            echo "Waiting for release to propagate... (attempt $i/12)"
+            sleep 10
           done
           sh ./install.sh --dir "$INSTALL_DIR"
 
