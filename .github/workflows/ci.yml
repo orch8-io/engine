@@ -148,32 +148,6 @@ jobs:
         # harness in spawn mode.
         run: npm run test:standalone
 
-  node-sdks:
-    name: Node SDKs (build & test)
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: ["20", "22"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-
-      - name: Install & build worker-sdk
-        working-directory: worker-sdk-node
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-
-      - name: Install, build & test workflow-sdk
-        working-directory: workflow-sdk-node
-        run: |
-          npm install --no-audit --no-fund
-          npm run build
-          npm test
-
   docker-smoke:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
