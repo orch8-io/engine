@@ -27,7 +27,7 @@ pub enum OutputFormat {
     name = "orch8",
     version,
     about,
-    after_help = "License: BUSL-1.1 | Managed cloud: https://orch8.io/pricing"
+    after_help = "© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io"
 )]
 struct Cli {
     /// Base URL of the Orch8 API server.

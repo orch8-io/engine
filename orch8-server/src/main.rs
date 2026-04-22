@@ -560,7 +560,7 @@ fn print_startup_banner(config: &EngineConfig, insecure: bool) {
     tracing::info!("  storage={backend}  http={http}  grpc={grpc}");
     tracing::info!("  auth={auth}  encryption={encryption}  tenant-header={tenant}");
     tracing::info!("  tick={tick}ms  batch={batch}  max-concurrent-steps={concurrency}");
-    tracing::info!("License: BUSL-1.1 | Managed cloud: https://orch8.io/pricing");
+    tracing::info!("© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io");
 }
 
 fn build_cors_layer(origins: &str) -> CorsLayer {
