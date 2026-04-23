@@ -281,21 +281,18 @@ pub(super) async fn stats(
     store: &PostgresStorage,
     tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-    let tenant_clause = if tenant_id.is_some() {
-        " WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
-    } else {
-        ""
-    };
-
     // Count by state + handler_name
-    let count_sql = format!(
-        "SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks{tenant_clause} GROUP BY state, handler_name"
-    );
-    let mut q = sqlx::query_as::<_, (String, String, i64)>(&count_sql);
+    let mut qb = sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
     if let Some(tid) = tenant_id {
-        q = q.bind(&tid.0);
+        qb.push(" WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+            .push_bind(&tid.0)
+            .push(")");
     }
-    let counts = q.fetch_all(&store.pool).await?;
+    qb.push(" GROUP BY state, handler_name");
+    let counts = qb
+        .build_query_as::<(String, String, i64)>()
+        .fetch_all(&store.pool)
+        .await?;
 
     let mut by_state = std::collections::HashMap::<String, u64>::new();
     let mut by_handler =
@@ -312,19 +309,15 @@ pub(super) async fn stats(
     }
 
     // Active workers
-    let worker_tenant_clause = if tenant_id.is_some() {
-        " AND instance_id IN (SELECT id FROM instances WHERE tenant_id = $1)"
-    } else {
-        ""
-    };
-    let workers_sql = format!(
-        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL{worker_tenant_clause}"
+    let mut wqb = sqlx::QueryBuilder::new(
+        "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
     );
-    let mut wq = sqlx::query_as::<_, (String,)>(&workers_sql);
     if let Some(tid) = tenant_id {
-        wq = wq.bind(&tid.0);
+        wqb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+            .push_bind(&tid.0)
+            .push(")");
     }
-    let workers = wq.fetch_all(&store.pool).await?;
+    let workers = wqb.build_query_as::<(String,)>().fetch_all(&store.pool).await?;
 
     let active_workers = workers.into_iter().map(|(w,)| w).collect();
 
