@@ -92,7 +92,7 @@ fn make_instances(count: usize, seq_id: SequenceId, tenant: &str) -> Vec<TaskIns
 }
 
 async fn setup_storage() -> Arc<PostgresStorage> {
-    let storage = PostgresStorage::new(DB_URL, 64)
+    let storage = PostgresStorage::new(DB_URL, 64, None)
         .await
         .expect("Failed to connect to Postgres — is docker compose running?");
     storage

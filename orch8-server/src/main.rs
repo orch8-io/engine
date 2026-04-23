@@ -244,6 +244,7 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
         let pg = PostgresStorage::new(
             config.database.url.expose(),
             config.database.max_connections,
+            config.database.search_path.as_deref(),
         )
         .await
         .context("Failed to connect to PostgreSQL")?;
@@ -502,6 +503,11 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_REQUIRE_TENANT_HEADER") {
         config.api.require_tenant_header = val == "true" || val == "1";
+    }
+    if let Ok(val) = std::env::var("ORCH8_DATABASE_SEARCH_PATH") {
+        if !val.is_empty() {
+            config.database.search_path = Some(val);
+        }
     }
 }
 

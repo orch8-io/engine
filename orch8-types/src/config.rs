@@ -112,6 +112,9 @@ pub struct DatabaseConfig {
     pub max_connections: u32,
     #[serde(default = "default_true")]
     pub run_migrations: bool,
+    /// Postgres schema to use for this instance (schema-per-instance isolation).
+    #[serde(default)]
+    pub search_path: Option<String>,
 }
 
 impl Default for DatabaseConfig {
@@ -121,6 +124,7 @@ impl Default for DatabaseConfig {
             url: default_database_url(),
             max_connections: default_max_connections(),
             run_migrations: true,
+            search_path: None,
         }
     }
 }

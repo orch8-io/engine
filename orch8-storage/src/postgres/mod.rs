@@ -50,7 +50,11 @@ pub struct PostgresStorage {
 }
 
 impl PostgresStorage {
-    pub async fn new(database_url: &str, max_connections: u32) -> Result<Self, StorageError> {
+    pub async fn new(
+        database_url: &str,
+        max_connections: u32,
+        search_path: Option<&str>,
+    ) -> Result<Self, StorageError> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(2)
@@ -59,6 +63,16 @@ impl PostgresStorage {
             .connect(database_url)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+        // Set search_path so all queries and migrations run in the target schema.
+        if let Some(schema) = search_path {
+            sqlx::query("SET search_path TO $1, public")
+                .bind(schema)
+                .execute(&pool)
+                .await
+                .map_err(|e| StorageError::Connection(format!("Failed to set search_path: {e}")))?;
+        }
+
         Ok(Self { pool })
     }
 
