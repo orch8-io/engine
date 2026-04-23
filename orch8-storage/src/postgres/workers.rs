@@ -282,7 +282,8 @@ pub(super) async fn stats(
     tenant_id: Option<&orch8_types::ids::TenantId>,
 ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
     // Count by state + handler_name
-    let mut qb = sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
+    let mut qb =
+        sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
     if let Some(tid) = tenant_id {
         qb.push(" WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
             .push_bind(&tid.0)
@@ -317,7 +318,10 @@ pub(super) async fn stats(
             .push_bind(&tid.0)
             .push(")");
     }
-    let workers = wqb.build_query_as::<(String,)>().fetch_all(&store.pool).await?;
+    let workers = wqb
+        .build_query_as::<(String,)>()
+        .fetch_all(&store.pool)
+        .await?;
 
     let active_workers = workers.into_iter().map(|(w,)| w).collect();
 
