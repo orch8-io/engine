@@ -172,14 +172,16 @@ pub(crate) async fn public_webhook(
     // cache already exists. This avoids write-lock contention on the DashMap
     // shard, allowing concurrent webhooks for the same or different slugs on
     // the same shard to process without blocking.
-    let slug_cache = SEEN_NONCES
-        .get(&slug).map_or_else(|| {
+    let slug_cache = SEEN_NONCES.get(&slug).map_or_else(
+        || {
             // Slow path: acquire write lock to insert a new cache.
             SEEN_NONCES
                 .entry(slug.clone())
                 .or_insert_with(|| nonce_cache_for_slug(&slug))
                 .clone()
-        }, |r| r.value().clone());
+        },
+        |r| r.value().clone(),
+    );
     if slug_cache.get(nonce).await.is_some() {
         tracing::warn!(slug = %slug, "webhook rejected: nonce reuse detected");
         return Err(ApiError::Unauthorized);
