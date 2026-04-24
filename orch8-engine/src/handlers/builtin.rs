@@ -50,6 +50,11 @@ fn url_safety_cache() -> &'static Cache<String, bool> {
 /// loopback, private, link-local (incl. 169.254.169.254 cloud metadata),
 /// unspecified, or IPv6 ULA (`fc00::/7`) range.
 pub(crate) async fn is_address_safe(addr: &str) -> bool {
+    // Allow internal addresses in test environments.
+    if std::env::var("ORCH8_ALLOW_INTERNAL_URLS").is_ok() {
+        return true;
+    }
+
     let Ok(addrs) = tokio::net::lookup_host(addr).await else {
         return false;
     };
