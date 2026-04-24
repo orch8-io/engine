@@ -2173,7 +2173,7 @@ async fn a15_workers_receive_fair_share_under_load() {
 // --------------------------------------------------------------------------
 // Bonus: A1 per-branch cursor pure-function sentinel
 //
-// Even without driving the handler, we can assert that build_branch_nodes
+// Even without driving the handler, we can assert that build_nodes
 // tags each child with its `branch_index`. If this passes, the bug is
 // purely in the handler — not in tree construction.
 // --------------------------------------------------------------------------

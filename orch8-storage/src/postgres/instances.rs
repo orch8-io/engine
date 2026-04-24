@@ -386,6 +386,25 @@ pub(super) async fn update_started_at(
     Ok(())
 }
 
+pub(super) async fn update_current_step_started_at(
+    store: &PostgresStorage,
+    id: InstanceId,
+    ts: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let ts_json = serde_json::to_value(ts)?;
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = jsonb_set(context, ARRAY['runtime', 'current_step_started_at'], $2), \
+             updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(id.0)
+    .bind(ts_json)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 /// Update a task instance's context with externalization, atomic:
 /// externalized payloads + marker-swapped context commit or rollback together.
 ///
@@ -657,7 +676,11 @@ pub(super) async fn list(
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);
-    qb.push(" ORDER BY updated_at DESC");
+    if pagination.sort_ascending {
+        qb.push(" ORDER BY updated_at ASC");
+    } else {
+        qb.push(" ORDER BY updated_at DESC");
+    }
     qb.push(" LIMIT ")
         .push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ")

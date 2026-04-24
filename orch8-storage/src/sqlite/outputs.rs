@@ -41,6 +41,36 @@ pub(super) async fn get(
     row.as_ref().map(row_to_output).transpose()
 }
 
+pub(super) async fn get_batch(
+    storage: &SqliteStorage,
+    keys: &[(InstanceId, BlockId)],
+) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM block_outputs WHERE ");
+    let mut separated = qb.separated(" OR ");
+    for (inst_id, block_id) in keys {
+        separated.push("(instance_id=");
+        separated.push_bind(inst_id.0.to_string());
+        separated.push(" AND block_id=");
+        separated.push_bind(&block_id.0);
+        separated.push(")");
+    }
+    qb.push(" ORDER BY instance_id, block_id, created_at DESC");
+
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len().min(keys.len()));
+    for row in rows {
+        let out = row_to_output(&row)?;
+        let key = (out.instance_id, out.block_id.clone());
+        // Because we order by created_at DESC, the first row for each key is the most recent.
+        map.entry(key).or_insert(out);
+    }
+    Ok(map)
+}
+
 pub(super) async fn get_all(
     storage: &SqliteStorage,
     instance_id: InstanceId,

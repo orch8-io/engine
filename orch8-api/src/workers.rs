@@ -152,21 +152,21 @@ pub(crate) async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-    // Capture the tenant for later breaker bookkeeping. We only enforce access
-    // when the instance still exists; a missing instance makes the task
-    // meaningless but we let the transaction below 404/no-op as it always has.
-    let tenant_for_cb: Option<orch8_types::TenantId> =
-        match state.storage.get_instance(pre_task.instance_id).await {
-            Ok(Some(inst)) => {
-                crate::auth::enforce_tenant_access(
-                    &tenant_ctx,
-                    &inst.tenant_id,
-                    &format!("worker_task {task_id}"),
-                )?;
-                Some(inst.tenant_id.clone())
-            }
-            _ => None,
-        };
+    // Verify tenant access via the task's owning instance. If the instance is
+    // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
+    // caller cannot operate on orphaned tasks from another tenant.
+    let inst = state
+        .storage
+        .get_instance(pre_task.instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {}", pre_task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &inst.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
+    let tenant_for_cb = Some(inst.tenant_id);
 
     let updated = state
         .storage
@@ -344,22 +344,21 @@ pub(crate) async fn fail_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-    // Capture the tenant for later breaker bookkeeping. Both retryable and
-    // non-retryable external-worker failures count toward trip — a handler
-    // that keeps retry-failing N times is still a handler whose dependency
-    // is in distress, and withholding the signal would defeat the breaker.
-    let tenant_for_cb: Option<orch8_types::TenantId> =
-        match state.storage.get_instance(pre_task.instance_id).await {
-            Ok(Some(inst)) => {
-                crate::auth::enforce_tenant_access(
-                    &tenant_ctx,
-                    &inst.tenant_id,
-                    &format!("worker_task {task_id}"),
-                )?;
-                Some(inst.tenant_id.clone())
-            }
-            _ => None,
-        };
+    // Verify tenant access via the task's owning instance. If the instance is
+    // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
+    // caller cannot operate on orphaned tasks from another tenant.
+    let inst = state
+        .storage
+        .get_instance(pre_task.instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {}", pre_task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &inst.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
+    let tenant_for_cb = Some(inst.tenant_id);
 
     let updated = state
         .storage
@@ -747,6 +746,7 @@ pub(crate) async fn list_tasks(
     let pagination = Pagination {
         limit: query.limit.min(1000),
         offset: query.offset,
+        sort_ascending: false,
     };
 
     let tasks = state

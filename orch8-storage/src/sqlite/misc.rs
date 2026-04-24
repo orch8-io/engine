@@ -41,6 +41,31 @@ pub(super) async fn count_running_by_concurrency_key(
     Ok(row.get::<i64, _>("cnt"))
 }
 
+pub(super) async fn count_running_by_concurrency_keys(
+    storage: &SqliteStorage,
+    concurrency_keys: &[String],
+) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+    if concurrency_keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE concurrency_key IN ("
+    );
+    let mut separated = qb.separated(",");
+    for key in concurrency_keys {
+        separated.push_bind(key);
+    }
+    separated.push_unseparated(") AND state='running' GROUP BY concurrency_key");
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.get("concurrency_key");
+        let cnt: i64 = row.get("cnt");
+        map.insert(key, cnt);
+    }
+    Ok(map)
+}
+
 pub(super) async fn concurrency_position(
     storage: &SqliteStorage,
     instance_id: InstanceId,
@@ -51,20 +76,21 @@ pub(super) async fn concurrency_position(
     // v7 falls back to 74 random bits, so `created_at` leads and `id`
     // tiebreaks to keep position assignment deterministic for same-ms
     // arrivals. Matches the Postgres backend.
-    let rows = sqlx::query(
-        "SELECT id FROM task_instances
-         WHERE concurrency_key=?1 AND state='running'
-         ORDER BY created_at, id",
+    //
+    // Uses a COUNT query instead of fetching all rows and linearly
+    // searching, avoiding O(n) memory and CPU per check on busy keys.
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_instances
+         WHERE concurrency_key = ?1 AND state = 'running'
+           AND (created_at < (SELECT created_at FROM task_instances WHERE id = ?2)
+                OR (created_at = (SELECT created_at FROM task_instances WHERE id = ?2)
+                    AND id <= ?2))",
     )
     .bind(concurrency_key)
-    .fetch_all(&storage.pool)
+    .bind(instance_id.0.to_string())
+    .fetch_one(&storage.pool)
     .await?;
-    let id_str = instance_id.0.to_string();
-    let pos = rows
-        .iter()
-        .position(|r| r.get::<String, _>("id") == id_str)
-        .map_or(0, |p| p as i64 + 1);
-    Ok(pos)
+    Ok(row.0)
 }
 
 // === Recovery ===

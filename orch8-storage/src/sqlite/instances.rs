@@ -323,7 +323,8 @@ pub(super) async fn update_started_at(
     id: InstanceId,
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    let started_at_json = serde_json::to_value(started_at)?;
+    // Bind the raw RFC-3339 string (not a JSON-encoded Value) so SQLite's
+    // json_set treats it as a plain string and wraps it in quotes once.
     sqlx::query(
         "UPDATE task_instances \
          SET context = json_set(context, '$.runtime.started_at', ?2), \
@@ -331,7 +332,28 @@ pub(super) async fn update_started_at(
          WHERE id = ?1",
     )
     .bind(id.0.to_string())
-    .bind(started_at_json)
+    .bind(started_at.to_rfc3339())
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn update_current_step_started_at(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    started_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    // Bind the raw RFC-3339 string (not a JSON-encoded Value) so SQLite's
+    // json_set treats it as a plain string and wraps it in quotes once.
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = json_set(context, '$.runtime.current_step_started_at', ?2), \
+             updated_at = ?3 \
+         WHERE id = ?1",
+    )
+    .bind(id.0.to_string())
+    .bind(started_at.to_rfc3339())
     .bind(ts(Utc::now()))
     .execute(&storage.pool)
     .await?;
@@ -551,7 +573,11 @@ pub(super) async fn list(
     let mut qb = sqlx::QueryBuilder::new("SELECT * FROM task_instances WHERE 1=1");
     apply_filter_sql(&mut qb, filter);
 
-    qb.push(" ORDER BY updated_at DESC LIMIT ");
+    if pagination.sort_ascending {
+        qb.push(" ORDER BY updated_at ASC LIMIT ");
+    } else {
+        qb.push(" ORDER BY updated_at DESC LIMIT ");
+    }
     qb.push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ");
     qb.push_bind(pagination.offset as i64);
@@ -634,6 +660,9 @@ pub(super) async fn bulk_update_state(
     Ok(result.rows_affected())
 }
 
+/// Maximum absolute offset for bulk_reschedule (1 year in seconds).
+const BULK_RESCHEDULE_MAX_OFFSET_SECS: i64 = 365 * 24 * 60 * 60;
+
 pub(super) async fn bulk_reschedule(
     storage: &SqliteStorage,
     filter: &InstanceFilter,
@@ -642,7 +671,13 @@ pub(super) async fn bulk_reschedule(
     let mut qb =
         sqlx::QueryBuilder::new("UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ");
     // SQLite's datetime() does not accept positional parameters (?1) for
-    // modifiers — they must be literal strings. Inline the modifier safely.
+    // modifiers — they must be literal strings. Validate the numeric range
+    // before inlining to prevent SQL injection via malicious offset values.
+    if offset_secs.abs() > BULK_RESCHEDULE_MAX_OFFSET_SECS {
+        return Err(StorageError::Query(format!(
+            "bulk_reschedule offset too large: {offset_secs}"
+        )));
+    }
     qb.push(format!("\"+{offset_secs} seconds\""));
     qb.push("), updated_at=");
     qb.push_bind(ts(Utc::now()));

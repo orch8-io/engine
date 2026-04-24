@@ -75,11 +75,14 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
 
     let client = super::llm::http_client();
 
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "PUT" => client.put(url),
-        "PATCH" => client.patch(url),
-        _ => client.post(url),
+    let mut req = if method.eq_ignore_ascii_case("GET") {
+        client.get(url)
+    } else if method.eq_ignore_ascii_case("PUT") {
+        client.put(url)
+    } else if method.eq_ignore_ascii_case("PATCH") {
+        client.patch(url)
+    } else {
+        client.post(url)
     };
 
     req = req

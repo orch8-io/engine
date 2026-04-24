@@ -10,7 +10,7 @@ use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::BlockDefinition;
 
-use super::{fail_node, find_block};
+use super::{fail_node, flatten_blocks};
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 
@@ -26,6 +26,7 @@ pub(super) async fn check_sla_deadlines(
 ) -> Result<bool, EngineError> {
     let now = chrono::Utc::now();
     let mut breached = false;
+    let block_map = flatten_blocks(blocks);
     for node in tree {
         if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
             continue;
@@ -33,7 +34,7 @@ pub(super) async fn check_sla_deadlines(
         let Some(started_at) = node.started_at else {
             continue;
         };
-        let Some(BlockDefinition::Step(step_def)) = find_block(blocks, &node.block_id) else {
+        let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() else {
             continue;
         };
         let Some(deadline) = step_def.deadline else {

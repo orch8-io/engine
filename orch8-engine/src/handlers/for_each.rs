@@ -252,16 +252,13 @@ async fn bind_item_var(
     item_var: &str,
     item: serde_json::Value,
 ) -> Result<(), EngineError> {
-    let mut new_ctx = instance.context.clone();
-    if let serde_json::Value::Object(ref mut obj) = new_ctx.data {
-        obj.insert(item_var.to_string(), item);
-    } else {
-        let mut obj = serde_json::Map::new();
-        obj.insert(item_var.to_string(), item);
-        new_ctx.data = serde_json::Value::Object(obj);
-    }
+    // Use merge_context_data instead of full context clone+replace:
+    // 1. Avoids serialising the entire context on every iteration.
+    // 2. Re-reads the stored context before writing (SQLite path) so
+    //    concurrent updates (human_input merge, update_context signal)
+    //    are far less likely to be lost.
     storage
-        .update_instance_context(instance.id, &new_ctx)
+        .merge_context_data(instance.id, item_var, &item)
         .await?;
     Ok(())
 }

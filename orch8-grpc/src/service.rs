@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -372,6 +373,7 @@ impl Orch8Service for Orch8GrpcService {
             .map(|p| orch8_types::filter::Pagination {
                 limit: p.limit,
                 offset: u64::from(p.offset),
+                sort_ascending: false,
             })
             .unwrap_or_default();
         let instances = self
@@ -398,7 +400,8 @@ impl Orch8Service for Orch8GrpcService {
             .ok_or_else(|| Status::not_found("instance not found"))?;
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
         let new_state: orch8_types::instance::InstanceState =
-            from_json_str(&format!("\"{}\"", req.get_ref().new_state))?;
+            InstanceState::from_str(&req.get_ref().new_state)
+            .map_err(|e| Status::invalid_argument(e))?;
         // Validate the transition — HTTP path checks `can_transition_to`;
         // without this the gRPC path allows invalid moves like completed→running.
         if !inst.state.can_transition_to(new_state) {
@@ -573,7 +576,8 @@ impl Orch8Service for Orch8GrpcService {
             filter.tenant_id = Some(caller.clone());
         }
         let new_state: orch8_types::instance::InstanceState =
-            from_json_str(&format!("\"{}\"", req.get_ref().new_state))?;
+            InstanceState::from_str(&req.get_ref().new_state)
+            .map_err(|e| Status::invalid_argument(e))?;
         let updated = self
             .storage
             .bulk_update_state(&filter, new_state)
@@ -670,7 +674,9 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(storage_err)?
             .ok_or_else(|| Status::not_found("cron schedule not found"))?;
         enforce_tenant_match(&req, &existing.tenant_id, "cron schedule")?;
-        schedule.tenant_id = enforce_tenant_create(&req, &schedule.tenant_id)?;
+        // Pin the tenant_id to the existing row's tenant so the update cannot
+        // reparent the schedule to a different tenant.
+        schedule.tenant_id = existing.tenant_id.clone();
         self.storage
             .update_cron_schedule(&schedule)
             .await

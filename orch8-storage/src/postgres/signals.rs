@@ -162,11 +162,13 @@ pub(super) async fn get_signalled_instance_ids(
 ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         r"
-        SELECT DISTINCT ti.id, ti.state
+        SELECT ti.id, ti.state
         FROM task_instances ti
         INNER JOIN signal_inbox si ON si.instance_id = ti.id
         WHERE ti.state IN ('paused', 'waiting', 'scheduled')
           AND si.delivered = FALSE
+        GROUP BY ti.id, ti.state
+        ORDER BY MIN(si.created_at) ASC
         LIMIT $1
         ",
     )

@@ -22,7 +22,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
-use dashmap::DashMap;
 use moka::future::Cache;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -38,17 +37,15 @@ use crate::AppState;
 /// that a captured payload can't be replayed the next day.
 const REPLAY_WINDOW_SECS: i64 = 300;
 
-/// Per-slug nonce caches. Each webhook gets its own bounded cache so a
-/// high-volume trigger cannot evict replay-protection entries from a
-/// low-volume trigger.
-static SEEN_NONCES: LazyLock<DashMap<String, Cache<String, ()>>> = LazyLock::new(DashMap::new);
-
-fn nonce_cache_for_slug(_slug: &str) -> Cache<String, ()> {
+/// Global nonce cache with composite key `slug:nonce`. Using a single cache
+/// instead of a per-slug `DashMap` prevents unbounded growth when many unique
+/// slugs are encountered (e.g., scanning probes or UUID-based slugs).
+static SEEN_NONCES: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
     Cache::builder()
         .time_to_live(Duration::from_secs((REPLAY_WINDOW_SECS as u64) + 60))
-        .max_capacity(10_000)
+        .max_capacity(100_000)
         .build()
-}
+});
 
 /// Maximum body size for public webhooks. Webhook payloads are small event
 /// notifications (GitHub, Stripe, etc.) — anything larger is suspicious and
@@ -151,7 +148,7 @@ pub(crate) async fn public_webhook(
         return Err(ApiError::Unauthorized);
     };
     let now = chrono::Utc::now().timestamp();
-    if now.saturating_sub(ts).abs() > REPLAY_WINDOW_SECS {
+    if now.abs_diff(ts) > REPLAY_WINDOW_SECS as u64 {
         tracing::warn!(
             slug = %slug,
             skew = now - ts,
@@ -168,15 +165,12 @@ pub(crate) async fn public_webhook(
         tracing::warn!(slug = %slug, "webhook rejected: missing x-trigger-nonce");
         return Err(ApiError::Unauthorized);
     }
-    let slug_cache = SEEN_NONCES
-        .entry(slug.clone())
-        .or_insert_with(|| nonce_cache_for_slug(&slug))
-        .clone();
-    if slug_cache.get(nonce).await.is_some() {
+    let composite_key = format!("{slug}:{nonce}");
+    if SEEN_NONCES.get(&composite_key).await.is_some() {
         tracing::warn!(slug = %slug, "webhook rejected: nonce reuse detected");
         return Err(ApiError::Unauthorized);
     }
-    slug_cache.insert(nonce.to_string(), ()).await;
+    SEEN_NONCES.insert(composite_key, ()).await;
 
     let meta = serde_json::json!({
         "source": "public_webhook",

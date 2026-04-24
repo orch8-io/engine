@@ -218,6 +218,14 @@ impl StorageBackend for PostgresStorage {
         instances::update_started_at(self, id, started_at).await
     }
 
+    async fn update_instance_current_step_started_at(
+        &self,
+        id: InstanceId,
+        ts: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        instances::update_current_step_started_at(self, id, ts).await
+    }
+
     async fn update_instance_context_externalized(
         &self,
         id: InstanceId,
@@ -343,6 +351,13 @@ impl StorageBackend for PostgresStorage {
         block_id: &BlockId,
     ) -> Result<Option<BlockOutput>, StorageError> {
         outputs::get(self, instance_id, block_id).await
+    }
+
+    async fn get_block_outputs_batch(
+        &self,
+        keys: &[(InstanceId, BlockId)],
+    ) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
+        outputs::get_batch(self, keys).await
     }
 
     async fn get_all_outputs(
@@ -506,6 +521,13 @@ impl StorageBackend for PostgresStorage {
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
         misc::count_running_by_concurrency_key(self, concurrency_key).await
+    }
+
+    async fn count_running_by_concurrency_keys(
+        &self,
+        concurrency_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+        misc::count_running_by_concurrency_keys(self, concurrency_keys).await
     }
 
     async fn concurrency_position(

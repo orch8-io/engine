@@ -21,7 +21,7 @@ use crate::handlers::HandlerRegistry;
 /// concurrently with each other.
 ///
 /// Each direct child of the parallel node is tagged with `branch_index`
-/// (set by [`evaluator::build_branch_nodes`]). On every tick this handler:
+/// (set by [`evaluator::build_nodes`]). On every tick this handler:
 ///   1. Groups children by `branch_index`, preserving source order within
 ///      each group.
 ///   2. For each branch, finds the first non-terminal node (the branch's
@@ -54,12 +54,12 @@ pub async fn execute_parallel(
     // Group by branch_index. BTreeMap keeps branches in declaration order,
     // which makes log output deterministic. Within each group, children
     // are preserved in the insertion order from `children_of` — which
-    // mirrors source order because `build_branch_nodes` appends in
+    // mirrors source order because `build_nodes` appends in
     // block-sequence order.
     let mut branches: BTreeMap<i16, Vec<&ExecutionNode>> = BTreeMap::new();
     for c in &children {
         // Direct children of a parallel should always be tagged by
-        // build_branch_nodes. Any stray untagged child is treated as
+        // build_nodes. Any stray untagged child is treated as
         // branch 0 defensively.
         let idx = c.branch_index.unwrap_or(0);
         branches.entry(idx).or_default().push(*c);

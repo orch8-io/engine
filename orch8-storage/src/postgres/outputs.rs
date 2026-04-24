@@ -66,6 +66,41 @@ pub(super) async fn get(
     Ok(row.map(BlockOutputRow::into_output))
 }
 
+pub(super) async fn get_batch(
+    store: &PostgresStorage,
+    keys: &[(InstanceId, BlockId)],
+) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let instance_ids: Vec<uuid::Uuid> = keys.iter().map(|(i, _)| i.0).collect();
+    let block_ids: Vec<&str> = keys.iter().map(|(_, b)| b.0.as_str()).collect();
+
+    let rows = sqlx::query_as::<_, BlockOutputRow>(
+        r"
+        WITH pairs(instance_id, block_id) AS (
+            SELECT * FROM UNNEST($1::uuid[], $2::text[])
+        )
+        SELECT DISTINCT ON (b.instance_id, b.block_id)
+            b.id, b.instance_id, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at
+        FROM block_outputs b
+        JOIN pairs p ON b.instance_id = p.instance_id AND b.block_id = p.block_id
+        ORDER BY b.instance_id, b.block_id, b.created_at DESC
+        ",
+    )
+    .bind(&instance_ids)
+    .bind(&block_ids)
+    .fetch_all(&store.pool)
+    .await?;
+
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key = (InstanceId(row.instance_id), BlockId(row.block_id.clone()));
+        map.insert(key, row.into_output());
+    }
+    Ok(map)
+}
+
 pub(super) async fn get_all(
     store: &PostgresStorage,
     instance_id: InstanceId,

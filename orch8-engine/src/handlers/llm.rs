@@ -133,6 +133,13 @@ async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result
         };
 
         let base = resolve_base_url(&merged, provider_name);
+        if !super::builtin::is_url_safe(&base).await {
+            warn!(provider = %provider_name, base_url = %base, "llm_call: rejected unsafe base_url");
+            last_error = Some(permanent(format!(
+                "provider {provider_name}: base_url '{base}' targets an internal or non-public address"
+            )));
+            continue;
+        }
 
         let attempt = async {
             if provider_name == "anthropic" {

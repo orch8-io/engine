@@ -32,6 +32,24 @@ pub struct StepExecParams {
 
 /// Execute a step without persisting the output — returns the `BlockOutput` for
 /// the caller to save (typically combined with a state transition in one transaction).
+/// Count JSON-serialized bytes without allocating a throw-away buffer.
+fn json_byte_size(value: &serde_json::Value) -> Result<usize, serde_json::Error> {
+    use std::io::{self, Write};
+    struct Counter(usize);
+    impl Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 += buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 pub async fn execute_step_dry(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -105,8 +123,8 @@ pub async fn execute_step_dry(
 
     match result {
         Ok(output) => {
-            let output_size = serde_json::to_vec(&output)
-                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
+            let output_size = i32::try_from(json_byte_size(&output).unwrap_or(0))
+                .unwrap_or(i32::MAX);
 
             let block_output = maybe_externalize(
                 storage.as_ref(),
@@ -218,8 +236,8 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
-            let output_size = serde_json::to_vec(&output)
-                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
+            let output_size = i32::try_from(json_byte_size(&output).unwrap_or(0))
+                .unwrap_or(i32::MAX);
 
             let block_output = maybe_externalize(
                 storage.as_ref(),

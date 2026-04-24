@@ -269,6 +269,7 @@ pub(crate) async fn list_instances(
     let pagination = Pagination {
         offset: q.offset,
         limit: q.limit,
+        sort_ascending: false,
     }
     .capped();
 

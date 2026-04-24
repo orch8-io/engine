@@ -215,6 +215,23 @@ pub trait StorageBackend: Send + Sync + 'static {
         self.update_instance_context(id, &inst.context).await
     }
 
+    /// Update only the `runtime.current_step_started_at` field for an instance.
+    /// Used to record when the current step began so per-step deadlines and
+    /// `wait_for_input` timeouts are measured from step start rather than
+    /// workflow start.
+    async fn update_instance_current_step_started_at(
+        &self,
+        id: InstanceId,
+        ts: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut inst = self
+            .get_instance(id)
+            .await?
+            .ok_or_else(|| StorageError::Query(format!("instance not found: {id}")))?;
+        inst.context.runtime.current_step_started_at = Some(ts);
+        self.update_instance_context(id, &inst.context).await
+    }
+
     /// Persist `context` with top-level `data` fields >= `threshold_bytes`
     /// swapped for externalization markers. The payloads are written to
     /// `externalized_state` and the mutated context lands in
@@ -348,6 +365,16 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
         block_id: &BlockId,
     ) -> Result<Option<BlockOutput>, StorageError>;
+
+    /// Batch-fetch the most recent `BlockOutput` for multiple
+    /// `(instance_id, block_id)` pairs.
+    ///
+    /// Returns a map from `(InstanceId, BlockId)` to the latest output
+    /// (ordered by `created_at DESC`). Missing pairs are omitted.
+    async fn get_block_outputs_batch(
+        &self,
+        keys: &[(InstanceId, BlockId)],
+    ) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
 
     async fn get_all_outputs(
         &self,
@@ -552,10 +579,22 @@ pub trait StorageBackend: Send + Sync + 'static {
     // === Concurrency ===
 
     /// Count running instances with the given concurrency key.
+    ///
+    /// Default delegates to [] with a single key.
     async fn count_running_by_concurrency_key(
         &self,
         concurrency_key: &str,
-    ) -> Result<i64, StorageError>;
+    ) -> Result<i64, StorageError> {
+        let mut map = self.count_running_by_concurrency_keys(&[concurrency_key.to_owned()]).await?;
+        Ok(map.remove(concurrency_key).unwrap_or(0))
+    }
+
+    /// Batch count running instances for multiple concurrency keys.
+    /// Returns a map from key to count.
+    async fn count_running_by_concurrency_keys(
+        &self,
+        concurrency_keys: &[String],
+    ) -> Result<HashMap<String, i64>, StorageError>;
 
     /// Returns the 1-based position of an instance among running instances
     /// with the same concurrency key, ordered by ID.

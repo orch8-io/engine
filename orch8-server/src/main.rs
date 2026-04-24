@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use axum::extract::DefaultBodyLimit;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -107,14 +108,17 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = build_router(app_state.clone())
         .merge(orch8_api::circuit_breakers::routes().with_state(app_state.clone()))
-        .merge(orch8_api::metrics::routes().with_state(metrics_state))
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::tenant_middleware(require_tenant, req, next)
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
         }))
+        // Metrics and Swagger UI are mounted *after* auth so they are not
+        // publicly reachable. Internal scraping / docs access should carry
+        // the same API key as the rest of the management surface.
+        .merge(orch8_api::metrics::routes().with_state(metrics_state))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()))
         // Health probes live outside the auth layer so k8s/LB liveness checks
         // keep working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
@@ -123,6 +127,10 @@ async fn main() -> anyhow::Result<()> {
             orch8_api::request_id::request_id_middleware,
         ))
         .layer(cors);
+
+    // Apply global body limit to prevent OOM from multi-GB JSON payloads.
+    // Individual routes (e.g. webhooks) may override with their own limit.
+    app = app.layer(DefaultBodyLimit::max(10 * 1024 * 1024));
 
     // Apply global concurrency limit if configured (caps in-flight requests).
     if config.api.max_concurrent_requests > 0 {

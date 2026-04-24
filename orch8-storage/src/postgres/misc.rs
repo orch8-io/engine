@@ -45,6 +45,22 @@ pub(super) async fn count_running_by_concurrency_key(
     Ok(row.0)
 }
 
+pub(super) async fn count_running_by_concurrency_keys(
+    store: &PostgresStorage,
+    concurrency_keys: &[String],
+) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+    if concurrency_keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT concurrency_key, COUNT(*) FROM task_instances WHERE concurrency_key = ANY($1) AND state = 'running' GROUP BY concurrency_key",
+    )
+    .bind(concurrency_keys)
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 pub(super) async fn concurrency_position(
     store: &PostgresStorage,
     instance_id: InstanceId,

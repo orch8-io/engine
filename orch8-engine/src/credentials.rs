@@ -226,6 +226,13 @@ async fn refresh_credential(
         .expose()
         .to_string();
 
+    if !crate::handlers::builtin::is_url_safe(&refresh_url).await {
+        return Err(format!(
+            "credential '{}': refresh_url '{}' targets an internal or non-public address",
+            credential.id, refresh_url
+        ));
+    }
+
     let params = [
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token.as_str()),

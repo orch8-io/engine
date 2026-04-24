@@ -46,6 +46,15 @@ async fn process_signals_inner(
     }
 
     for signal in &signals {
+        // Re-read current state before every signal so control signals
+        // (pause/resume/cancel) act on storage reality, not the stale
+        // snapshot from when the batch was assembled. Non-aborting signals
+        // (update_context, custom) see fresh state too, which is harmless.
+        let current_state = storage
+            .get_instance(instance_id)
+            .await?
+            .map_or(current_state, |i| i.state);
+
         info!(
             instance_id = %instance_id,
             signal_type = %signal.signal_type,
@@ -251,6 +260,8 @@ async fn cancel_scoped(
         .map(|n| n.id)
         .collect();
 
+    let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
+
     for node in &tree {
         let is_active = matches!(
             node.state,
@@ -273,7 +284,7 @@ async fn cancel_scoped(
         let inside_finally = is_inside_finally_branch(&tree, node);
 
         // Check per-step cancellable flag.
-        let step_cancellable = crate::evaluator::find_block(&sequence_def.blocks, &node.block_id)
+        let step_cancellable = block_map.get(&node.block_id)
             .and_then(|block| match block {
                 BlockDefinition::Step(step) => Some(step.cancellable),
                 _ => None,

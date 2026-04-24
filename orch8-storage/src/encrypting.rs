@@ -499,6 +499,13 @@ impl StorageBackend for EncryptingStorage {
         self.inner.get_block_output(instance_id, block_id).await
     }
 
+    async fn get_block_outputs_batch(
+        &self,
+        keys: &[(InstanceId, orch8_types::ids::BlockId)],
+    ) -> Result<std::collections::HashMap<(InstanceId, orch8_types::ids::BlockId), orch8_types::output::BlockOutput>, StorageError> {
+        self.inner.get_block_outputs_batch(keys).await
+    }
+
     async fn get_all_outputs(
         &self,
         instance_id: InstanceId,
@@ -691,6 +698,15 @@ impl StorageBackend for EncryptingStorage {
     ) -> Result<i64, StorageError> {
         self.inner
             .count_running_by_concurrency_key(concurrency_key)
+            .await
+    }
+
+    async fn count_running_by_concurrency_keys(
+        &self,
+        concurrency_keys: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
+        self.inner
+            .count_running_by_concurrency_keys(concurrency_keys)
             .await
     }
 

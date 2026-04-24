@@ -99,6 +99,7 @@ pub async fn ensure_execution_tree(
                 build_nodes(
                     instance.id,
                     None,
+                    None,
                     std::slice::from_ref(block),
                     &mut new_nodes,
                 );
@@ -121,7 +122,7 @@ pub async fn ensure_execution_tree(
 
     // Build tree from blocks.
     let mut nodes = Vec::with_capacity(blocks.len() * 2);
-    build_nodes(instance.id, None, blocks, &mut nodes);
+    build_nodes(instance.id, None, None, blocks, &mut nodes);
 
     if !nodes.is_empty() {
         storage.create_execution_nodes_batch(&nodes).await?;
@@ -139,9 +140,11 @@ pub async fn ensure_execution_tree(
 fn build_nodes(
     instance_id: InstanceId,
     parent_id: Option<ExecutionNodeId>,
+    branch_index: Option<usize>,
     blocks: &[BlockDefinition],
     out: &mut Vec<ExecutionNode>,
 ) {
+    let branch_i16 = branch_index.and_then(|i| i16::try_from(i).ok());
     for block in blocks {
         let (block_id, block_type) = block_meta(block);
         let node_id = ExecutionNodeId::new();
@@ -152,7 +155,7 @@ fn build_nodes(
             block_id: block_id.clone(),
             parent_id,
             block_type,
-            branch_index: None,
+            branch_index: branch_i16,
             state: NodeState::Pending,
             started_at: None,
             completed_at: None,
@@ -163,111 +166,42 @@ fn build_nodes(
             BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
             BlockDefinition::Parallel(p) => {
                 for (i, branch) in p.branches.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, branch, out);
+                    build_nodes(instance_id, Some(node_id), Some(i), branch, out);
                 }
             }
             BlockDefinition::Race(r) => {
                 for (i, branch) in r.branches.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, branch, out);
+                    build_nodes(instance_id, Some(node_id), Some(i), branch, out);
                 }
             }
             BlockDefinition::Loop(l) => {
-                build_nodes(instance_id, Some(node_id), &l.body, out);
+                build_nodes(instance_id, Some(node_id), None, &l.body, out);
             }
             BlockDefinition::ForEach(f) => {
-                build_nodes(instance_id, Some(node_id), &f.body, out);
+                build_nodes(instance_id, Some(node_id), None, &f.body, out);
             }
             BlockDefinition::Router(r) => {
                 for (i, route) in r.routes.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, &route.blocks, out);
+                    build_nodes(instance_id, Some(node_id), Some(i), &route.blocks, out);
                 }
                 if let Some(default) = &r.default {
-                    build_branch_nodes(instance_id, node_id, r.routes.len(), default, out);
+                    build_nodes(instance_id, Some(node_id), Some(r.routes.len()), default, out);
                 }
             }
             BlockDefinition::TryCatch(tc) => {
-                build_branch_nodes(instance_id, node_id, 0, &tc.try_block, out);
-                build_branch_nodes(instance_id, node_id, 1, &tc.catch_block, out);
+                build_nodes(instance_id, Some(node_id), Some(0), &tc.try_block, out);
+                build_nodes(instance_id, Some(node_id), Some(1), &tc.catch_block, out);
                 if let Some(finally) = &tc.finally_block {
-                    build_branch_nodes(instance_id, node_id, 2, finally, out);
+                    build_nodes(instance_id, Some(node_id), Some(2), finally, out);
                 }
             }
             BlockDefinition::ABSplit(ab) => {
                 for (i, variant) in ab.variants.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
+                    build_nodes(instance_id, Some(node_id), Some(i), &variant.blocks, out);
                 }
             }
             BlockDefinition::CancellationScope(cs) => {
-                build_nodes(instance_id, Some(node_id), &cs.blocks, out);
-            }
-        }
-    }
-}
-
-fn build_branch_nodes(
-    instance_id: InstanceId,
-    parent_id: ExecutionNodeId,
-    branch_index: usize,
-    blocks: &[BlockDefinition],
-    out: &mut Vec<ExecutionNode>,
-) {
-    for block in blocks {
-        let (block_id, block_type) = block_meta(block);
-        let node_id = ExecutionNodeId::new();
-
-        out.push(ExecutionNode {
-            id: node_id,
-            instance_id,
-            block_id: block_id.clone(),
-            parent_id: Some(parent_id),
-            block_type,
-            branch_index: Some(i16::try_from(branch_index).unwrap_or(i16::MAX)),
-            state: NodeState::Pending,
-            started_at: None,
-            completed_at: None,
-        });
-
-        // Recurse for nested composites within the branch.
-        match block {
-            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
-            BlockDefinition::Parallel(p) => {
-                for (i, branch) in p.branches.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, branch, out);
-                }
-            }
-            BlockDefinition::Race(r) => {
-                for (i, branch) in r.branches.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, branch, out);
-                }
-            }
-            BlockDefinition::Loop(l) => {
-                build_nodes(instance_id, Some(node_id), &l.body, out);
-            }
-            BlockDefinition::ForEach(f) => {
-                build_nodes(instance_id, Some(node_id), &f.body, out);
-            }
-            BlockDefinition::Router(r) => {
-                for (i, route) in r.routes.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, &route.blocks, out);
-                }
-                if let Some(default) = &r.default {
-                    build_branch_nodes(instance_id, node_id, r.routes.len(), default, out);
-                }
-            }
-            BlockDefinition::TryCatch(tc) => {
-                build_branch_nodes(instance_id, node_id, 0, &tc.try_block, out);
-                build_branch_nodes(instance_id, node_id, 1, &tc.catch_block, out);
-                if let Some(finally) = &tc.finally_block {
-                    build_branch_nodes(instance_id, node_id, 2, finally, out);
-                }
-            }
-            BlockDefinition::ABSplit(ab) => {
-                for (i, variant) in ab.variants.iter().enumerate() {
-                    build_branch_nodes(instance_id, node_id, i, &variant.blocks, out);
-                }
-            }
-            BlockDefinition::CancellationScope(cs) => {
-                build_nodes(instance_id, Some(node_id), &cs.blocks, out);
+                build_nodes(instance_id, Some(node_id), None, &cs.blocks, out);
             }
         }
     }
@@ -413,12 +347,16 @@ pub async fn evaluate(
                 // Before activating new work, check if a cancel/pause signal
                 // arrived mid-tick (e.g. during a sleep inside a finally
                 // block). Process it now to avoid dispatching already-cancelled
-                // work.
+                // or already-paused work.
                 let pending_signals = storage.get_pending_signals(instance.id).await?;
-                let has_cancel = pending_signals
-                    .iter()
-                    .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Cancel));
-                if has_cancel {
+                let has_control_signal = pending_signals.iter().any(|s| {
+                    matches!(
+                        s.signal_type,
+                        orch8_types::signal::SignalType::Cancel
+                            | orch8_types::signal::SignalType::Pause
+                    )
+                });
+                if has_control_signal {
                     let abort = crate::signals::process_signals_prefetched(
                         storage.as_ref(),
                         instance.id,
@@ -455,9 +393,10 @@ pub async fn evaluate(
         }
 
         let parent_map = build_parent_map(&tree);
+        let node_map: HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
 
         // Phase 2: execute Running step nodes (leaf work first).
-        if let Some((node, block)) = find_running_step(&tree, &block_map, handlers, &parent_map) {
+        if let Some((node, block)) = find_running_step(&tree, &block_map, handlers, &parent_map, &node_map) {
             dispatch_block(
                 storage,
                 handlers,
@@ -583,8 +522,8 @@ fn find_running_step<'a>(
     block_map: &HashMap<&BlockId, &'a BlockDefinition>,
     handlers: &HandlerRegistry,
     parent_map: &ParentMap,
+    node_map: &HashMap<ExecutionNodeId, &'a ExecutionNode>,
 ) -> Option<(&'a ExecutionNode, &'a BlockDefinition)> {
-    let node_map: HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     for node in tree {
         if node.state != NodeState::Running {
             continue;
@@ -592,7 +531,7 @@ fn find_running_step<'a>(
         if let Some(block) = block_map.get(&node.block_id).copied() {
             if let BlockDefinition::Step(step_def) = block {
                 // Skip steps inside a race where another branch already won.
-                if is_inside_decided_race(tree, block_map, node, parent_map, &node_map) {
+                if is_inside_decided_race(tree, block_map, node, parent_map, node_map) {
                     continue;
                 }
                 // Defer *in-process* steps that race against a composite sibling
@@ -606,7 +545,7 @@ fn find_running_step<'a>(
                 // because they dispatch asynchronously and return immediately —
                 // they don't block the evaluator.
                 if handlers.contains(&step_def.handler)
-                    && has_racing_composite_sibling(tree, block_map, node, parent_map, &node_map)
+                    && has_racing_composite_sibling(tree, block_map, node, parent_map, node_map)
                 {
                     continue;
                 }
@@ -707,7 +646,7 @@ fn count_ancestors(parent_map: &ParentMap, mut node_id: ExecutionNodeId) -> usiz
 }
 
 /// Flatten a nested block tree into a `HashMap` for O(1) lookups.
-fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDefinition> {
+pub fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDefinition> {
     fn walk<'b>(
         blocks: &'b [BlockDefinition],
         map: &mut HashMap<&'b BlockId, &'b BlockDefinition>,

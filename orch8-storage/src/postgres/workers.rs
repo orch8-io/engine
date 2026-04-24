@@ -263,7 +263,11 @@ pub(super) async fn list(
            FROM worker_tasks WHERE 1=1",
     );
     apply_worker_task_filter(&mut qb, filter);
-    qb.push(" ORDER BY created_at DESC");
+    if pagination.sort_ascending {
+        qb.push(" ORDER BY created_at ASC");
+    } else {
+        qb.push(" ORDER BY created_at DESC");
+    }
     qb.push(" LIMIT ")
         .push_bind(i64::from(pagination.limit.min(1000)));
     qb.push(" OFFSET ")

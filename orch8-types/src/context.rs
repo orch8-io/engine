@@ -148,6 +148,11 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub attempt: u32,
     pub started_at: Option<DateTime<Utc>>,
+    /// When the current step began executing. Used as the baseline for
+    /// per-step SLA deadlines and `wait_for_input` timeouts so earlier
+    /// steps do not eat into the timeout budget of later ones.
+    #[serde(default)]
+    pub current_step_started_at: Option<DateTime<Utc>>,
     pub resource_key: Option<ResourceKey>,
 }
 
@@ -176,6 +181,7 @@ mod tests {
                 current_step: Some(BlockId("step-1".into())),
                 attempt: 2,
                 started_at: Some(Utc::now()),
+                current_step_started_at: None,
                 resource_key: None,
             },
         }

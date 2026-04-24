@@ -78,6 +78,7 @@ pub(crate) async fn list_approvals(
     let pagination = Pagination {
         offset: params.offset,
         limit: params.limit.min(1000),
+        sort_ascending: false,
     };
 
     let pairs = state

@@ -501,12 +501,16 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 
     let client = super::llm::http_client();
 
-    let mut req = match method.to_uppercase().as_str() {
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "PATCH" => client.patch(url),
-        "DELETE" => client.delete(url),
-        _ => client.get(url),
+    let mut req = if method.eq_ignore_ascii_case("POST") {
+        client.post(url)
+    } else if method.eq_ignore_ascii_case("PUT") {
+        client.put(url)
+    } else if method.eq_ignore_ascii_case("PATCH") {
+        client.patch(url)
+    } else if method.eq_ignore_ascii_case("DELETE") {
+        client.delete(url)
+    } else {
+        client.get(url)
     };
 
     req = req.timeout(timeout);

@@ -28,6 +28,7 @@ pub(super) async fn check_step_deadline(
     handlers: &HandlerRegistry,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
+    prev_output: Option<&orch8_types::output::BlockOutput>,
 ) -> Result<bool, EngineError> {
     let Some(deadline) = step_def.deadline else {
         return Ok(false);
@@ -35,9 +36,7 @@ pub(super) async fn check_step_deadline(
     // Compute elapsed time: use previous output's created_at if available
     // (retry scenario), otherwise fall back to instance runtime start time
     // (external worker scenario where no output exists yet).
-    let prev_output = storage.get_block_output(instance.id, &step_def.id).await?;
     let baseline = prev_output
-        .as_ref()
         .map(|o| o.created_at)
         .or(instance.context.runtime.started_at);
     let Some(baseline) = baseline else {
@@ -331,7 +330,12 @@ pub async fn check_human_input(
 
     // No response yet. Check timeout.
     if let Some(timeout) = human_def.timeout {
-        if let Some(started) = instance.context.runtime.started_at {
+        let baseline = instance
+            .context
+            .runtime
+            .current_step_started_at
+            .or(instance.context.runtime.started_at);
+        if let Some(started) = baseline {
             let elapsed = chrono::Utc::now() - started;
             if elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::days(365))
             {
@@ -441,6 +445,15 @@ pub(super) async fn execute_step_block(
     if check_step_rate_limit(storage.as_ref(), instance, step_def).await? {
         return Ok(StepOutcome::Deferred);
     }
+
+    // Stamp per-step start time so wait_for_input timeouts are measured from
+    // when this step began waiting, not from workflow start. We set this before
+    // human-input check so the timeout baseline is correct when the instance
+    // transitions to Waiting.
+    let step_started = chrono::Utc::now();
+    storage
+        .update_instance_current_step_started_at(instance_id, step_started)
+        .await?;
 
     // Human-in-the-loop: if this step waits for human input, check if a response
     // signal has been delivered. If not, transition to Waiting so the approvals

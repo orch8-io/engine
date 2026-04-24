@@ -54,13 +54,13 @@ async fn list_all_breakers(
     let Some(ref registry) = state.circuit_breakers else {
         return Json(Vec::new());
     };
-    // A caller with an `x-tenant-id` header should see their tenant's
-    // breakers only — `list_all` would otherwise leak cross-tenant
-    // handler names and state via the unscoped admin endpoint.
+    // Only callers scoped to a tenant may list breakers. Without a tenant
+    // header we cannot determine which breakers belong to the caller, so
+    // we return an empty list rather than leaking cross-tenant state.
     if let Some(axum::Extension(ctx)) = tenant_ctx {
         return Json(registry.list_for_tenant(&ctx.tenant_id));
     }
-    Json(registry.list_all())
+    Json(Vec::new())
 }
 
 #[utoipa::path(

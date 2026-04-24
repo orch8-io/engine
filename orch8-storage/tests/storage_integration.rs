@@ -1831,6 +1831,7 @@ async fn instance_filtering_by_state_and_pagination() {
             &Pagination {
                 offset: 0,
                 limit: 2,
+                sort_ascending: false,
             },
         )
         .await
@@ -1843,6 +1844,7 @@ async fn instance_filtering_by_state_and_pagination() {
             &Pagination {
                 offset: 2,
                 limit: 2,
+                sort_ascending: false,
             },
         )
         .await
@@ -2147,6 +2149,7 @@ async fn context_round_trip_all_sections() {
             current_step: Some(BlockId("s1".into())),
             attempt: 3,
             started_at: Some(Utc::now()),
+            current_step_started_at: None,
             resource_key: None,
         },
     };
@@ -2384,6 +2387,7 @@ async fn merge_context_data_preserves_other_sections() {
             current_step: Some(BlockId("step-1".into())),
             attempt: 2,
             started_at: None,
+            current_step_started_at: None,
             resource_key: None,
         },
     };
@@ -2974,6 +2978,7 @@ async fn list_waiting_with_trees_returns_only_waiting_instances() {
             &Pagination {
                 offset: 0,
                 limit: 100,
+                sort_ascending: false,
             },
         )
         .await

@@ -18,6 +18,9 @@ pub struct InstanceFilter {
 pub struct Pagination {
     pub offset: u64,
     pub limit: u32,
+    /// When `true`, order results by oldest `updated_at` first.
+    /// Default is `false` (newest first) to preserve existing behavior.
+    pub sort_ascending: bool,
 }
 
 impl Default for Pagination {
@@ -25,6 +28,7 @@ impl Default for Pagination {
         Self {
             offset: 0,
             limit: 100,
+            sort_ascending: false,
         }
     }
 }
@@ -54,6 +58,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: 500,
+            sort_ascending: false,
         }
         .capped();
         assert_eq!(p.limit, 500);
@@ -64,6 +69,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: 5000,
+            sort_ascending: false,
         }
         .capped();
         assert_eq!(p.limit, 1000);
@@ -74,6 +80,7 @@ mod tests {
         let p = Pagination {
             offset: 0,
             limit: 1000,
+            sort_ascending: false,
         }
         .capped();
         assert_eq!(p.limit, 1000);
@@ -84,6 +91,7 @@ mod tests {
         let p = Pagination {
             offset: 42,
             limit: 2000,
+            sort_ascending: false,
         }
         .capped();
         assert_eq!(p.offset, 42);

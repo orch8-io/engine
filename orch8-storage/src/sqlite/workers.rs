@@ -392,7 +392,11 @@ pub(super) async fn list(
         qb.push(" AND queue_name=");
         qb.push_bind(queue);
     }
-    qb.push(" ORDER BY created_at DESC");
+    if pagination.sort_ascending {
+        qb.push(" ORDER BY created_at ASC");
+    } else {
+        qb.push(" ORDER BY created_at DESC");
+    }
 
     let limit = i64::from(pagination.limit.min(1000));
     let offset = i64::try_from(pagination.offset).unwrap_or(i64::MAX);
