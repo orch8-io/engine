@@ -82,7 +82,7 @@ pub async fn run_tick_loop(
                 return Ok(());
             }
             _ = ticker.tick() => {
-                if let Err(e) = process_tick(
+                let tick_fut = process_tick(
                     &storage,
                     &handlers,
                     &semaphore,
@@ -92,27 +92,33 @@ pub async fn run_tick_loop(
                     &sequence_cache,
                     externalize_threshold,
                     &cancel,
-                ).await {
-                    error!(error = %e, "tick processing failed");
-                }
+                );
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
                 // on paused instances would never be processed.
-                if let Err(e) = process_signalled_instances(&storage, batch_size).await {
-                    error!(error = %e, "signalled instance processing failed");
-                }
+                let signals_fut = process_signalled_instances(&storage, batch_size);
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
-                if let Err(e) = process_waiting_deadlines(
+                let deadlines_fut = process_waiting_deadlines(
                     &storage,
                     &handlers,
                     &sequence_cache,
                     &webhook_config,
                     &cancel,
                     batch_size,
-                ).await {
+                );
+                let (tick_res, signals_res, deadlines_res) = tokio::join!(
+                    tick_fut, signals_fut, deadlines_fut
+                );
+                if let Err(e) = tick_res {
+                    error!(error = %e, "tick processing failed");
+                }
+                if let Err(e) = signals_res {
+                    error!(error = %e, "signalled instance processing failed");
+                }
+                if let Err(e) = deadlines_res {
                     error!(error = %e, "waiting deadline processing failed");
                 }
             }
@@ -790,8 +796,9 @@ async fn process_instance(
     let deadline_keys: Vec<(InstanceId, BlockId)> = blocks
         .iter()
         .filter_map(|b| match b {
-            orch8_types::sequence::BlockDefinition::Step(s)
-                if s.deadline.is_some() => Some((instance.id, s.id.clone())),
+            orch8_types::sequence::BlockDefinition::Step(s) if s.deadline.is_some() => {
+                Some((instance.id, s.id.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -803,14 +810,13 @@ async fn process_instance(
 
     for block in blocks.iter() {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if !prefetched
-                .completed_block_ids
-                .contains(&step_def.id)
-            {
+            if !prefetched.completed_block_ids.contains(&step_def.id) {
                 // SLA deadline check: if a previous attempt exists and the deadline has
                 // been breached (wall-clock time since first attempt), fail the instance.
                 let prev = deadline_outputs.get(&(instance.id, step_def.id.clone()));
-                if step_exec::check_step_deadline(storage, handlers, &instance, step_def, prev).await? {
+                if step_exec::check_step_deadline(storage, handlers, &instance, step_def, prev)
+                    .await?
+                {
                     return Ok(());
                 }
             }

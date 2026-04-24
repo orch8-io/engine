@@ -93,18 +93,15 @@ curl -X POST http://localhost:8080/instances \
 
 ## SDKs
 
-| Language | Package | Install |
-|----------|---------|---------|
-| TypeScript | `@orch8/workflow-sdk` + `@orch8/worker-sdk` | `npm install @orch8/workflow-sdk @orch8/worker-sdk` |
-| Python | `orch8-sdk` | `pip install orch8-sdk` |
-| Go | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` |
+All SDKs live in their own repositories under the [orch8-io](https://github.com/orch8-io) GitHub organization.
 
-In-repo TypeScript SDKs:
+| Language | Package | Install | Repo |
+|----------|---------|---------|------|
+| TypeScript | `@orch8.io/sdk` | `npm install @orch8.io/sdk` | [sdk-node](https://github.com/orch8-io/sdk-node) |
+| Python | `orch8-io-sdk` | `pip install orch8-io-sdk` | [sdk-python](https://github.com/orch8-io/sdk-python) |
+| Go | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` | [sdk-go](https://github.com/orch8-io/sdk-go) |
 
-| Package | Purpose | Location |
-|---------|---------|----------|
-| `@orch8/workflow-sdk` | Author sequences in TypeScript, deploy via REST | [`workflow-sdk-node/`](workflow-sdk-node/) |
-| `@orch8/worker-sdk` | Build external workers that execute handlers | [`worker-sdk-node/`](worker-sdk-node/) |
+The TypeScript SDK includes both workflow authoring (sequence builder, deploy via REST) and worker support (task polling, handler registration, concurrent execution).
 
 ## Architecture
 
@@ -203,37 +200,32 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**1,663 tests** across three layers:
+**2,028 tests** across two layers:
 
 | Layer | Tests | Scope |
 |-------|-------|-------|
-| **Rust unit + integration** | 1,251 | 33 test suites — storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, full engine integration |
-| **TypeScript E2E** | 412 | 94 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming |
+| **Rust unit + integration** | 1,255 | Storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, full engine integration |
+| **TypeScript E2E** | 773 | 202 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming |
 
 **Coverage by feature area:**
 
-| Area | Test files |
-|------|-----------|
-| Sequences | versioning, migration, deprecation, lookup, delete, interceptors |
-| Instances | lifecycle, batch create, state transitions, context update, retry, DLQ, priority, tree, filters |
-| Workers | polling, completion, failure, heartbeat, stats, dashboard, edge cases |
-| Scheduling | cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers |
-| Concurrency | rate limiting, resource pools, circuit breakers, bulk ops |
-| Signals | pause/resume/cancel, context update, terminal guards |
-| Multi-tenancy | tenant isolation CRUD, namespace filtering |
-| Approvals | workflow, listing |
-| Credentials | CRUD, encryption at rest, OAuth2 refresh, kind filtering |
-| Plugins | WASM/gRPC registration, type validation, edge cases |
-| Triggers & Webhooks | event triggers, webhook delivery, replay, secret validation |
-| Sessions | state updates, lookup, edge cases |
+| Area | Test suites |
+|------|-------------|
+| Blocks | Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split |
+| Handlers | Built-in handlers, external worker dispatch, LLM call, query-instance |
+| Features | Rate limiting, resource pools, circuit breakers, encryption, credentials, multi-tenancy |
+| Signals | Pause/resume/cancel, context update, terminal guards |
+| Scheduling | Cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers |
+| Mixing | Complex sequences combining multiple block types and features |
+| Resilience | Crash recovery, retry, DLQ, idempotency, checkpoint/restore |
+| Security | API key auth, CORS, encryption at rest, tenant isolation |
+| Templating | Context expressions, dynamic params, conditional logic |
 | Observability | Prometheus metrics, audit log, health endpoints, SSE streaming |
-| Infrastructure | cluster nodes, checkpoints, API validation, performance/load |
 
 ## Project Structure
 
 ```
 engine/
-  migrations/         29 SQL migrations (Postgres schema)
   orch8-api/          REST API layer (axum + utoipa)
   orch8-cli/          CLI binary
   orch8-engine/       Core scheduler, evaluator, handlers
@@ -241,13 +233,14 @@ engine/
   orch8-server/       Server binary, config, startup
   orch8-storage/      Storage trait + Postgres + SQLite impls
   orch8-types/        Shared domain types and config
-  tests/e2e/          94 TypeScript E2E test files (~400 test cases)
+  proto/              Protobuf service definitions
+  migrations/         29 SQL migrations (Postgres schema)
+  tests/e2e/          202 TypeScript E2E test files (773 test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
   examples/           Example workflows (email classifier, etc.)
-  worker-sdk-node/    TypeScript worker SDK
-  workflow-sdk-node/  TypeScript workflow SDK
+  scripts/            Dev scripts (dev-up, dev-down)
   docs/               Documentation
 ```
 
@@ -259,6 +252,7 @@ engine/
 - [Configuration](docs/CONFIGURATION.md) — all config options and env vars
 - [Deployment](docs/DEPLOYMENT.md) — production deploys (Docker, Kubernetes, managed cloud)
 - [External Workers](docs/WORKERS.md) — writing handlers in any language
+- [Applications](docs/APPLICATIONS.md) — building applications on top of Orch8
 - [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
 - [Externalized State](docs/EXTERNALIZATION.md) — how oversized payloads are offloaded
 - [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents

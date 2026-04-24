@@ -284,7 +284,8 @@ async fn cancel_scoped(
         let inside_finally = is_inside_finally_branch(&tree, node);
 
         // Check per-step cancellable flag.
-        let step_cancellable = block_map.get(&node.block_id)
+        let step_cancellable = block_map
+            .get(&node.block_id)
             .and_then(|block| match block {
                 BlockDefinition::Step(step) => Some(step.cancellable),
                 _ => None,

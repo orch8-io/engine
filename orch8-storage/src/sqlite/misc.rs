@@ -49,7 +49,7 @@ pub(super) async fn count_running_by_concurrency_keys(
         return Ok(std::collections::HashMap::new());
     }
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE concurrency_key IN ("
+        "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances WHERE concurrency_key IN (",
     );
     let mut separated = qb.separated(",");
     for key in concurrency_keys {

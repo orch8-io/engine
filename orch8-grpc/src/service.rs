@@ -401,7 +401,7 @@ impl Orch8Service for Orch8GrpcService {
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
         let new_state: orch8_types::instance::InstanceState =
             InstanceState::from_str(&req.get_ref().new_state)
-            .map_err(|e| Status::invalid_argument(e))?;
+                .map_err(|e| Status::invalid_argument(e))?;
         // Validate the transition — HTTP path checks `can_transition_to`;
         // without this the gRPC path allows invalid moves like completed→running.
         if !inst.state.can_transition_to(new_state) {
@@ -577,7 +577,7 @@ impl Orch8Service for Orch8GrpcService {
         }
         let new_state: orch8_types::instance::InstanceState =
             InstanceState::from_str(&req.get_ref().new_state)
-            .map_err(|e| Status::invalid_argument(e))?;
+                .map_err(|e| Status::invalid_argument(e))?;
         let updated = self
             .storage
             .bulk_update_state(&filter, new_state)

@@ -502,7 +502,13 @@ impl StorageBackend for EncryptingStorage {
     async fn get_block_outputs_batch(
         &self,
         keys: &[(InstanceId, orch8_types::ids::BlockId)],
-    ) -> Result<std::collections::HashMap<(InstanceId, orch8_types::ids::BlockId), orch8_types::output::BlockOutput>, StorageError> {
+    ) -> Result<
+        std::collections::HashMap<
+            (InstanceId, orch8_types::ids::BlockId),
+            orch8_types::output::BlockOutput,
+        >,
+        StorageError,
+    > {
         self.inner.get_block_outputs_batch(keys).await
     }
 

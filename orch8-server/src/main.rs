@@ -10,8 +10,8 @@ use tokio::signal::unix::SignalKind;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use axum::extract::DefaultBodyLimit;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 

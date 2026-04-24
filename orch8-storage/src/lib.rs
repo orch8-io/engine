@@ -585,7 +585,9 @@ pub trait StorageBackend: Send + Sync + 'static {
         &self,
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
-        let mut map = self.count_running_by_concurrency_keys(&[concurrency_key.to_owned()]).await?;
+        let mut map = self
+            .count_running_by_concurrency_keys(&[concurrency_key.to_owned()])
+            .await?;
         Ok(map.remove(concurrency_key).unwrap_or(0))
     }
 

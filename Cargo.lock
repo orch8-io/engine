@@ -2560,6 +2560,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",

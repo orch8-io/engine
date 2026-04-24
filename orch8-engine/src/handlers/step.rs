@@ -123,8 +123,8 @@ pub async fn execute_step_dry(
 
     match result {
         Ok(output) => {
-            let output_size = i32::try_from(json_byte_size(&output).unwrap_or(0))
-                .unwrap_or(i32::MAX);
+            let output_size =
+                i32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(i32::MAX);
 
             let block_output = maybe_externalize(
                 storage.as_ref(),
@@ -236,8 +236,8 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
-            let output_size = i32::try_from(json_byte_size(&output).unwrap_or(0))
-                .unwrap_or(i32::MAX);
+            let output_size =
+                i32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(i32::MAX);
 
             let block_output = maybe_externalize(
                 storage.as_ref(),

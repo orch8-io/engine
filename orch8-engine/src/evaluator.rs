@@ -185,7 +185,13 @@ fn build_nodes(
                     build_nodes(instance_id, Some(node_id), Some(i), &route.blocks, out);
                 }
                 if let Some(default) = &r.default {
-                    build_nodes(instance_id, Some(node_id), Some(r.routes.len()), default, out);
+                    build_nodes(
+                        instance_id,
+                        Some(node_id),
+                        Some(r.routes.len()),
+                        default,
+                        out,
+                    );
                 }
             }
             BlockDefinition::TryCatch(tc) => {
@@ -402,7 +408,9 @@ pub async fn evaluate(
         let node_map: HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
 
         // Phase 2: execute Running step nodes (leaf work first).
-        if let Some((node, block)) = find_running_step(&tree, &block_map, handlers, &parent_map, &node_map) {
+        if let Some((node, block)) =
+            find_running_step(&tree, &block_map, handlers, &parent_map, &node_map)
+        {
             dispatch_block(
                 storage,
                 handlers,
@@ -585,9 +593,10 @@ fn is_inside_decided_race(
                         .copied()
                         .and_then(|n| n.branch_index);
                     // Check if a sibling branch's direct child already completed.
-                    let sibling_completed = children_of(tree, *parent_id, None).iter().any(|c| {
-                        c.branch_index != my_branch && matches!(c.state, NodeState::Completed)
-                    });
+                    let sibling_completed =
+                        children_of(tree, *parent_id, None).into_iter().any(|c| {
+                            c.branch_index != my_branch && matches!(c.state, NodeState::Completed)
+                        });
                     if sibling_completed {
                         return true;
                     }
@@ -622,7 +631,7 @@ fn has_racing_composite_sibling(
                         .and_then(|n| n.branch_index);
                     // Check if a sibling branch's root is a Running composite.
                     let sibling_composite_running =
-                        children_of(tree, *parent_id, None).iter().any(|c| {
+                        children_of(tree, *parent_id, None).into_iter().any(|c| {
                             c.branch_index != my_branch
                                 && c.state == NodeState::Running
                                 && block_map
@@ -818,12 +827,11 @@ pub async fn fail_node(
 }
 
 /// Get child nodes for a parent, optionally filtered by branch index.
-#[allow(clippy::needless_lifetimes)]
-pub fn children_of<'a>(
-    tree: &'a [ExecutionNode],
+pub fn children_of(
+    tree: &[ExecutionNode],
     parent_id: ExecutionNodeId,
     branch_index: Option<i16>,
-) -> Vec<&'a ExecutionNode> {
+) -> Vec<&ExecutionNode> {
     tree.iter()
         .filter(|n| {
             n.parent_id == Some(parent_id)
@@ -884,9 +892,13 @@ pub async fn cancel_subtree(
         }
     }
 
+    // Build a HashSet for O(1) lookup when scanning the tree.
+    let to_cancel_set: std::collections::HashSet<ExecutionNodeId> =
+        to_cancel.iter().copied().collect();
+
     // Cancel worker tasks for any Waiting descendants before we flip their state.
     for node in tree {
-        if to_cancel.contains(&node.id) && node.state == NodeState::Waiting {
+        if to_cancel_set.contains(&node.id) && node.state == NodeState::Waiting {
             storage
                 .cancel_worker_tasks_for_block(instance_id.0, &node.block_id.0)
                 .await?;
@@ -932,7 +944,9 @@ pub async fn activate_first_pending_child(
     children: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
     if let Some(child) = children.iter().find(|c| c.state == NodeState::Pending) {
-        storage.update_node_state(child.id, NodeState::Running).await?;
+        storage
+            .update_node_state(child.id, NodeState::Running)
+            .await?;
     }
     Ok(())
 }

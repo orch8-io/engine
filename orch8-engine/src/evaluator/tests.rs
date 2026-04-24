@@ -545,8 +545,8 @@ fn find_running_step_prefers_step_over_composite() {
     let pm = build_parent_map(&tree);
     let block_map = flatten_blocks(&blocks);
     let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
-    let (found_node, found_block) =
-        find_running_step(&tree, &block_map, &handlers, &pm, &node_map).expect("should find the running step");
+    let (found_node, found_block) = find_running_step(&tree, &block_map, &handlers, &pm, &node_map)
+        .expect("should find the running step");
     assert_eq!(found_node.block_id.0, "s");
     assert!(matches!(found_block, BlockDefinition::Step(_)));
 }

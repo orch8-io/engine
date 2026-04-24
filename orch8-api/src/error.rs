@@ -179,8 +179,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn internal_response_redacts_message() {
+    #[tokio::test]
+    async fn internal_response_redacts_message() {
         // The body for Internal errors must not leak the underlying message
         // (we log it at `error` level server-side instead). Redaction is
         // part of the API contract — tests here stop a regression where
@@ -189,8 +189,7 @@ mod tests {
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(resp.into_body(), 1024)
-            .now_or_never()
-            .expect("body ready")
+            .await
             .expect("body ok");
         let text = std::str::from_utf8(&body).unwrap();
         assert!(
@@ -217,23 +216,5 @@ mod tests {
     fn storage_connection_maps_to_503_unavailable() {
         let err: ApiError = StorageError::Connection("timeout".into()).into();
         assert_eq!(status_of(err), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    // `now_or_never` lives behind `futures` which orch8-api doesn't pull
-    // in — inline a tiny helper to poll the body future once.
-    trait NowOrNever: std::future::Future + Sized {
-        fn now_or_never(self) -> Option<Self::Output>;
-    }
-    impl<F: std::future::Future> NowOrNever for F {
-        fn now_or_never(self) -> Option<Self::Output> {
-            use std::pin::pin;
-            use std::task::{Context, Poll, Waker};
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            match pin!(self).poll(&mut cx) {
-                Poll::Ready(v) => Some(v),
-                Poll::Pending => None,
-            }
-        }
     }
 }
