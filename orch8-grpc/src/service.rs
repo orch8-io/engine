@@ -783,6 +783,7 @@ impl Orch8Service for Orch8GrpcService {
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn complete_task(
         &self,
         req: Request<proto::CompleteTaskRequest>,
@@ -874,6 +875,36 @@ impl Orch8Service for Orch8GrpcService {
                 &instance.context,
             )
             .await?;
+        } else {
+            // Node not found or already terminal — fall back to the non-atomic
+            // path so the instance is still transitioned.
+            tracing::warn!(
+                instance_id = %task.instance_id,
+                block_id = %task.block_id,
+                "gRPC worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
+            );
+            if merged_context {
+                self.storage
+                    .save_output_merge_context_and_transition(
+                        &block_output,
+                        task.instance_id,
+                        &instance.context,
+                        InstanceState::Scheduled,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await
+                    .map_err(storage_err)?;
+            } else {
+                self.storage
+                    .save_output_and_transition(
+                        &block_output,
+                        task.instance_id,
+                        InstanceState::Scheduled,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await
+                    .map_err(storage_err)?;
+            }
         }
 
         Ok(Response::new(proto::Empty {}))

@@ -290,8 +290,42 @@ pub(crate) async fn complete_task(
             Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
         }
     } else {
-        // Node not found or already terminal — save output but don't transition.
-        false
+        // Node not found or already terminal — fall back to the non-atomic
+        // path so the instance is still transitioned. This mirrors the
+        // fail_task handler which always transitions the instance regardless
+        // of whether the node is found in the tree.
+        tracing::warn!(
+            instance_id = %task.instance_id,
+            block_id = %task_block_id,
+            "worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
+        );
+        let result = if merged_context {
+            state
+                .storage
+                .save_output_merge_context_and_transition(
+                    &block_output,
+                    task.instance_id,
+                    &instance.context,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        } else {
+            state
+                .storage
+                .save_output_and_transition(
+                    &block_output,
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        };
+        match result {
+            Ok(()) => false,
+            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
+            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
+        }
     };
 
     if cas_err {
