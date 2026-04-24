@@ -184,18 +184,16 @@ pub(super) async fn dispatch_block(
                     };
                     storage.save_block_output(&block_output).await?;
                     complete_node(storage.as_ref(), node.id).await?;
-                    Ok(true)
                 } else if child.state.is_terminal() {
                     // Child failed or cancelled.
                     fail_node(storage.as_ref(), node.id).await?;
-                    Ok(true)
                 } else {
                     // Still running — wait.
                     storage
                         .update_node_state(node.id, NodeState::Waiting)
                         .await?;
-                    Ok(true)
                 }
+                Ok(true)
             } else {
                 // Create the child instance.
                 let child_seq = storage

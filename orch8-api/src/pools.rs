@@ -131,7 +131,7 @@ pub(crate) async fn get_pool(
         .storage
         .get_resource_pool(id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {id}"))?;
     Ok(Json(pool))
 }
@@ -150,7 +150,7 @@ pub(crate) async fn delete_pool(
         .storage
         .get_resource_pool(id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {id}"))?;
     state.storage.delete_resource_pool(id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -170,7 +170,7 @@ pub(crate) async fn list_resources(
         .storage
         .get_resource_pool(pool_id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let resources = state.storage.list_pool_resources(pool_id).await?;
     Ok(Json(resources))
@@ -207,7 +207,7 @@ pub(crate) async fn add_resource(
         .storage
         .get_resource_pool(pool_id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let warmup_start = req
         .warmup_start
@@ -248,13 +248,13 @@ pub(crate) async fn update_resource(
         .storage
         .get_resource_pool(pool_id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let resources = state.storage.list_pool_resources(pool_id).await?;
     let mut resource = resources
         .into_iter()
         .find(|r| r.id == resource_id)
-        .ok_or(ApiError::NotFound("resource not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("resource not found".into()))?;
 
     if let Some(name) = req.name {
         resource.name = name;
@@ -296,7 +296,7 @@ pub(crate) async fn delete_resource(
         .storage
         .get_resource_pool(pool_id)
         .await?
-        .ok_or(ApiError::NotFound("pool not found".into()))?;
+        .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     state.storage.delete_pool_resource(resource_id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)

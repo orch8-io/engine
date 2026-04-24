@@ -308,7 +308,11 @@ fn registry_with_context_setter() -> HandlerRegistry {
                 .get("key")
                 .and_then(|v| v.as_str())
                 .unwrap_or("result");
-            let value = ctx.params.get("value").cloned().unwrap_or(json!("done"));
+            let value = ctx
+                .params
+                .get("value")
+                .cloned()
+                .unwrap_or_else(|| json!("done"));
             Ok(json!({ "_ctx_update": { key: value } }))
         })
     });

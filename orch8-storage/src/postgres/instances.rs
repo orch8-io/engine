@@ -85,7 +85,7 @@ pub(super) async fn create_batch(
         );
         qb.push_values(chunk, |mut b, inst| {
             let context = serde_json::to_value(&inst.context)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::default()));
             b.push_bind(inst.id.0)
                 .push_bind(inst.sequence_id.0)
                 .push_bind(&inst.tenant_id.0)
@@ -529,7 +529,7 @@ pub(super) async fn create_batch_externalized(
         );
         qb.push_values(chunk, |mut b, (inst, _)| {
             let context = serde_json::to_value(&inst.context)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::default()));
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::default()));
             b.push_bind(inst.id.0)
                 .push_bind(inst.sequence_id.0)
                 .push_bind(&inst.tenant_id.0)

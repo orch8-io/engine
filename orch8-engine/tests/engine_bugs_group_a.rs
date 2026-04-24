@@ -2101,7 +2101,6 @@ async fn a15_workers_receive_fair_share_under_load() {
     };
     storage.create_sequence(&seq).await.unwrap();
 
-    let mut all_ids: HashSet<InstanceId> = HashSet::new();
     for i in 0..20 {
         let inst = TaskInstance {
             id: InstanceId::new(),
@@ -2128,7 +2127,6 @@ async fn a15_workers_receive_fair_share_under_load() {
             updated_at: Utc::now(),
         };
         storage.create_instance(&inst).await.unwrap();
-        all_ids.insert(inst.id);
     }
 
     // Simulate 4 workers draining the pool, each with limit=5.

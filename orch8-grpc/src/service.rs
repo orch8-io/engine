@@ -11,7 +11,7 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, StepDef};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
-use crate::auth::{enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
+use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
 
 pub struct Orch8GrpcService {
@@ -66,9 +66,9 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
     }
 }
 
-async fn get_worker_task_checked<T>(
+async fn get_worker_task_checked(
     storage: &Arc<dyn StorageBackend>,
-    req: &Request<T>,
+    caller_tenant: Option<TenantId>,
     task_id: Uuid,
 ) -> Result<(WorkerTask, TaskInstance), Status> {
     let task = storage
@@ -81,7 +81,11 @@ async fn get_worker_task_checked<T>(
         .await
         .map_err(storage_err)?
         .ok_or_else(|| Status::not_found("instance not found"))?;
-    enforce_tenant_match(req, &instance.tenant_id, "worker_task")?;
+    if let Some(ref caller) = caller_tenant {
+        if caller != &instance.tenant_id {
+            return Err(Status::not_found("worker_task"));
+        }
+    }
     Ok((task, instance))
 }
 
@@ -736,8 +740,9 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::CompleteTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        let caller_tenant = caller_tenant(&req).cloned();
         let (_pre_task, _pre_instance) =
-            get_worker_task_checked(&self.storage, &req, task_id).await?;
+            get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
 
@@ -849,8 +854,9 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::FailTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        let caller_tenant = caller_tenant(&req).cloned();
         let (_pre_task, _pre_instance) =
-            get_worker_task_checked(&self.storage, &req, task_id).await?;
+            get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
         let updated = self
             .storage
@@ -957,7 +963,9 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::HeartbeatTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
-        let (_task, _instance) = get_worker_task_checked(&self.storage, &req, task_id).await?;
+        let caller_tenant = caller_tenant(&req).cloned();
+        let (_task, _instance) =
+            get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
         let updated = self
             .storage

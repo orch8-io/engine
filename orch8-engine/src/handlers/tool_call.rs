@@ -46,7 +46,11 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
 
-    let arguments = ctx.params.get("arguments").cloned().unwrap_or(json!({}));
+    let arguments = ctx
+        .params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     let timeout = Duration::from_millis(
         ctx.params

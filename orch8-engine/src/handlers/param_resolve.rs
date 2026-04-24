@@ -176,17 +176,16 @@ pub async fn apply_self_modify(
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     let new = blocks.as_array().cloned().unwrap_or_default();
-    let final_blocks = if let Some(pos) = position {
+    if let Some(pos) = position {
         #[allow(clippy::cast_possible_truncation)]
         let at = (pos.min(usize::MAX as u64) as usize).min(arr.len());
         // Perf: use splice instead of repeated insert to avoid O(n×m) shifting.
         let _: Vec<_> = arr.splice(at..at, new).collect();
-        serde_json::Value::Array(arr)
     } else {
         // No position → true append at the end of the existing list.
         arr.extend(new);
-        serde_json::Value::Array(arr)
-    };
+    }
+    let final_blocks = serde_json::Value::Array(arr);
     if let Err(e) = storage.inject_blocks(instance_id, &final_blocks).await {
         tracing::warn!(
             instance_id = %instance_id,

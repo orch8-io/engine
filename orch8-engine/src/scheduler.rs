@@ -82,7 +82,7 @@ pub async fn run_tick_loop(
                 return Ok(());
             }
             _ = ticker.tick() => {
-                let tick_fut = process_tick(
+                if let Err(e) = process_tick(
                     &storage,
                     &handlers,
                     &semaphore,
@@ -92,33 +92,27 @@ pub async fn run_tick_loop(
                     &sequence_cache,
                     externalize_threshold,
                     &cancel,
-                );
+                ).await {
+                    error!(error = %e, "tick processing failed");
+                }
                 // Process signals for paused/waiting instances that won't be
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
                 // on paused instances would never be processed.
-                let signals_fut = process_signalled_instances(&storage, batch_size);
+                if let Err(e) = process_signalled_instances(&storage, batch_size).await {
+                    error!(error = %e, "signalled instance processing failed");
+                }
                 // Check SLA deadlines for waiting instances (external worker
                 // dispatch). These instances are not claimed by the normal
                 // tick, but deadlines should still fire.
-                let deadlines_fut = process_waiting_deadlines(
+                if let Err(e) = process_waiting_deadlines(
                     &storage,
                     &handlers,
                     &sequence_cache,
                     &webhook_config,
                     &cancel,
                     batch_size,
-                );
-                let (tick_res, signals_res, deadlines_res) = tokio::join!(
-                    tick_fut, signals_fut, deadlines_fut
-                );
-                if let Err(e) = tick_res {
-                    error!(error = %e, "tick processing failed");
-                }
-                if let Err(e) = signals_res {
-                    error!(error = %e, "signalled instance processing failed");
-                }
-                if let Err(e) = deadlines_res {
+                ).await {
                     error!(error = %e, "waiting deadline processing failed");
                 }
             }
