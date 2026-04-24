@@ -153,4 +153,51 @@ mod tests {
         // These are different types — mixing them is a compile error.
         assert_ne!(instance_id.0, sequence_id.0);
     }
+
+    #[test]
+    fn instance_id_default_uses_v7() {
+        let id = InstanceId::default();
+        assert_eq!(id.0.get_version_num(), 7);
+    }
+
+    #[test]
+    fn sequence_id_default_uses_v7() {
+        let id = SequenceId::default();
+        assert_eq!(id.0.get_version_num(), 7);
+    }
+
+    #[test]
+    fn execution_node_id_default_uses_v7() {
+        let id = ExecutionNodeId::default();
+        assert_eq!(id.0.get_version_num(), 7);
+    }
+
+    #[test]
+    fn tenant_id_rejects_empty() {
+        assert!(TenantId::new("").is_err());
+        assert!(TenantId::new("   ").is_err());
+    }
+
+    #[test]
+    fn tenant_id_accepts_non_empty() {
+        assert_eq!(TenantId::new("acme").unwrap().0, "acme");
+    }
+
+    #[test]
+    fn block_id_display() {
+        let id = BlockId("step_1".into());
+        assert_eq!(id.to_string(), "step_1");
+    }
+
+    #[test]
+    fn namespace_display() {
+        let ns = Namespace("default".into());
+        assert_eq!(ns.to_string(), "default");
+    }
+
+    #[test]
+    fn resource_key_display() {
+        let rk = ResourceKey("api:prod".into());
+        assert_eq!(rk.to_string(), "api:prod");
+    }
 }

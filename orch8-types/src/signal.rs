@@ -214,4 +214,56 @@ mod tests {
             other => panic!("expected Custom, got {other:?}"),
         }
     }
+
+    #[test]
+    fn signal_type_from_str_pause() {
+        assert_eq!(SignalType::from_str("pause").unwrap(), SignalType::Pause);
+    }
+
+    #[test]
+    fn signal_type_from_str_resume() {
+        assert_eq!(SignalType::from_str("resume").unwrap(), SignalType::Resume);
+    }
+
+    #[test]
+    fn signal_type_from_str_cancel() {
+        assert_eq!(SignalType::from_str("cancel").unwrap(), SignalType::Cancel);
+    }
+
+    #[test]
+    fn signal_type_from_str_update_context() {
+        assert_eq!(
+            SignalType::from_str("update_context").unwrap(),
+            SignalType::UpdateContext
+        );
+    }
+
+    #[test]
+    fn signal_type_from_str_custom() {
+        assert_eq!(
+            SignalType::from_str("custom:notify").unwrap(),
+            SignalType::Custom("notify".into())
+        );
+    }
+
+    #[test]
+    fn signal_type_from_str_unknown_errors() {
+        let err = SignalType::from_str("puse").unwrap_err();
+        assert_eq!(err.0, "puse");
+    }
+
+    #[test]
+    fn signal_type_display_round_trip() {
+        for st in [
+            SignalType::Pause,
+            SignalType::Resume,
+            SignalType::Cancel,
+            SignalType::UpdateContext,
+            SignalType::Custom("foo".into()),
+        ] {
+            let s = st.to_string();
+            let parsed = SignalType::from_str(&s).unwrap();
+            assert_eq!(st, parsed);
+        }
+    }
 }

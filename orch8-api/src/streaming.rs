@@ -230,3 +230,48 @@ pub(crate) async fn stream_instance(
     Ok(Sse::new(tokio_stream::wrappers::ReceiverStream::new(rx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_poll_ms_is_500() {
+        assert_eq!(default_poll_ms(), 500);
+    }
+
+    #[test]
+    fn is_terminal_for_completed() {
+        assert!(is_terminal(InstanceState::Completed));
+    }
+
+    #[test]
+    fn is_terminal_for_failed() {
+        assert!(is_terminal(InstanceState::Failed));
+    }
+
+    #[test]
+    fn is_terminal_for_cancelled() {
+        assert!(is_terminal(InstanceState::Cancelled));
+    }
+
+    #[test]
+    fn is_terminal_false_for_running() {
+        assert!(!is_terminal(InstanceState::Running));
+    }
+
+    #[test]
+    fn is_terminal_false_for_scheduled() {
+        assert!(!is_terminal(InstanceState::Scheduled));
+    }
+
+    #[test]
+    fn is_terminal_false_for_waiting() {
+        assert!(!is_terminal(InstanceState::Waiting));
+    }
+
+    #[test]
+    fn is_terminal_false_for_paused() {
+        assert!(!is_terminal(InstanceState::Paused));
+    }
+}

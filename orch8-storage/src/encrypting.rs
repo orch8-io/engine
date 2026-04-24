@@ -1385,3 +1385,152 @@ impl StorageBackend for EncryptingStorage {
         self.inner.ping().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_encryptor() -> FieldEncryptor {
+        FieldEncryptor::from_hex_key(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // is_encrypted
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn is_encrypted_returns_true_for_encrypted_prefix() {
+        let enc = test_encryptor();
+        let encrypted = enc.encrypt_value(&json!({"secret": "data"})).unwrap();
+        assert!(FieldEncryptor::is_encrypted(&encrypted));
+    }
+
+    #[test]
+    fn is_encrypted_returns_false_for_plain_text() {
+        assert!(!FieldEncryptor::is_encrypted(&json!("hello world")));
+    }
+
+    #[test]
+    fn is_encrypted_returns_false_for_empty_string() {
+        assert!(!FieldEncryptor::is_encrypted(&json!("")));
+    }
+
+    #[test]
+    fn is_encrypted_returns_false_for_non_string_values() {
+        assert!(!FieldEncryptor::is_encrypted(&json!(42)));
+        assert!(!FieldEncryptor::is_encrypted(&json!(null)));
+        assert!(!FieldEncryptor::is_encrypted(&json!(true)));
+        assert!(!FieldEncryptor::is_encrypted(&json!([1, 2, 3])));
+        assert!(!FieldEncryptor::is_encrypted(&json!({"key": "value"})));
+    }
+
+    // ------------------------------------------------------------------
+    // decrypt_value — passthrough for unencrypted input
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn decrypt_value_leaves_plain_string_unchanged() {
+        let enc = test_encryptor();
+        let plain = json!("not encrypted");
+        let result = enc.decrypt_value(&plain).unwrap();
+        assert_eq!(result, plain);
+    }
+
+    #[test]
+    fn decrypt_value_leaves_empty_string_unchanged() {
+        let enc = test_encryptor();
+        let empty = json!("");
+        let result = enc.decrypt_value(&empty).unwrap();
+        assert_eq!(result, empty);
+    }
+
+    #[test]
+    fn decrypt_value_leaves_non_string_unchanged() {
+        let enc = test_encryptor();
+        let obj = json!({"a": 1});
+        assert_eq!(enc.decrypt_value(&obj).unwrap(), obj);
+
+        let arr = json!([1, 2, 3]);
+        assert_eq!(enc.decrypt_value(&arr).unwrap(), arr);
+
+        let num = json!(42);
+        assert_eq!(enc.decrypt_value(&num).unwrap(), num);
+
+        let nul = json!(null);
+        assert_eq!(enc.decrypt_value(&nul).unwrap(), nul);
+    }
+
+    // ------------------------------------------------------------------
+    // encrypt / decrypt round-trip
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_object() {
+        let enc = test_encryptor();
+        let original = json!({"user": "alice", "count": 7, "nested": {"ok": true}});
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_string() {
+        let enc = test_encryptor();
+        let original = json!("sensitive payload");
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_number() {
+        let enc = test_encryptor();
+        let original = json!(-123.456);
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_null() {
+        let enc = test_encryptor();
+        let original = json!(null);
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip_array() {
+        let enc = test_encryptor();
+        let original = json!([1, "two", null, {"three": 3}]);
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value(&encrypted).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    // ------------------------------------------------------------------
+    // encryption properties
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn encrypted_value_has_prefix() {
+        let enc = test_encryptor();
+        let encrypted = enc.encrypt_value(&json!("x")).unwrap();
+        let s = encrypted.as_str().unwrap();
+        assert!(s.starts_with("enc:v1:"));
+    }
+
+    #[test]
+    fn encrypt_produces_different_ciphertext_each_time() {
+        let enc = test_encryptor();
+        let v = json!({"secret": "data"});
+        let a = enc.encrypt_value(&v).unwrap();
+        let b = enc.encrypt_value(&v).unwrap();
+        assert_ne!(a, b, "nonce randomness should produce distinct ciphertexts");
+    }
+}

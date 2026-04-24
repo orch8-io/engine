@@ -549,4 +549,59 @@ mod tests {
             BreakerState::Open | BreakerState::HalfOpen
         ));
     }
+
+    #[test]
+    fn noop_is_not_tracked() {
+        assert!(!is_breaker_tracked("noop"));
+    }
+
+    #[test]
+    fn log_is_not_tracked() {
+        assert!(!is_breaker_tracked("log"));
+    }
+
+    #[test]
+    fn sleep_is_not_tracked() {
+        assert!(!is_breaker_tracked("sleep"));
+    }
+
+    #[test]
+    fn fail_is_not_tracked() {
+        assert!(!is_breaker_tracked("fail"));
+    }
+
+    #[test]
+    fn http_handler_is_tracked() {
+        assert!(is_breaker_tracked("http.get"));
+    }
+
+    #[test]
+    fn llm_handler_is_tracked() {
+        assert!(is_breaker_tracked("openai.chat"));
+    }
+
+    #[test]
+    fn emit_event_is_not_tracked() {
+        assert!(!is_breaker_tracked("emit_event"));
+    }
+
+    #[test]
+    fn send_signal_is_not_tracked() {
+        assert!(!is_breaker_tracked("send_signal"));
+    }
+
+    #[test]
+    fn query_instance_is_not_tracked() {
+        assert!(!is_breaker_tracked("query_instance"));
+    }
+
+    #[test]
+    fn human_review_is_not_tracked() {
+        assert!(!is_breaker_tracked("human_review"));
+    }
+
+    #[test]
+    fn self_modify_is_not_tracked() {
+        assert!(!is_breaker_tracked("self_modify"));
+    }
 }

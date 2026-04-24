@@ -314,4 +314,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn display_round_trip() {
+        for state in [
+            InstanceState::Scheduled,
+            InstanceState::Running,
+            InstanceState::Waiting,
+            InstanceState::Paused,
+            InstanceState::Completed,
+            InstanceState::Failed,
+            InstanceState::Cancelled,
+        ] {
+            let s = state.to_string();
+            let parsed = InstanceState::from_str(&s).unwrap();
+            assert_eq!(state, parsed);
+        }
+    }
 }

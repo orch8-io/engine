@@ -102,3 +102,70 @@ pub async fn inject_blocks(
         "total_injected": final_blocks.as_array().map_or(0, Vec::len),
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_types::ids::BlockId;
+    use orch8_types::sequence::{BlockDefinition, StepDef};
+
+    #[test]
+    fn block_def_id_extracts_step_id() {
+        let def = BlockDefinition::Step(Box::new(StepDef {
+            id: BlockId("step_1".into()),
+            handler: "noop".into(),
+            params: serde_json::Value::Null,
+            delay: None,
+            retry: None,
+            timeout: None,
+            rate_limit_key: None,
+            send_window: None,
+            context_access: None,
+            cancellable: true,
+            wait_for_input: None,
+            queue_name: None,
+            deadline: None,
+            on_deadline_breach: None,
+            fallback_handler: None,
+        }));
+        assert_eq!(block_def_id(&def), "step_1");
+    }
+
+    #[test]
+    fn validate_injected_blocks_rejects_non_array() {
+        let val = serde_json::json!({"not": "array"});
+        let err = validate_injected_blocks(&val).unwrap_err();
+        assert!(err.to_string().contains("blocks must be a JSON array"));
+    }
+
+    #[test]
+    fn validate_injected_blocks_rejects_empty_array() {
+        let val = serde_json::json!([]);
+        let err = validate_injected_blocks(&val).unwrap_err();
+        assert!(err.to_string().contains("blocks array must not be empty"));
+    }
+
+    #[test]
+    fn validate_injected_blocks_accepts_valid_step() {
+        let val = serde_json::json!([{
+            "type": "step",
+            "id": "injected_1",
+            "handler": "noop",
+            "params": {},
+            "delay": null,
+            "retry": null,
+            "timeout": null
+        }]);
+        let ids = validate_injected_blocks(&val).unwrap();
+        assert_eq!(ids, vec!["injected_1"]);
+    }
+
+    #[test]
+    fn validate_injected_blocks_rejects_invalid_block() {
+        let val = serde_json::json!([{"UnknownVariant": {}}]);
+        let err = validate_injected_blocks(&val).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("blocks[0] is not a valid BlockDefinition"));
+    }
+}

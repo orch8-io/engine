@@ -217,4 +217,48 @@ mod tests {
         let err: ApiError = StorageError::Connection("timeout".into()).into();
         assert_eq!(status_of(err), StatusCode::SERVICE_UNAVAILABLE);
     }
+
+    #[test]
+    fn context_too_large_maps_to_payload_too_large() {
+        let err: ApiError = ContextTooLarge {
+            max: 1024,
+            actual: 2048,
+        }
+        .into();
+        assert_eq!(status_of(err), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn engine_error_step_failed_maps_to_internal() {
+        let err: ApiError = EngineError::StepFailed {
+            instance_id: orch8_types::ids::InstanceId::new(),
+            block_id: orch8_types::ids::BlockId("b".into()),
+            message: "boom".into(),
+            retryable: false,
+        }
+        .into();
+        assert_eq!(status_of(err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn engine_error_storage_maps_to_internal() {
+        let err: ApiError = EngineError::Storage(StorageError::Query("bad sql".into())).into();
+        assert_eq!(status_of(err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn not_found_maps_to_404() {
+        assert_eq!(
+            status_of(ApiError::NotFound("instance xyz".into())),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn unavailable_maps_to_503() {
+        assert_eq!(
+            status_of(ApiError::Unavailable("downstream".into())),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 }

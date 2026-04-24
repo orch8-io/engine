@@ -368,3 +368,178 @@ pub(crate) async fn migrate_instance(
         "to_sequence_id": req.target_sequence_id,
     })))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ─── ByNameQuery ───
+
+    #[test]
+    fn by_name_query_deserializes_with_version() {
+        let raw = json!({
+            "tenant_id": "tenant-1",
+            "namespace": "ns",
+            "name": "seq",
+            "version": 5
+        });
+        let q: ByNameQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.tenant_id, "tenant-1");
+        assert_eq!(q.namespace, "ns");
+        assert_eq!(q.name, "seq");
+        assert_eq!(q.version, Some(5));
+    }
+
+    #[test]
+    fn by_name_query_deserializes_without_version() {
+        let raw = json!({
+            "tenant_id": "tenant-1",
+            "namespace": "ns",
+            "name": "seq"
+        });
+        let q: ByNameQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.tenant_id, "tenant-1");
+        assert_eq!(q.namespace, "ns");
+        assert_eq!(q.name, "seq");
+        assert_eq!(q.version, None);
+    }
+
+    #[test]
+    fn by_name_query_deserializes_with_null_version() {
+        let raw = json!({
+            "tenant_id": "tenant-1",
+            "namespace": "ns",
+            "name": "seq",
+            "version": null
+        });
+        let q: ByNameQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.version, None);
+    }
+
+    #[test]
+    fn by_name_query_empty_strings() {
+        let raw = json!({
+            "tenant_id": "",
+            "namespace": "",
+            "name": "",
+            "version": 1
+        });
+        let q: ByNameQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.tenant_id, "");
+        assert_eq!(q.namespace, "");
+        assert_eq!(q.name, "");
+        assert_eq!(q.version, Some(1));
+    }
+
+    // ─── ListSequencesQuery ───
+
+    #[test]
+    fn list_sequences_query_defaults_all_none() {
+        let raw = json!({});
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert!(q.tenant_id.is_none());
+        assert!(q.namespace.is_none());
+        assert!(q.limit.is_none());
+        assert!(q.offset.is_none());
+        assert_eq!(q.limit.unwrap_or(200).min(1000), 200);
+        assert_eq!(q.offset.unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn list_sequences_query_limit_caps_at_1000() {
+        let raw = json!({ "limit": 5000 });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.limit.unwrap_or(200).min(1000), 1000);
+    }
+
+    #[test]
+    fn list_sequences_query_limit_exact_1000() {
+        let raw = json!({ "limit": 1000 });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.limit.unwrap_or(200).min(1000), 1000);
+    }
+
+    #[test]
+    fn list_sequences_query_limit_below_cap() {
+        let raw = json!({ "limit": 50 });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.limit.unwrap_or(200).min(1000), 50);
+    }
+
+    #[test]
+    fn list_sequences_query_limit_zero() {
+        let raw = json!({ "limit": 0 });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.limit.unwrap_or(200).min(1000), 0);
+    }
+
+    #[test]
+    fn list_sequences_query_offset_explicit() {
+        let raw = json!({ "offset": 42 });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.offset.unwrap_or(0), 42);
+    }
+
+    #[test]
+    fn list_sequences_query_with_all_fields() {
+        let raw = json!({
+            "tenant_id": "t",
+            "namespace": "n",
+            "limit": 100,
+            "offset": 10
+        });
+        let q: ListSequencesQuery = serde_json::from_value(raw).unwrap();
+        assert_eq!(q.tenant_id, Some("t".to_string()));
+        assert_eq!(q.namespace, Some("n".to_string()));
+        assert_eq!(q.limit, Some(100));
+        assert_eq!(q.offset, Some(10));
+    }
+
+    // ─── MigrateInstanceRequest ───
+
+    #[test]
+    fn migrate_instance_request_deserializes() {
+        let raw = json!({
+            "instance_id": "550e8400-e29b-41d4-a716-446655440000",
+            "target_sequence_id": "550e8400-e29b-41d4-a716-446655440001"
+        });
+        let req: MigrateInstanceRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            req.instance_id.to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+        assert_eq!(
+            req.target_sequence_id.to_string(),
+            "550e8400-e29b-41d4-a716-446655440001"
+        );
+    }
+
+    #[test]
+    fn migrate_instance_request_missing_instance_id_fails() {
+        let raw = json!({
+            "target_sequence_id": "550e8400-e29b-41d4-a716-446655440001"
+        });
+        let res = serde_json::from_value::<MigrateInstanceRequest>(raw);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn migrate_instance_request_missing_target_sequence_id_fails() {
+        let raw = json!({
+            "instance_id": "550e8400-e29b-41d4-a716-446655440000"
+        });
+        let res = serde_json::from_value::<MigrateInstanceRequest>(raw);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn migrate_instance_request_invalid_uuid_fails() {
+        let raw = json!({
+            "instance_id": "not-a-uuid",
+            "target_sequence_id": "550e8400-e29b-41d4-a716-446655440001"
+        });
+        let res = serde_json::from_value::<MigrateInstanceRequest>(raw);
+        assert!(res.is_err());
+    }
+}

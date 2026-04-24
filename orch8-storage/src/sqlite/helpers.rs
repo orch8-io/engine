@@ -314,3 +314,70 @@ pub(super) fn apply_filter_sql<'q>(
         qb.push_bind(*p as i16);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn ts_roundtrips_rfc3339() {
+        let dt = Utc.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap();
+        let s = ts(dt);
+        assert!(s.starts_with("2024-01-15T10:30:00"));
+    }
+
+    #[test]
+    fn parse_ts_rfc3339_ok() {
+        let dt = parse_ts("2024-06-01T12:00:00Z").unwrap();
+        assert_eq!(dt.timestamp(), 1_717_243_200);
+    }
+
+    #[test]
+    fn parse_ts_sqlite_format_ok() {
+        let dt = parse_ts("2024-06-01 12:00:00").unwrap();
+        assert_eq!(dt.timestamp(), 1_717_243_200);
+    }
+
+    #[test]
+    fn parse_ts_invalid_errors() {
+        let err = parse_ts("not-a-date").unwrap_err();
+        assert!(err.to_string().contains("failed to parse timestamp"));
+    }
+
+    #[test]
+    fn parse_ts_opt_some() {
+        let dt = parse_ts_opt(Some("2024-01-01T00:00:00Z".into())).unwrap();
+        assert!(dt.is_some());
+    }
+
+    #[test]
+    fn parse_ts_opt_none() {
+        let dt = parse_ts_opt(None).unwrap();
+        assert!(dt.is_none());
+    }
+
+    #[test]
+    fn parse_uuid_valid() {
+        let uuid = parse_uuid("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        assert_eq!(uuid.to_string(), "550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn parse_uuid_invalid_errors() {
+        let err = parse_uuid("not-a-uuid").unwrap_err();
+        assert!(err.to_string().contains("invalid UUID"));
+    }
+
+    #[test]
+    fn parse_json_valid() {
+        let val: serde_json::Value = parse_json(r#"{"key": "value"}"#).unwrap();
+        assert_eq!(val["key"], "value");
+    }
+
+    #[test]
+    fn parse_json_invalid_errors() {
+        let err = parse_json::<serde_json::Value>("not json").unwrap_err();
+        assert!(matches!(err, StorageError::Serialization(_)));
+    }
+}

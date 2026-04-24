@@ -304,3 +304,71 @@ async fn delete_credential(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use orch8_types::config::SecretString;
+    use orch8_types::credential::{CredentialDef, CredentialKind};
+
+    fn mk_credential() -> CredentialDef {
+        CredentialDef {
+            id: "cred_1".into(),
+            tenant_id: "tenant_a".into(),
+            name: "API Key".into(),
+            kind: CredentialKind::ApiKey,
+            value: SecretString::new("secret123".into()),
+            expires_at: None,
+            refresh_url: None,
+            refresh_token: Some(SecretString::new("refresh456".into())),
+            enabled: true,
+            description: Some("test cred".into()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn credential_response_strips_secret_value() {
+        let cred = mk_credential();
+        let resp: CredentialResponse = cred.into();
+        // Secret value must never appear in the response.
+        // The struct has no `value` field, so compilation is the main guard.
+        assert_eq!(resp.id, "cred_1");
+        assert_eq!(resp.name, "API Key");
+        assert_eq!(resp.tenant_id, "tenant_a");
+    }
+
+    #[test]
+    fn credential_response_has_refresh_token_flag() {
+        let mut cred = mk_credential();
+        let resp: CredentialResponse = cred.clone().into();
+        assert!(resp.has_refresh_token);
+
+        cred.refresh_token = None;
+        let resp2: CredentialResponse = cred.into();
+        assert!(!resp2.has_refresh_token);
+    }
+
+    #[test]
+    fn credential_response_preserves_optional_fields() {
+        let mut cred = mk_credential();
+        cred.expires_at = Some(Utc::now());
+        cred.refresh_url = Some("https://example.com/refresh".into());
+        let resp: CredentialResponse = cred.into();
+        assert!(resp.expires_at.is_some());
+        assert_eq!(
+            resp.refresh_url.as_deref(),
+            Some("https://example.com/refresh")
+        );
+    }
+
+    #[test]
+    fn credential_response_reflects_enabled() {
+        let mut cred = mk_credential();
+        cred.enabled = false;
+        let resp: CredentialResponse = cred.into();
+        assert!(!resp.enabled);
+    }
+}

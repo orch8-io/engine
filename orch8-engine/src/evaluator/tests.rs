@@ -940,3 +940,463 @@ fn is_inside_decided_race_with_winner() {
         &tree, &block_map, loser, &pm, &node_map
     ));
 }
+
+// ------------------------------------------------------------------
+// Pure utility function tests
+// ------------------------------------------------------------------
+
+#[test]
+fn flatten_blocks_empty_returns_empty() {
+    let map = flatten_blocks(&[]);
+    assert!(map.is_empty());
+}
+
+#[test]
+fn flatten_blocks_flat_steps() {
+    let blocks = vec![mk_step("a"), mk_step("b"), mk_step("c")];
+    let map = flatten_blocks(&blocks);
+    assert_eq!(map.len(), 3);
+    assert!(map.contains_key(&BlockId("a".into())));
+    assert!(map.contains_key(&BlockId("b".into())));
+    assert!(map.contains_key(&BlockId("c".into())));
+}
+
+#[test]
+fn flatten_blocks_parallel_nested() {
+    use orch8_types::sequence::ParallelDef;
+    let blocks = vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId("par".into()),
+        branches: vec![vec![mk_step("b1"), mk_step("b2")], vec![mk_step("b3")]],
+    }))];
+    let map = flatten_blocks(&blocks);
+    assert_eq!(map.len(), 4);
+    assert!(map.contains_key(&BlockId("par".into())));
+    assert!(map.contains_key(&BlockId("b1".into())));
+    assert!(map.contains_key(&BlockId("b2".into())));
+    assert!(map.contains_key(&BlockId("b3".into())));
+}
+
+#[test]
+fn flatten_blocks_try_catch_with_finally() {
+    use orch8_types::sequence::TryCatchDef;
+    let blocks = vec![BlockDefinition::TryCatch(Box::new(TryCatchDef {
+        id: BlockId("tc".into()),
+        try_block: vec![mk_step("t1")],
+        catch_block: vec![mk_step("c1")],
+        finally_block: Some(vec![mk_step("f1")]),
+    }))];
+    let map = flatten_blocks(&blocks);
+    assert_eq!(map.len(), 4);
+    assert!(map.contains_key(&BlockId("tc".into())));
+    assert!(map.contains_key(&BlockId("t1".into())));
+    assert!(map.contains_key(&BlockId("c1".into())));
+    assert!(map.contains_key(&BlockId("f1".into())));
+}
+
+#[test]
+fn flatten_blocks_router_with_default() {
+    use orch8_types::sequence::{Route, RouterDef};
+    let blocks = vec![BlockDefinition::Router(Box::new(RouterDef {
+        id: BlockId("router".into()),
+        routes: vec![
+            Route {
+                condition: "x".into(),
+                blocks: vec![mk_step("r1")],
+            },
+            Route {
+                condition: "y".into(),
+                blocks: vec![mk_step("r2")],
+            },
+        ],
+        default: Some(vec![mk_step("def")]),
+    }))];
+    let map = flatten_blocks(&blocks);
+    assert_eq!(map.len(), 4);
+    assert!(map.contains_key(&BlockId("router".into())));
+    assert!(map.contains_key(&BlockId("r1".into())));
+    assert!(map.contains_key(&BlockId("r2".into())));
+    assert!(map.contains_key(&BlockId("def".into())));
+}
+
+#[test]
+fn build_parent_map_empty_tree() {
+    let tree: Vec<ExecutionNode> = vec![];
+    let pm = build_parent_map(&tree);
+    assert!(pm.is_empty());
+}
+
+#[test]
+fn build_parent_map_flat_nodes_no_parents() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let tree = vec![a, b];
+    let pm = build_parent_map(&tree);
+    assert_eq!(pm.len(), 2);
+    for (_, parent) in pm {
+        assert!(parent.is_none());
+    }
+}
+
+#[test]
+fn build_parent_map_deep_nesting() {
+    let root_id = ExecutionNodeId::new();
+    let mid_id = ExecutionNodeId::new();
+    let leaf_id = ExecutionNodeId::new();
+    let root = mk_node(
+        root_id,
+        None,
+        "r",
+        BlockType::Parallel,
+        NodeState::Running,
+        None,
+    );
+    let mid = mk_node(
+        mid_id,
+        Some(root_id),
+        "m",
+        BlockType::Parallel,
+        NodeState::Running,
+        None,
+    );
+    let leaf = mk_node(
+        leaf_id,
+        Some(mid_id),
+        "l",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let tree = vec![root, mid, leaf];
+    let pm = build_parent_map(&tree);
+    assert_eq!(pm.get(&root_id), Some(&None));
+    assert_eq!(pm.get(&mid_id), Some(&Some(root_id)));
+    assert_eq!(pm.get(&leaf_id), Some(&Some(mid_id)));
+}
+
+#[test]
+fn count_ancestors_single_level() {
+    let parent_id = ExecutionNodeId::new();
+    let child_id = ExecutionNodeId::new();
+    let parent = mk_node(
+        parent_id,
+        None,
+        "p",
+        BlockType::Step,
+        NodeState::Running,
+        None,
+    );
+    let child = mk_node(
+        child_id,
+        Some(parent_id),
+        "c",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let tree = vec![parent, child];
+    let pm = build_parent_map(&tree);
+    assert_eq!(count_ancestors(&pm, parent_id), 0);
+    assert_eq!(count_ancestors(&pm, child_id), 1);
+}
+
+#[test]
+fn count_ancestors_deep_three_levels() {
+    let l1 = ExecutionNodeId::new();
+    let l2 = ExecutionNodeId::new();
+    let l3 = ExecutionNodeId::new();
+    let l4 = ExecutionNodeId::new();
+    let n1 = mk_node(
+        l1,
+        None,
+        "l1",
+        BlockType::Parallel,
+        NodeState::Running,
+        None,
+    );
+    let n2 = mk_node(
+        l2,
+        Some(l1),
+        "l2",
+        BlockType::Parallel,
+        NodeState::Running,
+        None,
+    );
+    let n3 = mk_node(
+        l3,
+        Some(l2),
+        "l3",
+        BlockType::Parallel,
+        NodeState::Running,
+        None,
+    );
+    let n4 = mk_node(
+        l4,
+        Some(l3),
+        "l4",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let tree = vec![n1, n2, n3, n4];
+    let pm = build_parent_map(&tree);
+    assert_eq!(count_ancestors(&pm, l1), 0);
+    assert_eq!(count_ancestors(&pm, l2), 1);
+    assert_eq!(count_ancestors(&pm, l3), 2);
+    assert_eq!(count_ancestors(&pm, l4), 3);
+}
+
+#[test]
+fn count_ancestors_disconnected_node() {
+    let tree: Vec<ExecutionNode> = vec![];
+    let pm = build_parent_map(&tree);
+    assert_eq!(count_ancestors(&pm, ExecutionNodeId::new()), 0);
+}
+
+#[test]
+fn all_terminal_empty_is_true() {
+    assert!(all_terminal(&[]));
+}
+
+#[test]
+fn all_terminal_none_terminal() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Running,
+        None,
+    );
+    let c = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "c",
+        BlockType::Step,
+        NodeState::Waiting,
+        None,
+    );
+    assert!(!all_terminal(&[&a, &b, &c]));
+}
+
+#[test]
+fn any_completed_empty_is_false() {
+    assert!(!any_completed(&[]));
+}
+
+#[test]
+fn any_completed_multiple_completed() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Completed,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Completed,
+        None,
+    );
+    let c = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "c",
+        BlockType::Step,
+        NodeState::Failed,
+        None,
+    );
+    assert!(any_completed(&[&a, &b, &c]));
+}
+
+#[test]
+fn all_completed_empty_is_true() {
+    assert!(all_completed(&[]));
+}
+
+#[test]
+fn all_completed_none_completed() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Failed,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Running,
+        None,
+    );
+    assert!(!all_completed(&[&a, &b]));
+}
+
+#[test]
+fn any_failed_empty_is_false() {
+    assert!(!any_failed(&[]));
+}
+
+#[test]
+fn any_failed_multiple_failed() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Failed,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Failed,
+        None,
+    );
+    let c = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "c",
+        BlockType::Step,
+        NodeState::Completed,
+        None,
+    );
+    assert!(any_failed(&[&a, &b, &c]));
+}
+
+#[test]
+fn has_waiting_nodes_empty_is_false() {
+    assert!(!has_waiting_nodes(&[]));
+}
+
+#[test]
+fn has_waiting_nodes_mixed_states() {
+    let a = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "a",
+        BlockType::Step,
+        NodeState::Running,
+        None,
+    );
+    let b = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "b",
+        BlockType::Step,
+        NodeState::Waiting,
+        None,
+    );
+    let c = mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "c",
+        BlockType::Step,
+        NodeState::Completed,
+        None,
+    );
+    assert!(has_waiting_nodes(&[a.clone(), b.clone(), c.clone()]));
+    assert!(!has_waiting_nodes(&[a, c]));
+}
+
+#[test]
+fn children_of_filters_by_branch_index_exact() {
+    let parent_id = ExecutionNodeId::new();
+    let c0 = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "c0",
+        BlockType::Step,
+        NodeState::Pending,
+        Some(0),
+    );
+    let c0b = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "c0b",
+        BlockType::Step,
+        NodeState::Pending,
+        Some(0),
+    );
+    let c1 = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "c1",
+        BlockType::Step,
+        NodeState::Pending,
+        Some(1),
+    );
+    let tree = vec![c0, c0b, c1];
+    let r0 = children_of(&tree, parent_id, Some(0));
+    let r1 = children_of(&tree, parent_id, Some(1));
+    let r_all = children_of(&tree, parent_id, None);
+    assert_eq!(r0.len(), 2);
+    assert_eq!(r1.len(), 1);
+    assert_eq!(r_all.len(), 3);
+}
+
+#[test]
+fn children_of_mixed_branch_indices_and_none() {
+    let parent_id = ExecutionNodeId::new();
+    let c_none = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "cn",
+        BlockType::Step,
+        NodeState::Pending,
+        None,
+    );
+    let c0 = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "c0",
+        BlockType::Step,
+        NodeState::Pending,
+        Some(0),
+    );
+    let c1 = mk_node(
+        ExecutionNodeId::new(),
+        Some(parent_id),
+        "c1",
+        BlockType::Step,
+        NodeState::Pending,
+        Some(1),
+    );
+    let tree = vec![c_none, c0, c1];
+    let r_none = children_of(&tree, parent_id, None);
+    let r0 = children_of(&tree, parent_id, Some(0));
+    let r2 = children_of(&tree, parent_id, Some(2));
+    assert_eq!(r_none.len(), 3);
+    assert_eq!(r0.len(), 1);
+    assert_eq!(r2.len(), 0);
+}

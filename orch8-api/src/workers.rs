@@ -702,6 +702,9 @@ const fn default_list_limit() -> u32 {
 }
 
 fn parse_states(raw: &str) -> Result<Vec<WorkerTaskState>, ApiError> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     raw.split(',')
         .map(|s| match s.trim() {
             "pending" => Ok(WorkerTaskState::Pending),
@@ -713,6 +716,69 @@ fn parse_states(raw: &str) -> Result<Vec<WorkerTaskState>, ApiError> {
             ))),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_single_worker_state() {
+        assert_eq!(
+            parse_states("claimed").unwrap(),
+            vec![WorkerTaskState::Claimed]
+        );
+    }
+
+    #[test]
+    fn parse_multiple_worker_states() {
+        assert_eq!(
+            parse_states("pending,claimed,completed").unwrap(),
+            vec![
+                WorkerTaskState::Pending,
+                WorkerTaskState::Claimed,
+                WorkerTaskState::Completed
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_worker_states_with_whitespace() {
+        assert_eq!(
+            parse_states(" pending , failed ").unwrap(),
+            vec![WorkerTaskState::Pending, WorkerTaskState::Failed]
+        );
+    }
+
+    #[test]
+    fn parse_all_worker_states() {
+        let all = "pending,claimed,completed,failed";
+        assert_eq!(
+            parse_states(all).unwrap(),
+            vec![
+                WorkerTaskState::Pending,
+                WorkerTaskState::Claimed,
+                WorkerTaskState::Completed,
+                WorkerTaskState::Failed,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_empty_worker_string_returns_empty() {
+        assert_eq!(parse_states("").unwrap(), Vec::<WorkerTaskState>::new());
+    }
+
+    #[test]
+    fn parse_unknown_worker_state_errors() {
+        let err = parse_states("claimed,bogus").unwrap_err();
+        assert!(err.to_string().contains("unknown worker task state: bogus"));
+    }
+
+    #[test]
+    fn default_list_limit_is_50() {
+        assert_eq!(default_list_limit(), 50);
+    }
 }
 
 #[utoipa::path(get, path = "/workers/tasks", tag = "workers",

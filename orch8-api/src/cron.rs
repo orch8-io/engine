@@ -58,6 +58,21 @@ pub(crate) struct ListCronQuery {
     tenant_id: Option<String>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tz_is_utc() {
+        assert_eq!(default_tz(), "UTC");
+    }
+
+    #[test]
+    fn default_true_is_true() {
+        assert!(default_true());
+    }
+}
+
 #[utoipa::path(post, path = "/cron", tag = "cron",
     request_body = CreateCronRequest,
     responses(

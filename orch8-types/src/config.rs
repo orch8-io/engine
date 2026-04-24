@@ -733,4 +733,235 @@ mod tests {
             errs.len()
         );
     }
+
+    #[test]
+    fn secret_string_from_string_and_str() {
+        let from_string = SecretString::from("from-string".to_string());
+        assert_eq!(from_string.expose(), "from-string");
+
+        let from_str = SecretString::from("from-str");
+        assert_eq!(from_str.expose(), "from-str");
+
+        let new = SecretString::new("new-method".to_string());
+        assert_eq!(new.expose(), "new-method");
+    }
+
+    #[test]
+    fn secret_string_display_shows_redacted() {
+        let secret = SecretString::from("my-secret");
+        assert_eq!(format!("{secret}"), "[REDACTED]");
+
+        let empty = SecretString::default();
+        assert_eq!(format!("{empty}"), "");
+    }
+
+    #[test]
+    fn secret_string_creation_and_redaction() {
+        let secret = SecretString::new("top-secret".to_string());
+        assert_eq!(secret.expose(), "top-secret");
+        assert_eq!(format!("{secret}"), "[REDACTED]");
+        assert_eq!(secret.redact(), "[REDACTED]");
+    }
+
+    #[test]
+    fn externalization_mode_json_roundtrip_never() {
+        let original = ExternalizationMode::Never;
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtripped: ExternalizationMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn externalization_mode_json_roundtrip_threshold() {
+        let original = ExternalizationMode::Threshold { bytes: 8192 };
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtripped: ExternalizationMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn externalization_mode_json_roundtrip_always_outputs() {
+        let original = ExternalizationMode::AlwaysOutputs;
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtripped: ExternalizationMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, roundtripped);
+    }
+
+    #[test]
+    fn scheduler_config_defaults() {
+        let cfg = SchedulerConfig::default();
+        assert_eq!(cfg.tick_interval_ms, 100);
+        assert_eq!(cfg.batch_size, 256);
+        assert_eq!(cfg.max_concurrent_steps, 128);
+        assert_eq!(cfg.shutdown_grace_period_secs, 30);
+        assert_eq!(cfg.stale_instance_threshold_secs, 300);
+        assert_eq!(cfg.max_instances_per_tenant, 0);
+        assert_eq!(cfg.externalize_output_threshold, 0);
+        assert!(cfg.encryption_key.is_empty());
+        assert_eq!(
+            cfg.max_context_bytes,
+            crate::context::DEFAULT_MAX_CONTEXT_BYTES
+        );
+        assert!(matches!(
+            cfg.externalization_mode,
+            ExternalizationMode::Threshold { bytes: 65536 }
+        ));
+        assert_eq!(cfg.worker_reaper_tick_secs, 30);
+        assert_eq!(cfg.worker_reaper_stale_secs, 60);
+        assert_eq!(cfg.node_reaper_tick_secs, 60);
+        assert_eq!(cfg.node_reaper_stale_secs, 120);
+        assert_eq!(cfg.cron_tick_secs, 10);
+    }
+
+    #[test]
+    fn scheduler_config_deserializes_from_json() {
+        let json = r#"{
+            "tick_interval_ms": 50,
+            "batch_size": 128
+        }"#;
+        let cfg: SchedulerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.tick_interval_ms, 50);
+        assert_eq!(cfg.batch_size, 128);
+        // Defaults applied for missing fields.
+        assert_eq!(cfg.max_concurrent_steps, 128);
+        assert_eq!(cfg.shutdown_grace_period_secs, 30);
+    }
+
+    #[test]
+    fn api_config_defaults() {
+        let cfg = ApiConfig::default();
+        assert_eq!(cfg.grpc_addr, "127.0.0.1:50051");
+        assert_eq!(cfg.http_addr, "127.0.0.1:8080");
+        assert_eq!(cfg.cors_origins, "");
+        assert!(cfg.api_key.is_empty());
+        assert!(!cfg.require_tenant_header);
+        assert_eq!(cfg.max_concurrent_requests, 0);
+    }
+
+    #[test]
+    fn api_config_deserializes_from_json() {
+        let json = r#"{
+            "grpc_addr": "0.0.0.0:50051",
+            "http_addr": "0.0.0.0:8080",
+            "cors_origins": "*"
+        }"#;
+        let cfg: ApiConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.grpc_addr, "0.0.0.0:50051");
+        assert_eq!(cfg.http_addr, "0.0.0.0:8080");
+        assert_eq!(cfg.cors_origins, "*");
+        assert!(cfg.api_key.is_empty());
+    }
+
+    #[test]
+    fn webhook_config_defaults() {
+        let cfg = WebhookConfig::default();
+        assert!(cfg.urls.is_empty());
+        assert_eq!(cfg.timeout_secs, 10);
+        assert_eq!(cfg.max_retries, 3);
+    }
+
+    #[test]
+    fn webhook_config_deserializes_from_json() {
+        let json = r#"{
+            "urls": ["https://example.com/hook"],
+            "timeout_secs": 5
+        }"#;
+        let cfg: WebhookConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.urls, vec!["https://example.com/hook"]);
+        assert_eq!(cfg.timeout_secs, 5);
+        assert_eq!(cfg.max_retries, 3);
+    }
+
+    #[test]
+    fn engine_config_defaults_exhaustive() {
+        let cfg = EngineConfig::default();
+        assert_eq!(cfg.database.backend, "postgres");
+        assert!(cfg.database.url.is_empty());
+        assert_eq!(cfg.database.max_connections, 64);
+        assert!(cfg.database.run_migrations);
+        assert_eq!(cfg.database.search_path, None);
+        assert_eq!(cfg.engine.tick_interval_ms, 100);
+        assert_eq!(cfg.api.grpc_addr, "127.0.0.1:50051");
+        assert_eq!(cfg.logging.level, "info");
+        assert!(!cfg.logging.json);
+    }
+
+    #[test]
+    fn engine_config_deserializes_from_json() {
+        let json = r#"{
+            "database": { "backend": "sqlite", "max_connections": 8 },
+            "engine": { "tick_interval_ms": 200, "batch_size": 512 },
+            "api": { "http_addr": "0.0.0.0:9000" },
+            "logging": { "level": "debug", "json": true }
+        }"#;
+        let cfg: EngineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.database.backend, "sqlite");
+        assert_eq!(cfg.database.max_connections, 8);
+        assert_eq!(cfg.engine.tick_interval_ms, 200);
+        assert_eq!(cfg.engine.batch_size, 512);
+        assert_eq!(cfg.api.http_addr, "0.0.0.0:9000");
+        assert_eq!(cfg.logging.level, "debug");
+        assert!(cfg.logging.json);
+    }
+
+    #[test]
+    fn database_config_defaults() {
+        let cfg = DatabaseConfig::default();
+        assert_eq!(cfg.backend, "postgres");
+        assert!(cfg.url.is_empty());
+        assert_eq!(cfg.max_connections, 64);
+        assert!(cfg.run_migrations);
+        assert_eq!(cfg.search_path, None);
+    }
+
+    #[test]
+    fn database_config_deserializes_from_json() {
+        let json = r#"{
+            "backend": "sqlite",
+            "url": "sqlite::memory:",
+            "max_connections": 4,
+            "run_migrations": false,
+            "search_path": "public"
+        }"#;
+        let cfg: DatabaseConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backend, "sqlite");
+        assert_eq!(cfg.url.expose(), "sqlite::memory:");
+        assert_eq!(cfg.max_connections, 4);
+        assert!(!cfg.run_migrations);
+        assert_eq!(cfg.search_path, Some("public".to_string()));
+    }
+
+    #[test]
+    fn logging_config_defaults() {
+        let cfg = LoggingConfig::default();
+        assert_eq!(cfg.level, "info");
+        assert!(!cfg.json);
+    }
+
+    #[test]
+    fn logging_config_deserializes_from_json() {
+        let json = r#"{"level": "warn", "json": true}"#;
+        let cfg: LoggingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.level, "warn");
+        assert!(cfg.json);
+    }
+
+    #[test]
+    fn config_deserialization_from_json_string_for_key_fields() {
+        let json = r#"{
+            "database": { "url": "postgres://user:pass@localhost/db" },
+            "engine": { "encryption_key": "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd" },
+            "api": { "api_key": "secret-api-key" }
+        }"#;
+        let cfg: EngineConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.database.url.expose(),
+            "postgres://user:pass@localhost/db"
+        );
+        assert_eq!(
+            cfg.engine.encryption_key.expose(),
+            "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd"
+        );
+        assert_eq!(cfg.api.api_key.expose(), "secret-api-key");
+    }
 }

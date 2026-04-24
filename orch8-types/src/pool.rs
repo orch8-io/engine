@@ -233,4 +233,44 @@ mod tests {
         // New day — usage resets to 0
         assert!(r.has_capacity(today));
     }
+
+    #[test]
+    fn rotation_strategy_from_str_round_robin() {
+        assert_eq!(
+            RotationStrategy::from_str("round_robin").unwrap(),
+            RotationStrategy::RoundRobin
+        );
+    }
+
+    #[test]
+    fn rotation_strategy_from_str_weighted() {
+        assert_eq!(
+            RotationStrategy::from_str("weighted").unwrap(),
+            RotationStrategy::Weighted
+        );
+    }
+
+    #[test]
+    fn rotation_strategy_from_str_random() {
+        assert_eq!(
+            RotationStrategy::from_str("random").unwrap(),
+            RotationStrategy::Random
+        );
+    }
+
+    #[test]
+    fn rotation_strategy_from_str_unknown_errors() {
+        let err = RotationStrategy::from_str("fifo").unwrap_err();
+        assert!(err.contains("unknown rotation strategy: fifo"));
+    }
+
+    #[test]
+    fn default_weight_is_one() {
+        assert_eq!(default_weight(), 1);
+    }
+
+    #[test]
+    fn default_true_pool_is_true() {
+        assert!(default_true_pool());
+    }
 }

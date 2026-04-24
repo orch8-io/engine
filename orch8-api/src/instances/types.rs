@@ -101,6 +101,9 @@ pub struct CountResponse {
 
 /// Parse comma-separated state values.
 pub fn parse_states(s: &str) -> Result<Vec<InstanceState>, ApiError> {
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     s.split(',')
         .map(|part| {
             let trimmed = part.trim();
@@ -118,4 +121,75 @@ pub fn parse_states(s: &str) -> Result<Vec<InstanceState>, ApiError> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_single_state() {
+        assert_eq!(
+            parse_states("running").unwrap(),
+            vec![InstanceState::Running]
+        );
+    }
+
+    #[test]
+    fn parse_multiple_states() {
+        assert_eq!(
+            parse_states("scheduled,running,completed").unwrap(),
+            vec![
+                InstanceState::Scheduled,
+                InstanceState::Running,
+                InstanceState::Completed
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_states_with_whitespace() {
+        assert_eq!(
+            parse_states(" scheduled , running ").unwrap(),
+            vec![InstanceState::Scheduled, InstanceState::Running]
+        );
+    }
+
+    #[test]
+    fn parse_all_states() {
+        let all = "scheduled,running,waiting,paused,completed,failed,cancelled";
+        assert_eq!(
+            parse_states(all).unwrap(),
+            vec![
+                InstanceState::Scheduled,
+                InstanceState::Running,
+                InstanceState::Waiting,
+                InstanceState::Paused,
+                InstanceState::Completed,
+                InstanceState::Failed,
+                InstanceState::Cancelled,
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_empty_string_returns_empty() {
+        assert_eq!(parse_states("").unwrap(), Vec::<InstanceState>::new());
+    }
+
+    #[test]
+    fn parse_unknown_state_errors() {
+        let err = parse_states("running,unknown").unwrap_err();
+        assert!(err.to_string().contains("unknown instance state: unknown"));
+    }
+
+    #[test]
+    fn default_limit_is_100() {
+        assert_eq!(default_limit(), 100);
+    }
+
+    #[test]
+    fn default_timezone_is_utc() {
+        assert_eq!(default_timezone(), "UTC");
+    }
 }
