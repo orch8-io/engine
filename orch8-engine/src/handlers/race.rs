@@ -31,7 +31,11 @@ pub async fn execute_race(
 
     // Check if any branch completed (winner).
     if evaluator::any_completed(&children) {
-        // Cancel all non-terminal branches and their worker tasks.
+        // Cancel all non-terminal branches and their entire subtrees.
+        // A losing branch root may itself be a composite (e.g. parallel)
+        // that is Running while a descendant is Waiting on an external
+        // worker. We must recursively cancel every descendant and purge
+        // their worker tasks so the race decision is fully honoured.
         for child in &children {
             if !matches!(
                 child.state,
@@ -40,12 +44,14 @@ pub async fn execute_race(
                     | NodeState::Cancelled
                     | NodeState::Skipped
             ) {
-                // If the node is Waiting, cancel its pending worker task.
+                // Cancel the direct child's worker task first, then recurse
+                // into its subtree to cancel any descendant workers.
                 if child.state == NodeState::Waiting {
                     storage
                         .cancel_worker_tasks_for_block(instance.id.0, &child.block_id.0)
                         .await?;
                 }
+                evaluator::cancel_subtree(storage, instance.id, tree, child.id).await?;
                 storage
                     .update_node_state(child.id, NodeState::Cancelled)
                     .await?;

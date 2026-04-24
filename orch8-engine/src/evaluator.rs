@@ -366,9 +366,15 @@ pub async fn evaluate(
                     )
                     .await?;
                     if abort {
+                        // Distinguish Pause from Cancel so the scheduler does
+                        // not transition a paused instance to Cancelled.
+                        let now_paused = storage
+                            .get_instance(instance.id)
+                            .await?
+                            .is_some_and(|i| i.state == InstanceState::Paused);
                         return Ok(EvalOutcome::Done {
                             any_failed: false,
-                            any_cancelled: true,
+                            any_cancelled: !now_paused,
                         });
                     }
                     // Tree will be re-fetched at the top of the next iteration.
@@ -856,16 +862,51 @@ pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
     tree.iter().any(|n| n.state == NodeState::Waiting)
 }
 
+/// Recursively cancel every node in the subtree rooted at `parent_id`,
+/// including cancelling any pending worker tasks for `Waiting` descendants.
+/// The nodes are updated bottom-up so parent state changes don't interfere
+/// with descendant lookups.
+pub async fn cancel_subtree(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tree: &[ExecutionNode],
+    parent_id: ExecutionNodeId,
+) -> Result<(), EngineError> {
+    // Collect all descendants of parent_id (not including parent_id itself).
+    let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
+    let mut stack = vec![parent_id];
+    while let Some(current) = stack.pop() {
+        for node in tree {
+            if node.parent_id == Some(current) {
+                stack.push(node.id);
+                to_cancel.push(node.id);
+            }
+        }
+    }
+
+    // Cancel worker tasks for any Waiting descendants before we flip their state.
+    for node in tree {
+        if to_cancel.contains(&node.id) && node.state == NodeState::Waiting {
+            storage
+                .cancel_worker_tasks_for_block(instance_id.0, &node.block_id.0)
+                .await?;
+        }
+    }
+
+    // Mark every descendant as Cancelled.
+    for id in to_cancel {
+        storage.update_node_state(id, NodeState::Cancelled).await?;
+    }
+
+    Ok(())
+}
+
 /// Activate all `Pending` children by flipping them to `Running`.
 ///
-/// Every composite handler (`race`, `router`, `try_catch`, `parallel`, `loop`,
-/// `foreach`, `cancellation_scope`) needs the same "wake up pending descendants so the
-/// scheduler can dispatch them" step. Centralizing it here keeps the
-/// transition atomic and the tracing consistent, and lets handlers focus on
-/// their own branching/completion logic.
-///
-/// Silently skips any child not in `Pending`; caller decides whether to check
-/// terminal state beforehand.
+/// Use this for composites that need concurrent fan-out (`race`, `parallel`).
+/// For sequential bodies use [`activate_first_pending_child`] so that only
+/// the cursor block runs and subsequent blocks remain Pending until their
+/// predecessor finishes.
 pub async fn activate_pending_children(
     storage: &dyn StorageBackend,
     children: &[&ExecutionNode],
@@ -877,6 +918,21 @@ pub async fn activate_pending_children(
         .collect();
     if !pending_ids.is_empty() {
         storage.batch_activate_nodes(&pending_ids).await?;
+    }
+    Ok(())
+}
+
+/// Activate only the first `Pending` child (sequential cursor semantics).
+///
+/// Used by composites whose body is an ordered sequence: `router` branches,
+/// `try_catch` phases, `loop` bodies, and `for_each` bodies. Activating every
+/// pending child at once would turn sequential execution into parallel fan-out.
+pub async fn activate_first_pending_child(
+    storage: &dyn StorageBackend,
+    children: &[&ExecutionNode],
+) -> Result<(), EngineError> {
+    if let Some(child) = children.iter().find(|c| c.state == NodeState::Pending) {
+        storage.update_node_state(child.id, NodeState::Running).await?;
     }
     Ok(())
 }

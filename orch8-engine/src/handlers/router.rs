@@ -87,10 +87,11 @@ pub async fn execute_router(
         }
     }
 
-    // Activate selected branch children.
+    // Activate selected branch children — sequential cursor semantics.
+    // Only the first Pending child should start; later blocks wait their turn.
     let branch_children = evaluator::children_of(tree, node.id, Some(branch_idx));
 
-    evaluator::activate_pending_children(storage, &branch_children).await?;
+    evaluator::activate_first_pending_child(storage, &branch_children).await?;
 
     if branch_children.is_empty() || evaluator::all_terminal(&branch_children) {
         if !branch_children.is_empty() && evaluator::any_failed(&branch_children) {

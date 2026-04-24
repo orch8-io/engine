@@ -26,8 +26,8 @@ pub async fn execute_try_catch(
 
     // Phase 1: Activate and wait for try block.
     if !try_children.is_empty() && !evaluator::all_terminal(&try_children) {
-        // Activate pending try children.
-        evaluator::activate_pending_children(storage, &try_children).await?;
+        // Sequential cursor: only the first Pending try child should start.
+        evaluator::activate_first_pending_child(storage, &try_children).await?;
         return Ok(true);
     }
 
@@ -59,8 +59,8 @@ pub async fn execute_try_catch(
                 );
             }
 
-            // Activate catch children.
-            evaluator::activate_pending_children(storage, &catch_children).await?;
+            // Sequential cursor: only the first Pending catch child should start.
+            evaluator::activate_first_pending_child(storage, &catch_children).await?;
             return Ok(true);
         }
     } else if !try_failed {
@@ -76,7 +76,8 @@ pub async fn execute_try_catch(
 
     // Phase 3: Finally block always runs.
     if !finally_children.is_empty() && !evaluator::all_terminal(&finally_children) {
-        evaluator::activate_pending_children(storage, &finally_children).await?;
+        // Sequential cursor: only the first Pending finally child should start.
+        evaluator::activate_first_pending_child(storage, &finally_children).await?;
         return Ok(true);
     }
 

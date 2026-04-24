@@ -634,11 +634,8 @@ async fn a4_try_catch_branch_competes_fairly_in_race() {
         NodeState::Completed,
         "race must complete once branch 1 (step_fast) finishes — race.rs:39-66"
     );
-    // The losing direct child (try_catch node) is cancelled by race.rs:41-58.
-    // The nested try_block/catch_block children are NOT recursively cancelled
-    // by the race handler — that gap is documented above and out of scope
-    // here. We pin it explicitly so a future recursive-cancel fix trips this
-    // assertion and forces an intentional update.
+    // The losing direct child (try_catch node) and its entire subtree are
+    // recursively cancelled when the race decides.
     assert_eq!(
         state_of(&final_tree, "tc"),
         NodeState::Cancelled,
@@ -646,14 +643,13 @@ async fn a4_try_catch_branch_competes_fairly_in_race() {
     );
     assert_eq!(
         state_of(&final_tree, "step_slow"),
-        NodeState::Running,
-        "current behaviour: race.rs does not recursively cancel composite grandchildren; \
-         step_slow remains Running. Flip this when recursive cancellation is added."
+        NodeState::Cancelled,
+        "recursive cancellation: losing branch's descendant step_slow must be cancelled"
     );
     assert_eq!(
         state_of(&final_tree, "noop_fast"),
-        NodeState::Pending,
-        "catch_block child was never activated — A4 core invariant held through race completion"
+        NodeState::Cancelled,
+        "recursive cancellation: losing branch's catch_block child must be cancelled"
     );
 }
 

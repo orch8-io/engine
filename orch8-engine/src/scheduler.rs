@@ -1099,6 +1099,17 @@ async fn process_instance_tree(
                 .await?
                 .map_or(InstanceState::Running, |i| i.state);
 
+            // If a signal (pause / cancel) or concurrent writer already moved
+            // the instance out of Running, do not overwrite it.
+            if current == InstanceState::Paused || current.is_terminal() {
+                debug!(
+                    instance_id = %instance_id,
+                    current = %current,
+                    "instance already moved by signal or concurrent writer — skipping terminal transition"
+                );
+                return Ok(());
+            }
+
             // Distinguish user-initiated cancel from genuine failure: a
             // Cancelled root node (and no Failed root) means the instance
             // was cancelled, not that a step failed.

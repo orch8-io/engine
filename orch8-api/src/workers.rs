@@ -215,12 +215,12 @@ pub(crate) async fn complete_task(
     else {
         return Ok(StatusCode::OK);
     };
-    if instance.state.is_terminal() {
+    if instance.state.is_terminal() || instance.state == InstanceState::Paused {
         tracing::info!(
             instance_id = %task.instance_id,
             state = %instance.state,
             block_id = %task_block_id,
-            "external worker completion arrived for terminal instance — task accepted, transition skipped"
+            "external worker completion arrived for terminal/paused instance — task accepted, transition skipped"
         );
         // Still roll the external work into the breaker — the handler's
         // dependency did succeed, and withholding the signal would leave
@@ -382,12 +382,12 @@ pub(crate) async fn fail_task(
     // Without this, a late worker failure can resurrect or overwrite a terminal
     // instance — the same race that `complete_task` guards against.
     if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await {
-        if inst.state.is_terminal() {
+        if inst.state.is_terminal() || inst.state == InstanceState::Paused {
             tracing::info!(
                 instance_id = %task.instance_id,
                 state = %inst.state,
                 block_id = %task.block_id,
-                "external worker failure arrived for terminal instance — task accepted, transition skipped"
+                "external worker failure arrived for terminal/paused instance — task accepted, transition skipped"
             );
             if let (Some(cb), Some(tenant)) =
                 (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())

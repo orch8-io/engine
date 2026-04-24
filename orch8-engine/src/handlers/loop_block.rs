@@ -130,9 +130,10 @@ pub async fn execute_loop(
 
     let children = evaluator::children_of(tree, node.id, None);
 
-    // Start-of-iteration: activate any Pending body children so the next
-    // evaluator tick will run them.
-    evaluator::activate_pending_children(storage, &children).await?;
+    // Start-of-iteration: activate the first Pending body child so the next
+    // evaluator tick will run it. Sequential cursor semantics — we must not
+    // fan-out all pending blocks in the loop body.
+    evaluator::activate_first_pending_child(storage, &children).await?;
 
     // End-of-iteration: if every body child is terminal, either fail (on
     // any child failure) or advance the counter and reset for the next

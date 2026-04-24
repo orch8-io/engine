@@ -179,15 +179,16 @@ pub async fn execute_for_each(
     let children = evaluator::children_of(tree, node.id, None);
 
     // Start-of-iteration: when the body children are still Pending, bind
-    // `item_var = items[index]` and activate them. We gate on "any child
-    // Pending" so the bind happens exactly once per iteration — subsequent
-    // ticks while the body is running observe no Pending children and skip.
+    // `item_var = items[index]` and activate the first one. We gate on "any
+    // child Pending" so the bind happens exactly once per iteration —
+    // subsequent ticks while the body is running observe no Pending children
+    // and skip. Sequential cursor: only the first Pending child should start.
     let has_pending_child = children.iter().any(|c| c.state == NodeState::Pending);
     if has_pending_child {
         if let Some(item) = snapshot_items.get(index as usize) {
             bind_item_var(storage, instance, &fe_def.item_var, item.clone()).await?;
         }
-        evaluator::activate_pending_children(storage, &children).await?;
+        evaluator::activate_first_pending_child(storage, &children).await?;
     }
 
     // End-of-iteration: if every body child is terminal, either fail (on
