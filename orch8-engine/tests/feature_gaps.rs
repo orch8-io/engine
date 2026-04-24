@@ -16,7 +16,9 @@ use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+use orch8_types::output::BlockOutput;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
+use uuid::Uuid;
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -282,4 +284,337 @@ async fn circuit_breaker_records_success_and_resets_failures() {
         ),
         "success must close breaker"
     );
+}
+
+// --------------------------------------------------------------------------
+// Atomic worker completion + CAS guard
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn save_output_complete_node_and_transition_is_atomic() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let seq = SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        name: "atomic-test".into(),
+        version: 1,
+        deprecated: false,
+        blocks: vec![BlockDefinition::Step(Box::new(mk_step("s1", "noop")))],
+        interceptors: None,
+        created_at: Utc::now(),
+    };
+    storage.create_sequence(&seq).await.unwrap();
+
+    let instance = mk_instance(seq.id);
+    storage.create_instance(&instance).await.unwrap();
+
+    let node = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance.id,
+        block_id: BlockId("s1".into()),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Waiting,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&node).await.unwrap();
+
+    let output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: BlockId("s1".into()),
+        output: json!({"ok": true}),
+        output_ref: None,
+        output_size: 13,
+        attempt: 1,
+        created_at: Utc::now(),
+    };
+
+    let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
+    storage_dyn
+        .save_output_complete_node_and_transition(
+            &output,
+            node.id,
+            instance.id,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
+
+    let tree = storage_dyn.get_execution_tree(instance.id).await.unwrap();
+    assert_eq!(
+        tree[0].state,
+        NodeState::Completed,
+        "node must be Completed"
+    );
+
+    let inst = storage_dyn
+        .get_instance(instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inst.state,
+        InstanceState::Scheduled,
+        "instance must be Scheduled"
+    );
+
+    let outs = storage_dyn.get_all_outputs(instance.id).await.unwrap();
+    assert_eq!(outs.len(), 1, "output must be saved");
+}
+
+#[tokio::test]
+async fn save_output_complete_node_and_transition_rejects_terminal_instance() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let seq = SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        name: "cas-test".into(),
+        version: 1,
+        deprecated: false,
+        blocks: vec![BlockDefinition::Step(Box::new(mk_step("s1", "noop")))],
+        interceptors: None,
+        created_at: Utc::now(),
+    };
+    storage.create_sequence(&seq).await.unwrap();
+
+    let mut instance = mk_instance(seq.id);
+    instance.state = InstanceState::Completed;
+    storage.create_instance(&instance).await.unwrap();
+
+    let node = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance.id,
+        block_id: BlockId("s1".into()),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Waiting,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&node).await.unwrap();
+
+    let output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: BlockId("s1".into()),
+        output: json!({"ok": true}),
+        output_ref: None,
+        output_size: 13,
+        attempt: 1,
+        created_at: Utc::now(),
+    };
+
+    let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
+    let result = storage_dyn
+        .save_output_complete_node_and_transition(
+            &output,
+            node.id,
+            instance.id,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(orch8_types::error::StorageError::TerminalTarget { .. })
+        ),
+        "must reject terminal instance with TerminalTarget"
+    );
+
+    // Transaction rolled back — node and output must be untouched.
+    let tree = storage_dyn.get_execution_tree(instance.id).await.unwrap();
+    assert_eq!(
+        tree[0].state,
+        NodeState::Waiting,
+        "node must still be Waiting"
+    );
+
+    let outs = storage_dyn.get_all_outputs(instance.id).await.unwrap();
+    assert!(outs.is_empty(), "no output must be saved");
+}
+
+// --------------------------------------------------------------------------
+// SQLite get_batch chunking
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sqlite_get_batch_chunking_does_not_drop_keys() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let instance = InstanceId::new();
+
+    // Seed 450 outputs to exercise the 400-key chunk boundary.
+    let mut keys = Vec::with_capacity(450);
+    for i in 0..450 {
+        let block_id = BlockId(format!("block_{i:03}"));
+        let out = BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: instance,
+            block_id: block_id.clone(),
+            output: json!({"idx": i}),
+            output_ref: None,
+            output_size: 10,
+            attempt: 1,
+            created_at: Utc::now(),
+        };
+        storage.save_block_output(&out).await.unwrap();
+        keys.push((instance, block_id));
+    }
+
+    let batch = storage.get_block_outputs_batch(&keys).await.unwrap();
+    assert_eq!(batch.len(), 450, "batch must return all 450 outputs");
+
+    // Spot-check a few keys.
+    assert_eq!(batch[&keys[0]].output, json!({"idx": 0}));
+    assert_eq!(batch[&keys[399]].output, json!({"idx": 399}));
+    assert_eq!(batch[&keys[449]].output, json!({"idx": 449}));
+}
+
+// --------------------------------------------------------------------------
+// Sequential composite activation (regression for ordered-body fan-out)
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn activate_first_pending_child_only_flips_first() {
+    use orch8_engine::evaluator;
+
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let instance = InstanceId::new();
+
+    // Parent node
+    let parent = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("parent".into()),
+        parent_id: None,
+        block_type: BlockType::Router,
+        branch_index: None,
+        state: NodeState::Running,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&parent).await.unwrap();
+
+    // Two pending children
+    let child_a = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("a".into()),
+        parent_id: Some(parent.id),
+        block_type: BlockType::Step,
+        branch_index: Some(0),
+        state: NodeState::Pending,
+        started_at: None,
+        completed_at: None,
+    };
+    let child_b = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("b".into()),
+        parent_id: Some(parent.id),
+        block_type: BlockType::Step,
+        branch_index: Some(0),
+        state: NodeState::Pending,
+        started_at: None,
+        completed_at: None,
+    };
+    storage.create_execution_node(&child_a).await.unwrap();
+    storage.create_execution_node(&child_b).await.unwrap();
+
+    let tree = storage.get_execution_tree(instance).await.unwrap();
+    let children: Vec<&ExecutionNode> = tree
+        .iter()
+        .filter(|n| n.parent_id == Some(parent.id))
+        .collect();
+
+    evaluator::activate_first_pending_child(&storage, &children)
+        .await
+        .unwrap();
+
+    let after = storage.get_execution_tree(instance).await.unwrap();
+    let state_a = after.iter().find(|n| n.block_id.0 == "a").unwrap().state;
+    let state_b = after.iter().find(|n| n.block_id.0 == "b").unwrap().state;
+
+    assert_eq!(
+        state_a,
+        NodeState::Running,
+        "first pending child must activate"
+    );
+    assert_eq!(
+        state_b,
+        NodeState::Pending,
+        "second pending child must stay Pending"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Race recursive cancellation
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cancel_subtree_recursively_cancels_deep_descendants() {
+    use orch8_engine::evaluator;
+
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let instance = InstanceId::new();
+
+    // Root -> mid -> deep
+    let root = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("root".into()),
+        parent_id: None,
+        block_type: BlockType::Parallel,
+        branch_index: None,
+        state: NodeState::Running,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&root).await.unwrap();
+
+    let mid = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("mid".into()),
+        parent_id: Some(root.id),
+        block_type: BlockType::Parallel,
+        branch_index: Some(0),
+        state: NodeState::Running,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&mid).await.unwrap();
+
+    let deep = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: instance,
+        block_id: BlockId("deep".into()),
+        parent_id: Some(mid.id),
+        block_type: BlockType::Step,
+        branch_index: Some(0),
+        state: NodeState::Waiting,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    storage.create_execution_node(&deep).await.unwrap();
+
+    let tree = storage.get_execution_tree(instance).await.unwrap();
+    evaluator::cancel_subtree(&storage, instance, &tree, root.id)
+        .await
+        .unwrap();
+
+    let after = storage.get_execution_tree(instance).await.unwrap();
+    let state_mid = after.iter().find(|n| n.block_id.0 == "mid").unwrap().state;
+    let state_deep = after.iter().find(|n| n.block_id.0 == "deep").unwrap().state;
+
+    assert_eq!(state_mid, NodeState::Cancelled, "mid must be cancelled");
+    assert_eq!(state_deep, NodeState::Cancelled, "deep must be cancelled");
 }

@@ -22,6 +22,54 @@ impl Orch8GrpcService {
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
         Self { storage }
     }
+
+    /// Atomically save worker output, mark the execution node Completed, and
+    /// transition the instance state. The instance UPDATE is CAS-guarded: if
+    /// the instance became terminal/paused after our read, the tx rolls back
+    /// and we return `Ok(())` (the late completion is harmlessly dropped).
+    async fn atomically_complete_node(
+        &self,
+        task: &orch8_types::worker::WorkerTask,
+        block_output: &orch8_types::output::BlockOutput,
+        node_id: orch8_types::ids::ExecutionNodeId,
+        merged_context: bool,
+        context: &orch8_types::context::ExecutionContext,
+    ) -> Result<(), Status> {
+        let result = if merged_context {
+            self.storage
+                .save_output_complete_node_merge_context_and_transition(
+                    block_output,
+                    node_id,
+                    task.instance_id,
+                    context,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        } else {
+            self.storage
+                .save_output_complete_node_and_transition(
+                    block_output,
+                    node_id,
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
+                tracing::info!(
+                    instance_id = %task.instance_id,
+                    block_id = %task.block_id.0,
+                    "gRPC worker completion CAS failed — instance became terminal/paused after read"
+                );
+                Ok(())
+            }
+            Err(e) => Err(storage_err(e)),
+        }
+    }
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, Status> {
@@ -770,11 +818,11 @@ impl Orch8Service for Orch8GrpcService {
         else {
             return Ok(Response::new(proto::Empty {}));
         };
-        if instance.state.is_terminal() {
+        if instance.state.is_terminal() || instance.state == InstanceState::Paused {
             tracing::info!(
                 instance_id = %task.instance_id,
                 state = %instance.state,
-                "gRPC worker completion for terminal instance; task accepted, transition skipped"
+                "gRPC worker completion for terminal/paused instance; task accepted, transition skipped"
             );
             return Ok(Response::new(proto::Empty {}));
         }
@@ -803,30 +851,8 @@ impl Orch8Service for Orch8GrpcService {
             attempt: task.attempt,
             created_at: chrono::Utc::now(),
         };
-        if merged_context {
-            self.storage
-                .save_output_merge_context_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-                .map_err(storage_err)?;
-        } else {
-            self.storage
-                .save_output_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-                .map_err(storage_err)?;
-        }
 
-        // Update execution tree node to Completed if present.
+        // Atomic: save output + complete node + transition instance in one tx.
         let tree = self
             .storage
             .get_execution_tree(task.instance_id)
@@ -840,10 +866,14 @@ impl Orch8Service for Orch8GrpcService {
                         | orch8_types::execution::NodeState::Waiting
                 )
         }) {
-            self.storage
-                .update_node_state(node.id, orch8_types::execution::NodeState::Completed)
-                .await
-                .map_err(storage_err)?;
+            self.atomically_complete_node(
+                &task,
+                &block_output,
+                node.id,
+                merged_context,
+                &instance.context,
+            )
+            .await?;
         }
 
         Ok(Response::new(proto::Empty {}))

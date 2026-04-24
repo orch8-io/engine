@@ -488,6 +488,46 @@ impl StorageBackend for SqliteStorage {
         .await
     }
 
+    async fn save_output_complete_node_and_transition(
+        &self,
+        output: &BlockOutput,
+        node_id: orch8_types::ids::ExecutionNodeId,
+        instance_id: InstanceId,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        outputs::save_output_complete_node_and_transition(
+            self,
+            output,
+            node_id,
+            instance_id,
+            new_state,
+            next_fire_at,
+        )
+        .await
+    }
+
+    async fn save_output_complete_node_merge_context_and_transition(
+        &self,
+        output: &BlockOutput,
+        node_id: orch8_types::ids::ExecutionNodeId,
+        instance_id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        outputs::save_output_complete_node_merge_context_and_transition(
+            self,
+            output,
+            node_id,
+            instance_id,
+            context,
+            new_state,
+            next_fire_at,
+        )
+        .await
+    }
+
     async fn delete_block_outputs(
         &self,
         instance_id: InstanceId,

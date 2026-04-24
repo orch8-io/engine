@@ -435,6 +435,44 @@ pub trait StorageBackend: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Atomic: save block output + mark execution node Completed + update
+    /// instance state in a single transaction.
+    ///
+    /// Closes the race where the scheduler claims an instance between
+    /// `save_output_and_transition` and `update_node_state`, observes the
+    /// node still Waiting, and parks the instance back to Waiting.
+    ///
+    /// The instance UPDATE is guarded by a CAS: it only succeeds if the
+    /// current state is NOT terminal or paused. If the instance became
+    /// terminal/paused between the caller's read and this write, a
+    /// [`StorageError::TerminalTarget`] is returned.
+    async fn save_output_complete_node_and_transition(
+        &self,
+        output: &BlockOutput,
+        node_id: orch8_types::ids::ExecutionNodeId,
+        instance_id: InstanceId,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
+    /// Atomic: save block output + mark execution node Completed + merge
+    /// context + update instance state in a single transaction.
+    ///
+    /// Combines the crash-safety of `save_output_merge_context_and_transition`
+    /// with the node-state atomicity of `save_output_complete_node_and_transition`.
+    ///
+    /// The instance UPDATE is guarded by a CAS (see
+    /// [`Self::save_output_complete_node_and_transition`]).
+    async fn save_output_complete_node_merge_context_and_transition(
+        &self,
+        output: &BlockOutput,
+        node_id: orch8_types::ids::ExecutionNodeId,
+        instance_id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
     /// Delete every `block_outputs` row for `(instance_id, block_id)`.
     ///
     /// Returns the number of rows actually removed.

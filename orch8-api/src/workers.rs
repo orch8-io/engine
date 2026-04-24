@@ -201,12 +201,7 @@ pub(crate) async fn complete_task(
     };
 
     // Re-read instance state before propagating. Between task-claim and
-    // completion a cancel/admin-fail could have terminated the instance;
-    // `save_output_and_transition` updates by id only, so without this
-    // guard a late completion resurrects a terminal instance back to
-    // Scheduled. See `save_output_and_transition` in
-    // orch8-storage/src/{postgres,sqlite}/outputs.rs — there is no
-    // conditional predicate on from-state.
+    // completion a cancel/admin-fail could have terminated the instance.
     let Some(mut instance) = state
         .storage
         .get_instance(task.instance_id)
@@ -234,19 +229,8 @@ pub(crate) async fn complete_task(
         return Ok(StatusCode::OK);
     }
 
-    // Merge step output into context.data BEFORE transitioning to Scheduled.
-    // This prevents a race where the scheduler claims the instance before
-    // the context is updated, causing downstream blocks (routers, loops)
-    // to evaluate conditions against stale context.
-    //
-    // Crash-safety: when there is a context merge we go through the atomic
-    // `save_output_merge_context_and_transition` so output INSERT + context
-    // UPDATE + state transition commit together. A process crash between
-    // the two legacy calls could leave merged context but the old state
-    // (`Running`), stranding the instance until manual intervention.
+    // Merge step output into context.data BEFORE the atomic write.
     let merged_context = if let Some(obj) = block_output.output.as_object() {
-        // Ensure context.data is an object (it may be null/Null for
-        // instances created without initial context data).
         if instance.context.data.is_null() || !instance.context.data.is_object() {
             instance.context.data = serde_json::Value::Object(serde_json::Map::new());
         }
@@ -262,44 +246,60 @@ pub(crate) async fn complete_task(
         false
     };
 
-    if merged_context {
-        state
-            .storage
-            .save_output_merge_context_and_transition(
-                &block_output,
-                task.instance_id,
-                &instance.context,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-    } else {
-        state
-            .storage
-            .save_output_and_transition(
-                &block_output,
-                task.instance_id,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-    }
-
+    // Find the execution node that this worker task corresponds to.
+    // We do this BEFORE the atomic write so we can include the node
+    // completion in the same transaction, closing the race where the
+    // scheduler claims the instance between output-save and node-complete.
     let tree = state
         .storage
         .get_execution_tree(task.instance_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    if let Some(node) = tree.iter().find(|n| {
+    let node = tree.iter().find(|n| {
         n.block_id == task_block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
-    }) {
-        state
-            .storage
-            .update_node_state(node.id, NodeState::Completed)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
+    });
+
+    let cas_err = if let Some(node) = node {
+        let result = if merged_context {
+            state
+                .storage
+                .save_output_complete_node_merge_context_and_transition(
+                    &block_output,
+                    node.id,
+                    task.instance_id,
+                    &instance.context,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        } else {
+            state
+                .storage
+                .save_output_complete_node_and_transition(
+                    &block_output,
+                    node.id,
+                    task.instance_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+        };
+        match result {
+            Ok(()) => false,
+            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
+            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
+        }
+    } else {
+        // Node not found or already terminal — save output but don't transition.
+        false
+    };
+
+    if cas_err {
+        tracing::info!(
+            instance_id = %task.instance_id,
+            block_id = %task_block_id,
+            "worker completion CAS failed — instance became terminal/paused after read"
+        );
     }
 
     // Roll external-worker success into the same breaker registry the

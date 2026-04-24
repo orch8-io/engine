@@ -41,6 +41,8 @@ pub(super) async fn get(
     row.as_ref().map(row_to_output).transpose()
 }
 
+const GET_BATCH_CHUNK_SIZE: usize = 400;
+
 pub(super) async fn get_batch(
     storage: &SqliteStorage,
     keys: &[(InstanceId, BlockId)],
@@ -49,25 +51,34 @@ pub(super) async fn get_batch(
         return Ok(std::collections::HashMap::new());
     }
 
-    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM block_outputs WHERE ");
-    let mut separated = qb.separated(" OR ");
-    for (inst_id, block_id) in keys {
-        separated.push("(instance_id=");
-        separated.push_bind(inst_id.0.to_string());
-        separated.push(" AND block_id=");
-        separated.push_bind(&block_id.0);
-        separated.push(")");
-    }
-    qb.push(" ORDER BY instance_id, block_id, created_at DESC");
+    // SQLite has a default limit of 999 host parameters per query. Each key
+    // uses 2 binds, so chunk at 400 to stay well under the limit and avoid
+    // planner overhead from enormous OR chains.
+    let mut map = std::collections::HashMap::with_capacity(keys.len());
 
-    let rows = qb.build().fetch_all(&storage.pool).await?;
-    let mut map = std::collections::HashMap::with_capacity(rows.len().min(keys.len()));
-    for row in rows {
-        let out = row_to_output(&row)?;
-        let key = (out.instance_id, out.block_id.clone());
-        // Because we order by created_at DESC, the first row for each key is the most recent.
-        map.entry(key).or_insert(out);
+    for chunk in keys.chunks(GET_BATCH_CHUNK_SIZE) {
+        let mut qb = sqlx::QueryBuilder::new("SELECT * FROM block_outputs WHERE ");
+        for (i, (inst_id, block_id)) in chunk.iter().enumerate() {
+            if i > 0 {
+                qb.push(" OR ");
+            }
+            qb.push("(instance_id=");
+            qb.push_bind(inst_id.0.to_string());
+            qb.push(" AND block_id=");
+            qb.push_bind(&block_id.0);
+            qb.push(")");
+        }
+        qb.push(" ORDER BY instance_id, block_id, created_at DESC");
+
+        let rows = qb.build().fetch_all(&storage.pool).await?;
+        for row in rows {
+            let out = row_to_output(&row)?;
+            let key = (out.instance_id, out.block_id.clone());
+            // Because we order by created_at DESC, the first row for each key is the most recent.
+            map.entry(key).or_insert(out);
+        }
     }
+
     Ok(map)
 }
 
@@ -271,6 +282,114 @@ pub(super) async fn save_output_merge_context_and_transition(
     .bind(ts(chrono::Utc::now()))
     .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomic: INSERT `block_outputs` + UPDATE `execution_tree` + UPDATE `task_instances`
+/// with a CAS guard that rejects the update if the instance is terminal or paused.
+pub(super) async fn save_output_complete_node_and_transition(
+    storage: &SqliteStorage,
+    output: &BlockOutput,
+    node_id: orch8_types::ids::ExecutionNodeId,
+    instance_id: InstanceId,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+    )
+    .bind(output.id.to_string())
+    .bind(output.instance_id.0.to_string())
+    .bind(&output.block_id.0)
+    .bind(serde_json::to_string(&output.output)?)
+    .bind(&output.output_ref)
+    .bind(output.output_size as i64)
+    .bind(output.attempt as i64)
+    .bind(ts(output.created_at))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE execution_tree SET state='completed' WHERE id=?1")
+        .bind(node_id.0.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let result = sqlx::query(
+        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
+    )
+    .bind(instance_id.0.to_string())
+    .bind(new_state.to_string())
+    .bind(next_fire_at.map(ts))
+    .bind(ts(chrono::Utc::now()))
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instances".into(),
+            id: instance_id.0.to_string(),
+        });
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomic: INSERT `block_outputs` + UPDATE `execution_tree` + UPDATE `task_instances` (context, state)
+/// with a CAS guard that rejects the update if the instance is terminal or paused.
+pub(super) async fn save_output_complete_node_merge_context_and_transition(
+    storage: &SqliteStorage,
+    output: &BlockOutput,
+    node_id: orch8_types::ids::ExecutionNodeId,
+    instance_id: InstanceId,
+    context: &ExecutionContext,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+
+    sqlx::query(
+        "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+    )
+    .bind(output.id.to_string())
+    .bind(output.instance_id.0.to_string())
+    .bind(&output.block_id.0)
+    .bind(serde_json::to_string(&output.output)?)
+    .bind(&output.output_ref)
+    .bind(output.output_size as i64)
+    .bind(output.attempt as i64)
+    .bind(ts(output.created_at))
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE execution_tree SET state='completed' WHERE id=?1")
+        .bind(node_id.0.to_string())
+        .execute(&mut *tx)
+        .await?;
+
+    let result = sqlx::query(
+        "UPDATE task_instances SET context=?2, state=?3, next_fire_at=?4, updated_at=?5 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
+    )
+    .bind(instance_id.0.to_string())
+    .bind(serde_json::to_string(context)?)
+    .bind(new_state.to_string())
+    .bind(next_fire_at.map(ts))
+    .bind(ts(chrono::Utc::now()))
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instances".into(),
+            id: instance_id.0.to_string(),
+        });
+    }
 
     tx.commit().await?;
     Ok(())
