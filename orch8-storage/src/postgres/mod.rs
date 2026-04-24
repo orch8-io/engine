@@ -76,7 +76,7 @@ impl PostgresStorage {
         Ok(Self { pool })
     }
 
-    pub fn pool(&self) -> &PgPool {
+    pub const fn pool(&self) -> &PgPool {
         &self.pool
     }
 

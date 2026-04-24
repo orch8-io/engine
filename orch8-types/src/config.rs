@@ -12,7 +12,7 @@ pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
 
 impl SecretString {
     #[must_use]
-    pub fn new(s: String) -> Self {
+    pub const fn new(s: String) -> Self {
         Self(s)
     }
 
@@ -25,7 +25,7 @@ impl SecretString {
 
     /// Return a safe-to-log placeholder (`""` when empty, `[REDACTED]` otherwise).
     #[must_use]
-    pub fn redact(&self) -> &'static str {
+    pub const fn redact(&self) -> &'static str {
         if self.0.is_empty() {
             ""
         } else {
@@ -34,7 +34,7 @@ impl SecretString {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
@@ -139,19 +139,20 @@ fn default_database_url() -> SecretString {
     SecretString::default()
 }
 
-fn default_max_connections() -> u32 {
+const fn default_max_connections() -> u32 {
     64
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
 /// How the engine decides which payloads leave the inline context and
-/// land in `externalized_state`. Ships as `Threshold { bytes: 65536 }`
-/// — oversized fields go external, everything smaller stays inline for
-/// zero-RTT reads.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// land in `externalized_state`.
+///
+/// Ships as `Threshold { bytes: 65536 }` — oversized fields go external,
+/// everything smaller stays inline for zero-RTT reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExternalizationMode {
     /// Never externalize — every payload stays inline. Small deployments,
@@ -177,7 +178,7 @@ impl ExternalizationMode {
     /// The size threshold for `context.data` fields (in bytes), or `None`
     /// if this mode does not externalize context data.
     #[must_use]
-    pub fn context_threshold(&self) -> Option<u32> {
+    pub const fn context_threshold(&self) -> Option<u32> {
         match self {
             Self::Never | Self::AlwaysOutputs => None,
             Self::Threshold { bytes } => Some(*bytes),
@@ -186,7 +187,7 @@ impl ExternalizationMode {
 
     /// Returns `true` iff block outputs should always be externalized.
     #[must_use]
-    pub fn always_externalize_outputs(&self) -> bool {
+    pub const fn always_externalize_outputs(&self) -> bool {
         matches!(self, Self::AlwaysOutputs)
     }
 }
@@ -281,27 +282,27 @@ impl Default for SchedulerConfig {
     }
 }
 
-fn default_worker_reaper_tick_secs() -> u64 {
+const fn default_worker_reaper_tick_secs() -> u64 {
     30
 }
 
-fn default_worker_reaper_stale_secs() -> u64 {
+const fn default_worker_reaper_stale_secs() -> u64 {
     60
 }
 
-fn default_node_reaper_tick_secs() -> u64 {
+const fn default_node_reaper_tick_secs() -> u64 {
     60
 }
 
-fn default_node_reaper_stale_secs() -> u64 {
+const fn default_node_reaper_stale_secs() -> u64 {
     120
 }
 
-fn default_cron_tick_secs() -> u64 {
+const fn default_cron_tick_secs() -> u64 {
     10
 }
 
-fn default_max_context_bytes() -> u32 {
+const fn default_max_context_bytes() -> u32 {
     crate::context::DEFAULT_MAX_CONTEXT_BYTES
 }
 
@@ -325,31 +326,31 @@ impl Default for WebhookConfig {
     }
 }
 
-fn default_webhook_timeout_secs() -> u64 {
+const fn default_webhook_timeout_secs() -> u64 {
     10
 }
 
-fn default_webhook_max_retries() -> u32 {
+const fn default_webhook_max_retries() -> u32 {
     3
 }
 
-fn default_tick_interval_ms() -> u64 {
+const fn default_tick_interval_ms() -> u64 {
     100
 }
 
-fn default_batch_size() -> u32 {
+const fn default_batch_size() -> u32 {
     256
 }
 
-fn default_max_concurrent() -> u32 {
+const fn default_max_concurrent() -> u32 {
     128
 }
 
-fn default_grace_period() -> u64 {
+const fn default_grace_period() -> u64 {
     30
 }
 
-fn default_stale_threshold() -> u64 {
+const fn default_stale_threshold() -> u64 {
     300
 }
 
@@ -392,7 +393,7 @@ impl Default for ApiConfig {
     }
 }
 
-fn default_cors_origins() -> String {
+const fn default_cors_origins() -> String {
     String::new()
 }
 

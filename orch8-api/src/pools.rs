@@ -34,7 +34,7 @@ pub(crate) struct CreatePoolRequest {
     pub strategy: RotationStrategy,
 }
 
-fn default_strategy() -> RotationStrategy {
+const fn default_strategy() -> RotationStrategy {
     RotationStrategy::RoundRobin
 }
 
@@ -54,7 +54,7 @@ pub(crate) struct AddResourceRequest {
     pub warmup_start_cap: u32,
 }
 
-fn default_weight() -> u32 {
+const fn default_weight() -> u32 {
     1
 }
 

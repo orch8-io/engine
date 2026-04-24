@@ -108,4 +108,5 @@ async fn grpc_create_and_get_instance_smoke() {
     let got: serde_json::Value =
         serde_json::from_str(&get_resp.into_inner().instance_json).unwrap();
     assert_eq!(got["id"], "00000000-0000-0000-0000-000000000002");
+    drop(client);
 }

@@ -241,6 +241,7 @@ pub(super) async fn check_step_rate_limit(
 }
 
 /// Check if a human-in-the-loop step has received its input signal.
+///
 /// If the response signal exists, stores it as block output and returns `false` (continue).
 /// If not received yet, pauses the instance and returns `true` (deferred).
 ///

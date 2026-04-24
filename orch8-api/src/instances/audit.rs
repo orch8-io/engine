@@ -16,7 +16,7 @@ use crate::AppState;
     params(("id" = Uuid, Path, description = "Instance ID")),
     responses((status = 200, body = Vec<orch8_types::audit::AuditLogEntry>))
 )]
-pub(crate) async fn list_audit_log(
+pub async fn list_audit_log(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

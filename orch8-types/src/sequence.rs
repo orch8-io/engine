@@ -24,6 +24,7 @@ pub struct SequenceDefinition {
 }
 
 /// A block is either a leaf (step) or a composite (parallel, race, etc.).
+///
 /// This recursive enum IS the workflow DSL.
 /// Each variant wraps its definition in `Box<T>` so the enum itself stays a
 /// single word. `StepDef` is large (14 fields with many `Option<...>`), and
@@ -157,11 +158,11 @@ pub struct SendWindow {
     pub days: Vec<u8>,
 }
 
-fn default_window_start() -> u8 {
+const fn default_window_start() -> u8 {
     9
 }
 
-fn default_window_end() -> u8 {
+const fn default_window_end() -> u8 {
     17
 }
 
@@ -189,7 +190,7 @@ pub struct ContextAccess {
     pub runtime: bool,
 }
 
-fn default_true_seq() -> bool {
+const fn default_true_seq() -> bool {
     true
 }
 
@@ -247,7 +248,7 @@ impl FieldAccess {
     /// Return `true` if _any_ field is permitted. Used by code paths that
     /// want to skip work entirely when the handler cannot read the section.
     #[must_use]
-    pub fn allows_any(&self) -> bool {
+    pub const fn allows_any(&self) -> bool {
         match self {
             Self::Bool(b) => *b,
             Self::Keyword(AccessKeyword::All) => true,
@@ -259,7 +260,7 @@ impl FieldAccess {
     /// Return the explicit field list when this is a `Fields` variant; `None`
     /// for `All`/`None` (caller must fall back to full fetch or skip).
     #[must_use]
-    pub fn required_fields(&self) -> Option<&[String]> {
+    pub const fn required_fields(&self) -> Option<&[String]> {
         match self {
             Self::Fields { fields } => Some(fields.as_slice()),
             _ => None,
@@ -381,7 +382,7 @@ pub struct RetryPolicy {
     pub backoff_multiplier: f64,
 }
 
-fn default_backoff_multiplier() -> f64 {
+const fn default_backoff_multiplier() -> f64 {
     2.0
 }
 
@@ -425,7 +426,7 @@ pub struct LoopDef {
     pub max_iterations: u32,
 }
 
-fn default_max_iterations() -> u32 {
+const fn default_max_iterations() -> u32 {
     1000
 }
 
@@ -484,6 +485,7 @@ pub struct ABSplitDef {
 }
 
 /// Cancellation scope: wraps child blocks in a non-cancellable boundary.
+///
 /// When a cancel signal is received, blocks inside a `CancellationScope`
 /// continue executing until completion. The cancel takes effect only after
 /// all scoped blocks finish.

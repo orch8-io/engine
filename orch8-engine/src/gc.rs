@@ -33,7 +33,7 @@ use crate::metrics;
 /// (pool exhaustion, connection drops) from structural ones (bad query,
 /// migration skew). The set is intentionally small — high-cardinality
 /// error labels break Prometheus.
-fn error_kind(err: &StorageError) -> &'static str {
+const fn error_kind(err: &StorageError) -> &'static str {
     match err {
         StorageError::Connection(_) => "connection",
         StorageError::Query(_) => "query",
@@ -54,19 +54,23 @@ pub const GC_BATCH_LIMIT: u32 = 1_000;
 /// Default cadence between sweep ticks.
 pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_mins(5);
 
-/// Default TTL for `emit_event_dedupe` rows. After this window a retry with
-/// the same `(parent, dedupe_key)` is no longer considered a duplicate — it
-/// will create a fresh child. Callers should not rely on dedupe beyond this
-/// window; see the `emit_event` design doc for rationale.
+/// Default TTL for `emit_event_dedupe` rows.
+///
+/// After this window a retry with the same `(parent, dedupe_key)` is no
+/// longer considered a duplicate — it will create a fresh child. Callers
+/// should not rely on dedupe beyond this window; see the `emit_event` design
+/// doc for rationale.
 ///
 /// Encoded as hours (`30` days × `24` hours = `720` hours) because
 /// `Duration::from_days` is not yet a `const fn` on the toolchain this crate
 /// targets.
 pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_hours(720);
 
-/// Run the expiry sweeper until `cancel` fires. Each tick calls
-/// [`StorageBackend::delete_expired_externalized_state`] once with
-/// [`GC_BATCH_LIMIT`] and then sweeps [`StorageBackend::delete_expired_emit_event_dedupe`]
+/// Run the expiry sweeper until `cancel` fires.
+///
+/// Each tick calls [`StorageBackend::delete_expired_externalized_state`] once
+/// with [`GC_BATCH_LIMIT`] and then sweeps
+/// [`StorageBackend::delete_expired_emit_event_dedupe`]
 /// with the same bound. Continued backlog naturally spreads across ticks.
 ///
 /// Both tables share the same tick so the engine only maintains one timer;

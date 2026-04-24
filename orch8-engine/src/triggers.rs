@@ -47,10 +47,12 @@ pub async fn run_trigger_loop(
             () = cancel.cancelled() => {
                 info!("trigger processor loop cancelled");
                 // Cancel all active listeners.
-                let active = active.read().await;
-                for (slug, token) in &active.listeners {
-                    debug!(slug, "cancelling trigger listener");
-                    token.cancel();
+                {
+                    let active = active.read().await;
+                    for (slug, token) in &active.listeners {
+                        debug!(slug, "cancelling trigger listener");
+                        token.cancel();
+                    }
                 }
                 return;
             }
@@ -70,72 +72,74 @@ async fn sync_triggers(
 ) -> Result<(), orch8_types::error::StorageError> {
     let triggers = storage.list_triggers(None).await?;
 
-    let mut active = active.write().await;
+    {
+        let mut active = active.write().await;
 
-    // Build set of slugs that should be active. `Webhook` and `Event` triggers
-    // are fired synchronously via HTTP routes, not by background listeners —
-    // exclude them here so we don't warn about "unsupported trigger type".
-    let desired: HashMap<String, &TriggerDef> = triggers
-        .iter()
-        .filter(|t| {
-            t.enabled && !matches!(t.trigger_type, TriggerType::Webhook | TriggerType::Event)
-        })
-        .map(|t| (t.slug.clone(), t))
-        .collect();
+        // Build set of slugs that should be active. `Webhook` and `Event` triggers
+        // are fired synchronously via HTTP routes, not by background listeners —
+        // exclude them here so we don't warn about "unsupported trigger type".
+        let desired: HashMap<String, &TriggerDef> = triggers
+            .iter()
+            .filter(|t| {
+                t.enabled && !matches!(t.trigger_type, TriggerType::Webhook | TriggerType::Event)
+            })
+            .map(|t| (t.slug.clone(), t))
+            .collect();
 
-    // Stop listeners for triggers that were removed or disabled.
-    let to_remove: Vec<String> = active
-        .listeners
-        .keys()
-        .filter(|slug| !desired.contains_key(*slug))
-        .cloned()
-        .collect();
-    for slug in to_remove {
-        if let Some(token) = active.listeners.remove(&slug) {
-            info!(slug, "stopping trigger listener");
-            token.cancel();
-        }
-    }
-
-    // Start listeners for new triggers.
-    for (slug, trigger) in &desired {
-        if active.listeners.contains_key(slug) {
-            continue;
+        // Stop listeners for triggers that were removed or disabled.
+        let to_remove: Vec<String> = active
+            .listeners
+            .keys()
+            .filter(|slug| !desired.contains_key(*slug))
+            .cloned()
+            .collect();
+        for slug in to_remove {
+            if let Some(token) = active.listeners.remove(&slug) {
+                info!(slug, "stopping trigger listener");
+                token.cancel();
+            }
         }
 
-        let child_cancel = parent_cancel.child_token();
-        active.listeners.insert(slug.clone(), child_cancel.clone());
+        // Start listeners for new triggers.
+        for (slug, trigger) in &desired {
+            if active.listeners.contains_key(slug) {
+                continue;
+            }
 
-        match trigger.trigger_type {
-            #[cfg(feature = "nats")]
-            TriggerType::Nats => {
-                let storage = Arc::clone(storage);
-                let trigger = (*trigger).clone();
-                let cancel = child_cancel;
-                tokio::spawn(async move {
-                    if let Err(e) = run_nats_listener(storage, trigger, cancel).await {
-                        error!(error = %e, "NATS trigger listener failed");
-                    }
-                });
-            }
-            #[cfg(feature = "file-watch")]
-            TriggerType::FileWatch => {
-                let storage = Arc::clone(storage);
-                let trigger = (*trigger).clone();
-                let cancel = child_cancel;
-                tokio::spawn(async move {
-                    if let Err(e) = run_file_watch_listener(storage, trigger, cancel).await {
-                        error!(error = %e, "file watch trigger listener failed");
-                    }
-                });
-            }
-            _ => {
-                warn!(
-                    slug,
-                    trigger_type = %trigger.trigger_type,
-                    "unsupported trigger type, skipping"
-                );
-                active.listeners.remove(slug);
+            let child_cancel = parent_cancel.child_token();
+            active.listeners.insert(slug.clone(), child_cancel.clone());
+
+            match trigger.trigger_type {
+                #[cfg(feature = "nats")]
+                TriggerType::Nats => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    tokio::spawn(async move {
+                        if let Err(e) = run_nats_listener(storage, trigger, cancel).await {
+                            error!(error = %e, "NATS trigger listener failed");
+                        }
+                    });
+                }
+                #[cfg(feature = "file-watch")]
+                TriggerType::FileWatch => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    tokio::spawn(async move {
+                        if let Err(e) = run_file_watch_listener(storage, trigger, cancel).await {
+                            error!(error = %e, "file watch trigger listener failed");
+                        }
+                    });
+                }
+                _ => {
+                    warn!(
+                        slug,
+                        trigger_type = %trigger.trigger_type,
+                        "unsupported trigger type, skipping"
+                    );
+                    active.listeners.remove(slug);
+                }
             }
         }
     }

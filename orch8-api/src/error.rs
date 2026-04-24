@@ -57,17 +57,17 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            ApiError::NotFound(_) => StatusCode::NOT_FOUND,
-            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
-            ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
-            ApiError::InvalidArgument(_) => StatusCode::BAD_REQUEST,
-            ApiError::AlreadyExists(_) | ApiError::Conflict(_) => StatusCode::CONFLICT,
-            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
+            Self::AlreadyExists(_) | Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
         };
         let body = match &self {
-            ApiError::Internal(msg) => {
+            Self::Internal(msg) => {
                 tracing::error!(error = %msg, "internal server error");
                 serde_json::json!({ "error": "internal server error" })
             }
@@ -93,16 +93,16 @@ impl From<EngineError> for ApiError {
     fn from(err: EngineError) -> Self {
         match err {
             EngineError::Storage(StorageError::NotFound { entity, id }) => {
-                ApiError::NotFound(format!("{entity} {id}"))
+                Self::NotFound(format!("{entity} {id}"))
             }
-            EngineError::Storage(StorageError::Conflict(msg)) => ApiError::AlreadyExists(msg),
+            EngineError::Storage(StorageError::Conflict(msg)) => Self::AlreadyExists(msg),
             EngineError::Storage(StorageError::TerminalTarget { entity, id }) => {
-                ApiError::AlreadyExists(format!("{entity} {id} is in a terminal state"))
+                Self::AlreadyExists(format!("{entity} {id} is in a terminal state"))
             }
-            EngineError::InvalidTransition { .. } => ApiError::InvalidArgument(err.to_string()),
-            EngineError::HandlerNotFound(h) => ApiError::NotFound(format!("handler: {h}")),
-            EngineError::ShuttingDown => ApiError::Unavailable("shutdown in progress".into()),
-            other => ApiError::Internal(other.to_string()),
+            EngineError::InvalidTransition { .. } => Self::InvalidArgument(err.to_string()),
+            EngineError::HandlerNotFound(h) => Self::NotFound(format!("handler: {h}")),
+            EngineError::ShuttingDown => Self::Unavailable("shutdown in progress".into()),
+            other => Self::Internal(other.to_string()),
         }
     }
 }

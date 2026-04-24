@@ -16,7 +16,7 @@ use crate::AppState;
     request_body = BulkUpdateStateRequest,
     responses((status = 200, description = "Bulk state update result", body = CountResponse))
 )]
-pub(crate) async fn bulk_update_state(
+pub async fn bulk_update_state(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkUpdateStateRequest>,
@@ -44,7 +44,7 @@ pub(crate) async fn bulk_update_state(
     request_body = BulkRescheduleRequest,
     responses((status = 200, description = "Bulk reschedule result", body = CountResponse))
 )]
-pub(crate) async fn bulk_reschedule(
+pub async fn bulk_reschedule(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BulkRescheduleRequest>,
@@ -78,7 +78,7 @@ pub(crate) async fn bulk_reschedule(
     ),
     responses((status = 200, description = "Failed instances (DLQ)", body = Vec<orch8_types::instance::TaskInstance>))
 )]
-pub(crate) async fn list_dlq(
+pub async fn list_dlq(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListQuery>,

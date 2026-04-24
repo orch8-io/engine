@@ -1,8 +1,9 @@
-//! Interceptor dispatch: saves trace-artifact `BlockOutput` records at
-//! defined lifecycle points (before/after step, on-signal, on-complete,
-//! on-failure).  The interceptor handler is **not** invoked — we only
-//! persist the artifact so it appears in the instance's block-output
-//! timeline.
+//! Interceptor dispatch: saves trace-artifact `BlockOutput` records.
+//!
+//! Persists artifacts at defined lifecycle points (before/after step,
+//! on-signal, on-complete, on-failure). The interceptor handler is **not**
+//! invoked — we only persist the artifact so it appears in the instance's
+//! block-output timeline.
 
 use chrono::Utc;
 use tracing::warn;

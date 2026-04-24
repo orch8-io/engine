@@ -1093,7 +1093,7 @@ impl Orch8Service for Orch8GrpcService {
             #[serde(default)]
             warmup_start_cap: u32,
         }
-        fn default_weight() -> u32 {
+        const fn default_weight() -> u32 {
             1
         }
 

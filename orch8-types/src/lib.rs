@@ -35,7 +35,7 @@ pub use instance::{InstanceState, Priority, TaskInstance};
 /// Shared serde default value functions used across types.
 pub mod serde_defaults {
     #[must_use]
-    pub fn yes() -> bool {
+    pub const fn yes() -> bool {
         true
     }
 

@@ -36,13 +36,14 @@ use orch8_types::ids::TenantId;
 
 type Key = (TenantId, String);
 
-/// Handlers that the circuit breaker should NOT track. The breaker exists to
-/// protect against cascading failures in external dependencies (HTTP APIs,
-/// LLM providers, plugin sidecars, gRPC services, external worker queues).
-/// Pure control-flow / internal built-ins have no external dependency and
-/// would only cause false positives — a `fail` step in a test or a
-/// `send_signal` that loses a race shouldn't take down every instance using
-/// that handler for a minute.
+/// Handlers that the circuit breaker should NOT track.
+///
+/// The breaker exists to protect against cascading failures in external
+/// dependencies (HTTP APIs, LLM providers, plugin sidecars, gRPC services,
+/// external worker queues). Pure control-flow / internal built-ins have no
+/// external dependency and would only cause false positives — a `fail` step
+/// in a test or a `send_signal` that loses a race shouldn't take down every
+/// instance using that handler for a minute.
 ///
 /// Policy lives alongside the breaker (and not e.g. on `StepHandler`) so the
 /// set is a single visible list rather than scattered opt-outs. External
@@ -282,13 +283,14 @@ impl CircuitBreakerRegistry {
     /// removing any persisted row.
     pub fn reset(&self, tenant_id: &TenantId, handler: &str) {
         let key: Key = (tenant_id.clone(), handler.to_string());
-        let mut delete_snapshot = None;
-        if let Some(mut breaker) = self.breakers.get_mut(&key) {
+        let delete_snapshot = if let Some(mut breaker) = self.breakers.get_mut(&key) {
             breaker.state = BreakerState::Closed;
             breaker.failure_count = 0;
             breaker.opened_at = None;
-            delete_snapshot = Some(breaker.clone());
-        }
+            Some(breaker.clone())
+        } else {
+            None
+        };
         if let Some(snap) = delete_snapshot {
             self.spawn_delete(&snap);
         }

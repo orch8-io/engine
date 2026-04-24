@@ -41,7 +41,7 @@ fn default_tz() -> String {
     "UTC".into()
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 

@@ -29,11 +29,11 @@ pub(crate) struct StreamQuery {
     pub poll_ms: u64,
 }
 
-fn default_poll_ms() -> u64 {
+const fn default_poll_ms() -> u64 {
     500
 }
 
-fn is_terminal(state: InstanceState) -> bool {
+const fn is_terminal(state: InstanceState) -> bool {
     matches!(
         state,
         InstanceState::Completed | InstanceState::Failed | InstanceState::Cancelled

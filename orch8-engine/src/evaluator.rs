@@ -230,6 +230,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
 
 /// Evaluate the execution tree: dispatch actionable nodes until no more
 /// progress can be made within this tick.
+///
 /// Returns [`EvalOutcome`] describing why evaluation stopped, so the caller
 /// can transition the instance without re-reading the tree from DB.
 #[allow(clippy::too_many_lines)]
@@ -872,6 +873,7 @@ pub fn has_waiting_nodes(tree: &[ExecutionNode]) -> bool {
 
 /// Recursively cancel every node in the subtree rooted at `parent_id`,
 /// including cancelling any pending worker tasks for `Waiting` descendants.
+///
 /// The nodes are updated bottom-up so parent state changes don't interfere
 /// with descendant lookups.
 pub async fn cancel_subtree(

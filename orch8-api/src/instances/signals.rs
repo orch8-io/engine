@@ -24,7 +24,7 @@ use crate::AppState;
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn send_signal(
+pub async fn send_signal(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

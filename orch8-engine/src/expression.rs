@@ -1,7 +1,7 @@
 use orch8_types::context::ExecutionContext;
 
 /// Expression evaluation error with position information.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExprError {
     pub message: String,
     pub position: usize,
@@ -266,7 +266,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(
+    const fn new(
         tokens: &'a [Token],
         context: &'a ExecutionContext,
         outputs: &'a serde_json::Value,
@@ -290,12 +290,12 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    fn enter(&mut self) -> bool {
+    const fn enter(&mut self) -> bool {
         self.depth += 1;
         self.depth <= MAX_PARSE_DEPTH
     }
 
-    fn leave(&mut self) {
+    const fn leave(&mut self) {
         self.depth -= 1;
     }
 

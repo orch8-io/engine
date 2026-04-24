@@ -49,7 +49,7 @@ enum Scheme {
 }
 
 impl Scheme {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Http => "http",
             Self::Https => "https",

@@ -32,7 +32,7 @@ pub(crate) struct ListApprovalsQuery {
     limit: u32,
 }
 
-fn default_limit() -> u32 {
+const fn default_limit() -> u32 {
     100
 }
 

@@ -31,10 +31,11 @@ use orch8_types::config::ExternalizationMode;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-/// Default ceiling on concurrent SSE streams per process. Each open stream
-/// holds a DB-polling tokio task; without a bound a single client can
-/// exhaust connections and tasks simply by opening streams. Configurable
-/// by overriding `AppState::stream_limiter` at construction time.
+/// Default ceiling on concurrent SSE streams per process.
+///
+/// Each open stream holds a DB-polling tokio task; without a bound a single
+/// client can exhaust connections and tasks simply by opening streams.
+/// Configurable by overriding `AppState::stream_limiter` at construction time.
 pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 256;
 
 /// Generic paginated response envelope for list endpoints.
@@ -42,7 +43,7 @@ pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 256;
 /// `has_more` is inferred by comparing the returned item count against
 /// the requested limit — no extra `COUNT(*)` query required.
 #[derive(Debug, Serialize)]
-pub struct PaginatedResponse<T: Serialize> {
+pub struct PaginatedResponse<T> {
     pub items: Vec<T>,
     pub has_more: bool,
 }

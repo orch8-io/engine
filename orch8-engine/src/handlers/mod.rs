@@ -102,7 +102,7 @@ impl HandlerRegistry {
     }
 
     /// Return the installed circuit breaker registry, if any.
-    pub fn circuit_breakers(&self) -> Option<&Arc<CircuitBreakerRegistry>> {
+    pub const fn circuit_breakers(&self) -> Option<&Arc<CircuitBreakerRegistry>> {
         self.circuit_breakers.as_ref()
     }
 

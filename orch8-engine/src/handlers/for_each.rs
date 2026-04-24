@@ -21,10 +21,12 @@ use crate::handlers::HandlerRegistry;
 /// for the plan to reject such workflows at submit time.
 pub const FOR_EACH_ABSOLUTE_MAX: u32 = 1_000_000;
 
-/// Execute a `for_each` block: iterate over each element of `collection`,
-/// binding it to `item_var` in the instance context and running the body
-/// once per element, up to the lesser of `items.len()`, the user's
-/// `max_iterations` cap, and [`FOR_EACH_ABSOLUTE_MAX`].
+/// Execute a `for_each` block.
+///
+/// Iterate over each element of `collection`, binding it to `item_var` in
+/// the instance context and running the body once per element, up to the
+/// lesser of `items.len()`, the user's `max_iterations` cap, and
+/// [`FOR_EACH_ABSOLUTE_MAX`].
 ///
 /// Iteration bookkeeping is persisted as a `BlockOutput` keyed by the
 /// `for_each`'s own `block_id`, carrying `{ "_index": N, "_total": L,

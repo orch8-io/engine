@@ -13,7 +13,9 @@ pub mod proto {
         clippy::too_many_lines,
         clippy::doc_markdown,
         clippy::needless_borrows_for_generic_args,
-        clippy::default_trait_access
+        clippy::default_trait_access,
+        clippy::derive_partial_eq_without_eq,
+        clippy::missing_const_for_fn
     )]
     tonic::include_proto!("orch8");
 }

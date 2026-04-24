@@ -37,7 +37,7 @@ pub(crate) struct PollRequest {
     limit: u32,
 }
 
-fn default_poll_limit() -> u32 {
+const fn default_poll_limit() -> u32 {
     1
 }
 
@@ -697,7 +697,7 @@ pub(crate) struct ListTasksQuery {
     offset: u64,
 }
 
-fn default_list_limit() -> u32 {
+const fn default_list_limit() -> u32 {
     50
 }
 

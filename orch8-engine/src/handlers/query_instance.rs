@@ -32,7 +32,7 @@ use super::StepContext;
 
 /// Node states that count as "done" for the purpose of `current_node`
 /// derivation.
-fn node_is_terminal(state: NodeState) -> bool {
+const fn node_is_terminal(state: NodeState) -> bool {
     matches!(
         state,
         NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped

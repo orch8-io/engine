@@ -8,6 +8,7 @@ use crate::evaluator;
 use crate::handlers::HandlerRegistry;
 
 /// Execute a cancellation scope block.
+///
 /// Children execute sequentially. External cancel signals do NOT propagate
 /// into children — the scope completes normally even if the parent instance
 /// receives a cancel request.

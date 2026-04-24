@@ -1,8 +1,10 @@
-//! Credentials registry: CRUD management for shared secrets referenced from
-//! step params via `credentials://<id>`. Responses use [`CredentialResponse`]
-//! which completely strips secret material (`value`, `refresh_token`) —
-//! credential values never leave the server. They are only resolved internally
-//! by step handlers (LLM, HTTP, etc.) via the `credentials://` scheme.
+//! Credentials registry: CRUD management for shared secrets.
+//!
+//! Secrets are referenced from step params via `credentials://<id>`.
+//! Responses use [`CredentialResponse`] which completely strips secret
+//! material (`value`, `refresh_token`) — credential values never leave the
+//! server. They are only resolved internally by step handlers (LLM, HTTP,
+//! etc.) via the `credentials://` scheme.
 
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
@@ -75,6 +77,7 @@ pub struct UpdateCredentialRequest {
 }
 
 /// API response for credentials — secret material is completely stripped.
+///
 /// Credential values never leave the server; they are only resolved
 /// internally by step handlers (LLM, HTTP, etc.) via `credentials://<id>`.
 #[derive(Debug, Serialize, ToSchema)]

@@ -39,9 +39,11 @@ pub fn extract_ref_key(v: &Value) -> Option<&str> {
 }
 
 /// Walk the top-level fields of `ctx.data` and replace any externalization
-/// markers with their resolved payloads. Non-object `data` and non-marker
-/// values are left untouched; broken refs (payload missing in storage) are
-/// also left in place so downstream code can detect them.
+/// markers with their resolved payloads.
+///
+/// Non-object `data` and non-marker values are left untouched; broken refs
+/// (payload missing in storage) are also left in place so downstream code
+/// can detect them.
 ///
 /// This is the shared inflator used by every engine site that needs to see
 /// user context values: step dispatch (`step_block.rs`), router condition

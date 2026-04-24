@@ -14,7 +14,7 @@ use crate::AppState;
     params(("id" = Uuid, Path, description = "Instance ID")),
     responses((status = 200, description = "Block outputs", body = Vec<orch8_types::output::BlockOutput>))
 )]
-pub(crate) async fn get_outputs(
+pub async fn get_outputs(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -96,7 +96,7 @@ pub(crate) async fn get_outputs(
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn get_execution_tree(
+pub async fn get_execution_tree(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

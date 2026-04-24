@@ -1,7 +1,8 @@
-/// Find the closest match for `input` among `candidates` using normalized
-/// Levenshtein distance. Returns `Some(candidate)` if the best match is
-/// within a reasonable threshold (distance ≤ 40% of the longer string),
-/// `None` otherwise.
+/// Find the closest match for `input` among `candidates`.
+///
+/// Uses normalized Levenshtein distance. Returns `Some(candidate)` if the
+/// best match is within a reasonable threshold (distance ≤ 40% of the
+/// longer string), `None` otherwise.
 pub fn did_you_mean<'a>(input: &str, candidates: &[&'a str]) -> Option<&'a str> {
     let input_lower = input.to_lowercase();
     candidates

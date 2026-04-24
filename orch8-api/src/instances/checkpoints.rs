@@ -34,7 +34,7 @@ pub struct PruneCheckpointsRequest {
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn save_checkpoint(
+pub async fn save_checkpoint(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -78,7 +78,7 @@ pub(crate) async fn save_checkpoint(
     params(("id" = Uuid, Path, description = "Instance ID")),
     responses((status = 200, description = "List of checkpoints", body = Vec<orch8_types::checkpoint::Checkpoint>))
 )]
-pub(crate) async fn list_checkpoints(
+pub async fn list_checkpoints(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -112,7 +112,7 @@ pub(crate) async fn list_checkpoints(
         (status = 404, description = "No checkpoint found"),
     )
 )]
-pub(crate) async fn get_latest_checkpoint(
+pub async fn get_latest_checkpoint(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -145,7 +145,7 @@ pub(crate) async fn get_latest_checkpoint(
     request_body = PruneCheckpointsRequest,
     responses((status = 200, description = "Pruned checkpoints", body = CountResponse))
 )]
-pub(crate) async fn prune_checkpoints(
+pub async fn prune_checkpoints(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

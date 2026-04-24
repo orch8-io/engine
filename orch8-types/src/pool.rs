@@ -80,11 +80,11 @@ pub struct PoolResource {
     pub created_at: DateTime<Utc>,
 }
 
-fn default_weight() -> u32 {
+const fn default_weight() -> u32 {
     1
 }
 
-fn default_true_pool() -> bool {
+const fn default_true_pool() -> bool {
     true
 }
 

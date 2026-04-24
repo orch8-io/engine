@@ -135,7 +135,7 @@ async fn send_request(url: &str, body: &[u8], timeout: Duration) -> Result<u16, 
 }
 
 /// Compute exponential backoff delay for a given attempt.
-pub(crate) fn backoff_duration(attempt: u32) -> Duration {
+pub(crate) const fn backoff_duration(attempt: u32) -> Duration {
     Duration::from_millis(500_u64.saturating_mul(2_u64.saturating_pow(attempt)))
 }
 
@@ -395,14 +395,17 @@ mod tests {
         send_with_retry(&url, &event, Duration::from_secs(2), 0, &cancel).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one request");
-        let bodies = bodies.lock().await;
-        let raw = std::str::from_utf8(&bodies[0]).unwrap();
-        assert!(raw.starts_with("POST /hook HTTP/1.1"), "method+path: {raw}");
-        assert!(raw
-            .to_ascii_lowercase()
-            .contains("content-type: application/json"));
-        assert!(raw.contains("\"event_type\":\"instance.completed\""));
-        assert!(raw.contains("\"k\":\"v\""));
+        {
+            let bodies = bodies.lock().await;
+            let raw = std::str::from_utf8(&bodies[0]).unwrap();
+            assert!(raw.starts_with("POST /hook HTTP/1.1"), "method+path: {raw}");
+            assert!(raw
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"));
+            assert!(raw.contains("\"event_type\":\"instance.completed\""));
+            assert!(raw.contains("\"k\":\"v\""));
+            drop(bodies);
+        }
     }
 
     #[tokio::test]

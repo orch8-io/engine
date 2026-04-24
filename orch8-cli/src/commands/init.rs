@@ -159,6 +159,7 @@ volumes:
 
 fn write_scaffolds(base: &Path) -> Result<()> {
     let api_key = generate_api_key();
+    #[allow(clippy::literal_string_with_formatting_args)]
     let orch8_toml = ORCH8_TOML_TEMPLATE.replace("{api_key}", &api_key);
     write_if_absent(&base.join("orch8.toml"), &orch8_toml)?;
     write_if_absent(&base.join("sequence.json"), SEQUENCE_JSON_TEMPLATE)?;

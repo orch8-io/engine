@@ -175,7 +175,7 @@ mod tests {
         let big = "x".repeat(2048);
         let mut v = json!({
             "small": "tiny",
-            "big": big.clone(),
+            "big": big,
         });
         let refs = externalize_fields(&mut v, "inst1", 1024);
 
@@ -196,7 +196,7 @@ mod tests {
         // itself is only ~60 bytes so we need an artificially low threshold
         // to prove we're gating on shape, not size.
         let existing = marker("inst0:ctx:data:earlier");
-        let mut v = json!({ "already": existing.clone() });
+        let mut v = json!({ "already": existing });
         let refs = externalize_fields(&mut v, "inst1", 1);
         assert!(refs.is_empty(), "markers must not be re-externalized");
         assert_eq!(v["already"], existing);
@@ -215,8 +215,8 @@ mod tests {
         let big1 = "a".repeat(2048);
         let big2 = "b".repeat(4096);
         let mut v = json!({
-            "a": big1.clone(),
-            "b": big2.clone(),
+            "a": big1,
+            "b": big2,
             "c": "tiny",
         });
         let mut refs = externalize_fields(&mut v, "inst42", 1024);
@@ -254,7 +254,7 @@ mod tests {
         let payload = "x".repeat(10);
         // serialized form is `"xxxxxxxxxx"` (12 bytes including quotes).
         let encoded_len = serde_json::to_vec(&json!(payload)).unwrap().len();
-        let mut v = json!({ "k": payload.clone() });
+        let mut v = json!({ "k": payload });
         #[allow(clippy::cast_possible_truncation)]
         let refs = externalize_fields(&mut v, "inst1", encoded_len as u32);
         assert_eq!(
@@ -292,7 +292,7 @@ mod tests {
         // operators reading raw keys may be surprised. Pin the behavior so
         // nobody "fixes" it by rejecting colons silently.
         let big = "x".repeat(2048);
-        let mut v = json!({ "weird:field": big.clone() });
+        let mut v = json!({ "weird:field": big });
         let refs = externalize_fields(&mut v, "inst1", 1024);
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].0, "inst1:ctx:data:weird:field");

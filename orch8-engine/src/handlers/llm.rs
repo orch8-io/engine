@@ -533,14 +533,14 @@ fn classify_api_error(status: u16, body: &Value) -> StepError {
     }
 }
 
-fn retryable(message: String) -> StepError {
+const fn retryable(message: String) -> StepError {
     StepError::Retryable {
         message,
         details: None,
     }
 }
 
-fn permanent(message: String) -> StepError {
+const fn permanent(message: String) -> StepError {
     StepError::Permanent {
         message,
         details: None,

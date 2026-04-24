@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn request_id_struct_clones() {
         let id = RequestId("abc-123".into());
-        let cloned = id.clone();
+        let cloned = id;
         assert_eq!(cloned.0, "abc-123");
     }
 }

@@ -76,11 +76,11 @@ impl Engine {
         self.storage.as_ref()
     }
 
-    pub fn config(&self) -> &SchedulerConfig {
+    pub const fn config(&self) -> &SchedulerConfig {
         &self.config
     }
 
-    pub fn node_id(&self) -> Uuid {
+    pub const fn node_id(&self) -> Uuid {
         self.node_id
     }
 

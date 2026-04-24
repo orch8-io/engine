@@ -66,7 +66,7 @@ fn block_def_id(def: &orch8_types::sequence::BlockDefinition) -> String {
     request_body = InjectBlocksRequest,
     responses((status = 200, description = "Blocks injected"))
 )]
-pub(crate) async fn inject_blocks(
+pub async fn inject_blocks(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

@@ -350,7 +350,7 @@ fn any_failed_and_has_waiting_nodes() {
     );
     assert!(any_failed(&[&ok, &bad]));
     assert!(!any_failed(&[&ok]));
-    let tree = vec![ok.clone(), wait.clone()];
+    let tree = vec![ok.clone(), wait];
     assert!(has_waiting_nodes(&tree));
     assert!(!has_waiting_nodes(&[ok]));
 }
@@ -382,7 +382,7 @@ fn children_of_filters_by_parent_and_branch() {
         NodeState::Pending,
         None,
     );
-    let tree = vec![c1.clone(), c2.clone(), unrelated.clone()];
+    let tree = vec![c1, c2, unrelated];
     assert_eq!(children_of(&tree, parent_id, None).len(), 2);
     assert_eq!(children_of(&tree, parent_id, Some(0)).len(), 1);
     assert_eq!(children_of(&tree, parent_id, Some(1)).len(), 1);

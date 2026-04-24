@@ -36,10 +36,10 @@ impl DedupeScope {
     /// lowercase to match the on-the-wire spelling of the `emit_event`
     /// `dedupe_scope` param.
     #[must_use]
-    pub fn kind(&self) -> &'static str {
+    pub const fn kind(&self) -> &'static str {
         match self {
-            DedupeScope::Parent(_) => "parent",
-            DedupeScope::Tenant(_) => "tenant",
+            Self::Parent(_) => "parent",
+            Self::Tenant(_) => "tenant",
         }
     }
 
@@ -49,8 +49,8 @@ impl DedupeScope {
     #[must_use]
     pub fn value(&self) -> String {
         match self {
-            DedupeScope::Parent(id) => id.0.to_string(),
-            DedupeScope::Tenant(t) => t.0.clone(),
+            Self::Parent(id) => id.0.to_string(),
+            Self::Tenant(t) => t.0.clone(),
         }
     }
 }

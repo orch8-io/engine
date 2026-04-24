@@ -42,7 +42,7 @@ use orch8_types::sequence::{BlockDefinition, RetryPolicy, SequenceDefinition, St
 // Test helpers
 // ---------------------------------------------------------------------------
 
-fn mk_retry(max_attempts: u32) -> RetryPolicy {
+const fn mk_retry(max_attempts: u32) -> RetryPolicy {
     RetryPolicy {
         max_attempts,
         initial_backoff: StdDuration::from_millis(50),

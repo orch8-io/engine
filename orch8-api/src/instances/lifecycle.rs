@@ -25,7 +25,7 @@ use crate::AppState;
         (status = 200, description = "Deduplicated (idempotency key match)", body = serde_json::Value),
     )
 )]
-pub(crate) async fn create_instance(
+pub async fn create_instance(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<CreateInstanceRequest>,
@@ -120,7 +120,7 @@ pub(crate) async fn create_instance(
         (status = 400, description = "Empty batch"),
     )
 )]
-pub(crate) async fn create_instances_batch(
+pub async fn create_instances_batch(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<BatchCreateRequest>,
@@ -213,7 +213,7 @@ pub(crate) async fn create_instances_batch(
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn get_instance(
+pub async fn get_instance(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Path(id): Path<Uuid>,
@@ -246,7 +246,7 @@ pub(crate) async fn get_instance(
     ),
     responses((status = 200, description = "List of instances", body = Vec<TaskInstance>))
 )]
-pub(crate) async fn list_instances(
+pub async fn list_instances(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Query(q): Query<ListQuery>,
@@ -292,7 +292,7 @@ pub(crate) async fn list_instances(
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn update_state(
+pub async fn update_state(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -370,7 +370,7 @@ pub(crate) async fn update_state(
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn update_context(
+pub async fn update_context(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
@@ -411,7 +411,7 @@ pub(crate) async fn update_context(
         (status = 404, description = "Instance not found"),
     )
 )]
-pub(crate) async fn retry_instance(
+pub async fn retry_instance(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,

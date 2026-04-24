@@ -193,7 +193,6 @@ pub(super) async fn dispatch_block(
                         .update_node_state(node.id, NodeState::Waiting)
                         .await?;
                 }
-                Ok(true)
             } else {
                 // Create the child instance.
                 let child_seq = storage
@@ -240,8 +239,8 @@ pub(super) async fn dispatch_block(
                 storage
                     .update_node_state(node.id, NodeState::Waiting)
                     .await?;
-                Ok(true) // Re-schedule to check child status later
             }
+            Ok(true) // Re-schedule to check child status later
         }
     }
 }
