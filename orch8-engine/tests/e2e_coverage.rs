@@ -1455,3 +1455,286 @@ async fn try_catch_success_completes_instance() {
     let final_inst = storage.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(final_inst.state, InstanceState::Completed);
 }
+
+// ================================================================
+// FEATURE GAPS: interceptors, templates, self-modify, signals
+// ================================================================
+
+use orch8_types::interceptor::{InterceptorAction, InterceptorDef};
+
+fn mk_sequence_with_interceptors(
+    blocks: Vec<BlockDefinition>,
+    interceptors: InterceptorDef,
+) -> SequenceDefinition {
+    SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        name: "intercepted-flow".into(),
+        version: 1,
+        deprecated: false,
+        blocks,
+        interceptors: Some(interceptors),
+        created_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn interceptors_emit_before_and_after_step_artifacts() {
+    let interceptors = InterceptorDef {
+        before_step: Some(InterceptorAction {
+            handler: "audit".into(),
+            params: json!({"stage": "pre"}),
+        }),
+        after_step: Some(InterceptorAction {
+            handler: "audit".into(),
+            params: json!({"stage": "post"}),
+        }),
+        ..Default::default()
+    };
+
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence_with_interceptors(vec![mk_step("s1", "noop")], interceptors);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let reg = registry();
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let before = storage
+        .get_block_output(inst.id, &BlockId("_interceptor:before:s1".into()))
+        .await
+        .unwrap();
+    assert!(before.is_some(), "before_step artifact must exist");
+    assert_eq!(before.unwrap().output["stage"], "pre");
+
+    let after = storage
+        .get_block_output(inst.id, &BlockId("_interceptor:after:s1".into()))
+        .await
+        .unwrap();
+    assert!(after.is_some(), "after_step artifact must exist");
+    assert_eq!(after.unwrap().output["stage"], "post");
+}
+
+// NOTE: on_complete and on_failure interceptors are emitted by the scheduler
+// (process_instance_tree), not the evaluator loop. Testing them requires the
+// full scheduler tick loop, which is not exposed in integration tests.
+// Coverage exists in scheduler/tests.rs and interceptors/tests.rs.
+
+/// Registry with a handler that captures resolved params for template tests.
+fn registry_with_param_capture() -> (
+    HandlerRegistry,
+    Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+) {
+    let mut reg = HandlerRegistry::new();
+    register_builtins(&mut reg);
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = Arc::clone(&captured);
+    reg.register("capture_params", move |ctx| {
+        let captured = Arc::clone(&captured_clone);
+        async move {
+            *captured.lock().unwrap() = Some(ctx.params.clone());
+            Ok(json!({"ok": true}))
+        }
+    });
+    (reg, captured)
+}
+
+#[tokio::test]
+async fn template_resolves_context_data_in_step_params() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![mk_step_with_params(
+        "s1",
+        "capture_params",
+        json!({"slug": "{{context.data.slug}}"}),
+    )]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance_with_ctx(seq.id, json!({"slug": "user.signed_up"}));
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_param_capture();
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler was called");
+    assert_eq!(
+        seen["slug"], "user.signed_up",
+        "template must resolve context.data.slug"
+    );
+}
+
+#[tokio::test]
+async fn template_resolves_config_in_step_params() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let mut seq = mk_sequence(vec![mk_step_with_params(
+        "s1",
+        "capture_params",
+        json!({"api_key": "{{context.config.api_key}}"}),
+    )]);
+    seq.interceptors = None;
+    storage.create_sequence(&seq).await.unwrap();
+
+    let mut inst = mk_instance_with_ctx(seq.id, json!({}));
+    inst.context.config = json!({"api_key": "secret-123"});
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_param_capture();
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler was called");
+    assert_eq!(
+        seen["api_key"], "secret-123",
+        "template must resolve context.config.api_key"
+    );
+}
+
+#[tokio::test]
+async fn self_modify_injects_blocks_and_evaluator_executes_them() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+    // The self-modify step will inject a new "injected" noop step.
+    let inj = serde_json::to_value(BlockDefinition::Step(Box::new(StepDef {
+        id: BlockId("injected".into()),
+        handler: "noop".into(),
+        params: json!({}),
+        delay: None,
+        retry: None,
+        timeout: None,
+        rate_limit_key: None,
+        send_window: None,
+        context_access: None,
+        cancellable: true,
+        wait_for_input: None,
+        queue_name: None,
+        deadline: None,
+        on_deadline_breach: None,
+        fallback_handler: None,
+    })))
+    .unwrap();
+
+    let seq = mk_sequence(vec![mk_step_with_params(
+        "self_mod",
+        "self_modify",
+        json!({"blocks": [inj]}),
+    )]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let mut reg = registry();
+    reg.register(
+        "self_modify",
+        orch8_engine::handlers::self_modify::handle_self_modify,
+    );
+
+    // Custom driver: the evaluator returns Done after self_mod completes
+    // because the tree is terminal at that point. We must run a second
+    // evaluate() call so ensure_execution_tree picks up the injected block.
+    let inst = storage.get_instance(inst.id).await.unwrap().unwrap();
+    let outcome = evaluator::evaluate(&storage, &reg, &inst, &seq)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            EvalOutcome::Done {
+                any_failed: false,
+                any_cancelled: false
+            }
+        ),
+        "first pass must complete self_mod step"
+    );
+
+    // Re-schedule so the evaluator sees injected blocks on next tick.
+    storage
+        .update_instance_state(inst.id, InstanceState::Running, None)
+        .await
+        .unwrap();
+    let inst = storage.get_instance(inst.id).await.unwrap().unwrap();
+    let outcome = evaluator::evaluate(&storage, &reg, &inst, &seq)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            EvalOutcome::Done {
+                any_failed: false,
+                any_cancelled: false
+            }
+        ),
+        "second pass must complete injected step"
+    );
+
+    // The injected block should have been executed and be in Completed state.
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    let injected_node = tree.iter().find(|n| n.block_id.0 == "injected");
+    assert!(
+        injected_node.is_some(),
+        "injected block must appear in execution tree"
+    );
+    assert_eq!(injected_node.unwrap().state, NodeState::Completed);
+}
+
+#[tokio::test]
+async fn signal_update_context_replaces_instance_context() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![mk_step("s1", "noop")]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance_with_ctx(seq.id, json!({"original": true}));
+    storage.create_instance(&inst).await.unwrap();
+
+    // Drive one tick so the instance is Running and the step is dispatched.
+    let reg = registry();
+    drive_n(&storage, &reg, inst.id, &seq, 1).await;
+
+    // Enqueue an update_context signal with a full replacement context.
+    let new_ctx = orch8_types::context::ExecutionContext {
+        data: json!({"new_key": "new_value"}),
+        config: json!({}),
+        audit: vec![],
+        runtime: orch8_types::context::RuntimeContext::default(),
+    };
+    let sig = Signal {
+        id: uuid::Uuid::now_v7(),
+        instance_id: inst.id,
+        signal_type: SignalType::UpdateContext,
+        payload: serde_json::to_value(&new_ctx).unwrap(),
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    storage.enqueue_signal(&sig).await.unwrap();
+
+    // Process the signal via the public signals path.
+    let signals = storage.get_pending_signals(inst.id).await.unwrap();
+    assert_eq!(signals.len(), 1);
+    let abort = orch8_engine::signals::process_signals_prefetched(
+        storage.as_ref(),
+        inst.id,
+        InstanceState::Running,
+        signals,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!abort, "update_context must not abort instance");
+
+    // Verify the context was replaced (not merged).
+    let refreshed = storage.get_instance(inst.id).await.unwrap().unwrap();
+    assert!(
+        refreshed.context.data.get("original").is_none(),
+        "original context must be replaced, not merged"
+    );
+    assert_eq!(
+        refreshed.context.data["new_key"], "new_value",
+        "new context must be present after replacement"
+    );
+}
