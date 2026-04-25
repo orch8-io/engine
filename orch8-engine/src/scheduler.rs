@@ -326,11 +326,11 @@ async fn enforce_concurrency_limits(
     instances: Vec<orch8_types::instance::TaskInstance>,
 ) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
     // Collect concurrency keys present in the batch.
-    let mut key_instances: HashMap<String, Vec<usize>> =
+    let mut key_instances: HashMap<&str, Vec<usize>> =
         HashMap::with_capacity(instances.len() / 2);
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(ref key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
-            key_instances.entry(key.clone()).or_default().push(idx);
+            key_instances.entry(key.as_str()).or_default().push(idx);
         }
     }
 
@@ -339,7 +339,7 @@ async fn enforce_concurrency_limits(
     }
 
     // Batch count running instances for all concurrency keys in a single query.
-    let keys: Vec<String> = key_instances.keys().cloned().collect();
+    let keys: Vec<String> = key_instances.keys().map(|&k| k.to_owned()).collect();
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
     // For each concurrency key, determine how many slots are available.
@@ -352,7 +352,7 @@ async fn enforce_concurrency_limits(
         // DB. This count includes the instances we just claimed (since
         // claim_due_instances already set them to Running). Subtract the batch
         // members to get the pre-existing running count.
-        let total_running = running_counts.get(key).copied().unwrap_or(0);
+        let total_running = running_counts.get(*key).copied().unwrap_or(0);
         #[allow(clippy::cast_possible_wrap)]
         let batch_count = indices.len() as i64;
         let already_running = total_running - batch_count;
