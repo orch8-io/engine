@@ -179,21 +179,16 @@ pub(super) async fn batch_get(
         return Ok(HashMap::new());
     }
 
-    // Build placeholder list: "?1,?2,?3" — 1-based for clarity, though sqlx
-    // accepts plain "?" too. Named indices keep behavior unambiguous.
-    let placeholders = (1..=ref_keys.len())
-        .map(|i| format!("?{i}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT ref_key, payload, payload_bytes, compression \
-         FROM externalized_state WHERE ref_key IN ({placeholders})"
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN ("
     );
-
-    let mut query = sqlx::query(&sql);
+    let mut separated = qb.separated(",");
     for key in ref_keys {
-        query = query.bind(key);
+        separated.push_bind(key);
     }
+    separated.push_unseparated(")");
+
+    let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
 
     let mut out = HashMap::with_capacity(rows.len());

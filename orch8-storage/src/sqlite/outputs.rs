@@ -136,15 +136,15 @@ pub(super) async fn get_completed_ids_batch(
     if instance_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders: Vec<String> = (1..=instance_ids.len()).map(|i| format!("?{i}")).collect();
-    let sql = format!(
-        "SELECT DISTINCT instance_id, block_id FROM block_outputs WHERE instance_id IN ({})",
-        placeholders.join(",")
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT DISTINCT instance_id, block_id FROM block_outputs WHERE instance_id IN (",
     );
-    let mut query = sqlx::query(&sql);
+    let mut separated = qb.separated(",");
     for id in instance_ids {
-        query = query.bind(id.0.to_string());
+        separated.push_bind(id.0.to_string());
     }
+    separated.push_unseparated(")");
+    let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<BlockId>> =
         instance_ids.iter().map(|id| (*id, Vec::new())).collect();
