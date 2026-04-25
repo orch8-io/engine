@@ -1,6 +1,6 @@
 //! Unit tests for the scheduler module.
 
-#![allow(clippy::duration_suboptimal_units)]
+#![allow(unknown_lints, clippy::duration_suboptimal_units)]
 
 use super::step_exec::{check_step_delay, check_step_rate_limit, execute_step_block};
 use super::*;

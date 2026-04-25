@@ -1311,7 +1311,7 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     // Case 1: threshold larger than the heartbeat age — MUST NOT reap.
     // An hour expressed in seconds; the exact unit doesn't matter, only
     // that it is comfortably larger than any plausible heartbeat age.
-    #[allow(clippy::duration_suboptimal_units)]
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     let one_hour = Duration::from_secs(3600);
     let reaped = storage.reap_stale_worker_tasks(one_hour).await.unwrap();
     assert_eq!(
