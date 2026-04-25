@@ -326,8 +326,7 @@ async fn enforce_concurrency_limits(
     instances: Vec<orch8_types::instance::TaskInstance>,
 ) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
     // Collect concurrency keys present in the batch.
-    let mut key_instances: HashMap<&str, Vec<usize>> =
-        HashMap::with_capacity(instances.len() / 2);
+    let mut key_instances: HashMap<&str, Vec<usize>> = HashMap::with_capacity(instances.len() / 2);
     for (idx, inst) in instances.iter().enumerate() {
         if let (Some(ref key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
             key_instances.entry(key.as_str()).or_default().push(idx);
