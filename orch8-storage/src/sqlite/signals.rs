@@ -148,15 +148,13 @@ pub(super) async fn get_pending_batch(
     if instance_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders: Vec<String> = (1..=instance_ids.len()).map(|i| format!("?{i}")).collect();
-    let sql = format!(
-        "SELECT * FROM signal_inbox WHERE instance_id IN ({}) AND delivered=0 ORDER BY created_at",
-        placeholders.join(",")
-    );
-    let mut query = sqlx::query(&sql);
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM signal_inbox WHERE instance_id IN (");
+    let mut separated = qb.separated(",");
     for id in instance_ids {
-        query = query.bind(id.0.to_string());
+        separated.push_bind(id.0.to_string());
     }
+    separated.push_unseparated(") AND delivered=0 ORDER BY created_at");
+    let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<Signal>> =
         instance_ids.iter().map(|id| (*id, Vec::new())).collect();
