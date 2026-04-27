@@ -249,10 +249,10 @@ async fn filter_by_concurrency_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     candidates: &[TaskInstance],
 ) -> Result<Vec<TaskInstance>, StorageError> {
-    let mut keyed: HashMap<String, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
+    let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
-            keyed.entry(key.clone()).or_default().push(idx);
+            keyed.entry(key.as_str()).or_default().push(idx);
         }
     }
 
@@ -262,7 +262,7 @@ async fn filter_by_concurrency_pg(
 
     // Batch-fetch running counts for all concurrency keys in a single query
     // instead of N separate COUNT queries (one per key).
-    let keys: Vec<&str> = keyed.keys().map(String::as_str).collect();
+    let keys: Vec<&str> = keyed.keys().copied().collect();
     let rows = sqlx::query(
         "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances \
          WHERE concurrency_key = ANY($1) AND state = 'running' \
@@ -285,7 +285,7 @@ async fn filter_by_concurrency_pg(
     let mut excluded = std::collections::HashSet::new();
     for (key, indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(i32::MAX);
-        let already_running = running_counts.get(key).copied().unwrap_or(0);
+        let already_running = running_counts.get(*key).copied().unwrap_or(0);
 
         #[allow(clippy::cast_possible_truncation)]
         let slots = (i64::from(max) - already_running).max(0) as usize;
