@@ -281,6 +281,32 @@ pub(super) async fn update_state(
     Ok(())
 }
 
+pub(super) async fn batch_reschedule(
+    storage: &SqliteStorage,
+    ids: &[InstanceId],
+    fire_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let now_s = ts(Utc::now());
+    let fire_s = ts(fire_at);
+    let mut qb = sqlx::QueryBuilder::new(
+        "UPDATE task_instances SET state='scheduled', next_fire_at=",
+    );
+    qb.push_bind(&fire_s);
+    qb.push(", updated_at=");
+    qb.push_bind(&now_s);
+    qb.push(" WHERE id IN (");
+    let mut separated = qb.separated(",");
+    for id in ids {
+        separated.push_bind(id.0.to_string());
+    }
+    separated.push_unseparated(")");
+    qb.build().execute(&storage.pool).await?;
+    Ok(())
+}
+
 pub(super) async fn conditional_update_state(
     storage: &SqliteStorage,
     id: InstanceId,

@@ -246,7 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_credentials_tenant ON credentials(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_credentials_expires ON credentials(expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_task_instances_state_fire ON task_instances(state, next_fire_at);
-CREATE INDEX IF NOT EXISTS idx_task_instances_tenant_idemp ON task_instances(tenant_id, idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_instances_tenant_idemp ON task_instances(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_task_instances_concurrency ON task_instances(concurrency_key, state);
 CREATE INDEX IF NOT EXISTS idx_task_instances_parent ON task_instances(parent_instance_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);

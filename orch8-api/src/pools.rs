@@ -209,9 +209,13 @@ pub(crate) async fn add_resource(
         .await?
         .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
-    let warmup_start = req
-        .warmup_start
-        .and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok());
+    let warmup_start = match req.warmup_start {
+        Some(s) => Some(
+            chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                .map_err(|e| ApiError::InvalidArgument(format!("invalid warmup_start date: {e}")))?,
+        ),
+        None => None,
+    };
 
     let resource = PoolResource {
         id: Uuid::now_v7(),
@@ -269,7 +273,10 @@ pub(crate) async fn update_resource(
         resource.daily_cap = daily_cap;
     }
     if let Some(warmup_start) = req.warmup_start {
-        resource.warmup_start = chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").ok();
+        resource.warmup_start = Some(
+            chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d")
+                .map_err(|e| ApiError::InvalidArgument(format!("invalid warmup_start date: {e}")))?,
+        );
     }
     if let Some(warmup_days) = req.warmup_days {
         resource.warmup_days = warmup_days;

@@ -261,6 +261,14 @@ impl StorageBackend for SqliteStorage {
         instances::update_state(self, id, new_state, next_fire_at).await
     }
 
+    async fn batch_reschedule_instances(
+        &self,
+        ids: &[InstanceId],
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        instances::batch_reschedule(self, ids, fire_at).await
+    }
+
     async fn conditional_update_instance_state(
         &self,
         id: InstanceId,

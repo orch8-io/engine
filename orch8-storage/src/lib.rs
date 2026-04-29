@@ -172,6 +172,18 @@ pub trait StorageBackend: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    async fn batch_reschedule_instances(
+        &self,
+        ids: &[InstanceId],
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        for &id in ids {
+            self.update_instance_state(id, InstanceState::Scheduled, Some(fire_at))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Atomically update instance state only if the current state matches
     /// `expected_state`. Returns `true` if the row was updated, `false` if
     /// the state had already moved (concurrent writer won the race).

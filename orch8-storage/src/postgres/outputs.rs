@@ -364,7 +364,9 @@ pub(super) async fn save_output_complete_node_and_transition(
     .await?;
 
     if result.rows_affected() == 0 {
-        tx.rollback().await?;
+        if let Err(rb_err) = tx.rollback().await {
+            tracing::warn!(error = %rb_err, "rollback failed after CAS guard rejection");
+        }
         return Err(StorageError::TerminalTarget {
             entity: "task_instances".into(),
             id: instance_id.0.to_string(),
@@ -422,7 +424,9 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     .await?;
 
     if result.rows_affected() == 0 {
-        tx.rollback().await?;
+        if let Err(rb_err) = tx.rollback().await {
+            tracing::warn!(error = %rb_err, "rollback failed after CAS guard rejection");
+        }
         return Err(StorageError::TerminalTarget {
             entity: "task_instances".into(),
             id: instance_id.0.to_string(),

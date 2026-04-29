@@ -325,6 +325,25 @@ pub(super) async fn update_state(
     Ok(())
 }
 
+pub(super) async fn batch_reschedule(
+    store: &PostgresStorage,
+    ids: &[InstanceId],
+    fire_at: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let uuids: Vec<uuid::Uuid> = ids.iter().map(|id| id.0).collect();
+    sqlx::query(
+        "UPDATE task_instances SET state = 'scheduled', next_fire_at = $1, updated_at = NOW() WHERE id = ANY($2)",
+    )
+    .bind(fire_at)
+    .bind(&uuids)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 /// Atomic CAS: update state only if current state matches `expected_state`.
 /// Returns `true` if the row was updated, `false` if the state had moved.
 pub(super) async fn conditional_update_state(

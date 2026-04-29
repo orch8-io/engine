@@ -494,14 +494,16 @@ pub async fn evaluate(
         });
     }
 
-    // Safety limit — re-schedule for next tick.
+    // Safety limit — defer to next tick. Report `has_waiting_nodes = true`
+    // so the scheduler transitions to Waiting instead of Scheduled, preventing
+    // an immediate re-claim that would busy-spin on every tick.
     warn!(
         instance_id = %instance.id,
         max_iterations,
-        "evaluate: iteration limit reached, re-scheduling for next tick"
+        "evaluate: iteration limit reached, deferring to next tick"
     );
     Ok(EvalOutcome::MoreWork {
-        has_waiting_nodes: false,
+        has_waiting_nodes: true,
     })
 }
 

@@ -371,8 +371,8 @@ async fn enforce_concurrency_limits(
         return Ok(instances);
     }
 
-    // Transition excess instances back to Scheduled.
     let defer_at = Utc::now() + chrono::Duration::seconds(1);
+    let mut deferred_ids: Vec<InstanceId> = Vec::with_capacity(deferred_indices.len());
     for &idx in &deferred_indices {
         let inst = &instances[idx];
         debug!(
@@ -380,10 +380,9 @@ async fn enforce_concurrency_limits(
             concurrency_key = %inst.concurrency_key.as_deref().unwrap_or(""),
             "concurrency limit exceeded at claim time, deferring"
         );
-        storage
-            .update_instance_state(inst.id, InstanceState::Scheduled, Some(defer_at))
-            .await?;
+        deferred_ids.push(inst.id);
     }
+    storage.batch_reschedule_instances(&deferred_ids, defer_at).await?;
 
     let mut kept = instances;
     let mut deferred_sorted: Vec<_> = deferred_indices.into_iter().collect();

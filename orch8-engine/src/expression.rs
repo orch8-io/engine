@@ -1,4 +1,22 @@
+use std::sync::{Arc, LazyLock};
+
 use orch8_types::context::ExecutionContext;
+
+static TOKEN_CACHE: LazyLock<moka::sync::Cache<String, Arc<[Token]>>> = LazyLock::new(|| {
+    moka::sync::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_idle(std::time::Duration::from_mins(10))
+        .build()
+});
+
+fn tokenize_cached(input: &str) -> Arc<[Token]> {
+    if let Some(cached) = TOKEN_CACHE.get(input) {
+        return cached;
+    }
+    let tokens: Arc<[Token]> = tokenize(input).into();
+    TOKEN_CACHE.insert(input.to_owned(), Arc::clone(&tokens));
+    tokens
+}
 
 /// Expression evaluation error with position information.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +46,7 @@ pub fn try_evaluate(
     if trimmed.is_empty() {
         return Ok(serde_json::Value::Null);
     }
-    let tokens = tokenize(trimmed);
+    let tokens = tokenize_cached(trimmed);
     let mut parser = Parser::new(&tokens, context, outputs);
     let result = parser.parse_or();
     if parser.pos < tokens.len() {
@@ -57,7 +75,7 @@ pub fn evaluate(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> serde_json::Value {
-    let tokens = tokenize(expr.trim());
+    let tokens = tokenize_cached(expr.trim());
     let mut parser = Parser::new(&tokens, context, outputs);
     parser.parse_or()
 }
@@ -1073,5 +1091,49 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("position 1"), "got: {display}");
         assert!(display.contains("5 5"), "got: {display}");
+    }
+
+    // ------------------------------------------------------------------
+    // tokenize_cached
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tokenize_cached_returns_same_tokens_as_tokenize() {
+        let inputs = [
+            "context.data.user.name",
+            "1 + 2 * 3",
+            "'hello' + ' ' + 'world'",
+            "true && false || !true",
+            "context.data.age >= 18",
+            "",
+        ];
+        for input in inputs {
+            let direct: Vec<Token> = tokenize(input);
+            let cached = tokenize_cached(input);
+            assert_eq!(
+                &direct[..],
+                &cached[..],
+                "mismatch for input: {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenize_cached_returns_arc_clone_on_cache_hit() {
+        let expr = "context.data.x == 42";
+        let first = tokenize_cached(expr);
+        let second = tokenize_cached(expr);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second call should return the same Arc (cache hit)"
+        );
+    }
+
+    #[test]
+    fn tokenize_cached_distinct_inputs_produce_distinct_entries() {
+        let a = tokenize_cached("1 + 2");
+        let b = tokenize_cached("3 + 4");
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_ne!(&a[..], &b[..]);
     }
 }

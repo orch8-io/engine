@@ -180,14 +180,19 @@ pub(super) async fn mark_delivered_batch(
     storage: &SqliteStorage,
     signal_ids: &[Uuid],
 ) -> Result<(), StorageError> {
-    let mut tx = storage.pool.begin().await?;
-    for id in signal_ids {
-        sqlx::query("UPDATE signal_inbox SET delivered=1 WHERE id=?1")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
+    if signal_ids.is_empty() {
+        return Ok(());
     }
-    tx.commit().await?;
+    let placeholders: Vec<String> = signal_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let sql = format!(
+        "UPDATE signal_inbox SET delivered=1 WHERE id IN ({})",
+        placeholders.join(",")
+    );
+    let mut query = sqlx::query(&sql);
+    for id in signal_ids {
+        query = query.bind(id.to_string());
+    }
+    query.execute(&storage.pool).await?;
     Ok(())
 }
 

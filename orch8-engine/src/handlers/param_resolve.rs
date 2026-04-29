@@ -98,6 +98,9 @@ pub(crate) async fn resolve_templates_in_params(
     params: &serde_json::Value,
     outputs: &OutputsSnapshot,
 ) -> Result<serde_json::Value, EngineError> {
+    if !crate::template::contains_template(params) {
+        return Ok(params.clone());
+    }
     let outputs = outputs.get(storage, instance.id).await?;
     crate::template::resolve(params, context, outputs)
 }

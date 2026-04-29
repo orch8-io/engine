@@ -630,3 +630,83 @@ async fn merge_context_data_missing_instance_is_noop_when_encrypted() {
         .await;
     assert!(res.is_ok(), "merge on missing id must be a no-op");
 }
+
+// ------------------------------------------------------------------
+// Delegation macro smoke tests
+// ------------------------------------------------------------------
+
+/// Verifies that macro-generated delegation methods forward correctly
+/// through `EncryptingStorage` without interfering with the inner backend.
+#[tokio::test]
+async fn delegated_sequence_crud_passes_through_encryption_layer() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let enc = FieldEncryptor::from_hex_key(TEST_KEY).unwrap();
+    let storage = EncryptingStorage::new(inner, enc);
+
+    let seq = SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t1".into()),
+        namespace: Namespace("ns".into()),
+        name: "delegated-test".into(),
+        version: 1,
+        deprecated: false,
+        blocks: vec![],
+        interceptors: None,
+        created_at: chrono::Utc::now(),
+    };
+
+    // create_sequence is a delegated method (macro-generated)
+    storage.create_sequence(&seq).await.unwrap();
+
+    // get_sequence is also delegated
+    let got = storage.get_sequence(seq.id).await.unwrap();
+    assert!(got.is_some());
+    assert_eq!(got.unwrap().name, "delegated-test");
+
+    // list_sequences is also delegated
+    let list = storage
+        .list_sequences(Some(&TenantId("t1".into())), None, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 1);
+
+    // deprecate_sequence is delegated
+    storage.deprecate_sequence(seq.id).await.unwrap();
+    let after = storage.get_sequence(seq.id).await.unwrap().unwrap();
+    assert!(after.deprecated);
+}
+
+/// Verifies that `batch_reschedule_instances` delegation works through
+/// the encryption layer.
+#[tokio::test]
+async fn delegated_batch_reschedule_passes_through_encryption_layer() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let enc = FieldEncryptor::from_hex_key(TEST_KEY).unwrap();
+    let storage = EncryptingStorage::new(inner, enc);
+
+    let seq_id = SequenceId::new();
+    seed_sequence(&storage, seq_id, "t1").await;
+
+    let inst = mk_instance("t1", json!({"secret": "data"}));
+    let mut inst2 = inst.clone();
+    inst2.id = InstanceId::new();
+    inst2.sequence_id = seq_id;
+    let mut inst_mut = inst.clone();
+    inst_mut.sequence_id = seq_id;
+    inst_mut.state = InstanceState::Running;
+    let mut inst2_mut = inst2.clone();
+    inst2_mut.state = InstanceState::Running;
+    storage.create_instance(&inst_mut).await.unwrap();
+    storage.create_instance(&inst2_mut).await.unwrap();
+
+    let fire_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+    storage
+        .batch_reschedule_instances(&[inst_mut.id, inst2_mut.id], fire_at)
+        .await
+        .unwrap();
+
+    let got1 = storage.get_instance(inst_mut.id).await.unwrap().unwrap();
+    let got2 = storage.get_instance(inst2_mut.id).await.unwrap().unwrap();
+    assert_eq!(got1.state, InstanceState::Scheduled);
+    assert_eq!(got2.state, InstanceState::Scheduled);
+}

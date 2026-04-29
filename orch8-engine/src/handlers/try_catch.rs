@@ -48,16 +48,17 @@ pub async fn execute_try_catch(
                 "source": "try_catch",
                 "block_id": tc_def.id.0,
             });
-            if let Err(e) = storage
+            storage
                 .merge_context_data(instance.id, "_error", &error_ctx)
                 .await
-            {
-                tracing::warn!(
-                    instance_id = %instance.id,
-                    error = %e,
-                    "failed to inject error context for catch block"
-                );
-            }
+                .map_err(|e| {
+                    tracing::warn!(
+                        instance_id = %instance.id,
+                        error = %e,
+                        "failed to inject error context for catch block"
+                    );
+                    EngineError::from(e)
+                })?;
 
             // Sequential cursor: only the first Pending catch child should start.
             evaluator::activate_first_pending_child(storage, &catch_children).await?;

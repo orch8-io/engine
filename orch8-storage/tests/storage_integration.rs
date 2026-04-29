@@ -264,6 +264,76 @@ async fn signal_batch_operations() {
     assert_eq!(remaining.len(), 0);
 }
 
+// Fix #8: mark_signals_delivered uses a single batched query, not N individual ones.
+// This test verifies the batch path works correctly for various sizes.
+#[tokio::test]
+async fn mark_signals_delivered_batch_various_sizes() {
+    let s = store().await;
+    let inst = InstanceId::new();
+
+    // 0 signals — should be a no-op
+    s.mark_signals_delivered(&[]).await.unwrap();
+
+    // 1 signal
+    let sig1 = Signal {
+        id: Uuid::now_v7(),
+        instance_id: inst,
+        signal_type: SignalType::Pause,
+        payload: json!(null),
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    s.enqueue_signal(&sig1).await.unwrap();
+    s.mark_signals_delivered(&[sig1.id]).await.unwrap();
+    assert_eq!(s.get_pending_signals(inst).await.unwrap().len(), 0);
+
+    // 5 signals at once
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let sig = Signal {
+            id: Uuid::now_v7(),
+            instance_id: inst,
+            signal_type: SignalType::Custom("tick".into()),
+            payload: json!(null),
+            delivered: false,
+            created_at: Utc::now(),
+            delivered_at: None,
+        };
+        s.enqueue_signal(&sig).await.unwrap();
+        ids.push(sig.id);
+    }
+    assert_eq!(s.get_pending_signals(inst).await.unwrap().len(), 5);
+    s.mark_signals_delivered(&ids).await.unwrap();
+    assert_eq!(s.get_pending_signals(inst).await.unwrap().len(), 0);
+}
+
+// Fix #3: idempotency_key should be unique per-tenant, not globally.
+// Two different tenants can use the same idempotency key.
+#[tokio::test]
+async fn idempotency_key_unique_per_tenant_not_global() {
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+    let seq2 = make_sequence("t2");
+    s.create_sequence(&seq2).await.unwrap();
+
+    let mut inst_a = make_instance("t1", seq.id);
+    inst_a.idempotency_key = Some("order-123".into());
+    s.create_instance(&inst_a).await.unwrap();
+
+    // Same idempotency key in a different tenant should succeed.
+    let mut inst_b = make_instance("t2", seq2.id);
+    inst_b.idempotency_key = Some("order-123".into());
+    s.create_instance(&inst_b).await.unwrap();
+
+    // Same idempotency key in the SAME tenant should fail (or dedupe).
+    let mut inst_c = make_instance("t1", seq.id);
+    inst_c.idempotency_key = Some("order-123".into());
+    let result = s.create_instance(&inst_c).await;
+    assert!(result.is_err(), "same tenant + same key should conflict");
+}
+
 // ===========================================================================
 // Worker Tasks
 // ===========================================================================
@@ -2989,4 +3059,63 @@ async fn list_waiting_with_trees_returns_only_waiting_instances() {
     assert_eq!(inst.id, waiting.id);
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].state, NodeState::Waiting);
+}
+
+// ===========================================================================
+// Batch Reschedule Instances
+// ===========================================================================
+
+#[tokio::test]
+async fn batch_reschedule_transitions_multiple_instances_to_scheduled() {
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut a = make_instance("t1", seq.id);
+    a.state = InstanceState::Running;
+    a.next_fire_at = None;
+    let mut b = make_instance("t1", seq.id);
+    b.state = InstanceState::Running;
+    b.next_fire_at = None;
+    s.create_instance(&a).await.unwrap();
+    s.create_instance(&b).await.unwrap();
+
+    let fire_at = Utc::now() + Duration::seconds(60);
+    s.batch_reschedule_instances(&[a.id, b.id], fire_at)
+        .await
+        .unwrap();
+
+    let got_a = s.get_instance(a.id).await.unwrap().unwrap();
+    let got_b = s.get_instance(b.id).await.unwrap().unwrap();
+    assert_eq!(got_a.state, InstanceState::Scheduled);
+    assert_eq!(got_b.state, InstanceState::Scheduled);
+    assert!(got_a.next_fire_at.is_some());
+    assert!(got_b.next_fire_at.is_some());
+}
+
+#[tokio::test]
+async fn batch_reschedule_empty_slice_is_noop() {
+    let s = store().await;
+    let fire_at = Utc::now() + Duration::seconds(60);
+    s.batch_reschedule_instances(&[], fire_at).await.unwrap();
+}
+
+#[tokio::test]
+async fn batch_reschedule_single_instance() {
+    let s = store().await;
+    let seq = make_sequence("t1");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t1", seq.id);
+    inst.state = InstanceState::Running;
+    s.create_instance(&inst).await.unwrap();
+
+    let fire_at = Utc::now() + Duration::seconds(120);
+    s.batch_reschedule_instances(&[inst.id], fire_at)
+        .await
+        .unwrap();
+
+    let got = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(got.state, InstanceState::Scheduled);
+    assert!(got.next_fire_at.is_some());
 }

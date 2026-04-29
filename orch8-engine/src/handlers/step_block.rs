@@ -1,10 +1,9 @@
 use std::borrow::Cow;
-use std::future::Future;
 use std::sync::Arc;
 
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
-use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::execution::ExecutionNode;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::TaskInstance;
 use orch8_types::plugin::PluginType;
@@ -16,6 +15,10 @@ use crate::externalized;
 use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::step::StepExecParams;
 use crate::handlers::HandlerRegistry;
+
+use super::step_dispatch::{
+    dispatch_plugin, dispatch_step_to_external_worker, resolve_plugin_source,
+};
 
 /// Walk `context.data` top-level fields and inflate any externalization
 /// markers found. Does not recurse into nested objects — only top-level
@@ -50,125 +53,6 @@ pub(crate) async fn context_for_step(
         None => instance.context.clone(),
     };
     resolve_markers(storage, instance.id, filtered).await
-}
-
-/// Dispatch a plugin handler and map the `StepError` result to node state transitions.
-///
-/// On success the output is persisted as a `BlockOutput` for the node's
-/// `(instance_id, block_id)` so downstream steps can reference
-/// `{{outputs.<block_id>.*}}` — matching how the in-process registry path
-/// saves step outputs. Previously the output was discarded, leaving plugin
-/// steps invisible to templating and causing `getOutputs` to miss them.
-async fn dispatch_plugin<F, Fut>(
-    storage: &dyn StorageBackend,
-    node: &ExecutionNode,
-    attempt: u32,
-    handler_fn: F,
-) -> Result<bool, EngineError>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
-{
-    #[allow(clippy::single_match_else)]
-    match handler_fn().await {
-        Ok(output) => {
-            let output_size = serde_json::to_vec(&output)
-                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
-            let bo = orch8_types::output::BlockOutput {
-                id: uuid::Uuid::now_v7(),
-                instance_id: node.instance_id,
-                block_id: node.block_id.clone(),
-                output,
-                output_ref: None,
-                output_size,
-                attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-                created_at: chrono::Utc::now(),
-            };
-            // Output persistence is part of the success contract. Previously
-            // this was logged and swallowed, completing the node while its
-            // output was missing — downstream `{{outputs.<block_id>...}}`
-            // references then evaluated against a blank value while the
-            // workflow advanced as if the step succeeded. Fail the node
-            // instead so templating sees a consistent world.
-            if let Err(e) = storage.save_block_output(&bo).await {
-                tracing::error!(
-                    instance_id = %node.instance_id,
-                    block_id = %node.block_id,
-                    error = %e,
-                    "plugin handler: save_block_output failed — failing node to avoid stale-output downstream"
-                );
-                evaluator::fail_node(storage, node.id).await?;
-                return Ok(false);
-            }
-            evaluator::complete_node(storage, node.id).await?;
-            Ok(true)
-        }
-        Err(step_err) => {
-            // Previously the StepError was matched as `Err(_)` — the error
-            // message, details, and retryable flag were all discarded before
-            // `fail_node`. That left operators staring at a silently-failed
-            // node with zero signal about why: an empty `log` stream, no
-            // `error_message` on the `BlockOutput`, no trace of the HTTP/gRPC
-            // transport error, timeout, or upstream 4xx/5xx.
-            //
-            // At minimum, surface the structured error at tracing::error so
-            // log-based alerting can pick it up. Persist an error-tagged
-            // `BlockOutput` so downstream templating / the UI can distinguish
-            // "step never ran" from "step ran and blew up".
-            let (msg, is_retryable, details) = match &step_err {
-                orch8_types::error::StepError::Permanent { message, details } => {
-                    (message.clone(), false, details.clone())
-                }
-                orch8_types::error::StepError::Retryable { message, details } => {
-                    (message.clone(), true, details.clone())
-                }
-            };
-            tracing::error!(
-                instance_id = %node.instance_id,
-                block_id = %node.block_id,
-                retryable = is_retryable,
-                error = %msg,
-                details = ?details,
-                "plugin handler returned an error"
-            );
-            let err_output = serde_json::json!({
-                "__error__": true,
-                "retryable": is_retryable,
-                "message": msg,
-                "details": details,
-            });
-            let output_size = serde_json::to_vec(&err_output)
-                .map_or(0, |v| i32::try_from(v.len()).unwrap_or(i32::MAX));
-            let bo = orch8_types::output::BlockOutput {
-                id: uuid::Uuid::now_v7(),
-                instance_id: node.instance_id,
-                block_id: node.block_id.clone(),
-                output: err_output,
-                output_ref: Some("__error__".into()),
-                output_size,
-                attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-                created_at: chrono::Utc::now(),
-            };
-            if let Err(persist_err) = storage.save_block_output(&bo).await {
-                // Non-fatal: still fail the node. A missing error-marker is
-                // strictly worse UX than a missing success-output, but not
-                // load-bearing for correctness.
-                tracing::warn!(
-                    instance_id = %node.instance_id,
-                    block_id = %node.block_id,
-                    error = %persist_err,
-                    "plugin handler: failed to persist error marker; proceeding with fail_node"
-                );
-            }
-            // NOTE: plugin dispatch currently fails the node permanently on
-            // any StepError. A future change should honour `retryable` and
-            // re-schedule via the same backoff path as the in-process
-            // handler — that requires threading `instance` + `step_def.retry`
-            // into this helper. Tracked as follow-up to Issue 3's fix.
-            evaluator::fail_node(storage, node.id).await?;
-            Ok(false)
-        }
-    }
 }
 
 /// Execute a step node within the execution tree.
@@ -630,124 +514,6 @@ pub async fn execute_step_node(
             Err(e)
         }
     }
-}
-
-/// Dispatch a step within the execution tree to the external worker queue.
-/// The node is marked Waiting; the instance state is NOT changed here.
-///
-/// `resolved_params` must already have been through template + credential
-/// resolution — external workers receive materialised values, not raw
-/// `{{…}}` or `credentials://…` strings.
-async fn dispatch_step_to_external_worker(
-    storage: &dyn StorageBackend,
-    instance: &TaskInstance,
-    node: &ExecutionNode,
-    step_def: &StepDef,
-    resolved_params: serde_json::Value,
-    step_context: ExecutionContext,
-    attempt: u32,
-) -> Result<bool, EngineError> {
-    use orch8_types::worker::{WorkerTask, WorkerTaskState};
-
-    let task = WorkerTask {
-        id: uuid::Uuid::now_v7(),
-        instance_id: instance.id,
-        block_id: step_def.id.clone(),
-        handler_name: step_def.handler.clone(),
-        queue_name: step_def.queue_name.clone(),
-        params: resolved_params,
-        // Apply the step's context_access policy before handing the context
-        // off to an external worker. The remote process can't be trusted to
-        // filter on its own.
-        context: serde_json::to_value(step_context)
-            .map_err(orch8_types::error::StorageError::Serialization)?,
-        attempt: i16::try_from(attempt).unwrap_or(i16::MAX),
-        timeout_ms: step_def
-            .timeout
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
-        state: WorkerTaskState::Pending,
-        worker_id: None,
-        claimed_at: None,
-        heartbeat_at: None,
-        completed_at: None,
-        output: None,
-        error_message: None,
-        error_retryable: None,
-        created_at: chrono::Utc::now(),
-    };
-
-    storage.create_worker_task(&task).await?;
-
-    // Mark the execution node as Waiting so the evaluator won't re-dispatch it.
-    // The instance state is NOT changed here — the evaluator may have other steps
-    // to execute within the same composite. The caller (evaluator / process_instance_tree)
-    // is responsible for transitioning the instance to Waiting when no more work remains.
-    storage
-        .update_node_state(node.id, orch8_types::execution::NodeState::Waiting)
-        .await?;
-
-    tracing::info!(
-        instance_id = %instance.id,
-        block_id = %step_def.id,
-        handler = %step_def.handler,
-        "dispatched tree step to external worker queue"
-    );
-
-    Ok(false) // No more work in this tick — instance is now Waiting.
-}
-
-/// Called when an external worker completes a task that belongs to an execution tree.
-/// Marks the corresponding execution node as completed.
-pub async fn complete_external_step_node(
-    storage: &dyn StorageBackend,
-    instance_id: orch8_types::ids::InstanceId,
-    block_id: &orch8_types::ids::BlockId,
-) -> Result<(), EngineError> {
-    let tree = storage.get_execution_tree(instance_id).await?;
-    if let Some(node) = tree.iter().find(|n| {
-        n.block_id == *block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
-    }) {
-        evaluator::complete_node(storage, node.id).await?;
-    }
-    Ok(())
-}
-
-/// Look up a plugin name in the registry and return its source path/endpoint.
-/// Returns `None` if the plugin isn't registered (caller falls back to the raw handler name).
-async fn resolve_plugin_source(
-    storage: &dyn StorageBackend,
-    name: &str,
-    expected_type: PluginType,
-) -> Option<String> {
-    let plugin = match storage.get_plugin(name).await {
-        Ok(Some(p)) => p,
-        Ok(None) => return None,
-        Err(e) => {
-            tracing::warn!(plugin = %name, error = %e, "failed to resolve plugin source");
-            return None;
-        }
-    };
-    if plugin.enabled && plugin.plugin_type == expected_type {
-        Some(plugin.source)
-    } else {
-        None
-    }
-}
-
-/// Called when an external worker permanently fails a task in an execution tree.
-/// Marks the corresponding execution node as failed.
-pub async fn fail_external_step_node(
-    storage: &dyn StorageBackend,
-    instance_id: orch8_types::ids::InstanceId,
-    block_id: &orch8_types::ids::BlockId,
-) -> Result<(), EngineError> {
-    let tree = storage.get_execution_tree(instance_id).await?;
-    if let Some(node) = tree.iter().find(|n| {
-        n.block_id == *block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
-    }) {
-        evaluator::fail_node(storage, node.id).await?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

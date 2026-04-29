@@ -75,7 +75,7 @@ tokio-stream = "0.1"
 # Misc
 rand = "0.8"
 cron = "0.15"
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 subtle = "2"
 sha2 = "0.10"
 tikv-jemallocator = "0.6"

@@ -2,6 +2,15 @@ use orch8_types::context::ExecutionContext;
 
 use crate::error::EngineError;
 
+pub fn contains_template(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains("{{"),
+        serde_json::Value::Object(map) => map.values().any(contains_template),
+        serde_json::Value::Array(arr) => arr.iter().any(contains_template),
+        _ => false,
+    }
+}
+
 /// Resolve `{{path}}` placeholders in a JSON value.
 ///
 /// Supported path prefixes:
@@ -15,6 +24,9 @@ pub fn resolve(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> Result<serde_json::Value, EngineError> {
+    if !contains_template(value) {
+        return Ok(value.clone());
+    }
     match value {
         serde_json::Value::String(s) => resolve_string(s, context, outputs),
         serde_json::Value::Object(map) => {
@@ -175,6 +187,35 @@ mod tests {
         json!({
             "step_1": {"result": "ok", "count": 42}
         })
+    }
+
+    #[test]
+    fn contains_template_detects_string() {
+        assert!(contains_template(&json!("{{context.data.x}}")));
+        assert!(contains_template(&json!("prefix {{x}} suffix")));
+        assert!(!contains_template(&json!("no templates here")));
+        assert!(!contains_template(&json!("")));
+    }
+
+    #[test]
+    fn contains_template_detects_in_object_values() {
+        assert!(contains_template(&json!({"a": "{{x}}"})));
+        assert!(contains_template(&json!({"a": {"b": "{{x}}"}})));
+        assert!(!contains_template(&json!({"a": "plain"})));
+    }
+
+    #[test]
+    fn contains_template_detects_in_array() {
+        assert!(contains_template(&json!(["a", "{{x}}"])));
+        assert!(!contains_template(&json!(["a", "b"])));
+    }
+
+    #[test]
+    fn contains_template_returns_false_for_non_string_leaves() {
+        assert!(!contains_template(&json!(42)));
+        assert!(!contains_template(&json!(true)));
+        assert!(!contains_template(&json!(null)));
+        assert!(!contains_template(&json!(3.14)));
     }
 
     #[test]

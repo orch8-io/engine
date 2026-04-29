@@ -55,9 +55,18 @@ impl PostgresStorage {
         max_connections: u32,
         search_path: Option<&str>,
     ) -> Result<Self, StorageError> {
+        Self::with_min_connections(database_url, max_connections, 2, search_path).await
+    }
+
+    pub async fn with_min_connections(
+        database_url: &str,
+        max_connections: u32,
+        min_connections: u32,
+        search_path: Option<&str>,
+    ) -> Result<Self, StorageError> {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
-            .min_connections(2)
+            .min_connections(min_connections)
             .acquire_timeout(std::time::Duration::from_secs(10))
             .idle_timeout(std::time::Duration::from_mins(5))
             .connect(database_url)
@@ -190,6 +199,14 @@ impl StorageBackend for PostgresStorage {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
         instances::update_state(self, id, new_state, next_fire_at).await
+    }
+
+    async fn batch_reschedule_instances(
+        &self,
+        ids: &[InstanceId],
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        instances::batch_reschedule(self, ids, fire_at).await
     }
 
     async fn conditional_update_instance_state(
