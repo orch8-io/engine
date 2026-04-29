@@ -215,10 +215,10 @@ async fn filter_by_concurrency(
     candidates: &[TaskInstance],
 ) -> Result<Vec<TaskInstance>, StorageError> {
     // Group candidates by concurrency_key.
-    let mut keyed: HashMap<String, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
+    let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
         if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
-            keyed.entry(key.clone()).or_default().push(idx);
+            keyed.entry(key.as_str()).or_default().push(idx);
         }
     }
 
@@ -247,7 +247,7 @@ async fn filter_by_concurrency(
     let mut excluded = std::collections::HashSet::new();
     for (key, indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(i32::MAX);
-        let already_running = running_counts.get(key).copied().unwrap_or(0);
+        let already_running = running_counts.get(*key).copied().unwrap_or(0);
 
         let slots = (i64::from(max) - already_running).max(0) as usize;
         if slots < indices.len() {
