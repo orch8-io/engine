@@ -18,3 +18,7 @@
 **Vulnerability:** A `format!` macro was used to dynamically construct SQL queries with `IN` clauses in `orch8-storage/src/sqlite/signals.rs`.
 **Learning:** Using `format!` or string concatenation with `sqlx` defeats defense-in-depth and will trigger SAST/linters. The preferred method to build dynamic `IN` clauses is using `QueryBuilder` with `.separated()`.
 **Prevention:** Construct parameterized queries using `sqlx::QueryBuilder` with `.separated()` and `.push_bind()`. Never use string format/concat for SQL queries.
+## 2025-02-15 - [Refactored format! out of SQLx query in SQLite Instances Bulk Reschedule]
+**Vulnerability:** A `format!` macro was used to dynamically construct SQL queries with string concatenation for datetime modifier in `orch8-storage/src/sqlite/instances.rs`.
+**Learning:** Using `format!` or string concatenation to build raw SQL query string parts defeats defense-in-depth and triggers SAST/linters, even if the value itself is an integer and safe from traditional SQL injection. Parameter binding should always be preferred over string concatenation.
+**Prevention:** Construct parameterized queries using `sqlx::QueryBuilder` with `.push_bind()`, formatting values before binding instead of formatting the SQL string itself. Never use string format/concat for raw SQL string components.
