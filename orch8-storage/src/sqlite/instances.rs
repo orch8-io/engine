@@ -670,15 +670,14 @@ pub(super) async fn bulk_reschedule(
 ) -> Result<u64, StorageError> {
     let mut qb =
         sqlx::QueryBuilder::new("UPDATE task_instances SET next_fire_at=datetime(next_fire_at, ");
-    // SQLite's datetime() does not accept positional parameters (?1) for
-    // modifiers — they must be literal strings. Validate the numeric range
-    // before inlining to prevent SQL injection via malicious offset values.
+
+    // Validate the numeric range to prevent overflow/unreasonable values.
     if offset_secs.abs() > BULK_RESCHEDULE_MAX_OFFSET_SECS {
         return Err(StorageError::Query(format!(
             "bulk_reschedule offset too large: {offset_secs}"
         )));
     }
-    qb.push(format!("\"+{offset_secs} seconds\""));
+    qb.push_bind(format!("{offset_secs:+} seconds"));
     qb.push("), updated_at=");
     qb.push_bind(ts(Utc::now()));
     qb.push(" WHERE state='scheduled'");
