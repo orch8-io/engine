@@ -589,7 +589,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     fn apply_function(name: &str, args: &[serde_json::Value]) -> serde_json::Value {
         let arg = args.first().unwrap_or(&serde_json::Value::Null);
         match name {
@@ -622,16 +627,16 @@ impl<'a> Parser<'a> {
             "format_date" => {
                 let iso = arg.as_str().unwrap_or("");
                 let fmt = args.get(1).and_then(|v| v.as_str()).unwrap_or("%Y-%m-%d");
-                chrono::DateTime::parse_from_rfc3339(iso)
-                    .map_or(serde_json::Value::Null, |dt| serde_json::json!(dt.format(fmt).to_string()))
+                chrono::DateTime::parse_from_rfc3339(iso).map_or(serde_json::Value::Null, |dt| {
+                    serde_json::json!(dt.format(fmt).to_string())
+                })
             }
             "day_of_week" => {
                 let iso = arg.as_str().unwrap_or("");
-                chrono::DateTime::parse_from_rfc3339(iso)
-                    .map_or(serde_json::Value::Null, |dt| {
-                        use chrono::Datelike;
-                        serde_json::json!(dt.weekday().num_days_from_monday())
-                    })
+                chrono::DateTime::parse_from_rfc3339(iso).map_or(serde_json::Value::Null, |dt| {
+                    use chrono::Datelike;
+                    serde_json::json!(dt.weekday().num_days_from_monday())
+                })
             }
             "keys" => match arg {
                 serde_json::Value::Object(m) => {

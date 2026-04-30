@@ -802,17 +802,17 @@ fn validate_template_string(
     while let Some(start) = remainder.find("{{") {
         let after_open = &remainder[start + 2..];
         if let Some(end) = find_closing_braces(after_open) {
-                let inner = after_open[..end].trim();
-                validate_template_expr(block_id, field, inner, warnings);
-                remainder = &after_open[end + 2..];
-            } else {
-                warnings.push(TemplateWarning {
-                    block_id: block_id.to_string(),
-                    field: field.to_string(),
-                    message: "unclosed template expression `{{` without matching `}}`".into(),
-                });
-                break;
-            }
+            let inner = after_open[..end].trim();
+            validate_template_expr(block_id, field, inner, warnings);
+            remainder = &after_open[end + 2..];
+        } else {
+            warnings.push(TemplateWarning {
+                block_id: block_id.to_string(),
+                field: field.to_string(),
+                message: "unclosed template expression `{{` without matching `}}`".into(),
+            });
+            break;
+        }
     }
 }
 
