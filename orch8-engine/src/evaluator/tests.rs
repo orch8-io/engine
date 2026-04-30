@@ -1435,8 +1435,16 @@ async fn activate_first_pending_child_blocks_on_waiting_sibling() {
     let tree = s.get_execution_tree(inst_id).await.unwrap();
     let c0_after = tree.iter().find(|n| n.id == c0.id).unwrap();
     let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
-    assert_eq!(c0_after.state, NodeState::Waiting, "Waiting node must not change");
-    assert_eq!(c1_after.state, NodeState::Pending, "Pending sibling must stay Pending while prior is Waiting");
+    assert_eq!(
+        c0_after.state,
+        NodeState::Waiting,
+        "Waiting node must not change"
+    );
+    assert_eq!(
+        c1_after.state,
+        NodeState::Pending,
+        "Pending sibling must stay Pending while prior is Waiting"
+    );
 }
 
 #[tokio::test]
@@ -1467,7 +1475,11 @@ async fn activate_first_pending_child_blocks_on_running_sibling() {
     activate_first_pending_child(&s, &children).await.unwrap();
     let tree = s.get_execution_tree(inst_id).await.unwrap();
     let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
-    assert_eq!(c1_after.state, NodeState::Pending, "Pending sibling must stay Pending while prior is Running");
+    assert_eq!(
+        c1_after.state,
+        NodeState::Pending,
+        "Pending sibling must stay Pending while prior is Running"
+    );
 }
 
 #[tokio::test]
@@ -1498,5 +1510,9 @@ async fn activate_first_pending_child_activates_after_completed() {
     activate_first_pending_child(&s, &children).await.unwrap();
     let tree = s.get_execution_tree(inst_id).await.unwrap();
     let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
-    assert_eq!(c1_after.state, NodeState::Running, "Pending sibling should activate after Completed predecessor");
+    assert_eq!(
+        c1_after.state,
+        NodeState::Running,
+        "Pending sibling should activate after Completed predecessor"
+    );
 }

@@ -963,7 +963,10 @@ pub async fn activate_first_pending_child(
 ) -> Result<(), EngineError> {
     for child in children {
         match child.state {
-            NodeState::Completed | NodeState::Skipped | NodeState::Failed | NodeState::Cancelled => {
+            NodeState::Completed
+            | NodeState::Skipped
+            | NodeState::Failed
+            | NodeState::Cancelled => {
                 continue;
             }
             NodeState::Pending => {

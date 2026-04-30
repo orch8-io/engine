@@ -1321,10 +1321,7 @@ mod tests {
 
     #[test]
     fn eval_in_empty_array() {
-        assert_eq!(
-            evaluate("'x' in []", &ctx(), &outputs()),
-            json!(false)
-        );
+        assert_eq!(evaluate("'x' in []", &ctx(), &outputs()), json!(false));
     }
 
     // --- ternary operator ---
@@ -1348,17 +1345,18 @@ mod tests {
     #[test]
     fn eval_ternary_with_expression() {
         assert_eq!(
-            evaluate("context.data.count > 3 ? 'big' : 'small'", &ctx(), &outputs()),
+            evaluate(
+                "context.data.count > 3 ? 'big' : 'small'",
+                &ctx(),
+                &outputs()
+            ),
             json!("big")
         );
     }
 
     #[test]
     fn eval_ternary_with_numbers() {
-        assert_eq!(
-            evaluate("true ? 1 : 0", &ctx(), &outputs()),
-            json!(1.0)
-        );
+        assert_eq!(evaluate("true ? 1 : 0", &ctx(), &outputs()), json!(1.0));
     }
 
     // --- abs() function ---
@@ -1397,10 +1395,7 @@ mod tests {
 
     #[test]
     fn eval_len_string() {
-        assert_eq!(
-            evaluate("len('hello')", &ctx(), &outputs()),
-            json!(5)
-        );
+        assert_eq!(evaluate("len('hello')", &ctx(), &outputs()), json!(5));
     }
 
     #[test]
@@ -1463,10 +1458,7 @@ mod tests {
             evaluate("input.question", &ctx, &json!({})),
             json!("Will X?")
         );
-        assert_eq!(
-            evaluate("input.price > 0.5", &ctx, &json!({})),
-            json!(true)
-        );
+        assert_eq!(evaluate("input.price > 0.5", &ctx, &json!({})), json!(true));
     }
 
     // --- instance_id ---
@@ -1482,10 +1474,7 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(
-            evaluate("instance_id", &ctx, &json!({})),
-            json!("inst-42")
-        );
+        assert_eq!(evaluate("instance_id", &ctx, &json!({})), json!("inst-42"));
     }
 
     // --- combined expressions ---
@@ -1498,7 +1487,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            evaluate("level in ['strong', 'moderate'] ? 'bet' : 'skip'", &ctx, &json!({})),
+            evaluate(
+                "level in ['strong', 'moderate'] ? 'bet' : 'skip'",
+                &ctx,
+                &json!({})
+            ),
             json!("bet")
         );
     }
@@ -1506,7 +1499,11 @@ mod tests {
     #[test]
     fn eval_abs_with_steps() {
         let outputs = json!({"calc": {"estimate": 0.7}, "price": {"value": 0.5}});
-        let result = evaluate("abs(steps.calc.estimate - steps.price.value) * 100", &ctx(), &outputs);
+        let result = evaluate(
+            "abs(steps.calc.estimate - steps.price.value) * 100",
+            &ctx(),
+            &outputs,
+        );
         let v = result.as_f64().unwrap();
         assert!((v - 20.0).abs() < 0.001, "expected ~20.0, got {v}");
     }
