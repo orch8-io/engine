@@ -966,9 +966,7 @@ pub async fn activate_first_pending_child(
             NodeState::Completed
             | NodeState::Skipped
             | NodeState::Failed
-            | NodeState::Cancelled => {
-                continue;
-            }
+            | NodeState::Cancelled => {}
             NodeState::Pending => {
                 storage
                     .update_node_state(child.id, NodeState::Running)

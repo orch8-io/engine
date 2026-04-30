@@ -539,7 +539,6 @@ impl<'a> Parser<'a> {
             Some(Token::String(s)) => serde_json::Value::String(s),
             Some(Token::Number(n)) => serde_json::json!(n),
             Some(Token::Bool(b)) => serde_json::Value::Bool(b),
-            Some(Token::Null) => serde_json::Value::Null,
             Some(Token::Path(path)) => {
                 // Check for function call: name(arg)
                 if self.peek() == Some(&Token::LParen) {
@@ -548,7 +547,7 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::RParen) {
                         self.advance(); // consume )
                     }
-                    return self.apply_function(&path, &arg);
+                    return Self::apply_function(&path, &arg);
                 }
                 self.resolve_path(&path)
             }
@@ -581,7 +580,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn apply_function(&self, name: &str, arg: &serde_json::Value) -> serde_json::Value {
+    fn apply_function(name: &str, arg: &serde_json::Value) -> serde_json::Value {
         match name {
             "abs" => match to_f64(arg) {
                 Some(n) => serde_json::json!(n.abs()),
@@ -592,7 +591,6 @@ impl<'a> Parser<'a> {
                     serde_json::Value::Array(a) => a.len(),
                     serde_json::Value::Object(m) => m.len(),
                     serde_json::Value::String(s) => s.len(),
-                    serde_json::Value::Null => 0,
                     _ => 0,
                 };
                 serde_json::json!(n)
@@ -614,7 +612,7 @@ impl<'a> Parser<'a> {
                 };
                 navigate_json(source, &parts[2..])
             }
-            Some("outputs") | Some("steps") => navigate_json(self.outputs, &parts[1..]),
+            Some("outputs" | "steps") => navigate_json(self.outputs, &parts[1..]),
             Some("input") => {
                 let mut full = vec!["input"];
                 full.extend_from_slice(&parts[1..]);

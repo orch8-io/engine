@@ -215,13 +215,18 @@ fn apply_pipe_filter(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> Result<serde_json::Value, EngineError> {
-    if let Some(inner) = filter.strip_prefix("replace(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = filter
+        .strip_prefix("replace(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let (search, replacement) = parse_replace_args(inner, context, outputs)?;
         let text = match value {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        return Ok(serde_json::Value::String(text.replace(&search, &replacement)));
+        return Ok(serde_json::Value::String(
+            text.replace(&search, &replacement),
+        ));
     }
     Err(EngineError::TemplateError(format!(
         "unknown pipe filter: {filter}"
@@ -287,7 +292,11 @@ fn is_template_path(s: &str) -> bool {
     // Strip leading function call for paths like "json(outputs.x.y)"
     let inner = strip_function_call(s).unwrap_or(s);
     let root = inner.split('.').next().unwrap_or("");
-    root == "context" || root == "outputs" || root == "steps" || root == "input" || root == "instance_id"
+    root == "context"
+        || root == "outputs"
+        || root == "steps"
+        || root == "input"
+        || root == "instance_id"
 }
 
 fn try_resolve_single(
@@ -297,8 +306,8 @@ fn try_resolve_single(
 ) -> Result<Option<serde_json::Value>, EngineError> {
     // Check for function calls: json(path), len(path)
     if let Some((func, inner)) = parse_function_call(path) {
-        let inner_val = try_resolve_single(inner, context, outputs)?
-            .unwrap_or(serde_json::Value::Null);
+        let inner_val =
+            try_resolve_single(inner, context, outputs)?.unwrap_or(serde_json::Value::Null);
         return Ok(Some(apply_template_function(func, &inner_val)?));
     }
 
@@ -317,7 +326,7 @@ fn try_resolve_single(
             };
             navigate_json(source, parts)
         }
-        Some("outputs") | Some("steps") => navigate_json(outputs, parts),
+        Some("outputs" | "steps") => navigate_json(outputs, parts),
         Some("input") => navigate_json(&context.data, std::iter::once("input").chain(parts)),
         Some("instance_id") => {
             let id_str = context.runtime.instance_id.as_deref().unwrap_or("");
@@ -352,7 +361,10 @@ fn parse_function_call(s: &str) -> Option<(&str, &str)> {
     Some((func, inner))
 }
 
-fn apply_template_function(func: &str, value: &serde_json::Value) -> Result<serde_json::Value, EngineError> {
+fn apply_template_function(
+    func: &str,
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, EngineError> {
     match func {
         "json" => Ok(serde_json::Value::String(value.to_string())),
         "len" => {
@@ -360,7 +372,6 @@ fn apply_template_function(func: &str, value: &serde_json::Value) -> Result<serd
                 serde_json::Value::Array(a) => a.len(),
                 serde_json::Value::Object(m) => m.len(),
                 serde_json::Value::String(s) => s.len(),
-                serde_json::Value::Null => 0,
                 _ => 0,
             };
             Ok(serde_json::json!(n))
@@ -906,7 +917,7 @@ mod tests {
             data: json!({"input": {"question": "Will X happen?", "market_id": "m123"}}),
             config: json!({}),
             audit: vec![],
-            runtime: Default::default(),
+            runtime: orch8_types::context::RuntimeContext::default(),
         };
         let input = json!("{{input.question}}");
         let result = resolve(&input, &ctx, &json!({})).unwrap();
@@ -920,7 +931,9 @@ mod tests {
         let ctx = test_context();
         let input = json!("{{foo(outputs.step_1)}}");
         let err = resolve(&input, &ctx, &json!({})).unwrap_err();
-        assert!(matches!(err, EngineError::TemplateError(ref m) if m.contains("unknown template function")));
+        assert!(
+            matches!(err, EngineError::TemplateError(ref m) if m.contains("unknown template function"))
+        );
     }
 
     // --- replace() pipe filter ---
@@ -932,7 +945,9 @@ mod tests {
             "load_prompts": {"template": "Hello {{name}}, welcome!"},
             "data_step": {"user_name": "Alice"}
         });
-        let input = json!("{{ steps.load_prompts.template | replace('{{name}}', steps.data_step.user_name) }}");
+        let input = json!(
+            "{{ steps.load_prompts.template | replace('{{name}}', steps.data_step.user_name) }}"
+        );
         let result = resolve(&input, &ctx, &outputs).unwrap();
         assert_eq!(result, json!("Hello Alice, welcome!"));
     }
