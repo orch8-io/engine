@@ -359,6 +359,7 @@ fn apply_pipe_filter_with_args(
             .parse()
             .map_err(|_| EngineError::TemplateError("round() requires integer arg".into()))?;
         let n = value.as_f64().unwrap_or(0.0);
+        #[allow(clippy::cast_possible_wrap)]
         let factor = 10_f64.powi(decimals as i32);
         return Ok(serde_json::json!((n * factor).round() / factor));
     }
@@ -800,13 +801,11 @@ fn validate_template_string(
     let mut remainder = s;
     while let Some(start) = remainder.find("{{") {
         let after_open = &remainder[start + 2..];
-        match find_closing_braces(after_open) {
-            Some(end) => {
+        if let Some(end) = find_closing_braces(after_open) {
                 let inner = after_open[..end].trim();
                 validate_template_expr(block_id, field, inner, warnings);
                 remainder = &after_open[end + 2..];
-            }
-            None => {
+            } else {
                 warnings.push(TemplateWarning {
                     block_id: block_id.to_string(),
                     field: field.to_string(),
@@ -814,7 +813,6 @@ fn validate_template_string(
                 });
                 break;
             }
-        }
     }
 }
 
@@ -1748,7 +1746,7 @@ mod tests {
     #[test]
     fn filter_round() {
         let ctx = ExecutionContext {
-            data: json!({"price": 3.14159}),
+            data: json!({"price": 3.14567}),
             config: json!({}),
             ..Default::default()
         };
@@ -1758,7 +1756,7 @@ mod tests {
             &json!({}),
         )
         .unwrap();
-        assert_eq!(result, json!(3.14));
+        assert_eq!(result, json!(3.15));
     }
 
     // --- chained filters ---

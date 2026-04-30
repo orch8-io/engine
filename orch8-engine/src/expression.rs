@@ -589,6 +589,7 @@ impl<'a> Parser<'a> {
         }
     }
 
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     fn apply_function(name: &str, args: &[serde_json::Value]) -> serde_json::Value {
         let arg = args.first().unwrap_or(&serde_json::Value::Null);
         match name {
@@ -610,7 +611,7 @@ impl<'a> Parser<'a> {
             "now" => serde_json::json!(chrono::Utc::now().to_rfc3339()),
             "uuid" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
             "random" => {
-                let min = args.get(0).and_then(to_f64).unwrap_or(0.0) as i64;
+                let min = args.first().and_then(to_f64).unwrap_or(0.0) as i64;
                 let max = args.get(1).and_then(to_f64).unwrap_or(100.0) as i64;
                 if max <= min {
                     return serde_json::json!(min);
@@ -622,17 +623,15 @@ impl<'a> Parser<'a> {
                 let iso = arg.as_str().unwrap_or("");
                 let fmt = args.get(1).and_then(|v| v.as_str()).unwrap_or("%Y-%m-%d");
                 chrono::DateTime::parse_from_rfc3339(iso)
-                    .map(|dt| serde_json::json!(dt.format(fmt).to_string()))
-                    .unwrap_or(serde_json::Value::Null)
+                    .map_or(serde_json::Value::Null, |dt| serde_json::json!(dt.format(fmt).to_string()))
             }
             "day_of_week" => {
                 let iso = arg.as_str().unwrap_or("");
                 chrono::DateTime::parse_from_rfc3339(iso)
-                    .map(|dt| {
+                    .map_or(serde_json::Value::Null, |dt| {
                         use chrono::Datelike;
                         serde_json::json!(dt.weekday().num_days_from_monday())
                     })
-                    .unwrap_or(serde_json::Value::Null)
             }
             "keys" => match arg {
                 serde_json::Value::Object(m) => {

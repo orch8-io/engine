@@ -47,6 +47,7 @@ pub const LOOP_ABSOLUTE_MAX: u32 = 1_000_000;
 ///      body subtree to `Pending` so the next tick re-executes it.
 ///
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_loop(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,

@@ -54,6 +54,7 @@ fn json_byte_size(value: &serde_json::Value) -> Result<usize, serde_json::Error>
     Ok(counter.0)
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn execute_step_dry(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -210,6 +211,7 @@ pub async fn execute_step_dry(
 
 /// Execute a step with memoization: check if output already exists (idempotency),
 /// invoke the handler if not, persist the result.
+#[allow(clippy::too_many_lines)]
 pub async fn execute_step(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
