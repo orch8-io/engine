@@ -2221,6 +2221,7 @@ async fn context_round_trip_all_sections() {
             started_at: Some(Utc::now()),
             current_step_started_at: None,
             resource_key: None,
+            instance_id: None,
         },
     };
     s.create_instance(&inst).await.unwrap();
@@ -2459,6 +2460,7 @@ async fn merge_context_data_preserves_other_sections() {
             started_at: None,
             current_step_started_at: None,
             resource_key: None,
+            instance_id: None,
         },
     };
     s.create_instance(&inst).await.unwrap();

@@ -154,6 +154,8 @@ pub struct RuntimeContext {
     #[serde(default)]
     pub current_step_started_at: Option<DateTime<Utc>>,
     pub resource_key: Option<ResourceKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -183,6 +185,7 @@ mod tests {
                 started_at: Some(Utc::now()),
                 current_step_started_at: None,
                 resource_key: None,
+                instance_id: None,
             },
         }
     }

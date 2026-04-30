@@ -762,9 +762,14 @@ async fn process_instance(
             .await?;
         let mut inst = instance;
         inst.context.runtime.started_at = Some(started_at);
+        inst.context.runtime.instance_id = Some(instance_id.to_string());
         inst
     } else {
-        instance
+        let mut inst = instance;
+        if inst.context.runtime.instance_id.is_none() {
+            inst.context.runtime.instance_id = Some(instance_id.to_string());
+        }
+        inst
     };
 
     // Process any pending signals (using pre-fetched data).

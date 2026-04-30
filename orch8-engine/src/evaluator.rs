@@ -961,10 +961,21 @@ pub async fn activate_first_pending_child(
     storage: &dyn StorageBackend,
     children: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
-    if let Some(child) = children.iter().find(|c| c.state == NodeState::Pending) {
-        storage
-            .update_node_state(child.id, NodeState::Running)
-            .await?;
+    for child in children {
+        match child.state {
+            NodeState::Completed | NodeState::Skipped | NodeState::Failed | NodeState::Cancelled => {
+                continue;
+            }
+            NodeState::Pending => {
+                storage
+                    .update_node_state(child.id, NodeState::Running)
+                    .await?;
+                return Ok(());
+            }
+            NodeState::Running | NodeState::Waiting | _ => {
+                return Ok(());
+            }
+        }
     }
     Ok(())
 }

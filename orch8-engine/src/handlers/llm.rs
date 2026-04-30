@@ -232,9 +232,20 @@ async fn call_openai_compat(
         .and_then(Value::as_str)
         .unwrap_or("gpt-4o");
 
+    let messages = {
+        let mut msgs = Vec::new();
+        if let Some(sys) = params.get("system").and_then(Value::as_str) {
+            msgs.push(json!({"role": "system", "content": sys}));
+        }
+        if let Some(Value::Array(arr)) = params.get("messages") {
+            msgs.extend(arr.iter().cloned());
+        }
+        Value::Array(msgs)
+    };
+
     let mut body = json!({
         "model": model,
-        "messages": params.get("messages").cloned().unwrap_or(json!([])),
+        "messages": messages,
     });
 
     // Forward optional fields as-is.

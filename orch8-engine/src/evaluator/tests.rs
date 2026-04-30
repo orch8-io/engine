@@ -1400,3 +1400,103 @@ fn children_of_mixed_branch_indices_and_none() {
     assert_eq!(r0.len(), 1);
     assert_eq!(r2.len(), 0);
 }
+
+// Regression: activate_first_pending_child must block on Waiting siblings.
+// Previously, a Waiting node (dispatched to external worker) was not
+// treated as a barrier — the cursor skipped it and activated the next
+// Pending sibling, causing template resolution to run before the prior
+// step's output was persisted.
+#[tokio::test]
+async fn activate_first_pending_child_blocks_on_waiting_sibling() {
+    let s = SqliteStorage::in_memory().await.unwrap();
+    let inst_id = InstanceId::new();
+    seed_instance_ev(&s, inst_id).await;
+    let c0 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "ext_step",
+        BlockType::Step,
+        NodeState::Waiting,
+        inst_id,
+    );
+    let c1 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "builtin_step",
+        BlockType::Step,
+        NodeState::Pending,
+        inst_id,
+    );
+    s.create_execution_nodes_batch(&[c0.clone(), c1.clone()])
+        .await
+        .unwrap();
+    let children: Vec<&ExecutionNode> = vec![&c0, &c1];
+    activate_first_pending_child(&s, &children).await.unwrap();
+    let tree = s.get_execution_tree(inst_id).await.unwrap();
+    let c0_after = tree.iter().find(|n| n.id == c0.id).unwrap();
+    let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
+    assert_eq!(c0_after.state, NodeState::Waiting, "Waiting node must not change");
+    assert_eq!(c1_after.state, NodeState::Pending, "Pending sibling must stay Pending while prior is Waiting");
+}
+
+#[tokio::test]
+async fn activate_first_pending_child_blocks_on_running_sibling() {
+    let s = SqliteStorage::in_memory().await.unwrap();
+    let inst_id = InstanceId::new();
+    seed_instance_ev(&s, inst_id).await;
+    let c0 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "running_step",
+        BlockType::Step,
+        NodeState::Running,
+        inst_id,
+    );
+    let c1 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "next_step",
+        BlockType::Step,
+        NodeState::Pending,
+        inst_id,
+    );
+    s.create_execution_nodes_batch(&[c0.clone(), c1.clone()])
+        .await
+        .unwrap();
+    let children: Vec<&ExecutionNode> = vec![&c0, &c1];
+    activate_first_pending_child(&s, &children).await.unwrap();
+    let tree = s.get_execution_tree(inst_id).await.unwrap();
+    let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
+    assert_eq!(c1_after.state, NodeState::Pending, "Pending sibling must stay Pending while prior is Running");
+}
+
+#[tokio::test]
+async fn activate_first_pending_child_activates_after_completed() {
+    let s = SqliteStorage::in_memory().await.unwrap();
+    let inst_id = InstanceId::new();
+    seed_instance_ev(&s, inst_id).await;
+    let c0 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "done_step",
+        BlockType::Step,
+        NodeState::Completed,
+        inst_id,
+    );
+    let c1 = mk_exec_node(
+        ExecutionNodeId::new(),
+        None,
+        "next_step",
+        BlockType::Step,
+        NodeState::Pending,
+        inst_id,
+    );
+    s.create_execution_nodes_batch(&[c0.clone(), c1.clone()])
+        .await
+        .unwrap();
+    let children: Vec<&ExecutionNode> = vec![&c0, &c1];
+    activate_first_pending_child(&s, &children).await.unwrap();
+    let tree = s.get_execution_tree(inst_id).await.unwrap();
+    let c1_after = tree.iter().find(|n| n.id == c1.id).unwrap();
+    assert_eq!(c1_after.state, NodeState::Running, "Pending sibling should activate after Completed predecessor");
+}

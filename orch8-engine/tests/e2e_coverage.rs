@@ -1738,3 +1738,218 @@ async fn signal_update_context_replaces_instance_context() {
         "new context must be present after replacement"
     );
 }
+
+// ================================================================
+// NEW TEMPLATE & EXPRESSION FEATURES (steps.*, json(), len(),
+// ternary, in operator, instance_id, unary minus, abs())
+// ================================================================
+
+/// Registry with a handler that returns a fixed JSON payload (for producing
+/// outputs that subsequent steps / routers can reference via `steps.*`).
+fn registry_with_fixed_output(
+    handler_name: &str,
+    output: serde_json::Value,
+) -> HandlerRegistry {
+    let mut reg = registry();
+    let output = Arc::new(output);
+    reg.register(handler_name, move |_ctx| {
+        let o = Arc::clone(&output);
+        async move { Ok((*o).clone()) }
+    });
+    reg
+}
+
+fn registry_with_fixed_output_and_capture(
+    fixed_handler: &str,
+    fixed_output: serde_json::Value,
+) -> (
+    HandlerRegistry,
+    Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+) {
+    let mut reg = HandlerRegistry::new();
+    register_builtins(&mut reg);
+
+    let output = Arc::new(fixed_output);
+    reg.register(fixed_handler, move |_ctx| {
+        let o = Arc::clone(&output);
+        async move { Ok((*o).clone()) }
+    });
+
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = Arc::clone(&captured);
+    reg.register("capture_params", move |ctx| {
+        let captured = Arc::clone(&captured_clone);
+        async move {
+            *captured.lock().unwrap() = Some(ctx.params.clone());
+            Ok(json!({"ok": true}))
+        }
+    });
+    (reg, captured)
+}
+
+#[tokio::test]
+async fn template_steps_alias_resolves_previous_step_output() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![
+        mk_step_with_params("producer", "produce", json!({})),
+        mk_step_with_params(
+            "consumer",
+            "capture_params",
+            json!({
+                "name": "{{ steps.producer.name }}",
+                "count": "{{ steps.producer.count }}"
+            }),
+        ),
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_fixed_output_and_capture(
+        "produce",
+        json!({"name": "widget", "count": 42}),
+    );
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured.lock().unwrap().clone().expect("handler was called");
+    assert_eq!(seen["name"], "widget");
+    assert_eq!(seen["count"], 42);
+}
+
+#[tokio::test]
+async fn template_json_function_serializes_value() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![
+        mk_step_with_params("producer", "produce", json!({})),
+        mk_step_with_params(
+            "consumer",
+            "capture_params",
+            json!({
+                "payload": "{{ json(steps.producer.items) }}"
+            }),
+        ),
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_fixed_output_and_capture(
+        "produce",
+        json!({"items": [1, 2, 3]}),
+    );
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured.lock().unwrap().clone().expect("handler was called");
+    let payload: Vec<i32> = serde_json::from_str(seen["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn template_len_function_returns_array_length() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![
+        mk_step_with_params("producer", "produce", json!({})),
+        mk_step_with_params(
+            "consumer",
+            "capture_params",
+            json!({
+                "item_count": "{{ len(steps.producer.items) }}"
+            }),
+        ),
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_fixed_output_and_capture(
+        "produce",
+        json!({"items": ["a", "b", "c", "d"]}),
+    );
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured.lock().unwrap().clone().expect("handler was called");
+    assert_eq!(seen["item_count"], 4);
+}
+
+#[tokio::test]
+async fn router_in_operator_routes_based_on_step_output() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![
+        mk_step_with_params("producer", "produce", json!({})),
+        BlockDefinition::Router(Box::new(RouterDef {
+            id: BlockId("router".into()),
+            routes: vec![
+                Route {
+                    condition: "steps.producer.level in ['strong', 'moderate']".into(),
+                    blocks: vec![mk_step("bet_path", "noop")],
+                },
+            ],
+            default: Some(vec![mk_step("skip_path", "noop")]),
+        })),
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let reg = registry_with_fixed_output(
+        "produce",
+        json!({"level": "strong"}),
+    );
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    assert_eq!(node_state(&tree, "router"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "bet_path"), NodeState::Completed);
+}
+
+#[tokio::test]
+async fn router_ternary_expression_selects_route() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![
+        mk_step_with_params("producer", "produce", json!({})),
+        BlockDefinition::Router(Box::new(RouterDef {
+            id: BlockId("router".into()),
+            routes: vec![
+                Route {
+                    condition: "(steps.producer.score > 70) ? true : false".into(),
+                    blocks: vec![mk_step("high_path", "noop")],
+                },
+            ],
+            default: Some(vec![mk_step("low_path", "noop")]),
+        })),
+    ]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+
+    let reg = registry_with_fixed_output("produce", json!({"score": 85}));
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    assert_eq!(node_state(&tree, "router"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "high_path"), NodeState::Completed);
+}
+
+#[tokio::test]
+async fn template_instance_id_resolves() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sequence(vec![mk_step_with_params(
+        "s1",
+        "capture_params",
+        json!({"iid": "{{ instance_id }}"}),
+    )]);
+    storage.create_sequence(&seq).await.unwrap();
+    let mut inst = mk_instance(seq.id);
+    inst.context.runtime.instance_id = Some(inst.id.to_string());
+    storage.create_instance(&inst).await.unwrap();
+
+    let (reg, captured) = registry_with_param_capture();
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    let seen = captured.lock().unwrap().clone().expect("handler was called");
+    assert_eq!(
+        seen["iid"].as_str().unwrap(),
+        inst.id.to_string(),
+        "instance_id template must resolve to actual instance ID"
+    );
+}

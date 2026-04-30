@@ -48,7 +48,7 @@ pub fn try_evaluate(
     }
     let tokens = tokenize_cached(trimmed);
     let mut parser = Parser::new(&tokens, context, outputs);
-    let result = parser.parse_or();
+    let result = parser.parse_ternary();
     if parser.pos < tokens.len() {
         return Err(ExprError {
             message: format!("unexpected token {:?}", tokens[parser.pos]),
@@ -62,12 +62,16 @@ pub fn try_evaluate(
 /// Evaluate a simple expression against context and outputs.
 ///
 /// Supported syntax:
-/// - Path references: `context.data.x`, `outputs.step_1.result`
+/// - Path references: `context.data.x`, `outputs.step_1.result`, `steps.x.y`
 /// - Literals: `"hello"`, `42`, `true`, `false`, `null`
 /// - Comparisons: `==`, `!=`, `>`, `<`, `>=`, `<=`
+/// - Membership: `x in [a, b, c]`
 /// - Logical: `&&`, `||`
 /// - Arithmetic: `+`, `-`, `*`, `/`
 /// - Unary negation: `!expr`
+/// - Ternary: `condition ? then : else`
+/// - Functions: `abs(x)`, `len(arr)`, `json(obj)`
+/// - Array literals: `[1, 2, 3]`
 ///
 /// Returns the evaluated result as a JSON value.
 pub fn evaluate(
@@ -77,7 +81,7 @@ pub fn evaluate(
 ) -> serde_json::Value {
     let tokens = tokenize_cached(expr.trim());
     let mut parser = Parser::new(&tokens, context, outputs);
-    parser.parse_or()
+    parser.parse_ternary()
 }
 
 /// Check if an expression evaluates to a truthy value.
@@ -127,6 +131,12 @@ enum Token {
     Slash,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
+    Question,
+    Colon,
+    In,
 }
 
 fn tokenize(input: &str) -> Vec<Token> {
@@ -156,6 +166,26 @@ fn tokenize(input: &str) -> Vec<Token> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+            }
+            '?' => {
+                tokens.push(Token::Question);
+                i += 1;
+            }
+            ':' => {
+                tokens.push(Token::Colon);
                 i += 1;
             }
             '-' => {
@@ -266,6 +296,7 @@ fn tokenize_word(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usize
         "true" => Token::Bool(true),
         "false" => Token::Bool(false),
         "null" => Token::Null,
+        "in" => Token::In,
         _ => Token::Path(word),
     });
     i
@@ -317,6 +348,26 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
     }
 
+    // ternary: or (? or : or)?
+    fn parse_ternary(&mut self) -> serde_json::Value {
+        if !self.enter() {
+            return serde_json::Value::Null;
+        }
+        let cond = self.parse_or();
+        if self.peek() == Some(&Token::Question) {
+            self.advance();
+            let then_val = self.parse_or();
+            if self.peek() == Some(&Token::Colon) {
+                self.advance();
+            }
+            let else_val = self.parse_or();
+            self.leave();
+            return if is_truthy(&cond) { then_val } else { else_val };
+        }
+        self.leave();
+        cond
+    }
+
     // or: and (|| and)*
     fn parse_or(&mut self) -> serde_json::Value {
         if !self.enter() {
@@ -347,7 +398,7 @@ impl<'a> Parser<'a> {
         left
     }
 
-    // comparison: additive (== | != | > | >= | < | <= additive)?
+    // comparison: additive (== | != | > | >= | < | <= additive | in array)?
     fn parse_comparison(&mut self) -> serde_json::Value {
         if !self.enter() {
             return serde_json::Value::Null;
@@ -391,6 +442,15 @@ impl<'a> Parser<'a> {
                 serde_json::Value::Bool(
                     json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Greater),
                 )
+            }
+            Some(Token::In) => {
+                self.advance();
+                let right = self.parse_primary();
+                let found = match &right {
+                    serde_json::Value::Array(arr) => arr.iter().any(|v| json_eq(&left, v)),
+                    _ => false,
+                };
+                serde_json::Value::Bool(found)
             }
             _ => left,
         };
@@ -448,7 +508,7 @@ impl<'a> Parser<'a> {
         left
     }
 
-    // unary: !unary | primary
+    // unary: !unary | -unary | primary
     fn parse_unary(&mut self) -> serde_json::Value {
         if !self.enter() {
             return serde_json::Value::Null;
@@ -459,25 +519,85 @@ impl<'a> Parser<'a> {
             self.leave();
             return serde_json::Value::Bool(!is_truthy(&val));
         }
+        if self.peek() == Some(&Token::Minus) {
+            self.advance();
+            let val = self.parse_unary();
+            self.leave();
+            return match to_f64(&val) {
+                Some(n) => serde_json::json!(-n),
+                None => serde_json::Value::Null,
+            };
+        }
         let result = self.parse_primary();
         self.leave();
         result
     }
 
-    // primary: literal | path | (expr)
+    // primary: literal | path | function(expr) | (expr) | [expr, ...]
     fn parse_primary(&mut self) -> serde_json::Value {
         match self.advance().cloned() {
             Some(Token::String(s)) => serde_json::Value::String(s),
             Some(Token::Number(n)) => serde_json::json!(n),
             Some(Token::Bool(b)) => serde_json::Value::Bool(b),
-            Some(Token::Path(path)) => self.resolve_path(&path),
+            Some(Token::Null) => serde_json::Value::Null,
+            Some(Token::Path(path)) => {
+                // Check for function call: name(arg)
+                if self.peek() == Some(&Token::LParen) {
+                    self.advance(); // consume (
+                    let arg = self.parse_ternary();
+                    if self.peek() == Some(&Token::RParen) {
+                        self.advance(); // consume )
+                    }
+                    return self.apply_function(&path, &arg);
+                }
+                self.resolve_path(&path)
+            }
             Some(Token::LParen) => {
-                let val = self.parse_or();
+                let val = self.parse_ternary();
                 if self.peek() == Some(&Token::RParen) {
                     self.advance();
                 }
                 val
             }
+            Some(Token::LBracket) => {
+                // Array literal: [expr, expr, ...]
+                let mut items = Vec::new();
+                if self.peek() != Some(&Token::RBracket) {
+                    items.push(self.parse_ternary());
+                    while self.peek() == Some(&Token::Comma) {
+                        self.advance();
+                        if self.peek() == Some(&Token::RBracket) {
+                            break; // trailing comma
+                        }
+                        items.push(self.parse_ternary());
+                    }
+                }
+                if self.peek() == Some(&Token::RBracket) {
+                    self.advance();
+                }
+                serde_json::Value::Array(items)
+            }
+            _ => serde_json::Value::Null,
+        }
+    }
+
+    fn apply_function(&self, name: &str, arg: &serde_json::Value) -> serde_json::Value {
+        match name {
+            "abs" => match to_f64(arg) {
+                Some(n) => serde_json::json!(n.abs()),
+                None => serde_json::Value::Null,
+            },
+            "len" => {
+                let n = match arg {
+                    serde_json::Value::Array(a) => a.len(),
+                    serde_json::Value::Object(m) => m.len(),
+                    serde_json::Value::String(s) => s.len(),
+                    serde_json::Value::Null => 0,
+                    _ => 0,
+                };
+                serde_json::json!(n)
+            }
+            "json" => serde_json::Value::String(arg.to_string()),
             _ => serde_json::Value::Null,
         }
     }
@@ -494,7 +614,16 @@ impl<'a> Parser<'a> {
                 };
                 navigate_json(source, &parts[2..])
             }
-            Some("outputs") => navigate_json(self.outputs, &parts[1..]),
+            Some("outputs") | Some("steps") => navigate_json(self.outputs, &parts[1..]),
+            Some("input") => {
+                let mut full = vec!["input"];
+                full.extend_from_slice(&parts[1..]);
+                navigate_json(&self.context.data, &full)
+            }
+            Some("instance_id") => {
+                let id = self.context.runtime.instance_id.as_deref().unwrap_or("");
+                serde_json::Value::String(id.to_string())
+            }
             _ => {
                 // Bare path — resolve from context.data for backwards compatibility.
                 navigate_json(&self.context.data, &parts)
@@ -1131,5 +1260,254 @@ mod tests {
         let b = tokenize_cached("3 + 4");
         assert!(!Arc::ptr_eq(&a, &b));
         assert_ne!(&a[..], &b[..]);
+    }
+
+    // --- steps alias ---
+
+    #[test]
+    fn eval_steps_alias() {
+        assert_eq!(
+            evaluate("steps.step_1.count", &ctx(), &outputs()),
+            json!(42)
+        );
+    }
+
+    #[test]
+    fn eval_steps_alias_comparison() {
+        assert_eq!(
+            evaluate("steps.step_1.count == 42", &ctx(), &outputs()),
+            json!(true)
+        );
+    }
+
+    // --- in operator ---
+
+    #[test]
+    fn eval_in_array_literal_found() {
+        assert_eq!(
+            evaluate("'strong' in ['strong', 'moderate']", &ctx(), &outputs()),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn eval_in_array_literal_not_found() {
+        assert_eq!(
+            evaluate("'weak' in ['strong', 'moderate']", &ctx(), &outputs()),
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn eval_in_number_array() {
+        assert_eq!(
+            evaluate("5 in [1, 2, 3, 5, 8]", &ctx(), &outputs()),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn eval_in_with_path() {
+        let ctx = ExecutionContext {
+            data: json!({"level": "moderate"}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("level in ['strong', 'moderate']", &ctx, &json!({})),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn eval_in_empty_array() {
+        assert_eq!(
+            evaluate("'x' in []", &ctx(), &outputs()),
+            json!(false)
+        );
+    }
+
+    // --- ternary operator ---
+
+    #[test]
+    fn eval_ternary_true() {
+        assert_eq!(
+            evaluate("true ? 'yes' : 'no'", &ctx(), &outputs()),
+            json!("yes")
+        );
+    }
+
+    #[test]
+    fn eval_ternary_false() {
+        assert_eq!(
+            evaluate("false ? 'yes' : 'no'", &ctx(), &outputs()),
+            json!("no")
+        );
+    }
+
+    #[test]
+    fn eval_ternary_with_expression() {
+        assert_eq!(
+            evaluate("context.data.count > 3 ? 'big' : 'small'", &ctx(), &outputs()),
+            json!("big")
+        );
+    }
+
+    #[test]
+    fn eval_ternary_with_numbers() {
+        assert_eq!(
+            evaluate("true ? 1 : 0", &ctx(), &outputs()),
+            json!(1.0)
+        );
+    }
+
+    // --- abs() function ---
+
+    #[test]
+    fn eval_abs_positive() {
+        assert_eq!(evaluate("abs(5)", &ctx(), &outputs()), json!(5.0));
+    }
+
+    #[test]
+    fn eval_abs_negative() {
+        assert_eq!(evaluate("abs(-5)", &ctx(), &outputs()), json!(5.0));
+    }
+
+    #[test]
+    fn eval_abs_expression() {
+        assert_eq!(evaluate("abs(3 - 10)", &ctx(), &outputs()), json!(7.0));
+    }
+
+    #[test]
+    fn eval_abs_null_returns_null() {
+        assert_eq!(evaluate("abs(null)", &ctx(), &outputs()), json!(null));
+    }
+
+    // --- len() function ---
+
+    #[test]
+    fn eval_len_array() {
+        let ctx = ExecutionContext {
+            data: json!({"items": [1, 2, 3]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("len(items)", &ctx, &json!({})), json!(3));
+    }
+
+    #[test]
+    fn eval_len_string() {
+        assert_eq!(
+            evaluate("len('hello')", &ctx(), &outputs()),
+            json!(5)
+        );
+    }
+
+    #[test]
+    fn eval_len_empty_array() {
+        let ctx = ExecutionContext {
+            data: json!({"items": []}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("len(items)", &ctx, &json!({})), json!(0));
+    }
+
+    // --- json() function ---
+
+    #[test]
+    fn eval_json_object() {
+        let outputs = json!({"step_1": {"data": {"x": 1}}});
+        assert_eq!(
+            evaluate("json(steps.step_1.data)", &ctx(), &outputs),
+            json!("{\"x\":1}")
+        );
+    }
+
+    // --- array literals ---
+
+    #[test]
+    fn eval_array_literal() {
+        let result = evaluate("[1, 2, 3]", &ctx(), &outputs());
+        assert_eq!(result, json!([1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn eval_array_literal_strings() {
+        let result = evaluate("['a', 'b', 'c']", &ctx(), &outputs());
+        assert_eq!(result, json!(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn eval_array_literal_empty() {
+        let result = evaluate("[]", &ctx(), &outputs());
+        assert_eq!(result, json!([]));
+    }
+
+    #[test]
+    fn eval_array_literal_mixed() {
+        let result = evaluate("[1, 'two', true, null]", &ctx(), &outputs());
+        assert_eq!(result, json!([1.0, "two", true, null]));
+    }
+
+    // --- input path ---
+
+    #[test]
+    fn eval_input_path() {
+        let ctx = ExecutionContext {
+            data: json!({"input": {"question": "Will X?", "price": 0.65}}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("input.question", &ctx, &json!({})),
+            json!("Will X?")
+        );
+        assert_eq!(
+            evaluate("input.price > 0.5", &ctx, &json!({})),
+            json!(true)
+        );
+    }
+
+    // --- instance_id ---
+
+    #[test]
+    fn eval_instance_id() {
+        let ctx = ExecutionContext {
+            data: json!({}),
+            config: json!({}),
+            runtime: orch8_types::context::RuntimeContext {
+                instance_id: Some("inst-42".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("instance_id", &ctx, &json!({})),
+            json!("inst-42")
+        );
+    }
+
+    // --- combined expressions ---
+
+    #[test]
+    fn eval_combined_in_and_ternary() {
+        let ctx = ExecutionContext {
+            data: json!({"level": "strong"}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("level in ['strong', 'moderate'] ? 'bet' : 'skip'", &ctx, &json!({})),
+            json!("bet")
+        );
+    }
+
+    #[test]
+    fn eval_abs_with_steps() {
+        let outputs = json!({"calc": {"estimate": 0.7}, "price": {"value": 0.5}});
+        let result = evaluate("abs(steps.calc.estimate - steps.price.value) * 100", &ctx(), &outputs);
+        let v = result.as_f64().unwrap();
+        assert!((v - 20.0).abs() < 0.001, "expected ~20.0, got {v}");
     }
 }
