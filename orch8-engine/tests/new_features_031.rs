@@ -336,11 +336,7 @@ async fn state_template_reads_kv_state() {
                 "set_state",
                 json!({"key": "flavor", "value": "vanilla"}),
             ),
-            mk_step(
-                "t1",
-                "transform",
-                json!({"picked": "{{ state.flavor }}"}),
-            ),
+            mk_step("t1", "transform", json!({"picked": "{{ state.flavor }}"})),
         ],
         json!({}),
     )
@@ -363,11 +359,7 @@ async fn state_template_reads_kv_state() {
 async fn state_template_with_merge_state() {
     let (storage, seq, inst) = setup(
         vec![
-            mk_step(
-                "ms1",
-                "merge_state",
-                json!({"values": {"x": 10, "y": 20}}),
-            ),
+            mk_step("ms1", "merge_state", json!({"values": {"x": 10, "y": 20}})),
             mk_step(
                 "t1",
                 "transform",
@@ -397,8 +389,7 @@ async fn state_template_with_merge_state() {
 
 #[tokio::test]
 async fn cache_key_caches_step_output() {
-    let storage: Arc<dyn StorageBackend> =
-        Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
 
     let seq = mk_sequence(vec![mk_step_cached(
         "c1",
@@ -433,8 +424,7 @@ async fn cache_key_caches_step_output() {
 
 #[tokio::test]
 async fn cache_key_serves_from_cache_on_second_instance() {
-    let storage: Arc<dyn StorageBackend> =
-        Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
 
     let instance_id = InstanceId::new();
     let seq_id = SequenceId::new();

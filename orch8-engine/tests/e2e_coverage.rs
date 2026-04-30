@@ -44,7 +44,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }))
 }
 
@@ -66,7 +66,7 @@ fn mk_step_with_params(id: &str, handler: &str, params: serde_json::Value) -> Bl
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }))
 }
 
@@ -92,7 +92,7 @@ fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDefini
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }))
 }
 
@@ -113,7 +113,7 @@ fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }))
 }
 
@@ -1657,7 +1657,7 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     })))
     .unwrap();
 

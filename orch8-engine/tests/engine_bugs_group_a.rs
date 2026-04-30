@@ -694,7 +694,13 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
 
     let registry = HandlerRegistry::new();
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
+        &storage,
+        &registry,
+        &instance,
+        &fe_node,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -812,7 +818,13 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     // Pending to Running (for_each.rs:163-175).
     // --------------------------------------------------------------------
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
+        &storage,
+        &registry,
+        &instance,
+        &fe_node,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -1104,7 +1116,13 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
     //    marker (`_items: [1,2]`, `_index: 0`), binds x=1, and activates
     //    the inner loop child (Pending -> Running).
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
+        &storage,
+        &registry,
+        &instance,
+        &fe_node,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();

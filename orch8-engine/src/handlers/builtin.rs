@@ -576,16 +576,21 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 /// - `key` (string, required): The key to set.
 /// - `value` (any, required): The JSON value to store.
 async fn handle_set_state(ctx: StepContext) -> Result<Value, StepError> {
-    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-        StepError::Permanent {
+    let key = ctx
+        .params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| StepError::Permanent {
             message: "set_state: `key` (string) is required".into(),
             details: None,
-        }
-    })?;
-    let value = ctx.params.get("value").ok_or_else(|| StepError::Permanent {
-        message: "set_state: `value` is required".into(),
-        details: None,
-    })?;
+        })?;
+    let value = ctx
+        .params
+        .get("value")
+        .ok_or_else(|| StepError::Permanent {
+            message: "set_state: `value` is required".into(),
+            details: None,
+        })?;
     ctx.storage
         .set_instance_kv(ctx.instance_id, key, value)
         .await
@@ -603,12 +608,14 @@ async fn handle_set_state(ctx: StepContext) -> Result<Value, StepError> {
 ///
 /// Returns `{"key": "...", "value": ...}` or `{"key": "...", "value": null}` if not found.
 async fn handle_get_state(ctx: StepContext) -> Result<Value, StepError> {
-    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-        StepError::Permanent {
+    let key = ctx
+        .params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| StepError::Permanent {
             message: "get_state: `key` (string) is required".into(),
             details: None,
-        }
-    })?;
+        })?;
     let value = ctx
         .storage
         .get_instance_kv(ctx.instance_id, key)
@@ -626,12 +633,14 @@ async fn handle_get_state(ctx: StepContext) -> Result<Value, StepError> {
 /// Params:
 /// - `key` (string, required): The key to delete.
 async fn handle_delete_state(ctx: StepContext) -> Result<Value, StepError> {
-    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
-        StepError::Permanent {
+    let key = ctx
+        .params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| StepError::Permanent {
             message: "delete_state: `key` (string) is required".into(),
             details: None,
-        }
-    })?;
+        })?;
     ctx.storage
         .delete_instance_kv(ctx.instance_id, key)
         .await
@@ -671,11 +680,8 @@ async fn handle_assert(ctx: StepContext) -> Result<Value, StepError> {
             details: None,
         })?;
 
-    let result = crate::expression::evaluate_condition(
-        condition,
-        &ctx.context,
-        &serde_json::json!({}),
-    );
+    let result =
+        crate::expression::evaluate_condition(condition, &ctx.context, &serde_json::json!({}));
 
     debug!(
         instance_id = %ctx.instance_id,
@@ -828,11 +834,9 @@ mod tests {
 
     #[tokio::test]
     async fn set_state_stores_value() {
-        let result = handle_set_state(
-            test_ctx(json!({"key": "counter", "value": 42})).await,
-        )
-        .await
-        .unwrap();
+        let result = handle_set_state(test_ctx(json!({"key": "counter", "value": 42})).await)
+            .await
+            .unwrap();
         assert_eq!(result["key"], "counter");
         assert_eq!(result["value"], 42);
     }
@@ -845,11 +849,9 @@ mod tests {
 
     #[tokio::test]
     async fn get_state_returns_null_for_missing() {
-        let result = handle_get_state(
-            test_ctx(json!({"key": "nonexistent"})).await,
-        )
-        .await
-        .unwrap();
+        let result = handle_get_state(test_ctx(json!({"key": "nonexistent"})).await)
+            .await
+            .unwrap();
         assert_eq!(result["value"], Value::Null);
     }
 
@@ -969,17 +971,13 @@ mod tests {
 
     #[tokio::test]
     async fn transform_empty_params() {
-        let result = handle_transform(test_ctx(json!({})).await)
-            .await
-            .unwrap();
+        let result = handle_transform(test_ctx(json!({})).await).await.unwrap();
         assert_eq!(result, json!({}));
     }
 
     #[tokio::test]
     async fn transform_null_params() {
-        let result = handle_transform(test_ctx(Value::Null).await)
-            .await
-            .unwrap();
+        let result = handle_transform(test_ctx(Value::Null).await).await.unwrap();
         assert_eq!(result, Value::Null);
     }
 

@@ -650,9 +650,7 @@ impl<'a> Parser<'a> {
                 let needle = args.get(1).unwrap_or(&serde_json::Value::Null);
                 let found = match arg {
                     serde_json::Value::Array(a) => a.iter().any(|v| json_eq(v, needle)),
-                    serde_json::Value::String(s) => {
-                        needle.as_str().is_some_and(|n| s.contains(n))
-                    }
+                    serde_json::Value::String(s) => needle.as_str().is_some_and(|n| s.contains(n)),
                     _ => false,
                 };
                 serde_json::Value::Bool(found)
@@ -710,9 +708,7 @@ impl<'a> Parser<'a> {
                 _ => serde_json::Value::Null,
             },
             "last" => match arg {
-                serde_json::Value::Array(a) => {
-                    a.last().cloned().unwrap_or(serde_json::Value::Null)
-                }
+                serde_json::Value::Array(a) => a.last().cloned().unwrap_or(serde_json::Value::Null),
                 _ => serde_json::Value::Null,
             },
             "slice" => {
@@ -734,7 +730,11 @@ impl<'a> Parser<'a> {
                         let mut sorted = a.clone();
                         sorted.sort_by(|a, b| {
                             let cmp = json_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal);
-                            if order == "desc" { cmp.reverse() } else { cmp }
+                            if order == "desc" {
+                                cmp.reverse()
+                            } else {
+                                cmp
+                            }
                         });
                         serde_json::Value::Array(sorted)
                     }
@@ -809,8 +809,8 @@ impl<'a> Parser<'a> {
             Some("config") => navigate_json(&self.context.config, &parts[1..]),
             Some("data") => navigate_json(&self.context.data, &parts[1..]),
             Some("runtime") => {
-                let rt_json = serde_json::to_value(&self.context.runtime)
-                    .unwrap_or(serde_json::Value::Null);
+                let rt_json =
+                    serde_json::to_value(&self.context.runtime).unwrap_or(serde_json::Value::Null);
                 navigate_json(&rt_json, &parts[1..])
             }
             _ => {
@@ -1703,7 +1703,10 @@ mod tests {
     fn eval_now_returns_rfc3339() {
         let result = evaluate("now()", &ctx(), &outputs());
         let s = result.as_str().unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(s).is_ok(), "invalid rfc3339: {s}");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(s).is_ok(),
+            "invalid rfc3339: {s}"
+        );
     }
 
     // --- uuid() ---
@@ -1728,7 +1731,11 @@ mod tests {
 
     #[test]
     fn eval_format_date() {
-        let result = evaluate("format_date('2026-01-15T10:30:00+00:00', '%Y-%m-%d')", &ctx(), &outputs());
+        let result = evaluate(
+            "format_date('2026-01-15T10:30:00+00:00', '%Y-%m-%d')",
+            &ctx(),
+            &outputs(),
+        );
         assert_eq!(result, json!("2026-01-15"));
     }
 
@@ -1737,7 +1744,11 @@ mod tests {
     #[test]
     fn eval_day_of_week() {
         // 2026-01-15 is a Thursday (3 = Thu, 0-indexed from Monday)
-        let result = evaluate("day_of_week('2026-01-15T10:00:00+00:00')", &ctx(), &outputs());
+        let result = evaluate(
+            "day_of_week('2026-01-15T10:00:00+00:00')",
+            &ctx(),
+            &outputs(),
+        );
         assert_eq!(result, json!(3));
     }
 
@@ -1780,8 +1791,14 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("contains(tags, 'vip')", &ctx, &json!({})), json!(true));
-        assert_eq!(evaluate("contains(tags, 'old')", &ctx, &json!({})), json!(false));
+        assert_eq!(
+            evaluate("contains(tags, 'vip')", &ctx, &json!({})),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("contains(tags, 'old')", &ctx, &json!({})),
+            json!(false)
+        );
     }
 
     #[test]
@@ -1791,8 +1808,14 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("contains(msg, 'world')", &ctx, &json!({})), json!(true));
-        assert_eq!(evaluate("contains(msg, 'xyz')", &ctx, &json!({})), json!(false));
+        assert_eq!(
+            evaluate("contains(msg, 'world')", &ctx, &json!({})),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("contains(msg, 'xyz')", &ctx, &json!({})),
+            json!(false)
+        );
     }
 
     // --- starts_with() ---
@@ -1804,8 +1827,14 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("starts_with(url, 'https')", &ctx, &json!({})), json!(true));
-        assert_eq!(evaluate("starts_with(url, 'http://')", &ctx, &json!({})), json!(false));
+        assert_eq!(
+            evaluate("starts_with(url, 'https')", &ctx, &json!({})),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("starts_with(url, 'http://')", &ctx, &json!({})),
+            json!(false)
+        );
     }
 
     // --- ends_with() ---
@@ -1817,8 +1846,14 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("ends_with(file, '.pdf')", &ctx, &json!({})), json!(true));
-        assert_eq!(evaluate("ends_with(file, '.csv')", &ctx, &json!({})), json!(false));
+        assert_eq!(
+            evaluate("ends_with(file, '.pdf')", &ctx, &json!({})),
+            json!(true)
+        );
+        assert_eq!(
+            evaluate("ends_with(file, '.csv')", &ctx, &json!({})),
+            json!(false)
+        );
     }
 
     // --- sum() ---
@@ -1910,7 +1945,10 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("slice(items, 1, 3)", &ctx, &json!({})), json!([20, 30]));
+        assert_eq!(
+            evaluate("slice(items, 1, 3)", &ctx, &json!({})),
+            json!([20, 30])
+        );
     }
 
     #[test]
@@ -1920,7 +1958,10 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("slice(items, 1)", &ctx, &json!({})), json!([20, 30]));
+        assert_eq!(
+            evaluate("slice(items, 1)", &ctx, &json!({})),
+            json!([20, 30])
+        );
     }
 
     // --- sort() ---
@@ -1942,7 +1983,10 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("sort(nums, 'desc')", &ctx, &json!({})), json!([3, 2, 1]));
+        assert_eq!(
+            evaluate("sort(nums, 'desc')", &ctx, &json!({})),
+            json!([3, 2, 1])
+        );
     }
 
     // --- unique() ---
@@ -1954,7 +1998,10 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        assert_eq!(evaluate("unique(items)", &ctx, &json!({})), json!(["a", "b", "c"]));
+        assert_eq!(
+            evaluate("unique(items)", &ctx, &json!({})),
+            json!(["a", "b", "c"])
+        );
     }
 
     // --- count() ---
@@ -1973,13 +2020,22 @@ mod tests {
 
     #[test]
     fn eval_change_pct() {
-        assert_eq!(evaluate("change_pct(100, 150)", &ctx(), &outputs()), json!(50.0));
-        assert_eq!(evaluate("change_pct(200, 100)", &ctx(), &outputs()), json!(-50.0));
+        assert_eq!(
+            evaluate("change_pct(100, 150)", &ctx(), &outputs()),
+            json!(50.0)
+        );
+        assert_eq!(
+            evaluate("change_pct(200, 100)", &ctx(), &outputs()),
+            json!(-50.0)
+        );
     }
 
     #[test]
     fn eval_change_pct_zero_old() {
-        assert_eq!(evaluate("change_pct(0, 100)", &ctx(), &outputs()), json!(null));
+        assert_eq!(
+            evaluate("change_pct(0, 100)", &ctx(), &outputs()),
+            json!(null)
+        );
     }
 
     // --- clamp() ---
@@ -1988,7 +2044,10 @@ mod tests {
     fn eval_clamp() {
         assert_eq!(evaluate("clamp(5, 0, 10)", &ctx(), &outputs()), json!(5.0));
         assert_eq!(evaluate("clamp(-5, 0, 10)", &ctx(), &outputs()), json!(0.0));
-        assert_eq!(evaluate("clamp(15, 0, 10)", &ctx(), &outputs()), json!(10.0));
+        assert_eq!(
+            evaluate("clamp(15, 0, 10)", &ctx(), &outputs()),
+            json!(10.0)
+        );
     }
 
     // --- root variable shortcuts in expressions ---
@@ -2000,7 +2059,10 @@ mod tests {
 
     #[test]
     fn eval_data_shortcut() {
-        assert_eq!(evaluate("data.user.name", &ctx(), &outputs()), json!("Alice"));
+        assert_eq!(
+            evaluate("data.user.name", &ctx(), &outputs()),
+            json!("Alice")
+        );
     }
 
     #[test]

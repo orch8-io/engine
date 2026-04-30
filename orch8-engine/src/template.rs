@@ -202,8 +202,10 @@ fn resolve_path(
 }
 
 fn is_pipe_filter(s: &str) -> bool {
-    matches!(s, "upper" | "lower" | "trim" | "abs" | "url_encode" | "base64" | "base64_decode")
-        || s.starts_with("replace(")
+    matches!(
+        s,
+        "upper" | "lower" | "trim" | "abs" | "url_encode" | "base64" | "base64_decode"
+    ) || s.starts_with("replace(")
         || s.starts_with("default(")
         || s.starts_with("truncate(")
         || s.starts_with("join(")
@@ -252,8 +254,14 @@ fn apply_pipe_filter(
         ));
     }
     match filter {
-        "upper" => Ok(serde_json::json!(value.as_str().unwrap_or("").to_uppercase())),
-        "lower" => Ok(serde_json::json!(value.as_str().unwrap_or("").to_lowercase())),
+        "upper" => Ok(serde_json::json!(value
+            .as_str()
+            .unwrap_or("")
+            .to_uppercase())),
+        "lower" => Ok(serde_json::json!(value
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase())),
         "trim" => Ok(serde_json::json!(value.as_str().unwrap_or("").trim())),
         "abs" => Ok(serde_json::json!(value.as_f64().unwrap_or(0.0).abs())),
         "url_encode" => Ok(serde_json::json!(url_encode_str(
@@ -272,10 +280,10 @@ fn apply_pipe_filter(
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(s)
                 .map_err(|e| EngineError::TemplateError(format!("base64_decode: {e}")))?;
-            Ok(serde_json::json!(
-                String::from_utf8(decoded)
-                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-            ))
+            Ok(serde_json::json!(String::from_utf8(decoded)
+                .unwrap_or_else(
+                    |e| String::from_utf8_lossy(e.as_bytes()).into_owned()
+                )))
         }
         _ => apply_pipe_filter_with_args(filter, value),
     }
@@ -381,10 +389,7 @@ fn parse_truncate_args(args: &str) -> Result<(usize, String), EngineError> {
         .first()
         .and_then(|s| s.trim().parse().ok())
         .ok_or_else(|| EngineError::TemplateError("truncate() requires length".into()))?;
-    let suffix = parts
-        .get(1)
-        .map(|s| unquote(s.trim()))
-        .unwrap_or_default();
+    let suffix = parts.get(1).map(|s| unquote(s.trim())).unwrap_or_default();
     Ok((n, suffix))
 }
 
@@ -550,8 +555,7 @@ fn try_resolve_single(
         Some("config") => navigate_json(&context.config, parts),
         Some("data") => navigate_json(&context.data, parts),
         Some("runtime") => {
-            let rt_json = serde_json::to_value(&context.runtime)
-                .unwrap_or(serde_json::Value::Null);
+            let rt_json = serde_json::to_value(&context.runtime).unwrap_or(serde_json::Value::Null);
             let remaining: Vec<&str> = parts.collect();
             if remaining.is_empty() {
                 return Ok(Some(rt_json));
@@ -814,12 +818,7 @@ fn validate_template_string(
     }
 }
 
-fn validate_expr_string(
-    block_id: &str,
-    field: &str,
-    s: &str,
-    warnings: &mut Vec<TemplateWarning>,
-) {
+fn validate_expr_string(block_id: &str, field: &str, s: &str, warnings: &mut Vec<TemplateWarning>) {
     validate_template_string(block_id, field, s, warnings);
 }
 
@@ -1477,7 +1476,12 @@ mod tests {
     #[test]
     fn filter_upper() {
         let ctx = test_context();
-        let result = resolve(&json!("{{ context.data.user.name | upper }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.user.name | upper }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("ALICE"));
     }
 
@@ -1501,7 +1505,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.country | lower }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.country | lower }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("us"));
     }
 
@@ -1540,7 +1549,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.currency | default('USD') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.currency | default('USD') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("USD"));
     }
 
@@ -1551,7 +1565,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.missing | default('fallback') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.missing | default('fallback') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("fallback"));
     }
 
@@ -1562,7 +1581,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.currency | default('USD') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.currency | default('USD') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("BRL"));
     }
 
@@ -1573,7 +1597,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.name | default('Anonymous') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.name | default('Anonymous') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("Anonymous"));
     }
 
@@ -1586,7 +1615,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.body | truncate(5, '...') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.body | truncate(5, '...') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("Hello..."));
     }
 
@@ -1597,7 +1631,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.s | truncate(10, '...') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.s | truncate(10, '...') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("hi"));
     }
 
@@ -1610,7 +1649,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.tags | join(', ') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.tags | join(', ') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("a, b, c"));
     }
 
@@ -1623,7 +1667,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.csv | split(',') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.csv | split(',') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!(["a", "b", "c"]));
     }
 
@@ -1636,7 +1685,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.q | url_encode }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.q | url_encode }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("hello%20world%26foo%3Dbar"));
     }
 
@@ -1662,7 +1716,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.token | base64_decode }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.token | base64_decode }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!("hello"));
     }
 
@@ -1675,7 +1734,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.email | hash('sha256') }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.email | hash('sha256') }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert!(result.as_str().unwrap().len() == 64);
     }
 
@@ -1688,7 +1752,12 @@ mod tests {
             config: json!({}),
             ..Default::default()
         };
-        let result = resolve(&json!("{{ context.data.price | round(2) }}"), &ctx, &json!({})).unwrap();
+        let result = resolve(
+            &json!("{{ context.data.price | round(2) }}"),
+            &ctx,
+            &json!({}),
+        )
+        .unwrap();
         assert_eq!(result, json!(3.14));
     }
 
@@ -1804,7 +1873,10 @@ mod tests {
             json!({"url": "https://api.com/{{ context.data.id }}"}),
         )]);
         let warnings = validate_sequence_templates(&seq);
-        assert!(warnings.is_empty(), "expected no warnings, got: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "expected no warnings, got: {warnings:?}"
+        );
     }
 
     #[test]

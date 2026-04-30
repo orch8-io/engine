@@ -951,7 +951,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
-        cache_key: None,
+            cache_key: None,
         }))
     }
 
@@ -1092,7 +1092,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
-        cache_key: None,
+            cache_key: None,
         }));
         let seq = sample_seq(vec![step_with_bad]);
         let err = seq.validate().unwrap_err();

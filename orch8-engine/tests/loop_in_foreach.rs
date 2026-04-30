@@ -48,7 +48,7 @@ fn build_sequence() -> SequenceDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }));
     let inner_loop = BlockDefinition::Loop(Box::new(LoopDef {
         id: BlockId("l1".into()),

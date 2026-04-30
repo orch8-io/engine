@@ -11,8 +11,8 @@ impl SqliteStorage {
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
         let id_str = instance_id.0.to_string();
-        let val_str = serde_json::to_string(value)
-            .map_err(|e| StorageError::Query(e.to_string()))?;
+        let val_str =
+            serde_json::to_string(value).map_err(|e| StorageError::Query(e.to_string()))?;
         sqlx::query(
             "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
              VALUES (?1, ?2, ?3, datetime('now'))
@@ -64,8 +64,8 @@ impl SqliteStorage {
                 .map_err(|e| StorageError::Query(e.to_string()))?;
         let mut map = std::collections::HashMap::with_capacity(rows.len());
         for (k, v_str) in rows {
-            let v: serde_json::Value = serde_json::from_str(&v_str)
-                .map_err(|e| StorageError::Query(e.to_string()))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&v_str).map_err(|e| StorageError::Query(e.to_string()))?;
             map.insert(k, v);
         }
         Ok(map)

@@ -41,7 +41,7 @@ fn mk_step(id: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
-    cache_key: None,
+        cache_key: None,
     }))
 }
 
@@ -488,9 +488,17 @@ async fn for_each_empty_body_completes_immediately() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Completed);
 }
@@ -510,9 +518,17 @@ async fn for_each_missing_collection_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Completed);
     assert_eq!(find_by_block(&tree, "body").state, NodeState::Pending);
@@ -533,9 +549,17 @@ async fn for_each_non_array_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Completed);
 }
@@ -555,9 +579,17 @@ async fn for_each_empty_collection_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Completed);
     assert_eq!(find_by_block(&tree, "body").state, NodeState::Pending);
@@ -578,9 +610,17 @@ async fn for_each_first_tick_binds_item_var_and_activates_body() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
 
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "body").state, NodeState::Running);
@@ -631,9 +671,17 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
     let fe = find_by_block(&tree, "fe").clone();
 
     // Tick 1: snapshot ["a","b"].
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
 
     // Mutate context.data BEFORE body terminates.
     let mut ctx = instance.context.clone();
@@ -653,9 +701,17 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
     let tree = refresh(&storage, &instance).await;
 
     // Tick 2: advance index. Marker `_total` must remain 2 (original snapshot).
-    execute_for_each(&storage, &reg, &updated, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &updated,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let marker = storage
         .get_block_output(instance.id, &BlockId("fe".into()))
         .await
@@ -695,9 +751,17 @@ async fn for_each_body_failure_fails_node() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     storage
         .update_node_state(find_by_block(&tree, "body").id, NodeState::Failed)
@@ -705,9 +769,17 @@ async fn for_each_body_failure_fails_node() {
         .unwrap();
     let tree = refresh(&storage, &instance).await;
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Failed);
 }
@@ -728,9 +800,17 @@ async fn for_each_max_iterations_caps_below_collection_length() {
     let fe = find_by_block(&tree, "fe").clone();
 
     // Tick 1: bind & activate body for items[0].
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     storage
         .update_node_state(find_by_block(&tree, "body").id, NodeState::Completed)
@@ -740,9 +820,17 @@ async fn for_each_max_iterations_caps_below_collection_length() {
 
     // Tick 2: increment to _index=1, which equals effective_max (1 from cap).
     // Cap-reached branch leaves body terminal without reset.
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(
         find_by_block(&tree, "body").state,
@@ -751,9 +839,17 @@ async fn for_each_max_iterations_caps_below_collection_length() {
     );
 
     // Tick 3: top-of-function cap guard completes the node.
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
-        .await
-        .unwrap();
+    execute_for_each(
+        &storage,
+        &reg,
+        &instance,
+        &fe,
+        &fe_def,
+        &tree,
+        &OutputsSnapshot::new(),
+    )
+    .await
+    .unwrap();
     let tree = refresh(&storage, &instance).await;
     assert_eq!(find_by_block(&tree, "fe").state, NodeState::Completed);
 }

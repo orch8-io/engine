@@ -121,9 +121,14 @@ pub async fn execute_for_each(
     } else {
         // First visit — resolve live, externalize the snapshot once, and
         // persist a lightweight marker that only holds the ref key.
-        let Some(items) =
-            resolve_collection(&fe_def.collection, &instance.context, storage, instance, outputs)
-                .await
+        let Some(items) = resolve_collection(
+            &fe_def.collection,
+            &instance.context,
+            storage,
+            instance,
+            outputs,
+        )
+        .await
         else {
             warn!(
                 instance_id = %instance.id,
@@ -431,13 +436,19 @@ mod tests {
     #[tokio::test]
     async fn resolve_missing_returns_none() {
         let (s, inst, snap) = mk_resolve_ctx(json!({})).await;
-        assert!(resolve_collection("missing", &inst.context, &s, &inst, &snap).await.is_none());
+        assert!(
+            resolve_collection("missing", &inst.context, &s, &inst, &snap)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn resolve_collection_returns_none_when_value_is_not_array() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"users": "not-an-array"})).await;
-        assert!(resolve_collection("users", &inst.context, &s, &inst, &snap).await.is_none());
+        assert!(resolve_collection("users", &inst.context, &s, &inst, &snap)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -452,7 +463,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_collection_stops_descending_on_non_object() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"a": 42})).await;
-        assert!(resolve_collection("a.b.c", &inst.context, &s, &inst, &snap).await.is_none());
+        assert!(resolve_collection("a.b.c", &inst.context, &s, &inst, &snap)
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -486,10 +499,7 @@ mod tests {
             &snap,
         )
         .await;
-        assert_eq!(
-            items,
-            Some(vec![json!("BTC"), json!("ETH"), json!("SOL")])
-        );
+        assert_eq!(items, Some(vec![json!("BTC"), json!("ETH"), json!("SOL")]));
     }
 
     #[test]
