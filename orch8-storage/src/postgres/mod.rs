@@ -74,9 +74,18 @@ impl PostgresStorage {
             .map_err(|e| StorageError::Connection(e.to_string()))?;
 
         // Set search_path so all queries and migrations run in the target schema.
+        // SET doesn't support parameterized values, so we sanitize the identifier.
         if let Some(schema) = search_path {
-            sqlx::query("SET search_path TO $1, public")
-                .bind(schema)
+            if !schema
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(StorageError::Connection(format!(
+                    "Invalid search_path schema name: {schema}"
+                )));
+            }
+            let stmt = format!("SET search_path TO \"{schema}\", public");
+            sqlx::query(&stmt)
                 .execute(&pool)
                 .await
                 .map_err(|e| StorageError::Connection(format!("Failed to set search_path: {e}")))?;
