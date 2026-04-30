@@ -80,11 +80,14 @@ impl PostgresStorage {
                     "Invalid search_path schema name: {schema}"
                 )));
             }
-            let stmt = format!("SET search_path TO \"{schema}\", public");
+            let search_path_value = format!("\"{schema}\", public");
             pool_opts = pool_opts.after_connect(move |conn, _meta| {
-                let stmt = stmt.clone();
+                let search_path_value = search_path_value.clone();
                 Box::pin(async move {
-                    sqlx::query(&stmt).execute(&mut *conn).await?;
+                    sqlx::query("SELECT set_config('search_path', $1, false)")
+                        .bind(&search_path_value)
+                        .execute(&mut *conn)
+                        .await?;
                     Ok(())
                 })
             });
