@@ -1110,11 +1110,7 @@ mod tests {
         for input in inputs {
             let direct: Vec<Token> = tokenize(input);
             let cached = tokenize_cached(input);
-            assert_eq!(
-                &direct[..],
-                &cached[..],
-                "mismatch for input: {input:?}"
-            );
+            assert_eq!(&direct[..], &cached[..], "mismatch for input: {input:?}");
         }
     }
 

@@ -382,7 +382,9 @@ async fn enforce_concurrency_limits(
         );
         deferred_ids.push(inst.id);
     }
-    storage.batch_reschedule_instances(&deferred_ids, defer_at).await?;
+    storage
+        .batch_reschedule_instances(&deferred_ids, defer_at)
+        .await?;
 
     let mut kept = instances;
     let mut deferred_sorted: Vec<_> = deferred_indices.into_iter().collect();

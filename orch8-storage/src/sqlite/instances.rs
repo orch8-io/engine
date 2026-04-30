@@ -291,9 +291,8 @@ pub(super) async fn batch_reschedule(
     }
     let now_s = ts(Utc::now());
     let fire_s = ts(fire_at);
-    let mut qb = sqlx::QueryBuilder::new(
-        "UPDATE task_instances SET state='scheduled', next_fire_at=",
-    );
+    let mut qb =
+        sqlx::QueryBuilder::new("UPDATE task_instances SET state='scheduled', next_fire_at=");
     qb.push_bind(&fire_s);
     qb.push(", updated_at=");
     qb.push_bind(&now_s);

@@ -313,11 +313,9 @@ mod tests {
         let node = mk_node(inst.id, "step1", NodeState::Running);
         s.create_execution_node(&node).await.unwrap();
 
-        let result = dispatch_plugin(&s, &node, 0, || async {
-            Ok(json!({"result": "success"}))
-        })
-        .await
-        .unwrap();
+        let result = dispatch_plugin(&s, &node, 0, || async { Ok(json!({"result": "success"})) })
+            .await
+            .unwrap();
 
         assert!(result, "dispatch_plugin should return true on success");
 

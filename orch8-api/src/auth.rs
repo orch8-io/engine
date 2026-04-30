@@ -82,10 +82,7 @@ pub async fn api_key_middleware(
         .and_then(|v| v.to_str().ok());
 
     if provided.is_some()
-        && orch8_types::auth::verify_secret_constant_time(
-            provided.unwrap_or(""),
-            &expected_key,
-        )
+        && orch8_types::auth::verify_secret_constant_time(provided.unwrap_or(""), &expected_key)
     {
         Ok(next.run(request).await)
     } else {

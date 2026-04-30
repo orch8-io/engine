@@ -40,7 +40,10 @@ mod tests {
 
     #[test]
     fn different_length_secrets_reject() {
-        assert!(!verify_secret_constant_time("short", "a-much-longer-secret-key"));
+        assert!(!verify_secret_constant_time(
+            "short",
+            "a-much-longer-secret-key"
+        ));
     }
 
     #[test]

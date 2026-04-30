@@ -183,7 +183,11 @@ pub(super) async fn mark_delivered_batch(
     if signal_ids.is_empty() {
         return Ok(());
     }
-    let placeholders: Vec<String> = signal_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = signal_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "UPDATE signal_inbox SET delivered=1 WHERE id IN ({})",
         placeholders.join(",")

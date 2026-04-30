@@ -1,5 +1,5 @@
-pub mod auth;
 pub mod audit;
+pub mod auth;
 pub mod checkpoint;
 pub mod circuit_breaker;
 pub mod cluster;

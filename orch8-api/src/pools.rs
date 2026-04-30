@@ -211,8 +211,9 @@ pub(crate) async fn add_resource(
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
     let warmup_start = match req.warmup_start {
         Some(s) => Some(
-            chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d")
-                .map_err(|e| ApiError::InvalidArgument(format!("invalid warmup_start date: {e}")))?,
+            chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").map_err(|e| {
+                ApiError::InvalidArgument(format!("invalid warmup_start date: {e}"))
+            })?,
         ),
         None => None,
     };
@@ -274,8 +275,9 @@ pub(crate) async fn update_resource(
     }
     if let Some(warmup_start) = req.warmup_start {
         resource.warmup_start = Some(
-            chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d")
-                .map_err(|e| ApiError::InvalidArgument(format!("invalid warmup_start date: {e}")))?,
+            chrono::NaiveDate::parse_from_str(&warmup_start, "%Y-%m-%d").map_err(|e| {
+                ApiError::InvalidArgument(format!("invalid warmup_start date: {e}"))
+            })?,
         );
     }
     if let Some(warmup_days) = req.warmup_days {
