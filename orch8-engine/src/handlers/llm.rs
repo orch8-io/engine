@@ -296,13 +296,41 @@ async fn call_openai_compat(
         .cloned()
         .unwrap_or_default();
 
-    Ok(json!({
+    let mut output = json!({
         "provider": provider,
         "model": resp_body.get("model").cloned().unwrap_or_default(),
         "message": choice.get("message").cloned().unwrap_or_default(),
         "finish_reason": choice.get("finish_reason").cloned().unwrap_or_default(),
         "usage": resp_body.get("usage").cloned().unwrap_or_default(),
-    }))
+    });
+
+    // When response_format is json_object, parse message.content and merge
+    // parsed fields into the top-level output so downstream templates can
+    // reference e.g. `steps.score_markets.markets` directly.
+    if params
+        .get("response_format")
+        .and_then(|rf| rf.get("type"))
+        .and_then(Value::as_str)
+        == Some("json_object")
+    {
+        if let Some(content_str) = choice
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(content_str) {
+                if let (Some(out_obj), Some(parsed_obj)) =
+                    (output.as_object_mut(), parsed.as_object())
+                {
+                    for (k, v) in parsed_obj {
+                        out_obj.entry(k).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +404,33 @@ async fn call_anthropic(params: &Value, api_key: &str, base_url: &str) -> Result
         return Err(classify_api_error(status, &resp_body));
     }
 
-    Ok(normalize_anthropic_response(&resp_body))
+    let mut output = normalize_anthropic_response(&resp_body);
+
+    // Same json_object content merge as OpenAI path.
+    if params
+        .get("response_format")
+        .and_then(|rf| rf.get("type"))
+        .and_then(Value::as_str)
+        == Some("json_object")
+    {
+        if let Some(content_str) = output
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(content_str) {
+                if let (Some(out_obj), Some(parsed_obj)) =
+                    (output.as_object_mut(), parsed.as_object())
+                {
+                    for (k, v) in parsed_obj {
+                        out_obj.entry(k).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 /// Normalize an Anthropic response body into the OpenAI-like shape we return.
