@@ -26,8 +26,6 @@
 //! contract only gives it access to metadata + extensions — the typed body
 //! is threaded through untouched.
 
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use tonic::{Request, Status};
 
 use orch8_types::ids::TenantId;
@@ -56,12 +54,8 @@ pub fn auth_interceptor(
     expected_api_key: Option<&str>,
     require_tenant: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
-    // Precompute the expected digest once at construction time so we don't
-    // re-hash the API key on every RPC.
-    let expected_digest: Option<[u8; 32]> = expected_api_key.map(|expected| {
-        let digest = Sha256::digest(expected.as_bytes());
-        digest.into()
-    });
+    let expected_digest: Option<[u8; 32]> =
+        expected_api_key.map(orch8_types::auth::precompute_secret_digest);
     move |mut req: Request<()>| {
         // 1. API key: hash both provided and expected to a fixed-size
         //    digest, then compare constant-time. Earlier versions gated on
@@ -74,9 +68,11 @@ pub fn auth_interceptor(
                 .metadata()
                 .get("x-api-key")
                 .and_then(|v| v.to_str().ok());
-            let provided_digest = Sha256::digest(provided.unwrap_or("").as_bytes());
-            let ok =
-                provided.is_some() && bool::from(provided_digest.ct_eq(expected_digest.as_slice()));
+            let ok = provided.is_some()
+                && orch8_types::auth::verify_secret_against_digest(
+                    provided.unwrap_or(""),
+                    &expected_digest,
+                );
             if !ok {
                 return Err(Status::unauthenticated("invalid or missing x-api-key"));
             }

@@ -23,8 +23,6 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use moka::future::Cache;
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use orch8_types::trigger::TriggerType;
 
@@ -117,13 +115,7 @@ pub(crate) async fn public_webhook(
         .get("x-trigger-secret")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let expected = secret.expose();
-    // Hash both sides before the constant-time compare so mismatched
-    // lengths don't short-circuit the timing path. SHA-256 is only a
-    // length-normaliser here — collision resistance is not load-bearing.
-    let provided_digest = Sha256::digest(provided.as_bytes());
-    let expected_digest = Sha256::digest(expected.as_bytes());
-    if !bool::from(provided_digest.ct_eq(expected_digest.as_slice())) {
+    if !orch8_types::auth::verify_secret_constant_time(provided, secret.expose()) {
         return Err(ApiError::Unauthorized);
     }
 

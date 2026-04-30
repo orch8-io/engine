@@ -16,8 +16,6 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
-subtle.workspace = true
-sha2.workspace = true
 
 [dev-dependencies]
 tokio-stream = "0.1"

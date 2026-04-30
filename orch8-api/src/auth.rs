@@ -2,8 +2,6 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use orch8_types::ids::TenantId;
 
@@ -83,15 +81,12 @@ pub async fn api_key_middleware(
         .get("x-api-key")
         .and_then(|v| v.to_str().ok());
 
-    // Hash both provided and expected keys to a fixed-size digest before
-    // comparing. This removes the length pre-check (which leaked the
-    // expected-key length via short-circuit timing) while still keeping
-    // the comparison constant-time. SHA-256 is used only as a
-    // length-normaliser — collision resistance does not matter here.
-    let expected_digest = Sha256::digest(expected_key.as_bytes());
-    let provided_bytes = provided.unwrap_or("").as_bytes();
-    let provided_digest = Sha256::digest(provided_bytes);
-    if provided.is_some() && bool::from(provided_digest.ct_eq(expected_digest.as_slice())) {
+    if provided.is_some()
+        && orch8_types::auth::verify_secret_constant_time(
+            provided.unwrap_or(""),
+            &expected_key,
+        )
+    {
         Ok(next.run(request).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -139,7 +134,6 @@ mod tests {
     //! covered by `tests/e2e/security/api_key_auth_enforcement.test.ts`.
     use super::*;
     use axum::Extension;
-    use subtle::ConstantTimeEq;
 
     #[allow(clippy::unnecessary_wraps)] // matches `OptionalTenant` alias
     fn ctx(t: &str) -> OptionalTenant {
@@ -234,19 +228,17 @@ mod tests {
 
     #[test]
     fn api_key_constant_time_comparison_matches_semantics() {
-        // #278: the middleware hashes both provided and expected keys via
-        // SHA-256 before a subtle::ConstantTimeEq compare. Digests are
-        // always 32 bytes, so the comparison is both length-uniform and
-        // constant-time. We don't measure timing here — we just assert
-        // the primitive's semantics hold for equal and unequal inputs
-        // (including the different-length case the previous early-return
-        // short-circuited).
-        let expected = Sha256::digest(b"secret-key-abcd");
-        let good = Sha256::digest(b"secret-key-abcd");
-        let bad_same_len = Sha256::digest(b"WRONG-key-abcd.");
-        let bad_diff_len = Sha256::digest(b"short");
-        assert!(bool::from(good.ct_eq(expected.as_slice())));
-        assert!(!bool::from(bad_same_len.ct_eq(expected.as_slice())));
-        assert!(!bool::from(bad_diff_len.ct_eq(expected.as_slice())));
+        assert!(orch8_types::auth::verify_secret_constant_time(
+            "secret-key-abcd",
+            "secret-key-abcd"
+        ));
+        assert!(!orch8_types::auth::verify_secret_constant_time(
+            "WRONG-key-abcd.",
+            "secret-key-abcd"
+        ));
+        assert!(!orch8_types::auth::verify_secret_constant_time(
+            "short",
+            "secret-key-abcd"
+        ));
     }
 }

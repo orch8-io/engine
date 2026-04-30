@@ -2465,7 +2465,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orch8-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum 0.8.9",
  "chrono",
@@ -2478,8 +2478,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -2494,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2506,7 +2504,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "strsim",
  "tabled",
  "tokio",
  "toml",
@@ -2515,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2548,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-grpc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2557,8 +2554,6 @@ dependencies = [
  "prost",
  "serde",
  "serde_json",
- "sha2",
- "subtle",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2569,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -2601,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2619,15 +2614,15 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
- "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "strsim",
  "subtle",

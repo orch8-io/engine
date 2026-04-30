@@ -254,25 +254,29 @@ pub async fn evaluate(
     // the tree to find more work. This lets parallel branches, try-catch
     // phases, etc. all make progress within a single scheduler tick.
     let max_iterations = 200;
+    let instance_id = instance.id;
     // Carry Phase 3's `post_tree` forward so the top of the next iteration
     // reuses it instead of re-reading the same rows from storage.
     let mut prefetched_tree: Option<Vec<ExecutionNode>> = None;
+    // Cache the instance across iterations — only refetch from storage when
+    // a prior dispatch may have mutated context or state (Step, ForEach,
+    // TryCatch, or signal processing). Parallel/Race/Loop/Router dispatches
+    // only modify tree nodes and cannot change instance data.
+    let mut cached_instance: Option<TaskInstance> = None;
+    let mut instance_dirty = true;
     for _ in 0..max_iterations {
-        // Fresh outputs snapshot per iteration. Collapses the N redundant
-        // `get_all_outputs` queries that would otherwise fire when Phase 3
-        // dispatches multiple routers (plus the separate query from a Phase
-        // 2 step in the same iteration) down to a single fetch on demand.
-        // A step's *newly saved* output is intentionally not visible in the
-        // same iteration — the loop `continue;`s and the next iteration
-        // builds a fresh snapshot.
         let outputs_snapshot = OutputsSnapshot::new();
 
-        // Re-fetch instance to pick up context mutations from composite
-        // handlers (e.g. for_each::bind_item_var writes context.data).
-        let instance = &storage
-            .get_instance(instance.id)
-            .await?
-            .ok_or_else(|| EngineError::NotFound(format!("instance {}", instance.id)))?;
+        if instance_dirty || cached_instance.is_none() {
+            cached_instance = Some(
+                storage
+                    .get_instance(instance_id)
+                    .await?
+                    .ok_or_else(|| EngineError::NotFound(format!("instance {instance_id}")))?,
+            );
+            instance_dirty = false;
+        }
+        let instance = cached_instance.as_ref().unwrap();
 
         // If a dispatch within this tick moved the instance out of Running
         // (e.g. a retryable step failure re-scheduled it with backoff, a
@@ -384,7 +388,7 @@ pub async fn evaluate(
                             any_cancelled: !now_paused,
                         });
                     }
-                    // Tree will be re-fetched at the top of the next iteration.
+                    instance_dirty = true;
                     continue;
                 }
                 let node = root_nodes[idx];
@@ -400,6 +404,7 @@ pub async fn evaluate(
                         &outputs_snapshot,
                     )
                     .await?;
+                    instance_dirty = may_mutate_instance(block);
                     continue;
                 }
             }
@@ -423,6 +428,7 @@ pub async fn evaluate(
                 &outputs_snapshot,
             )
             .await?;
+            instance_dirty = true;
             continue;
         }
 
@@ -452,11 +458,12 @@ pub async fn evaluate(
                         &outputs_snapshot,
                     )
                     .await?;
+                    if may_mutate_instance(block) {
+                        instance_dirty = true;
+                    }
                 }
 
-                // Single tree re-fetch after all composites have been
-                // dispatched, instead of one per composite.
-                let post_tree = storage.get_execution_tree(instance.id).await?;
+                let post_tree = storage.get_execution_tree(instance_id).await?;
                 let post_states: Vec<(ExecutionNodeId, NodeState)> =
                     post_tree.iter().map(|n| (n.id, n.state)).collect();
                 if pre_states != post_states {
@@ -505,6 +512,13 @@ pub async fn evaluate(
     Ok(EvalOutcome::MoreWork {
         has_waiting_nodes: true,
     })
+}
+
+fn may_mutate_instance(block: &BlockDefinition) -> bool {
+    matches!(
+        block,
+        BlockDefinition::Step(_) | BlockDefinition::ForEach(_) | BlockDefinition::TryCatch(_)
+    )
 }
 
 /// Return all Running composite nodes, deepest first, for iterative evaluation.

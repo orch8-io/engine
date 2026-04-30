@@ -256,6 +256,8 @@ CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_task_instances_waiting_updated
+    ON task_instances(updated_at) WHERE state = 'waiting';
 
 -- R7: scope_kind + scope_value columns replace the old parent_instance_id
 -- so the handler can pick per-parent or per-tenant dedupe at call time.

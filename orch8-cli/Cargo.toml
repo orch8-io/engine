@@ -21,7 +21,6 @@ anyhow.workspace = true
 tabled = "0.17"
 rand.workspace = true
 owo-colors = "4"
-strsim = "0.11"
 toml.workspace = true
 orch8-types = { path = "../orch8-types" }
 
