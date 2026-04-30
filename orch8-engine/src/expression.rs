@@ -540,14 +540,23 @@ impl<'a> Parser<'a> {
             Some(Token::Number(n)) => serde_json::json!(n),
             Some(Token::Bool(b)) => serde_json::Value::Bool(b),
             Some(Token::Path(path)) => {
-                // Check for function call: name(arg)
                 if self.peek() == Some(&Token::LParen) {
                     self.advance(); // consume (
-                    let arg = self.parse_ternary();
+                    let mut args = Vec::new();
+                    if self.peek() != Some(&Token::RParen) {
+                        args.push(self.parse_ternary());
+                        while self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            if self.peek() == Some(&Token::RParen) {
+                                break;
+                            }
+                            args.push(self.parse_ternary());
+                        }
+                    }
                     if self.peek() == Some(&Token::RParen) {
                         self.advance(); // consume )
                     }
-                    return Self::apply_function(&path, &arg);
+                    return Self::apply_function(&path, &args);
                 }
                 self.resolve_path(&path)
             }
@@ -580,7 +589,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn apply_function(name: &str, arg: &serde_json::Value) -> serde_json::Value {
+    fn apply_function(name: &str, args: &[serde_json::Value]) -> serde_json::Value {
+        let arg = args.first().unwrap_or(&serde_json::Value::Null);
         match name {
             "abs" => match to_f64(arg) {
                 Some(n) => serde_json::json!(n.abs()),
@@ -596,6 +606,180 @@ impl<'a> Parser<'a> {
                 serde_json::json!(n)
             }
             "json" => serde_json::Value::String(arg.to_string()),
+            // --- template-enhancements-v0.3.1 ---
+            "now" => serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            "uuid" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
+            "random" => {
+                let min = args.get(0).and_then(to_f64).unwrap_or(0.0) as i64;
+                let max = args.get(1).and_then(to_f64).unwrap_or(100.0) as i64;
+                if max <= min {
+                    return serde_json::json!(min);
+                }
+                let n = rand::random::<u64>() % ((max - min) as u64) + (min as u64);
+                serde_json::json!(n)
+            }
+            "format_date" => {
+                let iso = arg.as_str().unwrap_or("");
+                let fmt = args.get(1).and_then(|v| v.as_str()).unwrap_or("%Y-%m-%d");
+                chrono::DateTime::parse_from_rfc3339(iso)
+                    .map(|dt| serde_json::json!(dt.format(fmt).to_string()))
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            "day_of_week" => {
+                let iso = arg.as_str().unwrap_or("");
+                chrono::DateTime::parse_from_rfc3339(iso)
+                    .map(|dt| {
+                        use chrono::Datelike;
+                        serde_json::json!(dt.weekday().num_days_from_monday())
+                    })
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            "keys" => match arg {
+                serde_json::Value::Object(m) => {
+                    serde_json::json!(m.keys().collect::<Vec<_>>())
+                }
+                _ => serde_json::json!([]),
+            },
+            "values" => match arg {
+                serde_json::Value::Object(m) => {
+                    serde_json::Value::Array(m.values().cloned().collect())
+                }
+                _ => serde_json::json!([]),
+            },
+            "contains" => {
+                let needle = args.get(1).unwrap_or(&serde_json::Value::Null);
+                let found = match arg {
+                    serde_json::Value::Array(a) => a.iter().any(|v| json_eq(v, needle)),
+                    serde_json::Value::String(s) => {
+                        needle.as_str().is_some_and(|n| s.contains(n))
+                    }
+                    _ => false,
+                };
+                serde_json::Value::Bool(found)
+            }
+            "starts_with" => {
+                let prefix = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let s = arg.as_str().unwrap_or("");
+                serde_json::Value::Bool(s.starts_with(prefix))
+            }
+            "ends_with" => {
+                let suffix = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let s = arg.as_str().unwrap_or("");
+                serde_json::Value::Bool(s.ends_with(suffix))
+            }
+            // --- engine-enhancements: array/math ---
+            "sum" => match arg {
+                serde_json::Value::Array(a) => {
+                    let s: f64 = a.iter().filter_map(to_f64).sum();
+                    serde_json::json!(s)
+                }
+                _ => serde_json::Value::Null,
+            },
+            "avg" => match arg {
+                serde_json::Value::Array(a) => {
+                    let nums: Vec<f64> = a.iter().filter_map(to_f64).collect();
+                    if nums.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        let s: f64 = nums.iter().sum();
+                        serde_json::json!(s / nums.len() as f64)
+                    }
+                }
+                _ => serde_json::Value::Null,
+            },
+            "min" => match arg {
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(to_f64)
+                    .reduce(f64::min)
+                    .map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+                _ => serde_json::Value::Null,
+            },
+            "max" => match arg {
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(to_f64)
+                    .reduce(f64::max)
+                    .map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+                _ => serde_json::Value::Null,
+            },
+            "first" => match arg {
+                serde_json::Value::Array(a) => {
+                    a.first().cloned().unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            },
+            "last" => match arg {
+                serde_json::Value::Array(a) => {
+                    a.last().cloned().unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            },
+            "slice" => {
+                let start = args.get(1).and_then(to_f64).unwrap_or(0.0) as usize;
+                let end = args.get(2).and_then(to_f64);
+                match arg {
+                    serde_json::Value::Array(a) => {
+                        let end_idx = end.map_or(a.len(), |e| (e as usize).min(a.len()));
+                        let start_idx = start.min(a.len());
+                        serde_json::Value::Array(a[start_idx..end_idx].to_vec())
+                    }
+                    _ => serde_json::Value::Null,
+                }
+            }
+            "sort" => {
+                let order = args.get(1).and_then(|v| v.as_str()).unwrap_or("asc");
+                match arg {
+                    serde_json::Value::Array(a) => {
+                        let mut sorted = a.clone();
+                        sorted.sort_by(|a, b| {
+                            let cmp = json_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal);
+                            if order == "desc" { cmp.reverse() } else { cmp }
+                        });
+                        serde_json::Value::Array(sorted)
+                    }
+                    _ => serde_json::Value::Null,
+                }
+            }
+            "unique" => match arg {
+                serde_json::Value::Array(a) => {
+                    let mut seen = Vec::new();
+                    for v in a {
+                        if !seen.iter().any(|s| json_eq(s, v)) {
+                            seen.push(v.clone());
+                        }
+                    }
+                    serde_json::Value::Array(seen)
+                }
+                _ => serde_json::Value::Null,
+            },
+            "count" => {
+                let needle = args.get(1).unwrap_or(&serde_json::Value::Null);
+                match arg {
+                    serde_json::Value::Array(a) => {
+                        let n = a.iter().filter(|v| json_eq(v, needle)).count();
+                        serde_json::json!(n)
+                    }
+                    _ => serde_json::json!(0),
+                }
+            }
+            "change_pct" => {
+                let old = to_f64(arg);
+                let new = args.get(1).and_then(to_f64);
+                match (old, new) {
+                    (Some(o), Some(n)) if o != 0.0 => serde_json::json!((n - o) / o * 100.0),
+                    _ => serde_json::Value::Null,
+                }
+            }
+            "clamp" => {
+                let val = to_f64(arg);
+                let min = args.get(1).and_then(to_f64);
+                let max = args.get(2).and_then(to_f64);
+                match (val, min, max) {
+                    (Some(v), Some(lo), Some(hi)) => serde_json::json!(v.clamp(lo, hi)),
+                    _ => arg.clone(),
+                }
+            }
             _ => serde_json::Value::Null,
         }
     }
@@ -621,6 +805,13 @@ impl<'a> Parser<'a> {
             Some("instance_id") => {
                 let id = self.context.runtime.instance_id.as_deref().unwrap_or("");
                 serde_json::Value::String(id.to_string())
+            }
+            Some("config") => navigate_json(&self.context.config, &parts[1..]),
+            Some("data") => navigate_json(&self.context.data, &parts[1..]),
+            Some("runtime") => {
+                let rt_json = serde_json::to_value(&self.context.runtime)
+                    .unwrap_or(serde_json::Value::Null);
+                navigate_json(&rt_json, &parts[1..])
             }
             _ => {
                 // Bare path — resolve from context.data for backwards compatibility.
@@ -1504,5 +1695,325 @@ mod tests {
         );
         let v = result.as_f64().unwrap();
         assert!((v - 20.0).abs() < 0.001, "expected ~20.0, got {v}");
+    }
+
+    // --- now() ---
+
+    #[test]
+    fn eval_now_returns_rfc3339() {
+        let result = evaluate("now()", &ctx(), &outputs());
+        let s = result.as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(s).is_ok(), "invalid rfc3339: {s}");
+    }
+
+    // --- uuid() ---
+
+    #[test]
+    fn eval_uuid_returns_valid_uuid() {
+        let result = evaluate("uuid()", &ctx(), &outputs());
+        let s = result.as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(s).is_ok(), "invalid uuid: {s}");
+    }
+
+    // --- random() ---
+
+    #[test]
+    fn eval_random_in_range() {
+        let result = evaluate("random(1, 10)", &ctx(), &outputs());
+        let n = result.as_i64().unwrap_or(-1);
+        assert!((1..10).contains(&n), "expected 1..10, got {n}");
+    }
+
+    // --- format_date() ---
+
+    #[test]
+    fn eval_format_date() {
+        let result = evaluate("format_date('2026-01-15T10:30:00+00:00', '%Y-%m-%d')", &ctx(), &outputs());
+        assert_eq!(result, json!("2026-01-15"));
+    }
+
+    // --- day_of_week() ---
+
+    #[test]
+    fn eval_day_of_week() {
+        // 2026-01-15 is a Thursday (3 = Thu, 0-indexed from Monday)
+        let result = evaluate("day_of_week('2026-01-15T10:00:00+00:00')", &ctx(), &outputs());
+        assert_eq!(result, json!(3));
+    }
+
+    // --- keys() ---
+
+    #[test]
+    fn eval_keys() {
+        let ctx = ExecutionContext {
+            data: json!({"obj": {"a": 1, "b": 2}}),
+            config: json!({}),
+            ..Default::default()
+        };
+        let result = evaluate("keys(obj)", &ctx, &json!({}));
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.contains(&json!("a")));
+        assert!(arr.contains(&json!("b")));
+    }
+
+    // --- values() ---
+
+    #[test]
+    fn eval_values() {
+        let ctx = ExecutionContext {
+            data: json!({"obj": {"a": 1, "b": 2}}),
+            config: json!({}),
+            ..Default::default()
+        };
+        let result = evaluate("values(obj)", &ctx, &json!({}));
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    // --- contains() ---
+
+    #[test]
+    fn eval_contains_array() {
+        let ctx = ExecutionContext {
+            data: json!({"tags": ["vip", "new"]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("contains(tags, 'vip')", &ctx, &json!({})), json!(true));
+        assert_eq!(evaluate("contains(tags, 'old')", &ctx, &json!({})), json!(false));
+    }
+
+    #[test]
+    fn eval_contains_string() {
+        let ctx = ExecutionContext {
+            data: json!({"msg": "hello world"}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("contains(msg, 'world')", &ctx, &json!({})), json!(true));
+        assert_eq!(evaluate("contains(msg, 'xyz')", &ctx, &json!({})), json!(false));
+    }
+
+    // --- starts_with() ---
+
+    #[test]
+    fn eval_starts_with() {
+        let ctx = ExecutionContext {
+            data: json!({"url": "https://example.com"}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("starts_with(url, 'https')", &ctx, &json!({})), json!(true));
+        assert_eq!(evaluate("starts_with(url, 'http://')", &ctx, &json!({})), json!(false));
+    }
+
+    // --- ends_with() ---
+
+    #[test]
+    fn eval_ends_with() {
+        let ctx = ExecutionContext {
+            data: json!({"file": "report.pdf"}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("ends_with(file, '.pdf')", &ctx, &json!({})), json!(true));
+        assert_eq!(evaluate("ends_with(file, '.csv')", &ctx, &json!({})), json!(false));
+    }
+
+    // --- sum() ---
+
+    #[test]
+    fn eval_sum() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": [1, 2, 3, 4]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("sum(nums)", &ctx, &json!({})), json!(10.0));
+    }
+
+    #[test]
+    fn eval_sum_empty() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": []}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("sum(nums)", &ctx, &json!({})), json!(0.0));
+    }
+
+    // --- avg() ---
+
+    #[test]
+    fn eval_avg() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": [10, 20, 30]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("avg(nums)", &ctx, &json!({})), json!(20.0));
+    }
+
+    #[test]
+    fn eval_avg_empty() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": []}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("avg(nums)", &ctx, &json!({})), json!(null));
+    }
+
+    // --- min() / max() ---
+
+    #[test]
+    fn eval_min_max() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": [5, 2, 8, 1, 9]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("min(nums)", &ctx, &json!({})), json!(1.0));
+        assert_eq!(evaluate("max(nums)", &ctx, &json!({})), json!(9.0));
+    }
+
+    // --- first() / last() ---
+
+    #[test]
+    fn eval_first_last() {
+        let ctx = ExecutionContext {
+            data: json!({"items": ["a", "b", "c"]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("first(items)", &ctx, &json!({})), json!("a"));
+        assert_eq!(evaluate("last(items)", &ctx, &json!({})), json!("c"));
+    }
+
+    #[test]
+    fn eval_first_empty() {
+        let ctx = ExecutionContext {
+            data: json!({"items": []}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("first(items)", &ctx, &json!({})), json!(null));
+    }
+
+    // --- slice() ---
+
+    #[test]
+    fn eval_slice() {
+        let ctx = ExecutionContext {
+            data: json!({"items": [10, 20, 30, 40, 50]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("slice(items, 1, 3)", &ctx, &json!({})), json!([20, 30]));
+    }
+
+    #[test]
+    fn eval_slice_no_end() {
+        let ctx = ExecutionContext {
+            data: json!({"items": [10, 20, 30]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("slice(items, 1)", &ctx, &json!({})), json!([20, 30]));
+    }
+
+    // --- sort() ---
+
+    #[test]
+    fn eval_sort_asc() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": [3, 1, 2]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("sort(nums)", &ctx, &json!({})), json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn eval_sort_desc() {
+        let ctx = ExecutionContext {
+            data: json!({"nums": [3, 1, 2]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("sort(nums, 'desc')", &ctx, &json!({})), json!([3, 2, 1]));
+    }
+
+    // --- unique() ---
+
+    #[test]
+    fn eval_unique() {
+        let ctx = ExecutionContext {
+            data: json!({"items": ["a", "b", "a", "c", "b"]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("unique(items)", &ctx, &json!({})), json!(["a", "b", "c"]));
+    }
+
+    // --- count() ---
+
+    #[test]
+    fn eval_count() {
+        let ctx = ExecutionContext {
+            data: json!({"items": ["a", "b", "a", "c", "a"]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("count(items, 'a')", &ctx, &json!({})), json!(3));
+    }
+
+    // --- change_pct() ---
+
+    #[test]
+    fn eval_change_pct() {
+        assert_eq!(evaluate("change_pct(100, 150)", &ctx(), &outputs()), json!(50.0));
+        assert_eq!(evaluate("change_pct(200, 100)", &ctx(), &outputs()), json!(-50.0));
+    }
+
+    #[test]
+    fn eval_change_pct_zero_old() {
+        assert_eq!(evaluate("change_pct(0, 100)", &ctx(), &outputs()), json!(null));
+    }
+
+    // --- clamp() ---
+
+    #[test]
+    fn eval_clamp() {
+        assert_eq!(evaluate("clamp(5, 0, 10)", &ctx(), &outputs()), json!(5.0));
+        assert_eq!(evaluate("clamp(-5, 0, 10)", &ctx(), &outputs()), json!(0.0));
+        assert_eq!(evaluate("clamp(15, 0, 10)", &ctx(), &outputs()), json!(10.0));
+    }
+
+    // --- root variable shortcuts in expressions ---
+
+    #[test]
+    fn eval_config_shortcut() {
+        assert_eq!(evaluate("config.limit", &ctx(), &outputs()), json!(100));
+    }
+
+    #[test]
+    fn eval_data_shortcut() {
+        assert_eq!(evaluate("data.user.name", &ctx(), &outputs()), json!("Alice"));
+    }
+
+    #[test]
+    fn eval_runtime_shortcut() {
+        let ctx = ExecutionContext {
+            data: json!({}),
+            config: json!({}),
+            runtime: orch8_types::context::RuntimeContext {
+                attempt: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(evaluate("runtime.attempt", &ctx, &json!({})), json!(3));
     }
 }

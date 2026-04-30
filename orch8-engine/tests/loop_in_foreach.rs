@@ -48,12 +48,16 @@ fn build_sequence() -> SequenceDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }));
     let inner_loop = BlockDefinition::Loop(Box::new(LoopDef {
         id: BlockId("l1".into()),
         condition: "true".into(),
         body: vec![inner],
         max_iterations: 2,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let outer = BlockDefinition::ForEach(Box::new(ForEachDef {
         id: BlockId("fe1".into()),

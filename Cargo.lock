@@ -2465,7 +2465,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orch8-api"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.8.9",
  "chrono",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2512,10 +2512,11 @@ dependencies = [
 
 [[package]]
 name = "orch8-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-nats",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "criterion",
@@ -2545,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-grpc"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2564,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -2596,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2614,7 +2615,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

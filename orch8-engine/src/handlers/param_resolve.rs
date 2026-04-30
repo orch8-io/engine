@@ -102,7 +102,12 @@ pub(crate) async fn resolve_templates_in_params(
         return Ok(params.clone());
     }
     let outputs = outputs.get(storage, instance.id).await?;
-    crate::template::resolve(params, context, outputs)
+    let state_map = storage
+        .get_all_instance_kv(instance.id)
+        .await
+        .unwrap_or_default();
+    let state_value = serde_json::to_value(&state_map).unwrap_or(serde_json::Value::Null);
+    crate::template::resolve_with_state(params, context, outputs, Some(&state_value))
 }
 
 /// Compute the attempt number for a step from the latest prior

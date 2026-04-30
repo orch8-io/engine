@@ -27,6 +27,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use orch8_engine::evaluator;
+use orch8_engine::handlers::param_resolve::OutputsSnapshot;
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
@@ -59,6 +60,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }))
 }
 
@@ -320,6 +322,9 @@ async fn a3_loop_halts_on_non_retryable_error() {
         condition: "true".into(),
         body: vec![mk_step("body", "builtin.fail")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let lp_block = BlockDefinition::Loop(Box::new(loop_def.clone()));
 
@@ -689,7 +694,7 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
 
     let registry = HandlerRegistry::new();
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree,
+        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -728,6 +733,7 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
         &fe_node,
         &fe_def,
         &tree_now,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -806,7 +812,7 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     // Pending to Running (for_each.rs:163-175).
     // --------------------------------------------------------------------
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree,
+        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -964,6 +970,7 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
         &fe_node_now,
         &fe_def,
         &tree_now,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -1063,6 +1070,9 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         condition: "true".into(),
         body: vec![mk_step("lp_body", "builtin.noop")],
         max_iterations: 2,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let fe_def = ForEachDef {
         id: BlockId("fe".into()),
@@ -1094,7 +1104,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
     //    marker (`_items: [1,2]`, `_index: 0`), binds x=1, and activates
     //    the inner loop child (Pending -> Running).
     orch8_engine::handlers::for_each::execute_for_each(
-        &storage, &registry, &instance, &fe_node, &fe_def, &tree,
+        &storage, &registry, &instance, &fe_node, &fe_def, &tree, &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -1179,6 +1189,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         &fe_node_now,
         &fe_def,
         &tree_now,
+        &OutputsSnapshot::new(),
     )
     .await
     .unwrap();
@@ -1780,6 +1791,7 @@ async fn a11_sla_breach_records_block_output() {
         deadline: Some(Duration::from_millis(1)),
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }));
 
     let (storage, instance, tree) = setup_tree(vec![step.clone()], json!({})).await;

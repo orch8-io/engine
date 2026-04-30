@@ -102,6 +102,7 @@ pub(super) async fn dispatch_block(
                 node,
                 fe_def,
                 tree,
+                outputs,
             )
             .await
         }

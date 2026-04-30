@@ -21,6 +21,7 @@ fn find_block_in_flat_list() {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }))];
 
     let found = find_block(&blocks, &BlockId("step_1".into()));
@@ -51,6 +52,7 @@ fn find_block_nested_in_parallel() {
                 deadline: None,
                 on_deadline_breach: None,
                 fallback_handler: None,
+                cache_key: None,
             }))]],
         },
     ))];
@@ -77,6 +79,7 @@ fn block_meta_returns_correct_types() {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }));
     let (id, bt) = block_meta(&step);
     assert_eq!(id.0, "s");
@@ -100,6 +103,7 @@ fn mk_step(id: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }))
 }
 
@@ -132,6 +136,9 @@ fn find_block_nested_in_loop_body() {
         condition: "true".into(),
         body: vec![mk_step("inner")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     assert!(find_block(std::slice::from_ref(&loop_block), &BlockId("inner".into())).is_some());
     assert!(find_block(&[loop_block], &BlockId("loop".into())).is_some());
@@ -453,6 +460,9 @@ fn block_meta_recognizes_each_variant() {
         condition: "false".into(),
         body: vec![],
         max_iterations: 1,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let fe = BlockDefinition::ForEach(Box::new(ForEachDef {
         id: BlockId("fe".into()),

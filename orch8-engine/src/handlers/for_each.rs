@@ -9,6 +9,7 @@ use orch8_types::sequence::ForEachDef;
 
 use crate::error::EngineError;
 use crate::evaluator;
+use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
 
 /// Absolute upper bound on `for_each` iterations.
@@ -56,6 +57,7 @@ pub async fn execute_for_each(
     node: &ExecutionNode,
     fe_def: &ForEachDef,
     tree: &[ExecutionNode],
+    outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
     // Empty body: nothing to run.
     if fe_def.body.is_empty() {
@@ -119,7 +121,10 @@ pub async fn execute_for_each(
     } else {
         // First visit — resolve live, externalize the snapshot once, and
         // persist a lightweight marker that only holds the ref key.
-        let Some(items) = resolve_collection(&fe_def.collection, &instance.context) else {
+        let Some(items) =
+            resolve_collection(&fe_def.collection, &instance.context, storage, instance, outputs)
+                .await
+        else {
             warn!(
                 instance_id = %instance.id,
                 block_id = %fe_def.id,
@@ -331,10 +336,19 @@ async fn reset_subtree_to_pending(
     Ok(())
 }
 
-fn resolve_collection(
+async fn resolve_collection(
     path: &str,
     context: &orch8_types::context::ExecutionContext,
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    outputs: &OutputsSnapshot,
 ) -> Option<Vec<serde_json::Value>> {
+    if crate::template::contains_template(&serde_json::Value::String(path.to_string())) {
+        let wrapped = serde_json::Value::String(path.to_string());
+        let out_snap = outputs.get(storage, instance.id).await.ok()?;
+        let resolved = crate::template::resolve(&wrapped, context, out_snap).ok()?;
+        return resolved.as_array().cloned();
+    }
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = &context.data;
     for part in &parts {
@@ -349,68 +363,133 @@ mod tests {
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
 
-    #[test]
-    fn resolve_collection_from_context() {
-        let ctx = ExecutionContext {
-            data: json!({"users": [1, 2, 3]}),
-            ..Default::default()
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::context::RuntimeContext;
+    use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{InstanceState, Priority};
+
+    async fn mk_resolve_ctx(
+        data: serde_json::Value,
+    ) -> (SqliteStorage, TaskInstance, OutputsSnapshot) {
+        let s = SqliteStorage::in_memory().await.unwrap();
+        let inst_id = InstanceId::new();
+        let now = chrono::Utc::now();
+        let seq = orch8_types::sequence::SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            name: "test".into(),
+            version: 1,
+            deprecated: false,
+            blocks: vec![],
+            interceptors: None,
+            created_at: now,
         };
-        let items = resolve_collection("users", &ctx);
+        s.create_sequence(&seq).await.unwrap();
+        let inst = TaskInstance {
+            id: inst_id,
+            sequence_id: seq.id,
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: json!({}),
+            context: ExecutionContext {
+                data,
+                config: json!({}),
+                audit: vec![],
+                runtime: RuntimeContext::default(),
+            },
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        s.create_instance(&inst).await.unwrap();
+        (s, inst, OutputsSnapshot::new())
+    }
+
+    #[tokio::test]
+    async fn resolve_collection_from_context() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"users": [1, 2, 3]})).await;
+        let items = resolve_collection("users", &inst.context, &s, &inst, &snap).await;
         assert_eq!(items, Some(vec![json!(1), json!(2), json!(3)]));
     }
 
-    #[test]
-    fn resolve_nested_collection() {
-        let ctx = ExecutionContext {
-            data: json!({"data": {"items": ["a", "b"]}}),
-            ..Default::default()
-        };
-        let items = resolve_collection("data.items", &ctx);
+    #[tokio::test]
+    async fn resolve_nested_collection() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"data": {"items": ["a", "b"]}})).await;
+        let items = resolve_collection("data.items", &inst.context, &s, &inst, &snap).await;
         assert_eq!(items, Some(vec![json!("a"), json!("b")]));
     }
 
-    #[test]
-    fn resolve_missing_returns_none() {
-        let ctx = ExecutionContext::default();
-        assert!(resolve_collection("missing", &ctx).is_none());
+    #[tokio::test]
+    async fn resolve_missing_returns_none() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({})).await;
+        assert!(resolve_collection("missing", &inst.context, &s, &inst, &snap).await.is_none());
     }
 
-    #[test]
-    fn resolve_collection_returns_none_when_value_is_not_array() {
-        let ctx = ExecutionContext {
-            data: json!({"users": "not-an-array"}),
-            ..Default::default()
-        };
-        assert!(resolve_collection("users", &ctx).is_none());
+    #[tokio::test]
+    async fn resolve_collection_returns_none_when_value_is_not_array() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"users": "not-an-array"})).await;
+        assert!(resolve_collection("users", &inst.context, &s, &inst, &snap).await.is_none());
     }
 
-    #[test]
-    fn resolve_collection_returns_empty_vec_for_empty_array() {
-        let ctx = ExecutionContext {
-            data: json!({"xs": []}),
-            ..Default::default()
-        };
-        let v = resolve_collection("xs", &ctx).expect("empty array must still resolve");
+    #[tokio::test]
+    async fn resolve_collection_returns_empty_vec_for_empty_array() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"xs": []})).await;
+        let v = resolve_collection("xs", &inst.context, &s, &inst, &snap)
+            .await
+            .expect("empty array must still resolve");
         assert!(v.is_empty());
     }
 
-    #[test]
-    fn resolve_collection_stops_descending_on_non_object() {
-        let ctx = ExecutionContext {
-            data: json!({"a": 42}),
-            ..Default::default()
-        };
-        assert!(resolve_collection("a.b.c", &ctx).is_none());
+    #[tokio::test]
+    async fn resolve_collection_stops_descending_on_non_object() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"a": 42})).await;
+        assert!(resolve_collection("a.b.c", &inst.context, &s, &inst, &snap).await.is_none());
     }
 
-    #[test]
-    fn resolve_collection_deep_nested_array() {
-        let ctx = ExecutionContext {
-            data: json!({"l1": {"l2": {"l3": [10, 20]}}}),
-            ..Default::default()
-        };
-        let v = resolve_collection("l1.l2.l3", &ctx).unwrap();
+    #[tokio::test]
+    async fn resolve_collection_deep_nested_array() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({"l1": {"l2": {"l3": [10, 20]}}})).await;
+        let v = resolve_collection("l1.l2.l3", &inst.context, &s, &inst, &snap)
+            .await
+            .unwrap();
         assert_eq!(v, vec![json!(10), json!(20)]);
+    }
+
+    #[tokio::test]
+    async fn resolve_collection_from_template() {
+        let (s, inst, snap) = mk_resolve_ctx(json!({})).await;
+        let bo = orch8_types::output::BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: inst.id,
+            block_id: BlockId("score_markets".into()),
+            output: json!({"markets": ["BTC", "ETH", "SOL"]}),
+            output_ref: None,
+            output_size: 0,
+            attempt: 0,
+            created_at: chrono::Utc::now(),
+        };
+        s.save_block_output(&bo).await.unwrap();
+        let items = resolve_collection(
+            "{{ steps.score_markets.markets }}",
+            &inst.context,
+            &s,
+            &inst,
+            &snap,
+        )
+        .await;
+        assert_eq!(
+            items,
+            Some(vec![json!("BTC"), json!("ETH"), json!("SOL")])
+        );
     }
 
     #[test]
@@ -419,11 +498,6 @@ mod tests {
     }
 
     // ----- subtree-reset purge tests (mirrors loop_block::tests L1..L6) -----
-
-    use orch8_storage::sqlite::SqliteStorage;
-    use orch8_types::context::RuntimeContext;
-    use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
-    use orch8_types::instance::{InstanceState, Priority};
 
     fn mk_node(
         instance_id: InstanceId,
@@ -483,6 +557,7 @@ mod tests {
                 deadline: None,
                 on_deadline_breach: None,
                 fallback_handler: None,
+                cache_key: None,
             }))],
             interceptors: None,
             created_at: now,
@@ -755,6 +830,7 @@ mod tests {
                     deadline: None,
                     on_deadline_breach: None,
                     fallback_handler: None,
+                    cache_key: None,
                 },
             ))],
             max_iterations: 4,
@@ -763,7 +839,8 @@ mod tests {
         let tree = s.get_execution_tree(inst_id).await.unwrap();
         let fe_node = tree.iter().find(|n| n.block_id.0 == "fe").unwrap().clone();
 
-        execute_for_each(&s, &registry, &inst, &fe_node, &fe_def, &tree)
+        let outputs = OutputsSnapshot::new();
+        execute_for_each(&s, &registry, &inst, &fe_node, &fe_def, &tree, &outputs)
             .await
             .unwrap();
 

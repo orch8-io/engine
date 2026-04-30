@@ -36,6 +36,7 @@ mod execution_tree;
 mod externalized;
 mod helpers;
 mod instances;
+mod kv_state;
 mod misc;
 mod outputs;
 mod plugins;
@@ -1279,6 +1280,40 @@ impl StorageBackend for SqliteStorage {
         handler: &str,
     ) -> Result<(), StorageError> {
         circuit_breakers::delete(self, tenant_id, handler).await
+    }
+
+    // === Instance KV State ===
+
+    async fn set_instance_kv(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.set_instance_kv_impl(instance_id, key, value).await
+    }
+
+    async fn get_instance_kv(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        self.get_instance_kv_impl(instance_id, key).await
+    }
+
+    async fn get_all_instance_kv(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        self.get_all_instance_kv_impl(instance_id).await
+    }
+
+    async fn delete_instance_kv(
+        &self,
+        instance_id: InstanceId,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        self.delete_instance_kv_impl(instance_id, key).await
     }
 
     // === Health ===

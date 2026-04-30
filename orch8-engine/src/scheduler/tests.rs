@@ -140,6 +140,7 @@ fn mk_step_def(id: &str, handler: &str, params: serde_json::Value) -> StepDef {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }
 }
 

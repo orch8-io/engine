@@ -44,6 +44,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }))
 }
 
@@ -65,6 +66,7 @@ fn mk_step_with_params(id: &str, handler: &str, params: serde_json::Value) -> Bl
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }))
 }
 
@@ -90,6 +92,7 @@ fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDefini
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }))
 }
 
@@ -110,6 +113,7 @@ fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }))
 }
 
@@ -597,6 +601,9 @@ async fn loop_condition_false_immediately_completes() {
         condition: "false".into(),
         body: vec![mk_step("body", "noop")],
         max_iterations: 10,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -612,6 +619,9 @@ async fn loop_runs_until_max_iterations() {
         condition: "true".into(),
         body: vec![mk_step("body", "noop")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -627,6 +637,9 @@ async fn loop_body_failure_fails_loop() {
         condition: "true".into(),
         body: vec![mk_step("body", "fail")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry_with_fail();
@@ -933,6 +946,9 @@ async fn nested_parallel_in_loop() {
             branches: vec![vec![mk_step("b0", "noop")], vec![mk_step("b1", "noop")]],
         }))],
         max_iterations: 3,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -975,6 +991,9 @@ async fn nested_loop_in_for_each() {
             condition: "true".into(),
             body: vec![mk_step("inner_body", "noop")],
             max_iterations: 2,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         }))],
         max_iterations: 100,
     }));
@@ -1022,6 +1041,9 @@ async fn loop_with_context_condition() {
         condition: "active".into(),
         body: vec![mk_step("body", "noop")],
         max_iterations: 3,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup_with_ctx(vec![lp], json!({"active": true})).await;
     let reg = registry();
@@ -1058,6 +1080,9 @@ async fn failure_inside_loop_fails_loop() {
         condition: "true".into(),
         body: vec![mk_step("body", "fail")],
         max_iterations: 2,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry_with_fail();
@@ -1127,6 +1152,9 @@ async fn step_after_loop_runs() {
         condition: "true".into(),
         body: vec![mk_step("body", "noop")],
         max_iterations: 2,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp, mk_step("after", "noop")]).await;
     let reg = registry();
@@ -1171,6 +1199,9 @@ async fn deeply_nested_parallel_in_try_catch_in_loop() {
             finally_block: None,
         }))],
         max_iterations: 2,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -1258,6 +1289,9 @@ async fn loop_with_parallel_body() {
             branches: vec![vec![mk_step("b0", "noop")], vec![mk_step("b1", "noop")]],
         }))],
         max_iterations: 3,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -1375,6 +1409,9 @@ async fn loop_single_iteration() {
         condition: "true".into(),
         body: vec![mk_step("body", "noop")],
         max_iterations: 1,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry();
@@ -1433,6 +1470,9 @@ async fn loop_failure_fails_instance() {
         condition: "true".into(),
         body: vec![mk_step("body", "fail")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     }));
     let (storage, seq, inst) = setup(vec![lp]).await;
     let reg = registry_with_fail();
@@ -1617,6 +1657,7 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     })))
     .unwrap();
 

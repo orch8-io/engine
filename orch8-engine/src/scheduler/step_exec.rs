@@ -553,6 +553,21 @@ pub(super) async fn execute_step_block(
         .await;
     }
 
+    // Resolve cache_key template if present.
+    let resolved_cache_key = if let Some(ref ck) = step_def.cache_key {
+        if crate::template::contains_template(&serde_json::Value::String(ck.clone())) {
+            let wrapped = serde_json::Value::String(ck.clone());
+            match crate::template::resolve(&wrapped, &step_context, &serde_json::json!({})) {
+                Ok(serde_json::Value::String(s)) => Some(s),
+                _ => Some(ck.clone()),
+            }
+        } else {
+            Some(ck.clone())
+        }
+    } else {
+        None
+    };
+
     // Circuit breaker pre-flight. Runs BEFORE the in-process vs external-worker
     // fork so it applies uniformly: an Open breaker on the primary handler
     // either (a) swaps dispatch to `fallback_handler` when one is configured,
@@ -689,6 +704,7 @@ pub(super) async fn execute_step_block(
         timeout: step_def.timeout,
         externalize_threshold,
         wait_for_input: step_def.wait_for_input.clone(),
+        cache_key: resolved_cache_key,
     };
 
     let result = crate::handlers::step::execute_step_dry(storage, handlers, exec_params).await;

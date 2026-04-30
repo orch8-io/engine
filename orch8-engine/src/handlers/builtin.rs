@@ -144,6 +144,12 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
         "query_instance",
         super::query_instance::handle_query_instance,
     );
+    registry.register("set_state", handle_set_state);
+    registry.register("get_state", handle_get_state);
+    registry.register("delete_state", handle_delete_state);
+    registry.register("transform", handle_transform);
+    registry.register("assert", handle_assert);
+    registry.register("merge_state", handle_merge_state);
 }
 
 /// No-op handler. Always succeeds with an empty result.
@@ -564,6 +570,173 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
     }))
 }
 
+/// Set a key-value pair in the instance's KV state store.
+///
+/// Params:
+/// - `key` (string, required): The key to set.
+/// - `value` (any, required): The JSON value to store.
+async fn handle_set_state(ctx: StepContext) -> Result<Value, StepError> {
+    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+        StepError::Permanent {
+            message: "set_state: `key` (string) is required".into(),
+            details: None,
+        }
+    })?;
+    let value = ctx.params.get("value").ok_or_else(|| StepError::Permanent {
+        message: "set_state: `value` is required".into(),
+        details: None,
+    })?;
+    ctx.storage
+        .set_instance_kv(ctx.instance_id, key, value)
+        .await
+        .map_err(|e| StepError::Retryable {
+            message: format!("set_state storage error: {e}"),
+            details: None,
+        })?;
+    Ok(json!({"key": key, "value": value}))
+}
+
+/// Get a value from the instance's KV state store.
+///
+/// Params:
+/// - `key` (string, required): The key to retrieve.
+///
+/// Returns `{"key": "...", "value": ...}` or `{"key": "...", "value": null}` if not found.
+async fn handle_get_state(ctx: StepContext) -> Result<Value, StepError> {
+    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+        StepError::Permanent {
+            message: "get_state: `key` (string) is required".into(),
+            details: None,
+        }
+    })?;
+    let value = ctx
+        .storage
+        .get_instance_kv(ctx.instance_id, key)
+        .await
+        .map_err(|e| StepError::Retryable {
+            message: format!("get_state storage error: {e}"),
+            details: None,
+        })?
+        .unwrap_or(Value::Null);
+    Ok(json!({"key": key, "value": value}))
+}
+
+/// Delete a key from the instance's KV state store.
+///
+/// Params:
+/// - `key` (string, required): The key to delete.
+async fn handle_delete_state(ctx: StepContext) -> Result<Value, StepError> {
+    let key = ctx.params.get("key").and_then(|v| v.as_str()).ok_or_else(|| {
+        StepError::Permanent {
+            message: "delete_state: `key` (string) is required".into(),
+            details: None,
+        }
+    })?;
+    ctx.storage
+        .delete_instance_kv(ctx.instance_id, key)
+        .await
+        .map_err(|e| StepError::Retryable {
+            message: format!("delete_state storage error: {e}"),
+            details: None,
+        })?;
+    Ok(json!({"key": key, "deleted": true}))
+}
+
+/// Transform handler. Returns its resolved params as-is, enabling pure data
+/// transformation via template expressions without external calls.
+///
+/// Params: any JSON object — every value is template-resolved before dispatch.
+/// Output: the resolved params object.
+async fn handle_transform(ctx: StepContext) -> Result<Value, StepError> {
+    debug!(
+        instance_id = %ctx.instance_id,
+        block_id = %ctx.block_id,
+        "transform step executed"
+    );
+    Ok(ctx.params)
+}
+
+/// Assert handler. Evaluates a condition expression and fails if falsy.
+///
+/// Params:
+/// - `condition` (string, required): Expression to evaluate (same syntax as router/loop conditions).
+/// - `message` (string): Error message on failure. Defaults to "assertion failed".
+async fn handle_assert(ctx: StepContext) -> Result<Value, StepError> {
+    let condition = ctx
+        .params
+        .get("condition")
+        .and_then(Value::as_str)
+        .ok_or_else(|| StepError::Permanent {
+            message: "assert: `condition` (string) is required".into(),
+            details: None,
+        })?;
+
+    let result = crate::expression::evaluate_condition(
+        condition,
+        &ctx.context,
+        &serde_json::json!({}),
+    );
+
+    debug!(
+        instance_id = %ctx.instance_id,
+        block_id = %ctx.block_id,
+        condition = %condition,
+        result = result,
+        "assert step evaluated"
+    );
+
+    if result {
+        Ok(json!({"condition": condition, "passed": true}))
+    } else {
+        let message = ctx
+            .params
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("assertion failed")
+            .to_string();
+        Err(StepError::Permanent {
+            message: format!("assert: {message} (condition: {condition})"),
+            details: Some(json!({"condition": condition, "passed": false})),
+        })
+    }
+}
+
+/// Merge multiple key-value pairs into instance state in one step.
+///
+/// Params:
+/// - `values` (object, required): Map of key→value pairs to store.
+async fn handle_merge_state(ctx: StepContext) -> Result<Value, StepError> {
+    let values = ctx
+        .params
+        .get("values")
+        .and_then(Value::as_object)
+        .ok_or_else(|| StepError::Permanent {
+            message: "merge_state: `values` (object) is required".into(),
+            details: None,
+        })?;
+
+    let mut keys = Vec::with_capacity(values.len());
+    for (key, value) in values {
+        ctx.storage
+            .set_instance_kv(ctx.instance_id, key, value)
+            .await
+            .map_err(|e| StepError::Retryable {
+                message: format!("merge_state storage error for key `{key}`: {e}"),
+                details: None,
+            })?;
+        keys.push(key.clone());
+    }
+
+    debug!(
+        instance_id = %ctx.instance_id,
+        block_id = %ctx.block_id,
+        keys_count = keys.len(),
+        "merge_state step executed"
+    );
+
+    Ok(json!({"merged_keys": keys}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,12 +745,16 @@ mod tests {
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;
 
-    async fn test_ctx(params: Value) -> StepContext {
-        let storage: Arc<dyn StorageBackend> = Arc::new(
+    async fn mk_test_storage() -> Arc<dyn StorageBackend> {
+        Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await
                 .unwrap(),
-        );
+        )
+    }
+
+    async fn test_ctx(params: Value) -> StepContext {
+        let storage: Arc<dyn StorageBackend> = mk_test_storage().await;
         StepContext {
             instance_id: InstanceId::new(),
             tenant_id: TenantId("t".into()),
@@ -641,6 +818,114 @@ mod tests {
         assert!(registry.contains("emit_event"));
         assert!(registry.contains("send_signal"));
         assert!(registry.contains("query_instance"));
+        assert!(registry.contains("set_state"));
+        assert!(registry.contains("get_state"));
+        assert!(registry.contains("delete_state"));
+        assert!(registry.contains("transform"));
+        assert!(registry.contains("assert"));
+        assert!(registry.contains("merge_state"));
+    }
+
+    #[tokio::test]
+    async fn set_state_stores_value() {
+        let result = handle_set_state(
+            test_ctx(json!({"key": "counter", "value": 42})).await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["key"], "counter");
+        assert_eq!(result["value"], 42);
+    }
+
+    #[tokio::test]
+    async fn set_state_missing_key_fails() {
+        let result = handle_set_state(test_ctx(json!({"value": 1})).await).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_state_returns_null_for_missing() {
+        let result = handle_get_state(
+            test_ctx(json!({"key": "nonexistent"})).await,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["value"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn set_then_get_state_roundtrip() {
+        let storage = mk_test_storage().await;
+        let instance_id = InstanceId::new();
+
+        let set_ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("s1".into()),
+            params: json!({"key": "color", "value": "blue"}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        handle_set_state(set_ctx).await.unwrap();
+
+        let get_ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("s2".into()),
+            params: json!({"key": "color"}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        let result = handle_get_state(get_ctx).await.unwrap();
+        assert_eq!(result["value"], "blue");
+    }
+
+    #[tokio::test]
+    async fn delete_state_removes_key() {
+        let storage = mk_test_storage().await;
+        let instance_id = InstanceId::new();
+
+        let set_ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("s1".into()),
+            params: json!({"key": "temp", "value": true}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        handle_set_state(set_ctx).await.unwrap();
+
+        let del_ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("s2".into()),
+            params: json!({"key": "temp"}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        let result = handle_delete_state(del_ctx).await.unwrap();
+        assert_eq!(result["deleted"], true);
+
+        let get_ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("s3".into()),
+            params: json!({"key": "temp"}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage,
+            wait_for_input: None,
+        };
+        let result = handle_get_state(get_ctx).await.unwrap();
+        assert_eq!(result["value"], Value::Null);
     }
 
     #[tokio::test]
@@ -669,5 +954,141 @@ mod tests {
             panic!("expected Permanent, got {err:?}");
         };
         assert_eq!(message, "forced failure");
+    }
+
+    // --- transform handler tests ---
+
+    #[tokio::test]
+    async fn transform_passes_through_params() {
+        let params = json!({"a": 1, "b": "hello", "c": [1, 2, 3]});
+        let result = handle_transform(test_ctx(params.clone()).await)
+            .await
+            .unwrap();
+        assert_eq!(result, params);
+    }
+
+    #[tokio::test]
+    async fn transform_empty_params() {
+        let result = handle_transform(test_ctx(json!({})).await)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({}));
+    }
+
+    #[tokio::test]
+    async fn transform_null_params() {
+        let result = handle_transform(test_ctx(Value::Null).await)
+            .await
+            .unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    // --- assert handler tests ---
+
+    #[tokio::test]
+    async fn assert_true_condition_passes() {
+        let result = handle_assert(test_ctx(json!({"condition": "true"})).await)
+            .await
+            .unwrap();
+        assert_eq!(result["passed"], true);
+        assert_eq!(result["condition"], "true");
+    }
+
+    #[tokio::test]
+    async fn assert_false_condition_fails() {
+        let err = handle_assert(test_ctx(json!({"condition": "false"})).await)
+            .await
+            .unwrap_err();
+        let StepError::Permanent { message, details } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("assertion failed"));
+        assert_eq!(details.as_ref().unwrap()["passed"], false);
+    }
+
+    #[tokio::test]
+    async fn assert_custom_message_on_failure() {
+        let err = handle_assert(
+            test_ctx(json!({"condition": "false", "message": "score too low"})).await,
+        )
+        .await
+        .unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("score too low"));
+    }
+
+    #[tokio::test]
+    async fn assert_missing_condition_fails() {
+        let err = handle_assert(test_ctx(json!({"message": "oops"})).await)
+            .await
+            .unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("`condition`"));
+    }
+
+    // --- merge_state handler tests ---
+
+    #[tokio::test]
+    async fn merge_state_stores_multiple_keys() {
+        let storage = mk_test_storage().await;
+        let instance_id = InstanceId::new();
+
+        let ctx = StepContext {
+            instance_id,
+            tenant_id: TenantId("t".into()),
+            block_id: BlockId("ms".into()),
+            params: json!({"values": {"color": "red", "count": 42, "active": true}}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        let result = handle_merge_state(ctx).await.unwrap();
+        let merged: Vec<String> = result["merged_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(merged.len(), 3);
+        assert!(merged.contains(&"color".to_string()));
+        assert!(merged.contains(&"count".to_string()));
+        assert!(merged.contains(&"active".to_string()));
+
+        let val = storage
+            .get_instance_kv(instance_id, "color")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, json!("red"));
+        let val = storage
+            .get_instance_kv(instance_id, "count")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(val, json!(42));
+    }
+
+    #[tokio::test]
+    async fn merge_state_missing_values_fails() {
+        let err = handle_merge_state(test_ctx(json!({"key": "x"})).await)
+            .await
+            .unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("`values`"));
+    }
+
+    #[tokio::test]
+    async fn merge_state_empty_values_succeeds() {
+        let result = handle_merge_state(test_ctx(json!({"values": {}})).await)
+            .await
+            .unwrap();
+        assert_eq!(result["merged_keys"], json!([]));
     }
 }

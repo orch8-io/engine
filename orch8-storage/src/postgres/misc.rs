@@ -354,7 +354,18 @@ pub(super) async fn create_instance_with_dedupe(
     let scope_kind = scope.kind();
     let scope_value = scope.value();
 
+    let context = serde_json::to_value(&instance.context)?;
     let mut tx = store.pool.begin().await?;
+
+    // Insert the child instance FIRST so the FK on emit_event_dedupe
+    // (fk_emit_dedupe_child_instance, migration 031) is satisfied.
+    super::instances::bind_instance_insert(
+        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+        instance,
+        &context,
+    )
+    .execute(&mut *tx)
+    .await?;
 
     let inserted: Option<(uuid::Uuid,)> = sqlx::query_as(
         r"INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
@@ -369,37 +380,27 @@ pub(super) async fn create_instance_with_dedupe(
     .fetch_optional(&mut *tx)
     .await?;
 
-    if inserted.is_none() {
-        // Key already taken — load the existing child id, commit the read-only
-        // tx, and return AlreadyExists without creating an instance.
-        let (existing,): (uuid::Uuid,) = sqlx::query_as(
-            r"SELECT child_instance_id FROM emit_event_dedupe
-              WHERE scope_kind = $1 AND scope_value = $2 AND dedupe_key = $3",
-        )
-        .bind(scope_kind)
-        .bind(&scope_value)
-        .bind(key)
-        .fetch_one(&mut *tx)
-        .await?;
+    if inserted.is_some() {
         tx.commit().await?;
-        return Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
-            existing,
-        )));
+        return Ok(crate::EmitDedupeOutcome::Inserted);
     }
 
-    let context = serde_json::to_value(&instance.context)?;
-    // Insert SQL + bindings live in `super::instances` so a schema change
-    // touches exactly one place per backend.
-    super::instances::bind_instance_insert(
-        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
-        instance,
-        &context,
-    )
-    .execute(&mut *tx)
-    .await?;
+    // Key already taken — rollback the unnecessary child instance, then
+    // look up the existing child id outside the transaction.
+    tx.rollback().await?;
 
-    tx.commit().await?;
-    Ok(crate::EmitDedupeOutcome::Inserted)
+    let (existing,): (uuid::Uuid,) = sqlx::query_as(
+        r"SELECT child_instance_id FROM emit_event_dedupe
+          WHERE scope_kind = $1 AND scope_value = $2 AND dedupe_key = $3",
+    )
+    .bind(scope_kind)
+    .bind(&scope_value)
+    .bind(key)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+        existing,
+    )))
 }
 
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older

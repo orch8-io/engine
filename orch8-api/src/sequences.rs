@@ -46,7 +46,12 @@ pub(crate) async fn create_sequence(
     seq.validate()
         .map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
 
-    let warnings = seq.unknown_handler_warnings();
+    let mut warnings = seq.unknown_handler_warnings();
+
+    let template_warnings = orch8_engine::template::validate_sequence_templates(&seq);
+    for tw in &template_warnings {
+        warnings.push(tw.to_string());
+    }
 
     state
         .storage

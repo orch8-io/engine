@@ -141,8 +141,32 @@ pub async fn execute_loop(
     // `all_terminal` on every subsequent tick and spin forever.
     if !children.is_empty() && evaluator::all_terminal(&children) {
         if evaluator::any_failed(&children) {
-            evaluator::fail_node(storage, node.id).await?;
-            return Ok(true);
+            if loop_def.continue_on_error {
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    iteration,
+                    "loop body failed but continue_on_error=true; advancing"
+                );
+            } else {
+                evaluator::fail_node(storage, node.id).await?;
+                return Ok(true);
+            }
+        }
+
+        // break_on: evaluate after body completion; exit loop on match.
+        if let Some(ref break_expr) = loop_def.break_on {
+            if crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
+            {
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    iteration,
+                    "loop break_on condition met; completing"
+                );
+                evaluator::complete_node(storage, node.id).await?;
+                return Ok(true);
+            }
         }
 
         let next_iteration = iteration.saturating_add(1);
@@ -175,6 +199,19 @@ pub async fn execute_loop(
         // Reset the entire body subtree (direct children plus every
         // descendant) back to Pending so the next tick re-activates it.
         reset_subtree_to_pending(storage, tree, instance.id, node.id).await?;
+
+        // poll_interval: defer re-execution by setting next_fire_at.
+        if let Some(interval_secs) = loop_def.poll_interval {
+            let next_fire = chrono::Utc::now()
+                + chrono::Duration::seconds(i64::try_from(interval_secs).unwrap_or(5));
+            storage
+                .update_instance_state(
+                    instance.id,
+                    orch8_types::instance::InstanceState::Scheduled,
+                    Some(next_fire),
+                )
+                .await?;
+        }
     }
 
     Ok(true)
@@ -353,6 +390,7 @@ mod tests {
                 deadline: None,
                 on_deadline_breach: None,
                 fallback_handler: None,
+                cache_key: None,
             }))],
             interceptors: None,
             created_at: now,
@@ -754,9 +792,13 @@ mod tests {
                     deadline: None,
                     on_deadline_breach: None,
                     fallback_handler: None,
+                    cache_key: None,
                 },
             ))],
             max_iterations: 2,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();
@@ -833,9 +875,13 @@ mod tests {
                     deadline: None,
                     on_deadline_breach: None,
                     fallback_handler: None,
+                    cache_key: None,
                 },
             ))],
             max_iterations: 3,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();
@@ -892,9 +938,13 @@ mod tests {
                     deadline: None,
                     on_deadline_breach: None,
                     fallback_handler: None,
+                    cache_key: None,
                 },
             ))],
             max_iterations: 5,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();

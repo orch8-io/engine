@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-30
+
+### Added
+- **Template pipe filters:** `upper`, `lower`, `trim`, `abs`, `url_encode`, `base64`, `base64_decode`, `default()`, `truncate()`, `join()`, `split()`, `hash()`, `round()`, `replace()`.
+- **Expression functions:** `now()`, `uuid()`, `random()`, `format_date()`, `day_of_week()`, `keys()`, `values()`, `contains()`, `starts_with()`, `ends_with()`, `sum()`, `avg()`, `min()`, `max()`, `first()`, `last()`, `slice()`, `sort()`, `unique()`, `count()`, `change_pct()`, `clamp()`.
+- **Multi-argument function parser** in expression evaluator — functions accept comma-separated args.
+- **Root variable shortcuts** in templates and expressions: `config.*`, `data.*`, `runtime.*` as shorthands for `context.config.*`, `context.data.*`, `context.runtime.*`.
+- **Enhanced loop block:** `break_on` (expression-based early exit), `continue_on_error` (skip failed iterations), `poll_interval` (defer re-execution between iterations).
+- **Static template validation** on sequence create — warns about unknown template roots, unknown pipe filters, unclosed expressions.
+- **Instance KV state store:** `set_state`, `get_state`, `delete_state` built-in handlers with per-instance key-value persistence (`instance_kv_state` table).
+- **`transform` built-in handler:** passes template-resolved params through as output — useful for reshaping data between steps without a custom handler.
+- **`assert` built-in handler:** evaluates a condition expression and fails the step with a configurable message if falsy — enables guard clauses and invariant checks in sequences.
+- **`merge_state` built-in handler:** batch-writes multiple key-value pairs to instance KV state in one step.
+- **`state.*` template root:** access instance KV state in templates (e.g. `{{ state.color }}`), pre-fetched at param resolution time.
+- **Step output caching:** `cache_key` field on `StepDef` — when set, step output is cached in instance KV state under `_cache:{key}` and served from cache on subsequent executions.
+- Postgres migration `033_instance_kv_state.sql`.
+
+### Fixed
+- `for_each` collection resolution from template paths (e.g. `{{ context.data.items }}`).
+- `emit_event` dedupe FK insert order — child instance created before dedupe row to satisfy foreign key constraint.
+
 ## [0.2.0] — 2026-04-29
 
 ### Added

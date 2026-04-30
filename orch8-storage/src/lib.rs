@@ -1253,6 +1253,44 @@ pub trait StorageBackend: Send + Sync + 'static {
         Ok(())
     }
 
+    // === Instance KV State ===
+    //
+    // Per-instance key-value store for workflow state that persists across
+    // ticks. Used by `set_state` / `get_state` / `delete_state` built-in
+    // handlers and the `state.*` template root variable.
+
+    async fn set_instance_kv(
+        &self,
+        _instance_id: InstanceId,
+        _key: &str,
+        _value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn get_instance_kv(
+        &self,
+        _instance_id: InstanceId,
+        _key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        Ok(None)
+    }
+
+    async fn get_all_instance_kv(
+        &self,
+        _instance_id: InstanceId,
+    ) -> Result<HashMap<String, serde_json::Value>, StorageError> {
+        Ok(HashMap::new())
+    }
+
+    async fn delete_instance_kv(
+        &self,
+        _instance_id: InstanceId,
+        _key: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError>;

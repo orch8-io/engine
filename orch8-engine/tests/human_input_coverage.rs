@@ -46,6 +46,7 @@ fn mk_step(id: &str, human: HumanInputDef) -> StepDef {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }
 }
 

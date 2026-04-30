@@ -28,6 +28,10 @@ pub struct StepExecParams {
     /// Cloned from `StepDef::wait_for_input` so the `human_review` handler
     /// can surface the resolved choice list in its notification payload.
     pub wait_for_input: Option<orch8_types::sequence::HumanInputDef>,
+    /// Resolved cache key from `StepDef::cache_key`. If set, step output is
+    /// cached in instance KV state under this key. On subsequent executions,
+    /// the cached value is returned without running the handler.
+    pub cache_key: Option<String>,
 }
 
 /// Execute a step without persisting the output — returns the `BlockOutput` for
@@ -79,6 +83,35 @@ pub async fn execute_step_dry(
         }
     }
 
+    // Step output caching: if a cache_key is set and a cached value exists
+    // in instance KV state, return it without running the handler.
+    if let Some(ref cache_key) = exec.cache_key {
+        let prefixed_key = format!("_cache:{cache_key}");
+        if let Ok(Some(cached)) = storage
+            .get_instance_kv(exec.instance_id, &prefixed_key)
+            .await
+        {
+            info!(
+                instance_id = %exec.instance_id,
+                block_id = %exec.block_id,
+                cache_key = %cache_key,
+                "step output served from cache"
+            );
+            let output_size =
+                i32::try_from(json_byte_size(&cached).unwrap_or(0)).unwrap_or(i32::MAX);
+            return Ok(BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: exec.instance_id,
+                block_id: exec.block_id,
+                output: cached,
+                output_ref: None,
+                output_size,
+                attempt: i16::try_from(exec.attempt).unwrap_or(i16::MAX),
+                created_at: Utc::now(),
+            });
+        }
+    }
+
     let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
         let names = handlers.handler_names();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -95,6 +128,7 @@ pub async fn execute_step_dry(
     let block_id = exec.block_id.clone();
     let attempt = exec.attempt;
     let timeout = exec.timeout;
+    let cache_key = exec.cache_key;
 
     let step_ctx = StepContext {
         instance_id,
@@ -123,6 +157,22 @@ pub async fn execute_step_dry(
 
     match result {
         Ok(output) => {
+            // Save to cache if cache_key is set.
+            if let Some(ref ck) = cache_key {
+                let prefixed_key = format!("_cache:{ck}");
+                if let Err(e) = storage
+                    .set_instance_kv(instance_id, &prefixed_key, &output)
+                    .await
+                {
+                    warn!(
+                        instance_id = %instance_id,
+                        cache_key = %ck,
+                        error = %e,
+                        "failed to save step output to cache"
+                    );
+                }
+            }
+
             let output_size =
                 i32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(i32::MAX);
 
@@ -190,6 +240,36 @@ pub async fn execute_step(
         }
     }
 
+    // Step output caching for the tree-evaluator path.
+    if let Some(ref cache_key) = exec.cache_key {
+        let prefixed_key = format!("_cache:{cache_key}");
+        if let Ok(Some(cached)) = storage
+            .get_instance_kv(exec.instance_id, &prefixed_key)
+            .await
+        {
+            info!(
+                instance_id = %exec.instance_id,
+                block_id = %exec.block_id,
+                cache_key = %cache_key,
+                "step output served from cache"
+            );
+            let output_size =
+                i32::try_from(json_byte_size(&cached).unwrap_or(0)).unwrap_or(i32::MAX);
+            let block_output = BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: exec.instance_id,
+                block_id: exec.block_id,
+                output: cached.clone(),
+                output_ref: None,
+                output_size,
+                attempt: i16::try_from(exec.attempt).unwrap_or(i16::MAX),
+                created_at: Utc::now(),
+            };
+            storage.save_block_output(&block_output).await?;
+            return Ok(cached);
+        }
+    }
+
     let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
         let names = handlers.handler_names();
         let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -207,6 +287,7 @@ pub async fn execute_step(
     let block_id = exec.block_id.clone();
     let attempt = exec.attempt;
     let timeout = exec.timeout;
+    let cache_key = exec.cache_key;
 
     let step_ctx = StepContext {
         instance_id,
@@ -236,6 +317,21 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
+            if let Some(ref ck) = cache_key {
+                let prefixed_key = format!("_cache:{ck}");
+                if let Err(e) = storage
+                    .set_instance_kv(instance_id, &prefixed_key, &output)
+                    .await
+                {
+                    warn!(
+                        instance_id = %instance_id,
+                        cache_key = %ck,
+                        error = %e,
+                        "failed to save step output to cache"
+                    );
+                }
+            }
+
             let output_size =
                 i32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(i32::MAX);
 

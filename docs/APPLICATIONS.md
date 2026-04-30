@@ -28,7 +28,7 @@ Sequence definitions are JSON. A device can fetch a sequence from a server at ru
 ```
 Server                          Mobile Device
   │                                   │
-  │── GET /sequences/onboarding ──────▶│
+  │── GET /sequences/onboarding ─────▶│
   │◀── { "blocks": [...] } ───────────│
   │                                   │
   │                          engine.run(sequence)

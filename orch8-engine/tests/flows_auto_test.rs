@@ -51,6 +51,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+        cache_key: None,
     }))
 }
 
@@ -258,6 +259,9 @@ async fn run_100_exhaustive_flow_tests() {
             condition: "true".into(),
             body: vec![mk_step("step1", "noop")],
             max_iterations: max_iters,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         }));
 
         let seq = mk_sequence(vec![lp]);

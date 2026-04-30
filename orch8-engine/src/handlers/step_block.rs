@@ -151,6 +151,21 @@ pub async fn execute_step_node(
         return Ok(false);
     }
 
+    // Resolve cache_key template if present.
+    let resolved_cache_key = if let Some(ref ck) = step_def.cache_key {
+        if crate::template::contains_template(&serde_json::Value::String(ck.clone())) {
+            let wrapped = serde_json::Value::String(ck.clone());
+            match crate::template::resolve(&wrapped, &step_context, &serde_json::json!({})) {
+                Ok(serde_json::Value::String(s)) => Some(s),
+                _ => Some(ck.clone()),
+            }
+        } else {
+            Some(ck.clone())
+        }
+    } else {
+        None
+    };
+
     // Each dispatch branch below ends in `return`, so we can *move*
     // `resolved_params` and `step_context` into the branch that matches —
     // later branches are unreachable from that point. The clone calls were
@@ -354,6 +369,7 @@ pub async fn execute_step_node(
         timeout: step_def.timeout,
         externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
         wait_for_input: step_def.wait_for_input.clone(),
+        cache_key: resolved_cache_key,
     };
 
     match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
@@ -659,6 +675,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
+            cache_key: None,
         }
     }
 

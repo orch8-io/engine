@@ -110,6 +110,12 @@ pub struct StepDef {
     /// failures are tracked under its own breaker key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_handler: Option<String>,
+    /// If set, cache step output under this key in the instance KV state.
+    /// On subsequent executions, if a cached value exists for the resolved key,
+    /// the handler is skipped and the cached value is returned directly.
+    /// The key is template-resolved before lookup (e.g. `"rate_{{ data.currency }}"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -424,6 +430,12 @@ pub struct LoopDef {
     pub body: Vec<BlockDefinition>,
     #[serde(default = "default_max_iterations")]
     pub max_iterations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_on: Option<String>,
+    #[serde(default)]
+    pub continue_on_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval: Option<u64>,
 }
 
 const fn default_max_iterations() -> u32 {
@@ -535,6 +547,12 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "emit_event",
     "send_signal",
     "query_instance",
+    "set_state",
+    "get_state",
+    "delete_state",
+    "transform",
+    "assert",
+    "merge_state",
 ];
 
 impl SequenceDefinition {
@@ -933,6 +951,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
+        cache_key: None,
         }))
     }
 
@@ -1073,6 +1092,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
+        cache_key: None,
         }));
         let seq = sample_seq(vec![step_with_bad]);
         let err = seq.validate().unwrap_err();

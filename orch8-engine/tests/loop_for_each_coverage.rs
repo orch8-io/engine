@@ -14,6 +14,7 @@ use serde_json::json;
 use orch8_engine::evaluator;
 use orch8_engine::handlers::for_each::execute_for_each;
 use orch8_engine::handlers::loop_block::execute_loop;
+use orch8_engine::handlers::param_resolve::OutputsSnapshot;
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
@@ -40,6 +41,7 @@ fn mk_step(id: &str) -> BlockDefinition {
         deadline: None,
         on_deadline_breach: None,
         fallback_handler: None,
+    cache_key: None,
     }))
 }
 
@@ -115,6 +117,9 @@ async fn loop_empty_body_completes_immediately() {
         condition: "true".into(),
         body: vec![],
         max_iterations: 10,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -136,6 +141,9 @@ async fn loop_max_iterations_zero_fails() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 0,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -157,6 +165,9 @@ async fn loop_falsy_condition_completes_without_activating_body() {
         condition: "keep_going".into(),
         body: vec![mk_step("body")],
         max_iterations: 10,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     // context.data lacks `keep_going` → falsy via expression engine.
@@ -181,6 +192,9 @@ async fn loop_first_tick_activates_body() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 10,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -209,6 +223,9 @@ async fn loop_body_completion_increments_iteration_marker() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -250,6 +267,9 @@ async fn loop_cap_reached_after_increment_leaves_body_terminal() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 1,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -295,6 +315,9 @@ async fn loop_body_failure_fails_loop() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -326,6 +349,9 @@ async fn loop_preexisting_marker_at_cap_short_circuits() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 3,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -363,6 +389,9 @@ async fn loop_running_body_does_not_increment_counter() {
         condition: "true".into(),
         body: vec![mk_step("body")],
         max_iterations: 5,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -395,10 +424,12 @@ async fn loop_running_body_does_not_increment_counter() {
 async fn loop_condition_flips_false_mid_run_completes_cleanly() {
     let loop_def = LoopDef {
         id: BlockId("lp".into()),
-        // Reads from instance context.
         condition: "keep".into(),
         body: vec![mk_step("body")],
         max_iterations: 10,
+        break_on: None,
+        continue_on_error: false,
+        poll_interval: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"keep": true})).await;
@@ -457,7 +488,7 @@ async fn for_each_empty_body_completes_immediately() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -479,7 +510,7 @@ async fn for_each_missing_collection_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -502,7 +533,7 @@ async fn for_each_non_array_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -524,7 +555,7 @@ async fn for_each_empty_collection_completes() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -547,7 +578,7 @@ async fn for_each_first_tick_binds_item_var_and_activates_body() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
 
@@ -600,7 +631,7 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
     let fe = find_by_block(&tree, "fe").clone();
 
     // Tick 1: snapshot ["a","b"].
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
 
@@ -622,7 +653,7 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
     let tree = refresh(&storage, &instance).await;
 
     // Tick 2: advance index. Marker `_total` must remain 2 (original snapshot).
-    execute_for_each(&storage, &reg, &updated, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &updated, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let marker = storage
@@ -664,7 +695,7 @@ async fn for_each_body_failure_fails_node() {
     let reg = HandlerRegistry::new();
     let fe = find_by_block(&tree, "fe").clone();
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -674,7 +705,7 @@ async fn for_each_body_failure_fails_node() {
         .unwrap();
     let tree = refresh(&storage, &instance).await;
 
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -697,7 +728,7 @@ async fn for_each_max_iterations_caps_below_collection_length() {
     let fe = find_by_block(&tree, "fe").clone();
 
     // Tick 1: bind & activate body for items[0].
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -709,7 +740,7 @@ async fn for_each_max_iterations_caps_below_collection_length() {
 
     // Tick 2: increment to _index=1, which equals effective_max (1 from cap).
     // Cap-reached branch leaves body terminal without reset.
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;
@@ -720,7 +751,7 @@ async fn for_each_max_iterations_caps_below_collection_length() {
     );
 
     // Tick 3: top-of-function cap guard completes the node.
-    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree)
+    execute_for_each(&storage, &reg, &instance, &fe, &fe_def, &tree, &OutputsSnapshot::new())
         .await
         .unwrap();
     let tree = refresh(&storage, &instance).await;

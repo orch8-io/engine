@@ -370,6 +370,15 @@ pub(super) async fn create_instance_with_dedupe(
     // etc.) instead of being flattened to `Query`.
     let mut tx = storage.pool.begin().await?;
 
+    // Insert the child instance FIRST so any FK on emit_event_dedupe is
+    // satisfied (mirrors the Postgres path after migration 031).
+    super::instances::bind_instance_insert(
+        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+        instance,
+    )?
+    .execute(&mut *tx)
+    .await?;
+
     let inserted = sqlx::query(
         "INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
          VALUES (?1, ?2, ?3, ?4)
@@ -383,41 +392,30 @@ pub(super) async fn create_instance_with_dedupe(
     .await?
     .rows_affected();
 
-    if inserted == 0 {
-        // Key already taken — look up the existing child id and abort without
-        // creating an instance. Commit (a no-op read) and return AlreadyExists.
-        let row: (String,) = sqlx::query_as(
-            "SELECT child_instance_id FROM emit_event_dedupe
-             WHERE scope_kind = ?1 AND scope_value = ?2 AND dedupe_key = ?3",
-        )
-        .bind(scope_kind)
-        .bind(&scope_value)
-        .bind(key)
-        .fetch_one(&mut *tx)
-        .await?;
-
+    if inserted > 0 {
         tx.commit().await?;
-
-        let existing = uuid::Uuid::parse_str(&row.0)
-            .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
-        return Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
-            existing,
-        )));
+        return Ok(crate::EmitDedupeOutcome::Inserted);
     }
 
-    // Inserted the dedupe row — now insert the instance in the SAME tx. If this
-    // fails the dedupe row is rolled back with it. The insert SQL + bindings
-    // live in `super::instances` so a schema change touches exactly one place.
-    super::instances::bind_instance_insert(
-        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
-        instance,
-    )?
-    .execute(&mut *tx)
+    // Key already taken — rollback the unnecessary child instance, then
+    // look up the existing child id outside the transaction.
+    tx.rollback().await?;
+
+    let row: (String,) = sqlx::query_as(
+        "SELECT child_instance_id FROM emit_event_dedupe
+         WHERE scope_kind = ?1 AND scope_value = ?2 AND dedupe_key = ?3",
+    )
+    .bind(scope_kind)
+    .bind(&scope_value)
+    .bind(key)
+    .fetch_one(&storage.pool)
     .await?;
 
-    tx.commit().await?;
-
-    Ok(crate::EmitDedupeOutcome::Inserted)
+    let existing = uuid::Uuid::parse_str(&row.0)
+        .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId(
+        existing,
+    )))
 }
 
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older

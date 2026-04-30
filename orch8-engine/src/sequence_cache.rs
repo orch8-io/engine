@@ -196,6 +196,7 @@ mod tests {
                 deadline: None,
                 on_deadline_breach: None,
                 fallback_handler: None,
+                cache_key: None,
             }))],
             interceptors: None,
             created_at: Utc::now(),

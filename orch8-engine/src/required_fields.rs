@@ -165,6 +165,7 @@ mod tests {
             deadline: None,
             on_deadline_breach: None,
             fallback_handler: None,
+            cache_key: None,
         })
     }
 
@@ -306,6 +307,9 @@ mod tests {
             condition: "false".into(),
             body: vec![BlockDefinition::Step(step)],
             max_iterations: 10,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
         };
         let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Loop(
             Box::new(lp),
