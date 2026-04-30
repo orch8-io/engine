@@ -691,17 +691,17 @@ async fn delegated_batch_reschedule_passes_through_encryption_layer() {
     let mut inst2 = inst.clone();
     inst2.id = InstanceId::new();
     inst2.sequence_id = seq_id;
-    let mut inst_mut = inst.clone();
-    inst_mut.sequence_id = seq_id;
-    inst_mut.state = InstanceState::Running;
-    let mut inst2_mut = inst2.clone();
-    inst2_mut.state = InstanceState::Running;
-    storage.create_instance(&inst_mut).await.unwrap();
-    storage.create_instance(&inst2_mut).await.unwrap();
+    let mut first = inst.clone();
+    first.sequence_id = seq_id;
+    first.state = InstanceState::Running;
+    let mut second = inst2.clone();
+    second.state = InstanceState::Running;
+    storage.create_instance(&first).await.unwrap();
+    storage.create_instance(&second).await.unwrap();
 
     let fire_at = chrono::Utc::now() + chrono::Duration::seconds(60);
     storage
-        .batch_reschedule_instances(&[inst_mut.id, inst2_mut.id], fire_at)
+        .batch_reschedule_instances(&[first.id, second.id], fire_at)
         .await
         .unwrap();
 

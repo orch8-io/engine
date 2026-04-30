@@ -215,7 +215,7 @@ mod tests {
         assert!(!contains_template(&json!(42)));
         assert!(!contains_template(&json!(true)));
         assert!(!contains_template(&json!(null)));
-        assert!(!contains_template(&json!(3.14)));
+        assert!(!contains_template(&json!(2.72)));
     }
 
     #[test]
