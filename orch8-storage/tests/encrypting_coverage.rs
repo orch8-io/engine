@@ -705,8 +705,8 @@ async fn delegated_batch_reschedule_passes_through_encryption_layer() {
         .await
         .unwrap();
 
-    let got1 = storage.get_instance(inst_mut.id).await.unwrap().unwrap();
-    let got2 = storage.get_instance(inst2_mut.id).await.unwrap().unwrap();
+    let got1 = storage.get_instance(first.id).await.unwrap().unwrap();
+    let got2 = storage.get_instance(second.id).await.unwrap().unwrap();
     assert_eq!(got1.state, InstanceState::Scheduled);
     assert_eq!(got2.state, InstanceState::Scheduled);
 }
