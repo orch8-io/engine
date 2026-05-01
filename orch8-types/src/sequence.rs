@@ -522,13 +522,12 @@ pub struct ABVariant {
 /// Validation error produced by [`SequenceDefinition::validate`].
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SequenceValidationError {
-    /// Two or more blocks in the tree share the same `id`.
     #[error("duplicate block id: {0}")]
     DuplicateBlockId(String),
-    /// A step's `wait_for_input` (`HumanInputDef`) is structurally invalid.
-    /// Carries the offending block id and the underlying error message.
     #[error("invalid human_review on block `{block_id}`: {message}")]
     InvalidHumanInput { block_id: String, message: String },
+    #[error("block `{block_id}`: {message}")]
+    InvalidBlock { block_id: String, message: String },
 }
 
 /// Known built-in handler names shipped with the engine. Used for
@@ -557,14 +556,17 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
 
 impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
-    /// reaches storage). Currently checks that every `BlockId` in the
-    /// recursive block tree is unique — the engine relies on ids being
-    /// distinct keys for block outputs, execution-tree edges, and signal
-    /// routing, so duplicates would break every one of those subsystems.
+    /// reaches storage).
     pub fn validate(&self) -> Result<(), SequenceValidationError> {
+        if self.blocks.is_empty() {
+            return Err(SequenceValidationError::InvalidBlock {
+                block_id: "(root)".into(),
+                message: "sequence has no blocks".into(),
+            });
+        }
         let mut seen = std::collections::HashSet::new();
         for block in &self.blocks {
-            walk_block_ids(block, &mut seen)?;
+            validate_block(block, &mut seen)?;
         }
         Ok(())
     }
@@ -671,62 +673,257 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
     }
 }
 
-/// Recursively descend into a block and every composite child body,
-/// inserting each encountered `BlockId` into `seen`. The first duplicate
-/// encountered short-circuits with [`SequenceValidationError::DuplicateBlockId`].
-fn walk_block_ids(
-    block: &BlockDefinition,
+fn block_err(id: &str, msg: impl Into<String>) -> SequenceValidationError {
+    SequenceValidationError::InvalidBlock {
+        block_id: id.into(),
+        message: msg.into(),
+    }
+}
+
+fn check_id(
+    id: &BlockId,
     seen: &mut std::collections::HashSet<String>,
 ) -> Result<(), SequenceValidationError> {
-    let (id, children): (&BlockId, Vec<&[BlockDefinition]>) = match block {
-        BlockDefinition::Step(s) => {
-            if let Some(human) = &s.wait_for_input {
-                human
-                    .validate()
-                    .map_err(|message| SequenceValidationError::InvalidHumanInput {
-                        block_id: s.id.0.clone(),
-                        message,
-                    })?;
-            }
-            (&s.id, vec![])
-        }
-        BlockDefinition::Parallel(p) => (&p.id, p.branches.iter().map(Vec::as_slice).collect()),
-        BlockDefinition::Race(r) => (&r.id, r.branches.iter().map(Vec::as_slice).collect()),
-        BlockDefinition::Loop(l) => (&l.id, vec![l.body.as_slice()]),
-        BlockDefinition::ForEach(fe) => (&fe.id, vec![fe.body.as_slice()]),
-        BlockDefinition::Router(r) => {
-            let mut kids: Vec<&[BlockDefinition]> =
-                r.routes.iter().map(|rt| rt.blocks.as_slice()).collect();
-            if let Some(default) = r.default.as_ref() {
-                kids.push(default.as_slice());
-            }
-            (&r.id, kids)
-        }
-        BlockDefinition::TryCatch(tc) => {
-            let mut kids: Vec<&[BlockDefinition]> =
-                vec![tc.try_block.as_slice(), tc.catch_block.as_slice()];
-            if let Some(finally) = tc.finally_block.as_ref() {
-                kids.push(finally.as_slice());
-            }
-            (&tc.id, kids)
-        }
-        BlockDefinition::SubSequence(s) => (&s.id, vec![]),
-        BlockDefinition::ABSplit(ab) => (
-            &ab.id,
-            ab.variants.iter().map(|v| v.blocks.as_slice()).collect(),
-        ),
-        BlockDefinition::CancellationScope(cs) => (&cs.id, vec![cs.blocks.as_slice()]),
-    };
-
+    if id.0.is_empty() {
+        return Err(block_err("(empty)", "block id must not be empty"));
+    }
     if !seen.insert(id.0.clone()) {
         return Err(SequenceValidationError::DuplicateBlockId(id.0.clone()));
     }
-    for child in children {
-        for b in child {
-            walk_block_ids(b, seen)?;
+    Ok(())
+}
+
+fn validate_step(
+    s: &StepDef,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    check_id(&s.id, seen)?;
+    let id = &s.id.0;
+
+    if s.handler.is_empty() {
+        return Err(block_err(id, "handler name must not be empty"));
+    }
+
+    if let Some(retry) = &s.retry {
+        if retry.max_attempts == 0 {
+            return Err(block_err(id, "retry.max_attempts must be > 0"));
+        }
+        if retry.backoff_multiplier <= 0.0 {
+            return Err(block_err(id, "retry.backoff_multiplier must be > 0"));
+        }
+        if retry.initial_backoff > retry.max_backoff {
+            return Err(block_err(
+                id,
+                "retry.initial_backoff must be <= retry.max_backoff",
+            ));
+        }
+    }
+
+    if let Some(sw) = &s.send_window {
+        if sw.start_hour > 23 {
+            return Err(block_err(id, "send_window.start_hour must be 0-23"));
+        }
+        if sw.end_hour > 23 {
+            return Err(block_err(id, "send_window.end_hour must be 0-23"));
+        }
+        if sw.start_hour == sw.end_hour {
+            return Err(block_err(
+                id,
+                "send_window.start_hour must differ from end_hour",
+            ));
+        }
+        for &d in &sw.days {
+            if d > 6 {
+                return Err(block_err(
+                    id,
+                    format!("send_window.days value {d} out of range 0-6"),
+                ));
+            }
+        }
+    }
+
+    if let Some(human) = &s.wait_for_input {
+        human
+            .validate()
+            .map_err(|message| SequenceValidationError::InvalidHumanInput {
+                block_id: id.clone(),
+                message,
+            })?;
+    }
+
+    Ok(())
+}
+
+fn validate_branches(
+    id: &BlockId,
+    label: &str,
+    branches: &[Vec<BlockDefinition>],
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    check_id(id, seen)?;
+    if branches.is_empty() {
+        return Err(block_err(
+            &id.0,
+            format!("{label} must have at least one branch"),
+        ));
+    }
+    for branch in branches {
+        for b in branch {
+            validate_block(b, seen)?;
         }
     }
     Ok(())
+}
+
+fn validate_ab_split(
+    ab: &ABSplitDef,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    check_id(&ab.id, seen)?;
+    if ab.variants.len() < 2 {
+        return Err(block_err(
+            &ab.id.0,
+            "ab_split must have at least 2 variants",
+        ));
+    }
+    let total_weight: u32 = ab
+        .variants
+        .iter()
+        .fold(0u32, |acc, v| acc.saturating_add(v.weight));
+    if total_weight == 0 {
+        return Err(block_err(&ab.id.0, "ab_split total weight must be > 0"));
+    }
+    let mut names_seen = std::collections::HashSet::new();
+    for v in &ab.variants {
+        if v.name.trim().is_empty() {
+            return Err(block_err(
+                &ab.id.0,
+                "ab_split variant name must not be empty",
+            ));
+        }
+        if !names_seen.insert(&v.name) {
+            return Err(block_err(
+                &ab.id.0,
+                format!("ab_split duplicate variant name `{}`", v.name),
+            ));
+        }
+        for b in &v.blocks {
+            validate_block(b, seen)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_children(
+    blocks: &[BlockDefinition],
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    for b in blocks {
+        validate_block(b, seen)?;
+    }
+    Ok(())
+}
+
+fn validate_block(
+    block: &BlockDefinition,
+    seen: &mut std::collections::HashSet<String>,
+) -> Result<(), SequenceValidationError> {
+    match block {
+        BlockDefinition::Step(s) => validate_step(s, seen),
+        BlockDefinition::Parallel(p) => validate_branches(&p.id, "parallel", &p.branches, seen),
+        BlockDefinition::Race(r) => validate_branches(&r.id, "race", &r.branches, seen),
+
+        BlockDefinition::Loop(l) => {
+            check_id(&l.id, seen)?;
+            if l.condition.trim().is_empty() {
+                return Err(block_err(&l.id.0, "loop condition must not be empty"));
+            }
+            if l.body.is_empty() {
+                return Err(block_err(&l.id.0, "loop body must not be empty"));
+            }
+            if l.max_iterations == 0 {
+                return Err(block_err(&l.id.0, "loop max_iterations must be > 0"));
+            }
+            validate_children(&l.body, seen)
+        }
+
+        BlockDefinition::ForEach(fe) => {
+            check_id(&fe.id, seen)?;
+            if fe.collection.trim().is_empty() {
+                return Err(block_err(&fe.id.0, "for_each collection must not be empty"));
+            }
+            if fe.body.is_empty() {
+                return Err(block_err(&fe.id.0, "for_each body must not be empty"));
+            }
+            if fe.item_var.trim().is_empty() {
+                return Err(block_err(&fe.id.0, "for_each item_var must not be empty"));
+            }
+            if fe.max_iterations == 0 {
+                return Err(block_err(&fe.id.0, "for_each max_iterations must be > 0"));
+            }
+            validate_children(&fe.body, seen)
+        }
+
+        BlockDefinition::Router(r) => {
+            check_id(&r.id, seen)?;
+            if r.routes.is_empty() && r.default.is_none() {
+                return Err(block_err(
+                    &r.id.0,
+                    "router must have at least one route or a default",
+                ));
+            }
+            for route in &r.routes {
+                if route.condition.trim().is_empty() {
+                    return Err(block_err(
+                        &r.id.0,
+                        "router route condition must not be empty",
+                    ));
+                }
+                validate_children(&route.blocks, seen)?;
+            }
+            if let Some(default) = &r.default {
+                validate_children(default, seen)?;
+            }
+            Ok(())
+        }
+
+        BlockDefinition::TryCatch(tc) => {
+            check_id(&tc.id, seen)?;
+            if tc.try_block.is_empty() {
+                return Err(block_err(&tc.id.0, "try_catch try_block must not be empty"));
+            }
+            validate_children(&tc.try_block, seen)?;
+            validate_children(&tc.catch_block, seen)?;
+            if let Some(finally) = &tc.finally_block {
+                validate_children(finally, seen)?;
+            }
+            Ok(())
+        }
+
+        BlockDefinition::SubSequence(s) => {
+            check_id(&s.id, seen)?;
+            if s.sequence_name.trim().is_empty() {
+                return Err(block_err(
+                    &s.id.0,
+                    "sub_sequence sequence_name must not be empty",
+                ));
+            }
+            Ok(())
+        }
+
+        BlockDefinition::ABSplit(ab) => validate_ab_split(ab, seen),
+
+        BlockDefinition::CancellationScope(cs) => {
+            check_id(&cs.id, seen)?;
+            if cs.blocks.is_empty() {
+                return Err(block_err(
+                    &cs.id.0,
+                    "cancellation_scope must have at least one block",
+                ));
+            }
+            validate_children(&cs.blocks, seen)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1022,11 +1219,18 @@ mod tests {
             })),
             BlockDefinition::ABSplit(Box::new(ABSplitDef {
                 id: BlockId("ab".into()),
-                variants: vec![ABVariant {
-                    name: "v1".into(),
-                    weight: 1,
-                    blocks: vec![step("shared")],
-                }],
+                variants: vec![
+                    ABVariant {
+                        name: "v1".into(),
+                        weight: 1,
+                        blocks: vec![step("shared")],
+                    },
+                    ABVariant {
+                        name: "v2".into(),
+                        weight: 1,
+                        blocks: vec![],
+                    },
+                ],
             })),
         ]);
         assert!(matches!(
@@ -1244,5 +1448,371 @@ mod tests {
         assert!(BUILTIN_HANDLER_NAMES.contains(&"noop"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"http_request"));
         assert!(BUILTIN_HANDLER_NAMES.contains(&"human_review"));
+    }
+
+    // ─── structural validation ───
+
+    #[test]
+    fn validate_rejects_empty_blocks() {
+        let seq = sample_seq(vec![]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("no blocks"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_block_id() {
+        let seq = sample_seq(vec![step("")]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_handler() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.handler = String::new();
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("handler name must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_parallel_branches() {
+        let seq = sample_seq(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+            id: BlockId("p".into()),
+            branches: vec![],
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one branch"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_loop_body() {
+        let seq = sample_seq(vec![BlockDefinition::Loop(Box::new(LoopDef {
+            id: BlockId("l".into()),
+            condition: "true".into(),
+            body: vec![],
+            max_iterations: 10,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("body must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_loop_condition() {
+        let seq = sample_seq(vec![BlockDefinition::Loop(Box::new(LoopDef {
+            id: BlockId("l".into()),
+            condition: "  ".into(),
+            body: vec![step("s1")],
+            max_iterations: 10,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("condition must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_iterations() {
+        let seq = sample_seq(vec![BlockDefinition::Loop(Box::new(LoopDef {
+            id: BlockId("l".into()),
+            condition: "true".into(),
+            body: vec![step("s1")],
+            max_iterations: 0,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("max_iterations must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_for_each_empty_collection() {
+        let seq = sample_seq(vec![BlockDefinition::ForEach(Box::new(ForEachDef {
+            id: BlockId("fe".into()),
+            collection: "  ".into(),
+            item_var: "item".into(),
+            body: vec![step("s1")],
+            max_iterations: 10,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("collection must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_for_each_empty_body() {
+        let seq = sample_seq(vec![BlockDefinition::ForEach(Box::new(ForEachDef {
+            id: BlockId("fe".into()),
+            collection: "data.items".into(),
+            item_var: "item".into(),
+            body: vec![],
+            max_iterations: 10,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("body must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_router_no_routes_and_no_default() {
+        let seq = sample_seq(vec![BlockDefinition::Router(Box::new(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![],
+            default: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one route"));
+    }
+
+    #[test]
+    fn validate_accepts_router_with_default_only() {
+        let seq = sample_seq(vec![BlockDefinition::Router(Box::new(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![],
+            default: Some(vec![step("s1")]),
+        }))]);
+        assert!(seq.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_router_empty_condition() {
+        let seq = sample_seq(vec![BlockDefinition::Router(Box::new(RouterDef {
+            id: BlockId("r".into()),
+            routes: vec![Route {
+                condition: String::new(),
+                blocks: vec![step("s1")],
+            }],
+            default: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("condition must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_try_catch_empty_try() {
+        let seq = sample_seq(vec![BlockDefinition::TryCatch(Box::new(TryCatchDef {
+            id: BlockId("tc".into()),
+            try_block: vec![],
+            catch_block: vec![step("c1")],
+            finally_block: None,
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("try_block must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_ab_split_one_variant() {
+        let seq = sample_seq(vec![BlockDefinition::ABSplit(Box::new(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![ABVariant {
+                name: "only".into(),
+                weight: 1,
+                blocks: vec![],
+            }],
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("at least 2 variants"));
+    }
+
+    #[test]
+    fn validate_rejects_ab_split_zero_total_weight() {
+        let seq = sample_seq(vec![BlockDefinition::ABSplit(Box::new(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![
+                ABVariant {
+                    name: "a".into(),
+                    weight: 0,
+                    blocks: vec![],
+                },
+                ABVariant {
+                    name: "b".into(),
+                    weight: 0,
+                    blocks: vec![],
+                },
+            ],
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("total weight must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_ab_split_duplicate_variant_names() {
+        let seq = sample_seq(vec![BlockDefinition::ABSplit(Box::new(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![
+                ABVariant {
+                    name: "v1".into(),
+                    weight: 1,
+                    blocks: vec![],
+                },
+                ABVariant {
+                    name: "v1".into(),
+                    weight: 1,
+                    blocks: vec![],
+                },
+            ],
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate variant name"));
+    }
+
+    #[test]
+    fn validate_rejects_ab_split_empty_variant_name() {
+        let seq = sample_seq(vec![BlockDefinition::ABSplit(Box::new(ABSplitDef {
+            id: BlockId("ab".into()),
+            variants: vec![
+                ABVariant {
+                    name: String::new(),
+                    weight: 1,
+                    blocks: vec![],
+                },
+                ABVariant {
+                    name: "b".into(),
+                    weight: 1,
+                    blocks: vec![],
+                },
+            ],
+        }))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("variant name must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_sub_sequence_empty_name() {
+        let seq = sample_seq(vec![BlockDefinition::SubSequence(Box::new(
+            SubSequenceDef {
+                id: BlockId("ss".into()),
+                sequence_name: "  ".into(),
+                version: None,
+                input: serde_json::Value::Null,
+            },
+        ))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("sequence_name must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_cancellation_scope_empty_blocks() {
+        let seq = sample_seq(vec![BlockDefinition::CancellationScope(Box::new(
+            CancellationScopeDef {
+                id: BlockId("cs".into()),
+                blocks: vec![],
+            },
+        ))]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("at least one block"));
+    }
+
+    #[test]
+    fn validate_rejects_retry_zero_max_attempts() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.retry = Some(RetryPolicy {
+                max_attempts: 0,
+                initial_backoff: Duration::from_secs(1),
+                max_backoff: Duration::from_secs(10),
+                backoff_multiplier: 2.0,
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("max_attempts must be > 0"));
+    }
+
+    #[test]
+    fn validate_rejects_retry_initial_exceeds_max_backoff() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.retry = Some(RetryPolicy {
+                max_attempts: 3,
+                initial_backoff: Duration::from_mins(1),
+                max_backoff: Duration::from_secs(10),
+                backoff_multiplier: 2.0,
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("initial_backoff must be <= retry.max_backoff"));
+    }
+
+    #[test]
+    fn validate_rejects_send_window_invalid_hours() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.send_window = Some(SendWindow {
+                start_hour: 25,
+                end_hour: 17,
+                days: vec![],
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("start_hour must be 0-23"));
+    }
+
+    #[test]
+    fn validate_rejects_send_window_same_start_end() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.send_window = Some(SendWindow {
+                start_hour: 9,
+                end_hour: 9,
+                days: vec![],
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("must differ from end_hour"));
+    }
+
+    #[test]
+    fn validate_rejects_send_window_invalid_day() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.send_window = Some(SendWindow {
+                start_hour: 9,
+                end_hour: 17,
+                days: vec![0, 7],
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        let err = seq.validate().unwrap_err();
+        assert!(err.to_string().contains("out of range 0-6"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_retry() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.retry = Some(RetryPolicy {
+                max_attempts: 3,
+                initial_backoff: Duration::from_secs(1),
+                max_backoff: Duration::from_secs(30),
+                backoff_multiplier: 2.0,
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        assert!(seq.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_valid_send_window() {
+        let mut s = step("s1");
+        if let BlockDefinition::Step(ref mut sd) = s {
+            sd.send_window = Some(SendWindow {
+                start_hour: 9,
+                end_hour: 17,
+                days: vec![0, 1, 2, 3, 4],
+            });
+        }
+        let seq = sample_seq(vec![s]);
+        assert!(seq.validate().is_ok());
     }
 }

@@ -1,4 +1,5 @@
 use orch8_types::context::ExecutionContext;
+use tracing::warn;
 
 use crate::error::EngineError;
 
@@ -84,7 +85,16 @@ fn resolve_string(
             let resolved = resolve_path(path, context, outputs, state)?;
             match &resolved {
                 serde_json::Value::String(s) => result.push_str(s),
-                other => result.push_str(&other.to_string()),
+                other => {
+                    if other.is_object() || other.is_array() {
+                        warn!(
+                            template = %path,
+                            value_type = if other.is_object() { "object" } else { "array" },
+                            "template: interpolating complex value into string — did you mean to access a specific field?"
+                        );
+                    }
+                    result.push_str(&other.to_string());
+                }
             }
             remaining = &after_open[close + 2..];
         } else {
@@ -2005,5 +2015,338 @@ mod tests {
         let tmpl = json!("{{ data.user.name }}-{{ state.lang }}");
         let result = resolve_with_state(&tmpl, &ctx, &outputs, Some(&state)).unwrap();
         assert_eq!(result, json!("Alice-pt"));
+    }
+
+    // --- object/array interpolation into strings (warning cases) ---
+
+    #[test]
+    fn inline_object_interpolation_produces_json_string() {
+        let ctx = test_context();
+        let outputs = json!({"get_price": {"price": 0.65, "ts": "2024-01-01"}});
+        let input = json!("price: {{ steps.get_price }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        // Should still work — just serializes the object
+        let s = result.as_str().unwrap();
+        assert!(s.starts_with("price: {"));
+        assert!(s.contains("\"price\""));
+        assert!(s.contains("0.65"));
+    }
+
+    #[test]
+    fn inline_array_interpolation_produces_json_string() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"items": [1, 2, 3]}});
+        let input = json!("items: {{ steps.step.items }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        let s = result.as_str().unwrap();
+        assert!(s.starts_with("items: ["));
+    }
+
+    #[test]
+    fn single_expr_object_returns_object_not_string() {
+        let ctx = test_context();
+        let outputs = json!({"get_price": {"price": 0.65, "ts": "2024-01-01"}});
+        let input = json!("{{ steps.get_price }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        // Single expression should return the object directly, not a string
+        assert!(result.is_object());
+        assert_eq!(result["price"], json!(0.65));
+    }
+
+    #[test]
+    fn single_expr_array_returns_array_not_string() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"items": [1, 2, 3]}});
+        let input = json!("{{ steps.step.items }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert!(result.is_array());
+        assert_eq!(result, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn inline_null_interpolation() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"val": null}});
+        let input = json!("value: {{ steps.step.val }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("value: null"));
+    }
+
+    #[test]
+    fn inline_number_interpolation() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"price": 0.65}});
+        let input = json!("price: {{ steps.step.price }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("price: 0.65"));
+    }
+
+    #[test]
+    fn inline_bool_interpolation() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"active": true}});
+        let input = json!("active: {{ steps.step.active }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("active: true"));
+    }
+
+    // --- edge cases for template resolution ---
+
+    #[test]
+    fn missing_step_output_in_arithmetic_context() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"price": 0.5}});
+        // Missing step output should resolve to null
+        let input = json!("{{ steps.missing_step.value }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!(null));
+    }
+
+    #[test]
+    fn nested_field_access_on_null_returns_null() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"data": null}});
+        let input = json!("{{ steps.step.data.nested.field }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!(null));
+    }
+
+    #[test]
+    fn multiple_inline_templates_with_mixed_types() {
+        let ctx = test_context();
+        let outputs = json!({
+            "a": {"name": "test"},
+            "b": {"count": 42}
+        });
+        let input = json!("Name: {{ steps.a.name }}, Count: {{ steps.b.count }}");
+        let result = resolve(&input, &ctx, &outputs).unwrap();
+        assert_eq!(result, json!("Name: test, Count: 42"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Warning-capture test infrastructure
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    struct CapturedWarning {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    struct WarningCapture {
+        warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut collector = FieldCollector::default();
+                event.record(&mut collector);
+                self.warnings.lock().unwrap().push(CapturedWarning {
+                    message: collector.fields.remove("message").unwrap_or_default(),
+                    fields: collector.fields,
+                });
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldCollector {
+        fields: HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<CapturedWarning> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let layer = WarningCapture {
+            warnings: Arc::clone(&warnings),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, f);
+        Arc::try_unwrap(warnings).unwrap().into_inner().unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // Warning emission for complex value interpolation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn warn_on_object_interpolated_inline_with_fields() {
+        let ctx = test_context();
+        let outputs = json!({"get_price": {"price": 0.65, "ts": "2024-01-01"}});
+        let input = json!("price: {{ steps.get_price }}");
+        let warnings = capture_warnings(|| {
+            let result = resolve(&input, &ctx, &outputs).unwrap();
+            assert!(result.as_str().unwrap().starts_with("price: {"));
+        });
+        assert_eq!(warnings.len(), 1, "expected 1 warning, got: {warnings:?}");
+        let w = &warnings[0];
+        assert!(w.message.contains("interpolating complex value"));
+        assert_eq!(
+            w.fields.get("value_type").map(String::as_str),
+            Some("object")
+        );
+    }
+
+    #[test]
+    fn warn_on_array_interpolated_inline_with_fields() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"items": [1, 2, 3]}});
+        let input = json!("items: {{ steps.step.items }}");
+        let warnings = capture_warnings(|| {
+            let result = resolve(&input, &ctx, &outputs).unwrap();
+            assert!(result.as_str().unwrap().starts_with("items: ["));
+        });
+        assert_eq!(warnings.len(), 1);
+        let w = &warnings[0];
+        assert!(w.message.contains("interpolating complex value"));
+        assert_eq!(
+            w.fields.get("value_type").map(String::as_str),
+            Some("array")
+        );
+    }
+
+    #[test]
+    fn warn_on_nested_object_interpolated_inline() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"deep": {"a": {"b": 1}}}});
+        let input = json!("val: {{ steps.step.deep }}");
+        let warnings = capture_warnings(|| {
+            resolve(&input, &ctx, &outputs).unwrap();
+        });
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].fields.get("value_type").map(String::as_str),
+            Some("object")
+        );
+    }
+
+    #[test]
+    fn warn_on_multiple_complex_interpolations_in_one_template() {
+        let ctx = test_context();
+        let outputs = json!({"s": {"obj": {"x": 1}, "arr": [1, 2]}});
+        let input = json!("a={{ steps.s.obj }} b={{ steps.s.arr }}");
+        let warnings = capture_warnings(|| {
+            resolve(&input, &ctx, &outputs).unwrap();
+        });
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected 2 warnings for two complex interpolations, got {}: {warnings:?}",
+            warnings.len()
+        );
+        let types: Vec<&str> = warnings
+            .iter()
+            .filter_map(|w| w.fields.get("value_type").map(String::as_str))
+            .collect();
+        assert!(types.contains(&"object"));
+        assert!(types.contains(&"array"));
+    }
+
+    // --- no false positives ---
+
+    #[test]
+    fn no_warn_when_object_is_single_expression() {
+        let ctx = test_context();
+        let outputs = json!({"get_price": {"price": 0.65}});
+        let input = json!("{{ steps.get_price }}");
+        let warnings = capture_warnings(|| {
+            let result = resolve(&input, &ctx, &outputs).unwrap();
+            assert!(result.is_object());
+        });
+        assert!(
+            warnings.is_empty(),
+            "single-expression object should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_when_array_is_single_expression() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"items": [1, 2, 3]}});
+        let input = json!("{{ steps.step.items }}");
+        let warnings = capture_warnings(|| {
+            let result = resolve(&input, &ctx, &outputs).unwrap();
+            assert!(result.is_array());
+        });
+        assert!(
+            warnings.is_empty(),
+            "single-expression array should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_when_scalar_interpolated_inline() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"price": 0.65}});
+        let input = json!("price: {{ steps.step.price }}");
+        let warnings = capture_warnings(|| {
+            let result = resolve(&input, &ctx, &outputs).unwrap();
+            assert_eq!(result, json!("price: 0.65"));
+        });
+        assert!(
+            warnings.is_empty(),
+            "scalar interpolation should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_when_string_interpolated_inline() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"name": "test"}});
+        let input = json!("name: {{ steps.step.name }}");
+        let warnings = capture_warnings(|| {
+            resolve(&input, &ctx, &outputs).unwrap();
+        });
+        assert!(
+            warnings.is_empty(),
+            "string interpolation should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_when_null_interpolated_inline() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"val": null}});
+        let input = json!("val: {{ steps.step.val }}");
+        let warnings = capture_warnings(|| {
+            resolve(&input, &ctx, &outputs).unwrap();
+        });
+        assert!(
+            warnings.is_empty(),
+            "null interpolation should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_when_bool_interpolated_inline() {
+        let ctx = test_context();
+        let outputs = json!({"step": {"active": true}});
+        let input = json!("active: {{ steps.step.active }}");
+        let warnings = capture_warnings(|| {
+            resolve(&input, &ctx, &outputs).unwrap();
+        });
+        assert!(
+            warnings.is_empty(),
+            "bool interpolation should not warn, got: {warnings:?}"
+        );
     }
 }

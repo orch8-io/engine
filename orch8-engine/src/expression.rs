@@ -1,6 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
 use orch8_types::context::ExecutionContext;
+use tracing::warn;
 
 static TOKEN_CACHE: LazyLock<moka::sync::Cache<String, Arc<[Token]>>> = LazyLock::new(|| {
     moka::sync::Cache::builder()
@@ -523,9 +524,14 @@ impl<'a> Parser<'a> {
             self.advance();
             let val = self.parse_unary();
             self.leave();
-            return match to_f64(&val) {
-                Some(n) => serde_json::json!(-n),
-                None => serde_json::Value::Null,
+            return if let Some(n) = to_f64(&val) {
+                serde_json::json!(-n)
+            } else {
+                warn!(
+                    value = %val,
+                    "expression arithmetic: non-numeric operand in negation"
+                );
+                serde_json::Value::Null
             };
         }
         let result = self.parse_primary();
@@ -621,7 +627,8 @@ impl<'a> Parser<'a> {
                 if max <= min {
                     return serde_json::json!(min);
                 }
-                let n = rand::random::<u64>() % ((max - min) as u64) + (min as u64);
+                let range = (max - min) as u64;
+                let n = (rand::random::<u64>() % range) as i64 + min;
                 serde_json::json!(n)
             }
             "format_date" => {
@@ -890,30 +897,63 @@ fn json_add(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     if let (serde_json::Value::String(a), serde_json::Value::String(b)) = (a, b) {
         return serde_json::Value::String(format!("{a}{b}"));
     }
-    match (to_f64(a), to_f64(b)) {
-        (Some(a), Some(b)) => serde_json::json!(a + b),
-        _ => serde_json::Value::Null,
+    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
+        serde_json::json!(a + b)
+    } else {
+        warn!(
+            left = %a,
+            right = %b,
+            "expression arithmetic: non-numeric operand in addition"
+        );
+        serde_json::Value::Null
     }
 }
 
 fn json_sub(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-    match (to_f64(a), to_f64(b)) {
-        (Some(a), Some(b)) => serde_json::json!(a - b),
-        _ => serde_json::Value::Null,
+    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
+        serde_json::json!(a - b)
+    } else {
+        warn!(
+            left = %a,
+            right = %b,
+            "expression arithmetic: non-numeric operand in subtraction"
+        );
+        serde_json::Value::Null
     }
 }
 
 fn json_mul(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-    match (to_f64(a), to_f64(b)) {
-        (Some(a), Some(b)) => serde_json::json!(a * b),
-        _ => serde_json::Value::Null,
+    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
+        serde_json::json!(a * b)
+    } else {
+        warn!(
+            left = %a,
+            right = %b,
+            "expression arithmetic: non-numeric operand in multiplication"
+        );
+        serde_json::Value::Null
     }
 }
 
 fn json_div(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     match (to_f64(a), to_f64(b)) {
         (Some(a), Some(b)) if b != 0.0 => serde_json::json!(a / b),
-        _ => serde_json::Value::Null,
+        _ => {
+            if to_f64(a).is_some() && (to_f64(b) == Some(0.0)) {
+                warn!(
+                    left = %a,
+                    right = %b,
+                    "expression arithmetic: division by zero"
+                );
+            } else {
+                warn!(
+                    left = %a,
+                    right = %b,
+                    "expression arithmetic: non-numeric operand in division"
+                );
+            }
+            serde_json::Value::Null
+        }
     }
 }
 
@@ -2081,5 +2121,595 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(evaluate("runtime.attempt", &ctx, &json!({})), json!(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // Warning-capture test infrastructure
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    struct CapturedWarning {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    struct WarningCapture {
+        warnings: Arc<Mutex<Vec<CapturedWarning>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut collector = FieldCollector::default();
+                event.record(&mut collector);
+                self.warnings.lock().unwrap().push(CapturedWarning {
+                    message: collector.fields.remove("message").unwrap_or_default(),
+                    fields: collector.fields,
+                });
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FieldCollector {
+        fields: HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<CapturedWarning> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let warnings = Arc::new(Mutex::new(Vec::new()));
+        let layer = WarningCapture {
+            warnings: Arc::clone(&warnings),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, f);
+        Arc::try_unwrap(warnings).unwrap().into_inner().unwrap()
+    }
+
+    fn eval_expr(expr: &str, c: &ExecutionContext, o: &serde_json::Value) -> serde_json::Value {
+        evaluate(expr, c, o)
+    }
+
+    // -----------------------------------------------------------------------
+    // Null / non-numeric operands → null return value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn add_null_left_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"val": null, "num": 5}});
+        assert_eq!(eval_expr("steps.s.val + steps.s.num", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn add_null_right_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"num": 5, "val": null}});
+        assert_eq!(eval_expr("steps.s.num + steps.s.val", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn add_both_null_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": null}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn sub_null_operand_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 10}});
+        assert_eq!(eval_expr("steps.s.a - steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn sub_object_operand_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"obj": {"price": 0.5}, "b": 10}});
+        assert_eq!(eval_expr("steps.s.obj - steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn mul_null_operand_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 100}});
+        assert_eq!(eval_expr("steps.s.a * steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn mul_array_operand_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"arr": [1,2,3], "b": 2}});
+        assert_eq!(eval_expr("steps.s.arr * steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn div_null_operand_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": null}});
+        assert_eq!(eval_expr("steps.s.a / steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn div_by_zero_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": 0}});
+        assert_eq!(eval_expr("steps.s.a / steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn div_both_null_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": null}});
+        assert_eq!(eval_expr("steps.s.a / steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn negate_null_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"val": null}});
+        assert_eq!(eval_expr("-steps.s.val", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn negate_object_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"obj": {"x": 1}}});
+        assert_eq!(eval_expr("-steps.s.obj", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn negate_array_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"arr": [1, 2]}});
+        assert_eq!(eval_expr("-steps.s.arr", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn negate_non_numeric_string_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"val": "hello"}});
+        assert_eq!(eval_expr("-steps.s.val", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn add_non_numeric_string_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": "hello", "b": 5}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn sub_non_numeric_string_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": "world"}});
+        assert_eq!(eval_expr("steps.s.a - steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn mul_non_numeric_string_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": "abc", "b": "def"}});
+        assert_eq!(eval_expr("steps.s.a * steps.s.b", &c, &o), json!(null));
+    }
+
+    #[test]
+    fn div_non_numeric_string_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": "xyz", "b": 2}});
+        assert_eq!(eval_expr("steps.s.a / steps.s.b", &c, &o), json!(null));
+    }
+
+    // --- missing paths resolve to null in arithmetic ---
+
+    #[test]
+    fn add_missing_path_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": 5}});
+        assert_eq!(
+            eval_expr("steps.s.a + steps.s.missing", &c, &o),
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn sub_missing_path_returns_null() {
+        let c = ctx();
+        let o = json!({"s": {"a": 5}});
+        assert_eq!(
+            eval_expr("steps.s.a - steps.s.missing", &c, &o),
+            json!(null)
+        );
+    }
+
+    // --- valid arithmetic still works ---
+
+    #[test]
+    fn add_two_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": 3, "b": 7}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(10.0));
+    }
+
+    #[test]
+    fn sub_two_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": 3}});
+        assert_eq!(eval_expr("steps.s.a - steps.s.b", &c, &o), json!(7.0));
+    }
+
+    #[test]
+    fn mul_two_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": 4, "b": 5}});
+        assert_eq!(eval_expr("steps.s.a * steps.s.b", &c, &o), json!(20.0));
+    }
+
+    #[test]
+    fn div_two_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": 20, "b": 4}});
+        assert_eq!(eval_expr("steps.s.a / steps.s.b", &c, &o), json!(5.0));
+    }
+
+    #[test]
+    fn negate_number_works() {
+        let c = ctx();
+        let o = json!({"s": {"val": 42}});
+        assert_eq!(eval_expr("-steps.s.val", &c, &o), json!(-42.0));
+    }
+
+    #[test]
+    fn add_string_coercion_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": "3.5", "b": 2}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(5.5));
+    }
+
+    #[test]
+    fn sub_string_coercion_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"a": "10", "b": "3"}});
+        assert_eq!(eval_expr("steps.s.a - steps.s.b", &c, &o), json!(7.0));
+    }
+
+    #[test]
+    fn negate_numeric_string_works() {
+        let c = ctx();
+        let o = json!({"s": {"val": "7.5"}});
+        assert_eq!(eval_expr("-steps.s.val", &c, &o), json!(-7.5));
+    }
+
+    #[test]
+    fn bool_true_coerces_to_one_in_arithmetic() {
+        let c = ctx();
+        let o = json!({"s": {"a": true, "b": 5}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(6.0));
+    }
+
+    #[test]
+    fn bool_false_coerces_to_zero_in_arithmetic() {
+        let c = ctx();
+        let o = json!({"s": {"a": false, "b": 10}});
+        assert_eq!(eval_expr("steps.s.a + steps.s.b", &c, &o), json!(10.0));
+    }
+
+    // --- complex expressions ---
+
+    #[test]
+    fn complex_expression_with_null_intermediate() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 10}});
+        assert_eq!(
+            eval_expr("(steps.s.a - steps.s.b) * 100", &c, &o),
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn complex_expression_with_valid_numbers() {
+        let c = ctx();
+        let o = json!({"s": {"est": 0.65, "price": 0.5}});
+        let result = eval_expr("(steps.s.est - steps.s.price) * 100", &c, &o);
+        let val = result.as_f64().unwrap();
+        assert!((val - 15.0).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // Warning emission: verify message AND structured fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn warn_on_null_addition_with_fields() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 5}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a + steps.s.b", &c, &o);
+        });
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly 1 warning, got: {warnings:?}"
+        );
+        let w = &warnings[0];
+        assert!(w.message.contains("non-numeric operand in addition"));
+        assert_eq!(w.fields.get("left").map(String::as_str), Some("null"));
+        assert_eq!(w.fields.get("right").map(String::as_str), Some("5"));
+    }
+
+    #[test]
+    fn warn_on_null_subtraction_with_fields() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 10}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("steps.s.a - steps.s.b", &c, &o);
+            assert_eq!(result, json!(null));
+        });
+        assert_eq!(warnings.len(), 1);
+        let w = &warnings[0];
+        assert!(w.message.contains("non-numeric operand in subtraction"));
+        assert_eq!(w.fields.get("left").map(String::as_str), Some("null"));
+        assert_eq!(w.fields.get("right").map(String::as_str), Some("10"));
+    }
+
+    #[test]
+    fn warn_on_null_multiplication_with_fields() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 5}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a * steps.s.b", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in multiplication"));
+        assert_eq!(
+            warnings[0].fields.get("left").map(String::as_str),
+            Some("null")
+        );
+    }
+
+    #[test]
+    fn warn_on_division_by_zero_with_fields() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": 0}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("steps.s.a / steps.s.b", &c, &o);
+            assert_eq!(result, json!(null));
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("division by zero"));
+        assert_eq!(
+            warnings[0].fields.get("left").map(String::as_str),
+            Some("10")
+        );
+        assert_eq!(
+            warnings[0].fields.get("right").map(String::as_str),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn warn_on_null_division_with_fields() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": null}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a / steps.s.b", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in division"));
+        assert_eq!(
+            warnings[0].fields.get("right").map(String::as_str),
+            Some("null")
+        );
+    }
+
+    #[test]
+    fn warn_on_object_subtraction_includes_serialized_object() {
+        let c = ctx();
+        let o = json!({"s": {"obj": {"price": 0.5}, "b": 10}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.obj - steps.s.b", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in subtraction"));
+        let left = warnings[0].fields.get("left").unwrap();
+        assert!(
+            left.contains("price"),
+            "left field should contain the object, got: {left}"
+        );
+    }
+
+    #[test]
+    fn warn_on_array_multiplication_includes_serialized_array() {
+        let c = ctx();
+        let o = json!({"s": {"arr": [1,2,3], "b": 2}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.arr * steps.s.b", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in multiplication"));
+        let left = warnings[0].fields.get("left").unwrap();
+        assert!(
+            left.contains('['),
+            "left field should contain the array, got: {left}"
+        );
+    }
+
+    #[test]
+    fn warn_on_negation_of_null_with_field() {
+        let c = ctx();
+        let o = json!({"s": {"val": null}});
+        let warnings = capture_warnings(|| {
+            eval_expr("-steps.s.val", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in negation"));
+        assert_eq!(
+            warnings[0].fields.get("value").map(String::as_str),
+            Some("null")
+        );
+    }
+
+    #[test]
+    fn warn_on_negation_of_object_with_field() {
+        let c = ctx();
+        let o = json!({"s": {"obj": {"x": 1}}});
+        let warnings = capture_warnings(|| {
+            eval_expr("-steps.s.obj", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in negation"));
+        let val = warnings[0].fields.get("value").unwrap();
+        assert!(
+            val.contains('x'),
+            "value field should contain the object, got: {val}"
+        );
+    }
+
+    #[test]
+    fn warn_on_non_numeric_string_addition() {
+        let c = ctx();
+        let o = json!({"s": {"a": "hello", "b": 5}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a + steps.s.b", &c, &o);
+        });
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0]
+            .message
+            .contains("non-numeric operand in addition"));
+        assert!(warnings[0].fields.get("left").unwrap().contains("hello"));
+    }
+
+    // --- no false positives ---
+
+    #[test]
+    fn no_warn_on_valid_arithmetic() {
+        let c = ctx();
+        let o = json!({"s": {"a": 10, "b": 3}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("steps.s.a - steps.s.b", &c, &o);
+            assert_eq!(result, json!(7.0));
+        });
+        assert!(
+            warnings.is_empty(),
+            "no warnings expected for valid arithmetic, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_on_string_coercion_arithmetic() {
+        let c = ctx();
+        let o = json!({"s": {"a": "3.5", "b": 2}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a + steps.s.b", &c, &o);
+        });
+        assert!(
+            warnings.is_empty(),
+            "numeric string coercion should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_on_bool_arithmetic() {
+        let c = ctx();
+        let o = json!({"s": {"a": true, "b": 5}});
+        let warnings = capture_warnings(|| {
+            eval_expr("steps.s.a + steps.s.b", &c, &o);
+        });
+        assert!(
+            warnings.is_empty(),
+            "bool coercion should not warn, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_warn_on_negation_of_number() {
+        let c = ctx();
+        let o = json!({"s": {"val": 42}});
+        let warnings = capture_warnings(|| {
+            eval_expr("-steps.s.val", &c, &o);
+        });
+        assert!(
+            warnings.is_empty(),
+            "negation of number should not warn, got: {warnings:?}"
+        );
+    }
+
+    // --- cascade: chained null produces exactly the expected number of warnings ---
+
+    #[test]
+    fn cascade_null_sub_then_mul_produces_two_warnings() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 10}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("(steps.s.a - steps.s.b) * 100", &c, &o);
+            assert_eq!(result, json!(null));
+        });
+        assert_eq!(
+            warnings.len(),
+            2,
+            "expected 2 warnings (sub then mul), got {}: {warnings:?}",
+            warnings.len()
+        );
+        assert!(warnings[0].message.contains("subtraction"));
+        assert!(warnings[1].message.contains("multiplication"));
+    }
+
+    #[test]
+    fn cascade_null_add_then_div_produces_two_warnings() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 5}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("(steps.s.a + steps.s.b) / 10", &c, &o);
+            assert_eq!(result, json!(null));
+        });
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].message.contains("addition"));
+        assert!(warnings[1].message.contains("division"));
+    }
+
+    #[test]
+    fn triple_cascade_null_across_three_ops() {
+        let c = ctx();
+        let o = json!({"s": {"a": null, "b": 10}});
+        let warnings = capture_warnings(|| {
+            let result = eval_expr("(steps.s.a - steps.s.b) * 100 + 1", &c, &o);
+            assert_eq!(result, json!(null));
+        });
+        assert_eq!(
+            warnings.len(),
+            3,
+            "expected 3 warnings (sub, mul, add), got {}: {warnings:?}",
+            warnings.len()
+        );
     }
 }

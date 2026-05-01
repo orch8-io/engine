@@ -318,13 +318,22 @@ async fn call_openai_compat(
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
         {
-            if let Ok(parsed) = serde_json::from_str::<Value>(content_str) {
-                if let (Some(out_obj), Some(parsed_obj)) =
-                    (output.as_object_mut(), parsed.as_object())
-                {
-                    for (k, v) in parsed_obj {
-                        out_obj.entry(k).or_insert_with(|| v.clone());
+            match serde_json::from_str::<Value>(content_str) {
+                Ok(parsed) => {
+                    if let (Some(out_obj), Some(parsed_obj)) =
+                        (output.as_object_mut(), parsed.as_object())
+                    {
+                        for (k, v) in parsed_obj {
+                            out_obj.entry(k).or_insert_with(|| v.clone());
+                        }
                     }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        content_preview = %&content_str[..content_str.len().min(200)],
+                        "llm_call: response_format=json_object but content is not valid JSON — fields will NOT be merged into step output"
+                    );
                 }
             }
         }
@@ -417,13 +426,22 @@ async fn call_anthropic(params: &Value, api_key: &str, base_url: &str) -> Result
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
         {
-            if let Ok(parsed) = serde_json::from_str::<Value>(content_str) {
-                if let (Some(out_obj), Some(parsed_obj)) =
-                    (output.as_object_mut(), parsed.as_object())
-                {
-                    for (k, v) in parsed_obj {
-                        out_obj.entry(k).or_insert_with(|| v.clone());
+            match serde_json::from_str::<Value>(content_str) {
+                Ok(parsed) => {
+                    if let (Some(out_obj), Some(parsed_obj)) =
+                        (output.as_object_mut(), parsed.as_object())
+                    {
+                        for (k, v) in parsed_obj {
+                            out_obj.entry(k).or_insert_with(|| v.clone());
+                        }
                     }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        content_preview = %&content_str[..content_str.len().min(200)],
+                        "llm_call: response_format=json_object but content is not valid JSON — fields will NOT be merged into step output"
+                    );
                 }
             }
         }
@@ -823,5 +841,156 @@ mod tests {
             .unwrap()
             .block_on(handle_llm_call_failover(&json!({}), &[]));
         assert!(result.is_err());
+    }
+
+    fn try_merge_json_fields(content_str: &str, output: &mut Value) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(content_str) {
+            if let (Some(out_obj), Some(parsed_obj)) = (output.as_object_mut(), parsed.as_object())
+            {
+                for (k, v) in parsed_obj {
+                    out_obj.entry(k).or_insert_with(|| v.clone());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn json_object_merge_valid_json() {
+        let content_str = r#"{"markets": [{"id": "m1"}], "count": 1}"#;
+        let mut output = json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert!(output.get("markets").is_some());
+        assert_eq!(output["count"], json!(1));
+        assert_eq!(output["markets"][0]["id"], "m1");
+        assert_eq!(output["provider"], "openai");
+    }
+
+    #[test]
+    fn json_object_merge_markdown_wrapped_json_fails() {
+        let content_str = "```json\n{\"probability\": 0.65}\n```";
+        let mut output = json!({
+            "provider": "perplexity",
+            "model": "sonar-pro",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert!(output.get("probability").is_none());
+        assert_eq!(output["provider"], "perplexity");
+    }
+
+    #[test]
+    fn json_object_merge_empty_content() {
+        let content_str = "";
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_object_merge_does_not_overwrite_existing_keys() {
+        let content_str = r#"{"provider": "evil", "model": "hijacked", "score": 42}"#;
+        let mut output = json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output["provider"], "openai");
+        assert_eq!(output["model"], "gpt-4o");
+        assert_eq!(output["score"], 42);
+    }
+
+    #[test]
+    fn json_object_merge_non_object_json() {
+        let content_str = r"[1, 2, 3]";
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_object_merge_scalar_json_string() {
+        let content_str = r#""just a string""#;
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_object_merge_scalar_json_number() {
+        let content_str = "42";
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_object_merge_truncated_json_fails() {
+        let content_str = r#"{"probability": 0.65, "reas"#;
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert!(output.get("probability").is_none());
+    }
+
+    #[test]
+    fn json_object_merge_html_content_fails() {
+        let content_str = "<html><body>Not JSON</body></html>";
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn json_object_merge_nested_objects_preserved() {
+        let content_str = r#"{"data": {"nested": {"deep": true}}, "count": 1}"#;
+        let mut output = json!({
+            "provider": "openai",
+            "message": {"role": "assistant", "content": content_str},
+        });
+
+        try_merge_json_fields(content_str, &mut output);
+
+        assert_eq!(output["data"]["nested"]["deep"], json!(true));
+        assert_eq!(output["count"], json!(1));
     }
 }

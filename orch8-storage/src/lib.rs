@@ -794,12 +794,8 @@ pub trait StorageBackend: Send + Sync + 'static {
             self.update_node_state(nid, orch8_types::execution::NodeState::Pending)
                 .await?;
         }
-        self.update_instance_state(
-            instance_id,
-            InstanceState::Scheduled,
-            Some(fire_at),
-        )
-        .await?;
+        self.update_instance_state(instance_id, InstanceState::Scheduled, Some(fire_at))
+            .await?;
         Ok(())
     }
 

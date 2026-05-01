@@ -313,10 +313,12 @@ pub(super) async fn save_output_complete_node_and_transition(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE execution_tree SET state='completed', completed_at=datetime('now') WHERE id=?1")
-        .bind(node_id.0.to_string())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE execution_tree SET state='completed', completed_at=datetime('now') WHERE id=?1",
+    )
+    .bind(node_id.0.to_string())
+    .execute(&mut *tx)
+    .await?;
 
     let result = sqlx::query(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",
@@ -367,10 +369,12 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE execution_tree SET state='completed', completed_at=datetime('now') WHERE id=?1")
-        .bind(node_id.0.to_string())
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE execution_tree SET state='completed', completed_at=datetime('now') WHERE id=?1",
+    )
+    .bind(node_id.0.to_string())
+    .execute(&mut *tx)
+    .await?;
 
     let result = sqlx::query(
         "UPDATE task_instances SET context=?2, state=?3, next_fire_at=?4, updated_at=?5 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled','paused')",

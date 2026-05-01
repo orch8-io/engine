@@ -2078,12 +2078,19 @@ mod tests {
                 id: BlockId("s1".into()),
                 handler: "h".into(),
                 params: serde_json::Value::Null,
-                delay: None, retry: None, timeout: None,
-                rate_limit_key: None, send_window: None,
-                context_access: None, cancellable: true,
-                wait_for_input: None, queue_name: None,
-                deadline: None, on_deadline_breach: None,
-                fallback_handler: None, cache_key: None,
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
+                queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
+                fallback_handler: None,
+                cache_key: None,
             }))],
             interceptors: None,
             created_at: now,
@@ -2180,7 +2187,11 @@ mod tests {
             .unwrap();
 
         // Verify child rows exist
-        assert!(!storage.get_execution_tree(inst.id).await.unwrap().is_empty());
+        assert!(!storage
+            .get_execution_tree(inst.id)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(storage.get_worker_task(wt_id).await.unwrap().is_some());
 
         // Delete instance via raw SQL (no trait method exists)
@@ -2191,8 +2202,16 @@ mod tests {
             .unwrap();
 
         // All child rows must be cascade-deleted
-        assert!(storage.get_execution_tree(inst.id).await.unwrap().is_empty());
+        assert!(storage
+            .get_execution_tree(inst.id)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(storage.get_worker_task(wt_id).await.unwrap().is_none());
-        assert!(storage.get_pending_signals(inst.id).await.unwrap().is_empty());
+        assert!(storage
+            .get_pending_signals(inst.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

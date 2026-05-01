@@ -23,5 +23,8 @@ tokio-stream = "0.1"
 [build-dependencies]
 tonic-build = "0.12"
 
+[package.metadata.cargo-machete]
+ignored = ["async-trait", "prost"]
+
 [lints]
 workspace = true

@@ -2469,7 +2469,6 @@ version = "0.3.1"
 dependencies = [
  "axum 0.8.9",
  "chrono",
- "dashmap",
  "metrics-exporter-prometheus",
  "moka",
  "orch8-engine",
@@ -2482,11 +2481,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tower 0.5.3",
- "tower-http",
  "tracing",
  "utoipa",
- "utoipa-swagger-ui",
  "uuid",
 ]
 
@@ -2502,7 +2498,6 @@ dependencies = [
  "owo-colors",
  "rand 0.8.5",
  "reqwest",
- "serde",
  "serde_json",
  "tabled",
  "tokio",
@@ -2515,7 +2510,6 @@ name = "orch8-engine"
 version = "0.3.1"
 dependencies = [
  "async-nats",
- "async-trait",
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
@@ -2538,6 +2532,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "wasmtime",
@@ -2579,7 +2574,6 @@ dependencies = [
  "orch8-grpc",
  "orch8-storage",
  "orch8-types",
- "serde",
  "serde_json",
  "tikv-jemallocator",
  "tokio",
@@ -2606,7 +2600,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -2620,7 +2613,6 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "chrono",
- "chrono-tz",
  "serde",
  "serde_json",
  "sha2",

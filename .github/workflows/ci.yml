@@ -24,12 +24,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Check
-        run: cargo check --workspace
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
       - name: Format
         run: cargo fmt --check
+      - name: Check
+        run: cargo check --workspace
+      - name: Clippy (all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Doc warnings
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+      - name: Supply chain (licenses + advisories)
+        run: |
+          cargo install --locked cargo-deny@0.19
+          cargo deny check
 
   test:
     name: Unit Tests

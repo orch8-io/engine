@@ -86,7 +86,10 @@ async fn seed_instance(storage: &SqliteStorage, instance_id: InstanceId) {
         created_at: Utc::now(),
     };
     storage.create_sequence(&seq).await.unwrap();
-    let inst = TaskInstance { id: instance_id, ..mk_instance(seq.id) };
+    let inst = TaskInstance {
+        id: instance_id,
+        ..mk_instance(seq.id)
+    };
     storage.create_instance(&inst).await.unwrap();
 }
 

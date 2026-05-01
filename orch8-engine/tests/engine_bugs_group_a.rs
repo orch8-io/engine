@@ -1331,7 +1331,10 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     };
     storage.create_sequence(&seq).await.unwrap();
     let inst = mk_instance(json!({}), seq.id);
-    let inst = TaskInstance { id: inst_id, ..inst };
+    let inst = TaskInstance {
+        id: inst_id,
+        ..inst
+    };
     storage.create_instance(&inst).await.unwrap();
 
     let task = WorkerTask {

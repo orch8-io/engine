@@ -9,6 +9,7 @@ pub mod gc;
 pub mod handlers;
 pub mod interceptors;
 pub mod lifecycle;
+pub mod lint;
 pub mod metrics;
 pub mod preload;
 pub mod recovery;
