@@ -183,19 +183,13 @@ pub(super) async fn mark_delivered_batch(
     if signal_ids.is_empty() {
         return Ok(());
     }
-    let placeholders: Vec<String> = signal_ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect();
-    let sql = format!(
-        "UPDATE signal_inbox SET delivered=1 WHERE id IN ({})",
-        placeholders.join(",")
-    );
-    let mut query = sqlx::query(&sql);
+    let mut qb = sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1 WHERE id IN (");
+    let mut separated = qb.separated(",");
     for id in signal_ids {
-        query = query.bind(id.to_string());
+        separated.push_bind(id.to_string());
     }
+    separated.push_unseparated(")");
+    let query = qb.build();
     query.execute(&storage.pool).await?;
     Ok(())
 }

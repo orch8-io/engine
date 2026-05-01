@@ -26,3 +26,7 @@
 **Vulnerability:** A `format!` macro was used to dynamically construct SQL query strings (`SET search_path TO ...`) in `orch8-storage/src/postgres/mod.rs`.
 **Learning:** Using string interpolation with `sqlx` defeats defense-in-depth and triggers SAST/linters. Although the schema identifier may have been validated prior, parameter binding provides robust SQL injection protection in case validation fails.
 **Prevention:** Use the `set_config` PostgreSQL function with `sqlx::QueryBuilder` or `.bind()` for parameterized queries instead of string concatenation/interpolation for database settings. Never use string format/concat for SQL queries.
+## 2025-02-15 - [Refactored format! out of SQLx query in SQLite Signals Batch Delivery]
+**Vulnerability:** A `format!` macro and string joining was used to dynamically construct SQL queries with `IN` clauses in `orch8-storage/src/sqlite/signals.rs`.
+**Learning:** Using `format!` or string concatenation with `sqlx` defeats defense-in-depth and will trigger SAST/linters, even when used only for placeholders. The preferred method to build dynamic `IN` clauses securely is using `QueryBuilder` with `.separated()`.
+**Prevention:** Construct parameterized queries using `sqlx::QueryBuilder` with `.separated()` and `.push_bind()`. Never use string format/concat to build query structure.
