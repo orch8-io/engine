@@ -129,9 +129,7 @@ describe("Empty-branch semantics", () => {
     assert.equal(outputs.filter((o) => o.block_id === "body").length, 0);
   });
 
-  it("loop with max_iterations=0 effectively skips body", async () => {
-    // max_iterations=0 means the loop's iteration cap is hit before the
-    // first iteration even starts — body must never execute.
+  it("loop with max_iterations=0 is rejected at creation time", async () => {
     const seq = testSequence("empty-loop-zero", [
       {
         type: "loop",
@@ -141,21 +139,13 @@ describe("Empty-branch semantics", () => {
         body: [step("body", "log", { message: "x" })],
       } as Block,
     ]);
-    await client.createSequence(seq);
-    const { id } = await client.createInstance({
-      sequence_id: seq.id,
-      tenant_id: "test",
-      namespace: "default",
-    });
-    const done = await client.waitForState(id, ["completed", "failed"], {
-      timeoutMs: 10_000,
-    });
-    // Either completed (loop guard triggered immediately) or failed
-    // (invalid config) is acceptable — the critical invariant is no hang
-    // and no body execution.
-    const outputs = await client.getOutputs(id);
-    assert.equal(outputs.filter((o) => o.block_id === "body").length, 0);
-    assert.notEqual(done.state, "running");
-    assert.notEqual(done.state, "waiting");
+    await assert.rejects(
+      () => client.createSequence(seq),
+      (err: any) => {
+        assert.equal(err.status, 400);
+        assert.match(err.body, /max_iterations must be > 0/);
+        return true;
+      },
+    );
   });
 });

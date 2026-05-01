@@ -94,18 +94,17 @@ describe("Send Window Deferral", () => {
     }
   });
 
-  it("does not defer when current time is inside a 24h send_window", async () => {
+  it("does not defer when current time is inside a wide send_window", async () => {
     const tenantId = `sw-24h-${uuid().slice(0, 8)}`;
 
-    // start_hour == end_hour means 24-hour window (always open).
     const seq = testSequence(
       "send-window-24h",
       [
         step("s1", "noop", {}, {
           send_window: {
             start_hour: 0,
-            end_hour: 0,
-            days: [],
+            end_hour: 23,
+            days: [0, 1, 2, 3, 4, 5, 6],
           },
         }),
       ],
@@ -119,7 +118,7 @@ describe("Send Window Deferral", () => {
       namespace: "default",
     });
 
-    // Should complete promptly because the window is always open.
+    // Should complete promptly because the window covers all days 0:00–23:00.
     const instance = await client.waitForState(id, "completed", {
       timeoutMs: 10_000,
     });
