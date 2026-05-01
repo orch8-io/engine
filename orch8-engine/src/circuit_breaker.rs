@@ -23,6 +23,8 @@
 //! keeps the in-memory registry's semantics unchanged for callers on the
 //! request path while still giving us a durable backstop.
 
+use std::borrow::Borrow;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -34,7 +36,69 @@ use orch8_storage::StorageBackend;
 use orch8_types::circuit_breaker::{BreakerState, CircuitBreakerState};
 use orch8_types::ids::TenantId;
 
-type Key = (TenantId, String);
+#[derive(Clone, Debug)]
+struct Key(TenantId, String);
+
+trait CircuitKey {
+    fn tenant_id(&self) -> &str;
+    fn handler(&self) -> &str;
+}
+
+impl CircuitKey for Key {
+    fn tenant_id(&self) -> &str {
+        &self.0.0
+    }
+    fn handler(&self) -> &str {
+        &self.1
+    }
+}
+
+impl<'a> Borrow<dyn CircuitKey + 'a> for Key {
+    fn borrow(&self) -> &(dyn CircuitKey + 'a) {
+        self
+    }
+}
+
+impl Hash for dyn CircuitKey + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.tenant_id().hash(state);
+        self.handler().hash(state);
+    }
+}
+
+impl PartialEq for dyn CircuitKey + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.tenant_id() == other.tenant_id() && self.handler() == other.handler()
+    }
+}
+
+impl Eq for dyn CircuitKey + '_ {}
+
+impl Hash for Key {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.tenant_id().hash(state);
+        self.handler().hash(state);
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        self.tenant_id() == other.tenant_id() && self.handler() == other.handler()
+    }
+}
+
+impl Eq for Key {}
+
+struct KeyRef<'a>(&'a TenantId, &'a str);
+
+impl CircuitKey for KeyRef<'_> {
+    fn tenant_id(&self) -> &str {
+        &self.0.0
+    }
+    fn handler(&self) -> &str {
+        self.1
+    }
+}
 
 /// Handlers that the circuit breaker should NOT track.
 ///
@@ -132,7 +196,7 @@ impl CircuitBreakerRegistry {
         match storage.list_open_circuit_breakers().await {
             Ok(rows) => {
                 for state in rows {
-                    let key = (state.tenant_id.clone(), state.handler.clone());
+                    let key = Key(state.tenant_id.clone(), state.handler.clone());
                     self.breakers.insert(key, state);
                 }
             }
@@ -149,16 +213,19 @@ impl CircuitBreakerRegistry {
     /// if allowed, or `Err(remaining_cooldown_secs)` if the circuit is open.
     pub fn check(&self, tenant_id: &TenantId, handler: &str) -> Result<(), u64> {
         let now = Utc::now();
-        let key: Key = (tenant_id.clone(), handler.to_string());
 
         // Fast path: acquire a read lock. In the vast majority of cases (healthy
         // circuit), we can authorize execution without acquiring a write lock
         // on the DashMap shard, avoiding severe contention on the hot path.
-        if let Some(breaker) = self.breakers.get(&key) {
+        let search = KeyRef(tenant_id, handler);
+        let q: &dyn CircuitKey = &search;
+        if let Some(breaker) = self.breakers.get(q) {
             if matches!(breaker.state, BreakerState::Closed | BreakerState::HalfOpen) {
                 return Ok(());
             }
         }
+
+        let key = Key(tenant_id.clone(), handler.to_string());
 
         // Slow path: if the breaker is Open (or doesn't exist yet), we acquire
         // a write lock to potentially mutate it (e.g. initialize it, or check
@@ -203,19 +270,20 @@ impl CircuitBreakerRegistry {
     /// closes the breaker. If the breaker was previously `Open` the persisted
     /// row is removed so a subsequent crash doesn't revive it.
     pub fn record_success(&self, tenant_id: &TenantId, handler: &str) {
-        let key: Key = (tenant_id.clone(), handler.to_string());
+        let search = KeyRef(tenant_id, handler);
+        let q: &dyn CircuitKey = &search;
 
         // Fast path: if the breaker is already completely healthy (Closed with 0 failures),
         // we can skip acquiring a write lock entirely. This makes the standard success
         // path effectively free of lock contention.
-        if let Some(breaker) = self.breakers.get(&key) {
+        if let Some(breaker) = self.breakers.get(q) {
             if breaker.state == BreakerState::Closed && breaker.failure_count == 0 {
                 return;
             }
         }
 
         let mut delete_snapshot = None;
-        if let Some(mut breaker) = self.breakers.get_mut(&key) {
+        if let Some(mut breaker) = self.breakers.get_mut(q) {
             let was_open = matches!(breaker.state, BreakerState::Open | BreakerState::HalfOpen);
             breaker.failure_count = 0;
             breaker.state = BreakerState::Closed;
@@ -233,7 +301,7 @@ impl CircuitBreakerRegistry {
     /// which also persists the transition.
     pub fn record_failure(&self, tenant_id: &TenantId, handler: &str) {
         let now = Utc::now();
-        let key: Key = (tenant_id.clone(), handler.to_string());
+        let key = Key(tenant_id.clone(), handler.to_string());
         let mut tripped_snapshot = None;
         {
             let mut breaker = self
@@ -275,15 +343,17 @@ impl CircuitBreakerRegistry {
 
     /// Get the current state of a specific tenant+handler's breaker.
     pub fn get(&self, tenant_id: &TenantId, handler: &str) -> Option<CircuitBreakerState> {
-        let key: Key = (tenant_id.clone(), handler.to_string());
-        self.breakers.get(&key).map(|item| item.value().clone())
+        let search = KeyRef(tenant_id, handler);
+        let q: &dyn CircuitKey = &search;
+        self.breakers.get(q).map(|item| item.value().clone())
     }
 
     /// Reset a tenant+handler's breaker to `Closed`, clearing failures and
     /// removing any persisted row.
     pub fn reset(&self, tenant_id: &TenantId, handler: &str) {
-        let key: Key = (tenant_id.clone(), handler.to_string());
-        let delete_snapshot = if let Some(mut breaker) = self.breakers.get_mut(&key) {
+        let search = KeyRef(tenant_id, handler);
+        let q: &dyn CircuitKey = &search;
+        let delete_snapshot = if let Some(mut breaker) = self.breakers.get_mut(q) {
             breaker.state = BreakerState::Closed;
             breaker.failure_count = 0;
             breaker.opened_at = None;
