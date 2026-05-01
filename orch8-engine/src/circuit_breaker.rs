@@ -46,7 +46,7 @@ trait CircuitKey {
 
 impl CircuitKey for Key {
     fn tenant_id(&self) -> &str {
-        &self.0.0
+        &self.0 .0
     }
     fn handler(&self) -> &str {
         &self.1
@@ -93,7 +93,7 @@ struct KeyRef<'a>(&'a TenantId, &'a str);
 
 impl CircuitKey for KeyRef<'_> {
     fn tenant_id(&self) -> &str {
-        &self.0.0
+        &self.0 .0
     }
     fn handler(&self) -> &str {
         self.1
