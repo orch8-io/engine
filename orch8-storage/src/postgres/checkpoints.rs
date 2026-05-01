@@ -45,11 +45,13 @@ pub(super) async fn get_latest(
 pub(super) async fn list(
     store: &PostgresStorage,
     instance_id: InstanceId,
+    limit: u32,
 ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
     let rows: Vec<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC",
+        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
     .bind(instance_id.0)
+    .bind(i64::from(limit.min(1000)))
     .fetch_all(&store.pool)
     .await?;
     Ok(rows

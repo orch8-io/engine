@@ -108,13 +108,11 @@ pub async fn execute_for_each(
                 Vec::new()
             }
             Err(e) => {
-                warn!(
-                    instance_id = %instance.id,
-                    block_id = %fe_def.id,
-                    error = %e,
-                    "failed to resolve for_each snapshot — treating as empty"
-                );
-                Vec::new()
+                return Err(orch8_types::error::StorageError::Query(format!(
+                    "for_each snapshot read failed for instance {} block {}: {e}",
+                    instance.id, fe_def.id
+                ))
+                .into());
             }
         };
         (items_snap, idx)
@@ -281,7 +279,7 @@ async fn bind_item_var(
 /// iteration-counter markers from descendant `Loop` / `ForEach` blocks via
 /// [`StorageBackend::delete_block_outputs`].
 ///
-/// Mirror of [`crate::handlers::loop_block::reset_subtree_to_pending`].
+/// Mirror of `crate::handlers::loop_block::reset_subtree_to_pending`.
 /// Called at iteration boundaries so the body can re-execute without stale
 /// terminal state. Step body outputs are left in place — under the
 /// write-append model each iteration appends a fresh row for each step.
@@ -350,9 +348,39 @@ async fn resolve_collection(
 ) -> Option<Vec<serde_json::Value>> {
     if crate::template::contains_template(&serde_json::Value::String(path.to_string())) {
         let wrapped = serde_json::Value::String(path.to_string());
-        let out_snap = outputs.get(storage, instance.id).await.ok()?;
-        let resolved = crate::template::resolve(&wrapped, context, out_snap).ok()?;
-        return resolved.as_array().cloned();
+        let out_snap = match outputs.get(storage, instance.id).await {
+            Ok(snap) => snap,
+            Err(e) => {
+                warn!(
+                    instance_id = %instance.id,
+                    error = %e,
+                    "for_each: failed to build outputs snapshot"
+                );
+                return None;
+            }
+        };
+        let resolved = match crate::template::resolve(&wrapped, context, out_snap) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    instance_id = %instance.id,
+                    collection = %path,
+                    error = %e,
+                    "for_each: template resolution failed"
+                );
+                return None;
+            }
+        };
+        if resolved.is_array() {
+            return resolved.as_array().cloned();
+        }
+        warn!(
+            instance_id = %instance.id,
+            collection = %path,
+            resolved_type = resolved_type_name(&resolved),
+            "for_each: collection resolved to non-array"
+        );
+        return None;
     }
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = &context.data;
@@ -360,6 +388,17 @@ async fn resolve_collection(
         current = current.get(part)?;
     }
     current.as_array().cloned()
+}
+
+fn resolved_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]

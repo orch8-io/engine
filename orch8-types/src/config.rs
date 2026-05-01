@@ -87,6 +87,18 @@ impl PartialEq for SecretString {
 
 impl Eq for SecretString {}
 
+impl Drop for SecretString {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: zero the backing buffer so secrets don't linger in freed memory.
+        // `write_volatile` prevents the compiler from eliding the writes.
+        let v = unsafe { self.0.as_mut_vec() };
+        for b in v.iter_mut() {
+            unsafe { std::ptr::write_volatile(b as *mut u8, 0) };
+        }
+    }
+}
+
 /// Top-level configuration. Layered: TOML file -> env vars -> CLI flags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {

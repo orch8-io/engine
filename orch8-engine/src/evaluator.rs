@@ -446,6 +446,7 @@ pub async fn evaluate(
                 let pre_states: Vec<(ExecutionNodeId, NodeState)> =
                     tree.iter().map(|n| (n.id, n.state)).collect();
 
+                let mut early_restart = false;
                 for (node, block) in &composites {
                     dispatch_block(
                         storage,
@@ -460,16 +461,24 @@ pub async fn evaluate(
                     .await?;
                     if may_mutate_instance(block) {
                         instance_dirty = true;
+                        let mid_tree = storage.get_execution_tree(instance_id).await?;
+                        let mid_states: Vec<(ExecutionNodeId, NodeState)> =
+                            mid_tree.iter().map(|n| (n.id, n.state)).collect();
+                        if pre_states != mid_states {
+                            prefetched_tree = Some(mid_tree);
+                            early_restart = true;
+                            break;
+                        }
                     }
+                }
+                if early_restart {
+                    continue;
                 }
 
                 let post_tree = storage.get_execution_tree(instance_id).await?;
                 let post_states: Vec<(ExecutionNodeId, NodeState)> =
                     post_tree.iter().map(|n| (n.id, n.state)).collect();
                 if pre_states != post_states {
-                    // Reuse post_tree as the starting snapshot for the next
-                    // iteration — no intervening mutation happens before the
-                    // top-of-loop fetch.
                     prefetched_tree = Some(post_tree);
                     continue;
                 }
@@ -517,7 +526,10 @@ pub async fn evaluate(
 fn may_mutate_instance(block: &BlockDefinition) -> bool {
     matches!(
         block,
-        BlockDefinition::Step(_) | BlockDefinition::ForEach(_) | BlockDefinition::TryCatch(_)
+        BlockDefinition::Step(_)
+            | BlockDefinition::ForEach(_)
+            | BlockDefinition::TryCatch(_)
+            | BlockDefinition::Loop(_)
     )
 }
 

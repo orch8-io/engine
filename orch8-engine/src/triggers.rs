@@ -70,7 +70,7 @@ async fn sync_triggers(
     active: &Arc<RwLock<ActiveTriggers>>,
     parent_cancel: &CancellationToken,
 ) -> Result<(), orch8_types::error::StorageError> {
-    let triggers = storage.list_triggers(None).await?;
+    let triggers = storage.list_triggers(None, 1000).await?;
 
     {
         let mut active = active.write().await;

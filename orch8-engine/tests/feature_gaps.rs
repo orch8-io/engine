@@ -73,6 +73,23 @@ fn mk_instance(seq_id: SequenceId) -> TaskInstance {
     }
 }
 
+async fn seed_instance(storage: &SqliteStorage, instance_id: InstanceId) {
+    let seq = SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        name: "seed".into(),
+        version: 1,
+        deprecated: false,
+        blocks: vec![BlockDefinition::Step(Box::new(mk_step("s", "h")))],
+        interceptors: None,
+        created_at: Utc::now(),
+    };
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = TaskInstance { id: instance_id, ..mk_instance(seq.id) };
+    storage.create_instance(&inst).await.unwrap();
+}
+
 async fn setup_single_step(
     step: StepDef,
 ) -> (
@@ -451,6 +468,7 @@ async fn save_output_complete_node_and_transition_rejects_terminal_instance() {
 async fn sqlite_get_batch_chunking_does_not_drop_keys() {
     let storage = SqliteStorage::in_memory().await.unwrap();
     let instance = InstanceId::new();
+    seed_instance(&storage, instance).await;
 
     // Seed 450 outputs to exercise the 400-key chunk boundary.
     let mut keys = Vec::with_capacity(450);
@@ -489,6 +507,7 @@ async fn activate_first_pending_child_only_flips_first() {
 
     let storage = SqliteStorage::in_memory().await.unwrap();
     let instance = InstanceId::new();
+    seed_instance(&storage, instance).await;
 
     // Parent node
     let parent = ExecutionNode {
@@ -566,6 +585,7 @@ async fn cancel_subtree_recursively_cancels_deep_descendants() {
 
     let storage = SqliteStorage::in_memory().await.unwrap();
     let instance = InstanceId::new();
+    seed_instance(&storage, instance).await;
 
     // Root -> mid -> deep
     let root = ExecutionNode {

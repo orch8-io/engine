@@ -383,6 +383,24 @@ pub(super) async fn update_context(
     Ok(())
 }
 
+pub(super) async fn update_context_cas(
+    store: &PostgresStorage,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let ctx_json = serde_json::to_value(context)?;
+    let result = sqlx::query(
+        "UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1 AND updated_at = $3",
+    )
+    .bind(id.0)
+    .bind(&ctx_json)
+    .bind(expected_updated_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Update only `context.runtime.started_at` via `jsonb_set` so the scheduler
 /// doesn't have to clone + re-serialize the entire context just to stamp the
 /// first-run timestamp.

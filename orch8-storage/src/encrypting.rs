@@ -235,25 +235,31 @@ impl_encrypting_storage! {
             key: &str,
             value: &serde_json::Value,
         ) -> Result<(), StorageError> {
-            // When encryption is enabled, `context.data` is stored as a single
-            // encrypted blob — the only safe path is read → decrypt → merge →
-            // re-encrypt → write.  The underlying `update_instance_context` is
-            // an unconditional UPDATE (not CAS), so contention detection via
-            // `updated_at` comparison is not meaningful here — the write always
-            // lands.
-            let Some(mut instance) = self.inner.get_instance(id).await? else {
-                return Ok(());
-            };
-            self.decrypt_instance(&mut instance)?;
+            // Encrypted context is a single blob — read → decrypt → merge →
+            // encrypt → CAS write. Retry on contention (another writer
+            // updated `updated_at` between our read and write).
+            for _ in 0..5 {
+                let Some(mut instance) = self.inner.get_instance(id).await? else {
+                    return Ok(());
+                };
+                let snapshot_ts = instance.updated_at;
+                self.decrypt_instance(&mut instance)?;
 
-            if !instance.context.data.is_object() {
-                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-            }
-            if let Some(map) = instance.context.data.as_object_mut() {
-                map.insert(key.to_string(), value.clone());
-            }
+                if !instance.context.data.is_object() {
+                    instance.context.data = serde_json::Value::Object(serde_json::Map::new());
+                }
+                if let Some(map) = instance.context.data.as_object_mut() {
+                    map.insert(key.to_string(), value.clone());
+                }
 
-            self.update_instance_context(id, &instance.context).await
+                let encrypted = self.encrypt_context(&instance.context)?;
+                if self.inner.update_instance_context_cas(id, encrypted.as_ref(), snapshot_ts).await? {
+                    return Ok(());
+                }
+            }
+            Err(StorageError::Query(format!(
+                "merge_context_data: CAS contention exceeded retries for instance {id}"
+            )))
         }
 
         async fn list_instances(
@@ -378,8 +384,9 @@ impl_encrypting_storage! {
         async fn list_credentials(
             &self,
             tenant_id: Option<&orch8_types::ids::TenantId>,
+            limit: u32,
         ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
-            let mut creds = self.inner.list_credentials(tenant_id).await?;
+            let mut creds = self.inner.list_credentials(tenant_id, limit).await?;
             for c in &mut creds {
                 self.decrypt_credential(c)?;
             }
@@ -406,6 +413,52 @@ impl_encrypting_storage! {
                 self.decrypt_credential(c)?;
             }
             Ok(creds)
+        }
+
+        async fn create_instance_externalized(
+            &self,
+            instance: &TaskInstance,
+            threshold_bytes: u32,
+        ) -> Result<(), StorageError> {
+            let encrypted = self.encrypt_instance(instance)?;
+            self.inner
+                .create_instance_externalized(encrypted.as_ref(), threshold_bytes)
+                .await
+        }
+
+        async fn create_instances_batch_externalized(
+            &self,
+            instances: &[TaskInstance],
+            threshold_bytes: u32,
+        ) -> Result<u64, StorageError> {
+            if instances
+                .iter()
+                .all(|i| FieldEncryptor::is_encrypted(&i.context.data))
+            {
+                return self
+                    .inner
+                    .create_instances_batch_externalized(instances, threshold_bytes)
+                    .await;
+            }
+            let encrypted: Vec<TaskInstance> = instances
+                .iter()
+                .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
+                .collect::<Result<_, _>>()?;
+            self.inner
+                .create_instances_batch_externalized(&encrypted, threshold_bytes)
+                .await
+        }
+
+        async fn update_instance_context_externalized(
+            &self,
+            id: InstanceId,
+            context: &orch8_types::context::ExecutionContext,
+            threshold_bytes: u32,
+        ) -> Result<(), StorageError> {
+            let encrypted = self.encrypt_context(context)?;
+            self.inner
+                .update_instance_context_externalized(id, encrypted.as_ref(), threshold_bytes)
+                .await
         }
 
         async fn create_instance_with_dedupe(
@@ -490,7 +543,7 @@ impl_encrypting_storage! {
         // --- Cron Schedules ---
         async fn create_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
-        async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
         async fn update_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
         async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
         async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
@@ -505,6 +558,7 @@ impl_encrypting_storage! {
         async fn fail_worker_task(&self, task_id: Uuid, worker_id: &str, message: &str, retryable: bool) -> Result<bool, StorageError>;
         async fn heartbeat_worker_task(&self, task_id: Uuid, worker_id: &str) -> Result<bool, StorageError>;
         async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
+        async fn retry_worker_task(&self, old_task_id: Uuid, new_task: &orch8_types::worker::WorkerTask, node_id: Option<orch8_types::ids::ExecutionNodeId>, instance_id: orch8_types::ids::InstanceId, fire_at: chrono::DateTime<chrono::Utc>) -> Result<(), StorageError>;
         async fn reap_stale_worker_tasks(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
         async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError>;
         async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
@@ -527,13 +581,20 @@ impl_encrypting_storage! {
         // --- Checkpoints ---
         async fn save_checkpoint(&self, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<(), StorageError>;
         async fn get_latest_checkpoint(&self, instance_id: InstanceId) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError>;
-        async fn list_checkpoints(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
+        async fn list_checkpoints(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
         async fn prune_checkpoints(&self, instance_id: InstanceId, keep: u32) -> Result<u64, StorageError>;
+
+        // --- Instance Timestamps ---
+        async fn update_instance_started_at(&self, id: InstanceId, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
 
         // --- Externalized State ---
         async fn save_externalized_state(&self, instance_id: InstanceId, ref_key: &str, payload: &serde_json::Value) -> Result<(), StorageError>;
         async fn get_externalized_state(&self, ref_key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;
+        async fn batch_save_externalized_state(&self, instance_id: InstanceId, entries: &[(String, serde_json::Value)]) -> Result<(), StorageError>;
+        async fn batch_get_externalized_state(&self, ref_keys: &[String]) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError>;
+        async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError>;
 
         // --- Audit Log ---
         async fn append_audit_log(&self, entry: &orch8_types::audit::AuditLogEntry) -> Result<(), StorageError>;
@@ -575,7 +636,7 @@ impl_encrypting_storage! {
         // --- Triggers ---
         async fn create_trigger(&self, trigger: &orch8_types::trigger::TriggerDef) -> Result<(), StorageError>;
         async fn get_trigger(&self, slug: &str) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError>;
-        async fn list_triggers(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError>;
+        async fn list_triggers(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError>;
         async fn update_trigger(&self, trigger: &orch8_types::trigger::TriggerDef) -> Result<(), StorageError>;
         async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
 
@@ -585,6 +646,17 @@ impl_encrypting_storage! {
         // --- Emit Event Dedupe ---
         async fn record_or_get_emit_dedupe(&self, scope: &crate::DedupeScope, key: &str, candidate_child: InstanceId) -> Result<crate::EmitDedupeOutcome, StorageError>;
         async fn delete_expired_emit_event_dedupe(&self, older_than: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
+
+        // --- Circuit Breakers ---
+        async fn upsert_circuit_breaker(&self, state: &orch8_types::circuit_breaker::CircuitBreakerState) -> Result<(), StorageError>;
+        async fn list_open_circuit_breakers(&self) -> Result<Vec<orch8_types::circuit_breaker::CircuitBreakerState>, StorageError>;
+        async fn delete_circuit_breaker(&self, tenant_id: &orch8_types::ids::TenantId, handler: &str) -> Result<(), StorageError>;
+
+        // --- Instance KV State ---
+        async fn set_instance_kv(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
+        async fn get_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<Option<serde_json::Value>, StorageError>;
+        async fn get_all_instance_kv(&self, instance_id: InstanceId) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError>;
+        async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
 
         // --- Health ---
         async fn ping(&self) -> Result<(), StorageError>;

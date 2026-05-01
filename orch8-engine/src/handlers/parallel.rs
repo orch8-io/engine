@@ -21,7 +21,7 @@ use crate::handlers::HandlerRegistry;
 /// concurrently with each other.
 ///
 /// Each direct child of the parallel node is tagged with `branch_index`
-/// (set by [`evaluator::build_nodes`]). On every tick this handler:
+/// (set by `evaluator::build_nodes`). On every tick this handler:
 ///   1. Groups children by `branch_index`, preserving source order within
 ///      each group.
 ///   2. For each branch, finds the first non-terminal node (the branch's

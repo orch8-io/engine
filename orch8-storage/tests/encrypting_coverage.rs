@@ -413,7 +413,7 @@ async fn list_credentials_decrypts_all() {
         .unwrap();
 
     let creds = storage
-        .list_credentials(Some(&TenantId("T1".into())))
+        .list_credentials(Some(&TenantId("T1".into())), 1000)
         .await
         .unwrap();
     assert_eq!(creds.len(), 2);

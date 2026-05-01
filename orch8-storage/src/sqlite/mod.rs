@@ -297,6 +297,15 @@ impl StorageBackend for SqliteStorage {
         instances::update_context(self, id, context).await
     }
 
+    async fn update_instance_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        instances::update_context_cas(self, id, context, expected_updated_at).await
+    }
+
     async fn update_instance_started_at(
         &self,
         id: InstanceId,
@@ -678,8 +687,9 @@ impl StorageBackend for SqliteStorage {
     async fn list_cron_schedules(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<CronSchedule>, StorageError> {
-        cron::list(self, tenant_id).await
+        cron::list(self, tenant_id, limit).await
     }
 
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError> {
@@ -764,6 +774,59 @@ impl StorageBackend for SqliteStorage {
 
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
         workers::delete(self, task_id).await
+    }
+
+    async fn retry_worker_task(
+        &self,
+        old_task_id: Uuid,
+        new_task: &WorkerTask,
+        node_id: Option<ExecutionNodeId>,
+        instance_id: InstanceId,
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("DELETE FROM worker_tasks WHERE id = ?1")
+            .bind(old_task_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query(
+            r"INSERT INTO worker_tasks
+                (id, instance_id, block_id, handler_name, queue_name, params, context,
+                 attempt, timeout_ms, state, created_at)
+              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        )
+        .bind(new_task.id.to_string())
+        .bind(new_task.instance_id.0.to_string())
+        .bind(&new_task.block_id.0)
+        .bind(&new_task.handler_name)
+        .bind(&new_task.queue_name)
+        .bind(&new_task.params)
+        .bind(&new_task.context)
+        .bind(new_task.attempt as i64)
+        .bind(new_task.timeout_ms.map(|v| v as i64))
+        .bind(new_task.state.to_string())
+        .bind(new_task.created_at.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(nid) = node_id {
+            sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = ?1")
+                .bind(nid.0.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        sqlx::query("UPDATE task_instances SET state = 'scheduled', next_fire_at = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(instance_id.0.to_string())
+            .bind(fire_at.to_rfc3339())
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn reap_stale_worker_tasks(
@@ -895,8 +958,9 @@ impl StorageBackend for SqliteStorage {
     async fn list_checkpoints(
         &self,
         instance_id: InstanceId,
+        limit: u32,
     ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
-        checkpoints::list(self, instance_id).await
+        checkpoints::list(self, instance_id, limit).await
     }
 
     async fn prune_checkpoints(
@@ -1175,8 +1239,9 @@ impl StorageBackend for SqliteStorage {
     async fn list_triggers(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
-        triggers::list(self, tenant_id).await
+        triggers::list(self, tenant_id, limit).await
     }
 
     async fn update_trigger(
@@ -1209,8 +1274,9 @@ impl StorageBackend for SqliteStorage {
     async fn list_credentials(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
-        credentials::list(self, tenant_id).await
+        credentials::list(self, tenant_id, limit).await
     }
 
     async fn update_credential(
@@ -1989,5 +2055,144 @@ mod tests {
             pending.is_empty(),
             "corrupted-state rejection must not persist a signal, got: {pending:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fk_cascade_deletes_child_rows_when_instance_deleted() {
+        use orch8_types::execution::{BlockType, ExecutionNode};
+        use orch8_types::output::BlockOutput;
+        use orch8_types::signal::{Signal, SignalType};
+        use orch8_types::worker::{WorkerTask, WorkerTaskState};
+
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+
+        let seq = orch8_types::sequence::SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            name: "fk-test".into(),
+            version: 1,
+            deprecated: false,
+            blocks: vec![BlockDefinition::Step(Box::new(StepDef {
+                id: BlockId("s1".into()),
+                handler: "h".into(),
+                params: serde_json::Value::Null,
+                delay: None, retry: None, timeout: None,
+                rate_limit_key: None, send_window: None,
+                context_access: None, cancellable: true,
+                wait_for_input: None, queue_name: None,
+                deadline: None, on_deadline_breach: None,
+                fallback_handler: None, cache_key: None,
+            }))],
+            interceptors: None,
+            created_at: now,
+        };
+        storage.create_sequence(&seq).await.unwrap();
+
+        let inst = TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: seq.id,
+            tenant_id: TenantId("t".into()),
+            namespace: Namespace("ns".into()),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+
+        // Seed child rows
+        storage
+            .create_execution_node(&ExecutionNode {
+                id: ExecutionNodeId::new(),
+                instance_id: inst.id,
+                block_id: BlockId("s1".into()),
+                parent_id: None,
+                block_type: BlockType::Step,
+                branch_index: None,
+                state: NodeState::Running,
+                started_at: Some(now),
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .save_block_output(&BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: inst.id,
+                block_id: BlockId("s1".into()),
+                output: serde_json::json!({}),
+                output_ref: None,
+                output_size: 0,
+                attempt: 1,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        storage
+            .enqueue_signal(&Signal {
+                id: Uuid::now_v7(),
+                instance_id: inst.id,
+                signal_type: SignalType::Custom("sig".into()),
+                payload: serde_json::json!({}),
+                delivered: false,
+                created_at: now,
+                delivered_at: None,
+            })
+            .await
+            .unwrap();
+
+        let wt_id = Uuid::now_v7();
+        storage
+            .create_worker_task(&WorkerTask {
+                id: wt_id,
+                instance_id: inst.id,
+                block_id: BlockId("s1".into()),
+                handler_name: "h".into(),
+                queue_name: None,
+                params: serde_json::json!({}),
+                context: serde_json::json!({}),
+                attempt: 0,
+                timeout_ms: None,
+                state: WorkerTaskState::Pending,
+                worker_id: None,
+                claimed_at: None,
+                heartbeat_at: None,
+                completed_at: None,
+                output: None,
+                error_message: None,
+                error_retryable: None,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        // Verify child rows exist
+        assert!(!storage.get_execution_tree(inst.id).await.unwrap().is_empty());
+        assert!(storage.get_worker_task(wt_id).await.unwrap().is_some());
+
+        // Delete instance via raw SQL (no trait method exists)
+        sqlx::query("DELETE FROM task_instances WHERE id = ?1")
+            .bind(inst.id.0.to_string())
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+
+        // All child rows must be cascade-deleted
+        assert!(storage.get_execution_tree(inst.id).await.unwrap().is_empty());
+        assert!(storage.get_worker_task(wt_id).await.unwrap().is_none());
+        assert!(storage.get_pending_signals(inst.id).await.unwrap().is_empty());
     }
 }

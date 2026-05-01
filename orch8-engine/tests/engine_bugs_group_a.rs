@@ -1314,10 +1314,29 @@ async fn a6_reap_stale_worker_tasks_honours_small_threshold() {
     // With a 1-millisecond stale threshold it MUST be reaped; with a 10-second
     // threshold it must NOT be reaped.
     let task_id = Uuid::now_v7();
+    let inst_id = InstanceId::new();
     let long_ago = Utc::now() - ChronoDuration::seconds(5);
+
+    // FK constraint requires a parent task_instance row.
+    let seq = SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        name: "reap-test".into(),
+        version: 1,
+        deprecated: false,
+        blocks: vec![mk_step("step", "test.handler")],
+        interceptors: None,
+        created_at: Utc::now(),
+    };
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(json!({}), seq.id);
+    let inst = TaskInstance { id: inst_id, ..inst };
+    storage.create_instance(&inst).await.unwrap();
+
     let task = WorkerTask {
         id: task_id,
-        instance_id: InstanceId::new(),
+        instance_id: inst_id,
         block_id: BlockId("step".into()),
         handler_name: "test.handler".into(),
         queue_name: None,
@@ -2250,4 +2269,82 @@ async fn try_catch_branches_are_indexed_0_and_1() {
     let c = tree.iter().find(|n| n.block_id.0 == "c").unwrap();
     assert_eq!(t.branch_index, Some(0), "try_block is branch 0");
     assert_eq!(c.branch_index, Some(1), "catch_block is branch 1");
+}
+
+// --------------------------------------------------------------------------
+// H5 — cron timezone: calculate_next_fire respects schedule timezone
+// --------------------------------------------------------------------------
+
+#[tokio::test]
+async fn calculate_next_fire_respects_timezone() {
+    use orch8_engine::cron::calculate_next_fire;
+    use orch8_types::cron::CronSchedule;
+
+    let now = Utc::now();
+
+    // Schedule in UTC
+    let utc_schedule = CronSchedule {
+        id: uuid::Uuid::now_v7(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        sequence_id: SequenceId::new(),
+        cron_expr: "0 12 * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: json!({}),
+        last_triggered_at: None,
+        next_fire_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    // Same cron expression but in a different timezone
+    let sp_schedule = CronSchedule {
+        timezone: "America/Sao_Paulo".into(),
+        ..utc_schedule.clone()
+    };
+
+    let utc_next = calculate_next_fire(&utc_schedule).unwrap();
+    let sp_next = calculate_next_fire(&sp_schedule).unwrap();
+
+    // "0 12 * * *" in Sao Paulo fires at 12:00 BRT which is 15:00 UTC
+    // (or 14:00/15:00 depending on DST). Either way, the two next-fire
+    // timestamps must differ because Sao Paulo != UTC.
+    assert_ne!(
+        utc_next, sp_next,
+        "timezone must shift the fire time — UTC noon vs Sao Paulo noon are different instants"
+    );
+
+    // Both must be in the future
+    assert!(utc_next > now, "UTC next fire must be in the future");
+    assert!(sp_next > now, "SP next fire must be in the future");
+}
+
+#[tokio::test]
+async fn calculate_next_fire_falls_back_to_utc_for_invalid_timezone() {
+    use orch8_engine::cron::calculate_next_fire;
+    use orch8_types::cron::CronSchedule;
+
+    let now = Utc::now();
+    let schedule = CronSchedule {
+        id: uuid::Uuid::now_v7(),
+        tenant_id: TenantId("t".into()),
+        namespace: Namespace("ns".into()),
+        sequence_id: SequenceId::new(),
+        cron_expr: "0 12 * * *".into(),
+        timezone: "Invalid/Timezone".into(),
+        enabled: true,
+        metadata: json!({}),
+        last_triggered_at: None,
+        next_fire_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let next = calculate_next_fire(&schedule);
+    assert!(
+        next.is_some(),
+        "invalid timezone must fall back to UTC, not return None"
+    );
+    assert!(next.unwrap() > now);
 }

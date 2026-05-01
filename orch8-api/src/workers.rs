@@ -499,32 +499,21 @@ pub(crate) async fn fail_task(
                 error_retryable: None,
                 created_at: chrono::Utc::now(),
             };
+            let node_id = tree
+                .iter()
+                .find(|n| {
+                    n.block_id == task.block_id
+                        && matches!(n.state, NodeState::Running | NodeState::Waiting)
+                })
+                .map(|n| n.id);
             state
                 .storage
-                .delete_worker_task(task_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            state
-                .storage
-                .create_worker_task(&retry_task)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            if let Some(node) = tree.iter().find(|n| {
-                n.block_id == task.block_id
-                    && matches!(n.state, NodeState::Running | NodeState::Waiting)
-            }) {
-                state
-                    .storage
-                    .update_node_state(node.id, NodeState::Pending)
-                    .await
-                    .map_err(|e| ApiError::from_storage(e, "execution_node"))?;
-            }
-            state
-                .storage
-                .update_instance_state(
+                .retry_worker_task(
+                    task_id,
+                    &retry_task,
+                    node_id,
                     task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
+                    chrono::Utc::now(),
                 )
                 .await
                 .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
@@ -697,13 +686,17 @@ pub(crate) async fn heartbeat_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-    if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await {
-        crate::auth::enforce_tenant_access(
-            &tenant_ctx,
-            &inst.tenant_id,
-            &format!("worker_task {task_id}"),
-        )?;
-    }
+    let inst = state
+        .storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "task_instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("task_instance {}", task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &inst.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
 
     let updated = state
         .storage

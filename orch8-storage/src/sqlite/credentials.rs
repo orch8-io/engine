@@ -50,22 +50,26 @@ pub(super) async fn get(
 pub(super) async fn list(
     store: &SqliteStorage,
     tenant_id: Option<&TenantId>,
+    limit: u32,
 ) -> Result<Vec<CredentialDef>, StorageError> {
+    let cap = limit.min(1000) as i64;
     let rows: Vec<CredentialRow> = match tenant_id {
         Some(tid) => {
             sqlx::query_as(
                 r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-                  FROM credentials WHERE tenant_id = ?1 OR tenant_id = '' ORDER BY id",
+                  FROM credentials WHERE tenant_id = ?1 OR tenant_id = '' ORDER BY id LIMIT ?2",
             )
             .bind(&tid.0)
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }
         None => {
             sqlx::query_as(
                 r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-                  FROM credentials ORDER BY id",
+                  FROM credentials ORDER BY id LIMIT ?1",
             )
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }

@@ -65,17 +65,12 @@ impl PostgresStorage {
         min_connections: u32,
         search_path: Option<&str>,
     ) -> Result<Self, StorageError> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
+        let mut pool_opts = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(min_connections)
             .acquire_timeout(std::time::Duration::from_secs(10))
-            .idle_timeout(std::time::Duration::from_mins(5))
-            .connect(database_url)
-            .await
-            .map_err(|e| StorageError::Connection(e.to_string()))?;
+            .idle_timeout(std::time::Duration::from_mins(5));
 
-        // Set search_path so all queries and migrations run in the target schema.
-        // SET doesn't support parameterized values, so we sanitize the identifier.
         if let Some(schema) = search_path {
             if !schema
                 .chars()
@@ -86,11 +81,19 @@ impl PostgresStorage {
                 )));
             }
             let stmt = format!("SET search_path TO \"{schema}\", public");
-            sqlx::query(&stmt)
-                .execute(&pool)
-                .await
-                .map_err(|e| StorageError::Connection(format!("Failed to set search_path: {e}")))?;
+            pool_opts = pool_opts.after_connect(move |conn, _meta| {
+                let stmt = stmt.clone();
+                Box::pin(async move {
+                    sqlx::query(&stmt).execute(&mut *conn).await?;
+                    Ok(())
+                })
+            });
         }
+
+        let pool = pool_opts
+            .connect(database_url)
+            .await
+            .map_err(|e| StorageError::Connection(e.to_string()))?;
 
         Ok(Self { pool })
     }
@@ -235,6 +238,15 @@ impl StorageBackend for PostgresStorage {
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError> {
         instances::update_context(self, id, context).await
+    }
+
+    async fn update_instance_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        instances::update_context_cas(self, id, context, expected_updated_at).await
     }
 
     async fn update_instance_started_at(
@@ -627,8 +639,9 @@ impl StorageBackend for PostgresStorage {
     async fn list_cron_schedules(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<CronSchedule>, StorageError> {
-        cron::list(self, tenant_id).await
+        cron::list(self, tenant_id, limit).await
     }
 
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError> {
@@ -713,6 +726,17 @@ impl StorageBackend for PostgresStorage {
 
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
         workers::delete(self, task_id).await
+    }
+
+    async fn retry_worker_task(
+        &self,
+        old_task_id: Uuid,
+        new_task: &WorkerTask,
+        node_id: Option<ExecutionNodeId>,
+        instance_id: InstanceId,
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        workers::retry(self, old_task_id, new_task, node_id, instance_id, fire_at).await
     }
 
     async fn reap_stale_worker_tasks(
@@ -844,8 +868,9 @@ impl StorageBackend for PostgresStorage {
     async fn list_checkpoints(
         &self,
         instance_id: InstanceId,
+        limit: u32,
     ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
-        checkpoints::list(self, instance_id).await
+        checkpoints::list(self, instance_id, limit).await
     }
 
     async fn prune_checkpoints(
@@ -1124,8 +1149,9 @@ impl StorageBackend for PostgresStorage {
     async fn list_triggers(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::trigger::TriggerDef>, StorageError> {
-        triggers::list(self, tenant_id).await
+        triggers::list(self, tenant_id, limit).await
     }
 
     async fn update_trigger(
@@ -1158,8 +1184,9 @@ impl StorageBackend for PostgresStorage {
     async fn list_credentials(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
-        credentials::list(self, tenant_id).await
+        credentials::list(self, tenant_id, limit).await
     }
 
     async fn update_credential(

@@ -113,6 +113,7 @@ fn make_instance_in_state(tenant: &str, state: InstanceState) -> TaskInstance {
 async fn execution_tree_crud() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
     let root_id = ExecutionNodeId::new();
     let child_id = ExecutionNodeId::new();
 
@@ -164,6 +165,7 @@ async fn execution_tree_crud() {
 async fn execution_tree_batch_create() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let nodes: Vec<ExecutionNode> = (0..5)
         .map(|i| ExecutionNode {
@@ -192,6 +194,7 @@ async fn execution_tree_batch_create() {
 async fn signal_lifecycle() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let sig = Signal {
         id: Uuid::now_v7(),
@@ -220,6 +223,8 @@ async fn signal_batch_operations() {
     let s = store().await;
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
+    seed_instance(&s, inst1).await;
+    seed_instance(&s, inst2).await;
 
     let sig1 = Signal {
         id: Uuid::now_v7(),
@@ -271,6 +276,7 @@ async fn signal_batch_operations() {
 async fn mark_signals_delivered_batch_various_sizes() {
     let s = store().await;
     let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
 
     // 0 signals — should be a no-op
     s.mark_signals_delivered(&[]).await.unwrap();
@@ -343,6 +349,7 @@ async fn idempotency_key_unique_per_tenant_not_global() {
 async fn worker_task_full_lifecycle() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let task = WorkerTask {
         id: Uuid::now_v7(),
@@ -406,6 +413,7 @@ async fn worker_task_full_lifecycle() {
 async fn worker_task_fail_and_cancel() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let task = WorkerTask {
         id: Uuid::now_v7(),
@@ -485,6 +493,7 @@ async fn worker_task_fail_and_cancel() {
 async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Simulate iteration 0: task created, claimed, completed.
     let iter0 = WorkerTask {
@@ -566,6 +575,7 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
 async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let task = WorkerTask {
         id: Uuid::now_v7(),
@@ -655,6 +665,7 @@ async fn cancel_worker_tasks_for_block_noop_on_missing() {
 async fn worker_task_queue_routing() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let task = WorkerTask {
         id: Uuid::now_v7(),
@@ -725,7 +736,7 @@ async fn cron_schedule_lifecycle() {
 
     // List.
     let all = s
-        .list_cron_schedules(Some(&TenantId("t1".into())))
+        .list_cron_schedules(Some(&TenantId("t1".into())), 1000)
         .await
         .unwrap();
     assert_eq!(all.len(), 1);
@@ -837,6 +848,7 @@ async fn session_instances_link() {
 async fn checkpoint_save_and_prune() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Save 5 checkpoints.
     for i in 0..5 {
@@ -849,7 +861,7 @@ async fn checkpoint_save_and_prune() {
         s.save_checkpoint(&cp).await.unwrap();
     }
 
-    let all = s.list_checkpoints(inst_id).await.unwrap();
+    let all = s.list_checkpoints(inst_id, 1000).await.unwrap();
     assert_eq!(all.len(), 5);
 
     // Latest should be step 4.
@@ -860,7 +872,7 @@ async fn checkpoint_save_and_prune() {
     let pruned = s.prune_checkpoints(inst_id, 2).await.unwrap();
     assert_eq!(pruned, 3);
 
-    let remaining = s.list_checkpoints(inst_id).await.unwrap();
+    let remaining = s.list_checkpoints(inst_id, 1000).await.unwrap();
     assert_eq!(remaining.len(), 2);
 }
 
@@ -1200,6 +1212,7 @@ async fn rate_limit_check_and_exceed() {
 async fn block_output_crud() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     let out = BlockOutput {
         id: Uuid::now_v7(),
@@ -1323,6 +1336,8 @@ async fn completed_block_ids_batch() {
     let s = store().await;
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
+    seed_instance(&s, inst1).await;
+    seed_instance(&s, inst2).await;
 
     for (inst_id, block_name) in &[(inst1, "a"), (inst1, "b"), (inst2, "c")] {
         let out = BlockOutput {
@@ -1369,6 +1384,7 @@ fn mk_output(inst_id: InstanceId, block: &str, attempt: i16) -> BlockOutput {
 async fn delete_block_outputs_removes_all_rows_for_block() {
     let s = store().await;
     let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
     let block = BlockId("loop_marker".into());
 
     for attempt in 0..3 {
@@ -1385,6 +1401,7 @@ async fn delete_block_outputs_removes_all_rows_for_block() {
 async fn delete_block_outputs_leaves_other_blocks_untouched() {
     let s = store().await;
     let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
     let block_a = BlockId("block_a".into());
     let block_b = BlockId("block_b".into());
 
@@ -1410,6 +1427,8 @@ async fn delete_block_outputs_leaves_other_instances_untouched() {
     let s = store().await;
     let inst1 = InstanceId::new();
     let inst2 = InstanceId::new();
+    seed_instance(&s, inst1).await;
+    seed_instance(&s, inst2).await;
     let block = BlockId("shared".into());
 
     s.save_block_output(&mk_output(inst1, "shared", 0))
@@ -1440,6 +1459,7 @@ async fn delete_block_outputs_on_empty_is_noop() {
 async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance() {
     let s = store().await;
     let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
     let loop_id = BlockId("loop_1".into());
     let step_id = BlockId("inner_step".into());
 
@@ -1950,6 +1970,7 @@ async fn sub_sequence_parent_child() {
 async fn worker_task_list_and_stats() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Create tasks with different states.
     for (i, handler) in ["http_request", "email_send", "http_request"]
@@ -2053,6 +2074,7 @@ async fn perf_claim_due_under_load() {
 async fn perf_signal_batch_throughput() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Enqueue 200 signals.
     let mut sig_ids = Vec::new();
@@ -2089,6 +2111,7 @@ async fn perf_signal_batch_throughput() {
 async fn perf_execution_tree_deep() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Create a tree: 1 root -> 10 parallel branches -> 5 steps each = 51 nodes.
     let root = ExecutionNode {
@@ -2140,6 +2163,7 @@ async fn perf_execution_tree_deep() {
 async fn perf_concurrent_worker_claims() {
     let s = store().await;
     let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
 
     // Create 100 worker tasks.
     for i in 0..100 {
@@ -3121,4 +3145,389 @@ async fn batch_reschedule_single_instance() {
     let got = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(got.state, InstanceState::Scheduled);
     assert!(got.next_fire_at.is_some());
+}
+
+// ===========================================================================
+// H4 — Pagination limit enforcement
+// ===========================================================================
+
+#[tokio::test]
+async fn list_cron_schedules_respects_limit() {
+    let s = store().await;
+    let seq = make_sequence("t_lim");
+    s.create_sequence(&seq).await.unwrap();
+    let now = Utc::now();
+
+    for i in 0..5 {
+        let schedule = CronSchedule {
+            id: Uuid::now_v7(),
+            tenant_id: TenantId("t_lim".into()),
+            namespace: Namespace("default".into()),
+            sequence_id: seq.id,
+            cron_expr: format!("{i} * * * *"),
+            timezone: "UTC".into(),
+            enabled: true,
+            metadata: json!({}),
+            last_triggered_at: None,
+            next_fire_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        s.create_cron_schedule(&schedule).await.unwrap();
+    }
+
+    let all = s
+        .list_cron_schedules(Some(&TenantId("t_lim".into())), 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 5);
+
+    let limited = s
+        .list_cron_schedules(Some(&TenantId("t_lim".into())), 3)
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 3, "limit must cap result count");
+}
+
+#[tokio::test]
+async fn list_checkpoints_respects_limit() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+
+    for _ in 0..5 {
+        let cp = Checkpoint {
+            id: Uuid::now_v7(),
+            instance_id: inst_id,
+            checkpoint_data: json!({"k": "v"}),
+            created_at: Utc::now(),
+        };
+        s.save_checkpoint(&cp).await.unwrap();
+    }
+
+    let all = s.list_checkpoints(inst_id, 100).await.unwrap();
+    assert_eq!(all.len(), 5);
+
+    let limited = s.list_checkpoints(inst_id, 2).await.unwrap();
+    assert_eq!(limited.len(), 2, "limit must cap checkpoint count");
+}
+
+#[tokio::test]
+async fn list_triggers_respects_limit() {
+    let s = store().await;
+    let now = Utc::now();
+
+    for i in 0..5 {
+        let trigger = orch8_types::trigger::TriggerDef {
+            slug: format!("trig-{i}"),
+            sequence_name: "seq".into(),
+            version: None,
+            tenant_id: TenantId("t_trig".into()),
+            namespace: "default".into(),
+            enabled: true,
+            secret: None,
+            trigger_type: orch8_types::trigger::TriggerType::Webhook,
+            config: json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        s.create_trigger(&trigger).await.unwrap();
+    }
+
+    let all = s
+        .list_triggers(Some(&TenantId("t_trig".into())), 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 5);
+
+    let limited = s
+        .list_triggers(Some(&TenantId("t_trig".into())), 2)
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 2, "limit must cap trigger count");
+}
+
+#[tokio::test]
+async fn list_credentials_respects_limit() {
+    let s = store().await;
+    let now = Utc::now();
+
+    for i in 0..5 {
+        let cred = orch8_types::credential::CredentialDef {
+            id: Uuid::now_v7().to_string(),
+            tenant_id: "t_cred".into(),
+            name: format!("cred-{i}"),
+            kind: orch8_types::credential::CredentialKind::ApiKey,
+            value: orch8_types::config::SecretString::new(format!("val-{i}")),
+            expires_at: None,
+            refresh_url: None,
+            refresh_token: None,
+            enabled: true,
+            description: None,
+            created_at: now,
+            updated_at: now,
+        };
+        s.create_credential(&cred).await.unwrap();
+    }
+
+    let all = s
+        .list_credentials(Some(&TenantId("t_cred".into())), 100)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 5);
+
+    let limited = s
+        .list_credentials(Some(&TenantId("t_cred".into())), 2)
+        .await
+        .unwrap();
+    assert_eq!(limited.len(), 2, "limit must cap credential count");
+}
+
+// ===========================================================================
+// H6 — Atomic worker retry
+// ===========================================================================
+
+#[tokio::test]
+async fn retry_worker_task_atomically_replaces_task() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+
+    let node_id = ExecutionNodeId::new();
+    let node = ExecutionNode {
+        id: node_id,
+        instance_id: inst_id,
+        block_id: BlockId("step1".into()),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Running,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    s.create_execution_node(&node).await.unwrap();
+
+    let old_task = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("step1".into()),
+        handler_name: "h".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 0,
+        timeout_ms: None,
+        state: WorkerTaskState::Failed,
+        worker_id: Some("w1".into()),
+        claimed_at: Some(Utc::now()),
+        heartbeat_at: None,
+        completed_at: Some(Utc::now()),
+        output: None,
+        error_message: Some("boom".into()),
+        error_retryable: Some(true),
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&old_task).await.unwrap();
+
+    let new_task = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId("step1".into()),
+        handler_name: "h".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+
+    let fire_at = Utc::now() + Duration::seconds(5);
+    s.retry_worker_task(old_task.id, &new_task, Some(node_id), inst_id, fire_at)
+        .await
+        .unwrap();
+
+    // Old task deleted
+    assert!(s.get_worker_task(old_task.id).await.unwrap().is_none());
+
+    // New task exists and is pending
+    let got = s.get_worker_task(new_task.id).await.unwrap().unwrap();
+    assert_eq!(got.attempt, 1);
+    assert!(matches!(got.state, WorkerTaskState::Pending));
+
+    // Node reset to Pending
+    let tree = s.get_execution_tree(inst_id).await.unwrap();
+    let n = tree.iter().find(|n| n.id == node_id).unwrap();
+    assert_eq!(n.state, NodeState::Pending);
+
+    // Instance rescheduled
+    let inst = s.get_instance(inst_id).await.unwrap().unwrap();
+    assert_eq!(inst.state, InstanceState::Scheduled);
+    assert!(inst.next_fire_at.is_some());
+}
+
+// ===========================================================================
+// M8 — save_output_and_transition sets completed_at
+// ===========================================================================
+
+#[tokio::test]
+async fn save_output_and_transition_sets_completed_at() {
+    let s = store().await;
+    let seq = make_sequence("t_m8");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t_m8", seq.id);
+    inst.state = InstanceState::Running;
+    s.create_instance(&inst).await.unwrap();
+
+    let node_id = ExecutionNodeId::new();
+    let node = ExecutionNode {
+        id: node_id,
+        instance_id: inst.id,
+        block_id: BlockId("s1".into()),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Running,
+        started_at: Some(Utc::now()),
+        completed_at: None,
+    };
+    s.create_execution_node(&node).await.unwrap();
+
+    let output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId("s1".into()),
+        output: json!({"result": "ok"}),
+        output_ref: None,
+        output_size: 10,
+        attempt: 1,
+        created_at: Utc::now(),
+    };
+
+    s.save_output_complete_node_and_transition(
+        &output,
+        node_id,
+        inst.id,
+        InstanceState::Completed,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let tree = s.get_execution_tree(inst.id).await.unwrap();
+    let n = tree.iter().find(|n| n.id == node_id).unwrap();
+    assert_eq!(n.state, NodeState::Completed);
+    assert!(
+        n.completed_at.is_some(),
+        "completed_at must be set when node transitions to Completed"
+    );
+}
+
+// M9 — FK cascade tested in orch8-storage/src/sqlite/fk_cascade.rs (needs pool access)
+
+// ===========================================================================
+// H2 — Cron claim_due idempotency (double-claim returns empty)
+// ===========================================================================
+
+#[tokio::test]
+async fn cron_claim_due_is_idempotent() {
+    let s = store().await;
+    let seq = make_sequence("t_idemp");
+    s.create_sequence(&seq).await.unwrap();
+
+    let now = Utc::now();
+    let past = now - Duration::seconds(5);
+
+    let schedule = CronSchedule {
+        id: Uuid::now_v7(),
+        tenant_id: TenantId("t_idemp".into()),
+        namespace: Namespace("default".into()),
+        sequence_id: seq.id,
+        cron_expr: "0 * * * *".into(),
+        timezone: "UTC".into(),
+        enabled: true,
+        metadata: json!({}),
+        last_triggered_at: None,
+        next_fire_at: Some(past),
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_cron_schedule(&schedule).await.unwrap();
+
+    // First claim succeeds
+    let due1 = s.claim_due_cron_schedules(now).await.unwrap();
+    assert_eq!(due1.len(), 1);
+
+    // Second claim with same `now` must return empty (already triggered)
+    let due2 = s.claim_due_cron_schedules(now).await.unwrap();
+    assert!(
+        due2.is_empty(),
+        "second claim must be empty — schedule already triggered"
+    );
+}
+
+// ===========================================================================
+// update_instance_context_cas
+// ===========================================================================
+
+#[tokio::test]
+async fn update_instance_context_cas_succeeds_with_matching_timestamp() {
+    let s = store().await;
+    let seq = make_sequence("t_cas");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t_cas", seq.id);
+    s.create_instance(&inst).await.unwrap();
+
+    let original = s.get_instance(inst.id).await.unwrap().unwrap();
+    let mut ctx = original.context.clone();
+    ctx.data = json!({"new_key": "value"});
+
+    let ok = s
+        .update_instance_context_cas(inst.id, &ctx, original.updated_at)
+        .await
+        .unwrap();
+    assert!(ok, "CAS must succeed when updated_at matches");
+
+    let after = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(after.context.data, json!({"new_key": "value"}));
+}
+
+#[tokio::test]
+async fn update_instance_context_cas_fails_on_stale_timestamp() {
+    let s = store().await;
+    let seq = make_sequence("t_cas2");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t_cas2", seq.id);
+    s.create_instance(&inst).await.unwrap();
+
+    // Do a normal update to bump updated_at
+    let original = s.get_instance(inst.id).await.unwrap().unwrap();
+    let mut ctx = original.context.clone();
+    ctx.data = json!({"first": true});
+    s.update_instance_context(inst.id, &ctx).await.unwrap();
+
+    // Try CAS with the old timestamp — must fail
+    let mut ctx2 = original.context.clone();
+    ctx2.data = json!({"stale": true});
+    let ok = s
+        .update_instance_context_cas(inst.id, &ctx2, original.updated_at)
+        .await
+        .unwrap();
+    assert!(
+        !ok,
+        "CAS must fail when updated_at has changed since the read"
+    );
+
+    // Data must still be from the first update, not the stale write
+    let after = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(after.context.data, json!({"first": true}));
 }

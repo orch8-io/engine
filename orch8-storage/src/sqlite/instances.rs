@@ -340,6 +340,24 @@ pub(super) async fn update_context(
     Ok(())
 }
 
+pub(super) async fn update_context_cas(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    context: &ExecutionContext,
+    expected_updated_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1 AND updated_at=?4",
+    )
+    .bind(id.0.to_string())
+    .bind(serde_json::to_string(context)?)
+    .bind(ts(Utc::now()))
+    .bind(ts(expected_updated_at))
+    .execute(&storage.pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// Update only `context.runtime.started_at` via `json_set` so the scheduler
 /// doesn't have to clone + re-serialize the entire context just to stamp the
 /// first-run timestamp.
@@ -387,7 +405,7 @@ pub(super) async fn update_current_step_started_at(
 
 /// Transactional variant: externalize oversized `data.*` fields and commit
 /// the payload rows + context UPDATE atomically. See the Postgres twin in
-/// [`super::super::postgres::instances::update_context_externalized`] for the
+/// `super::super::postgres::instances::update_context_externalized` for the
 /// contract; SQLite differs only in wire syntax and bind form.
 pub(super) async fn update_context_externalized(
     storage: &SqliteStorage,
@@ -421,7 +439,7 @@ pub(super) async fn update_context_externalized(
 }
 
 /// Transactional single-instance create with externalization. SQLite twin of
-/// [`super::super::postgres::instances::create_externalized`].
+/// `super::super::postgres::instances::create_externalized`.
 pub(super) async fn create_externalized(
     storage: &SqliteStorage,
     instance: &TaskInstance,

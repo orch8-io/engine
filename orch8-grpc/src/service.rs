@@ -701,7 +701,7 @@ impl Orch8Service for Orch8GrpcService {
         let tenant_id = scoped_tenant_id(&req, body_tenant.as_ref());
         let schedules = self
             .storage
-            .list_cron_schedules(tenant_id.as_ref())
+            .list_cron_schedules(tenant_id.as_ref(), 1000)
             .await
             .map_err(storage_err)?;
         let json: Result<Vec<_>, _> = schedules.iter().map(|s| to_json_string(s)).collect();

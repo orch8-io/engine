@@ -209,6 +209,19 @@ pub trait StorageBackend: Send + Sync + 'static {
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError>;
 
+    /// CAS variant: update context only if `updated_at` still matches the
+    /// expected timestamp. Returns `true` if the write landed, `false` if
+    /// contention was detected (caller should re-read and retry).
+    async fn update_instance_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        _expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        self.update_instance_context(id, context).await?;
+        Ok(true)
+    }
+
     /// Update only the `runtime.started_at` field for an instance.
     /// Avoids the full context clone + deserialization that
     /// `update_instance_context` incurs when all we need is stamp the start
@@ -673,13 +686,20 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn list_cron_schedules(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<CronSchedule>, StorageError>;
 
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
 
     async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
 
-    /// Fetch all enabled cron schedules whose `next_fire_at <= now`.
+    /// Atomically claim enabled cron schedules whose `next_fire_at <= now`.
+    ///
+    /// **Missed-fire policy: skip.** If the scheduler was down and multiple
+    /// fire windows were missed, only a single trigger fires — the most
+    /// recent due window. The `next_fire_at` is then advanced past `now` so
+    /// no backfill of missed windows occurs. This prevents burst-spawning
+    /// hundreds of instances after a prolonged outage.
     async fn claim_due_cron_schedules(
         &self,
         now: DateTime<Utc>,
@@ -753,6 +773,35 @@ pub trait StorageBackend: Send + Sync + 'static {
 
     /// Delete a worker task (used when retryable failure needs re-dispatch).
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
+
+    /// Atomically replace a failed worker task with a retry: delete the old
+    /// task, insert the new one, reset the execution node to Pending, and
+    /// reschedule the instance — all in a single transaction.
+    ///
+    /// Default impl is non-atomic (sequential calls); production backends
+    /// should override with a real transaction.
+    async fn retry_worker_task(
+        &self,
+        old_task_id: Uuid,
+        new_task: &WorkerTask,
+        node_id: Option<orch8_types::ids::ExecutionNodeId>,
+        instance_id: InstanceId,
+        fire_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        self.delete_worker_task(old_task_id).await?;
+        self.create_worker_task(new_task).await?;
+        if let Some(nid) = node_id {
+            self.update_node_state(nid, orch8_types::execution::NodeState::Pending)
+                .await?;
+        }
+        self.update_instance_state(
+            instance_id,
+            InstanceState::Scheduled,
+            Some(fire_at),
+        )
+        .await?;
+        Ok(())
+    }
 
     /// Reset stale claimed tasks (no heartbeat within threshold) back to pending.
     async fn reap_stale_worker_tasks(&self, stale_threshold: Duration)
@@ -860,10 +909,11 @@ pub trait StorageBackend: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError>;
 
-    /// List all checkpoints for an instance.
+    /// List checkpoints for an instance (most recent first).
     async fn list_checkpoints(
         &self,
         instance_id: InstanceId,
+        limit: u32,
     ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
 
     /// Delete old checkpoints, keeping only the latest N.
@@ -1118,6 +1168,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn list_triggers(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<TriggerDef>, StorageError>;
 
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
@@ -1139,6 +1190,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn list_credentials(
         &self,
         tenant_id: Option<&TenantId>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
 
     async fn update_credential(

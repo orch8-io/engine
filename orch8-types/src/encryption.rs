@@ -155,7 +155,7 @@ impl FieldEncryptor {
 
 /// Decode a hex string into bytes.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, EncryptionError> {
-    if !hex.len().is_multiple_of(2) {
+    if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
         return Err(EncryptionError::InvalidHex);
     }
     (0..hex.len())

@@ -47,22 +47,26 @@ pub(super) async fn get(
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,
+    limit: u32,
 ) -> Result<Vec<TriggerDef>, StorageError> {
+    let cap = i64::from(limit.min(1000));
     let rows = match tenant_id {
         Some(tid) => {
             sqlx::query_as::<_, TriggerRow>(
                 r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
-                  FROM triggers WHERE tenant_id = $1 ORDER BY created_at",
+                  FROM triggers WHERE tenant_id = $1 ORDER BY created_at LIMIT $2",
             )
             .bind(&tid.0)
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }
         None => {
             sqlx::query_as::<_, TriggerRow>(
                 r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
-                  FROM triggers ORDER BY created_at",
+                  FROM triggers ORDER BY created_at LIMIT $1",
             )
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }

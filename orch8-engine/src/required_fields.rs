@@ -132,7 +132,7 @@ fn visit_blocks(blocks: &[BlockDefinition], out: &mut HashMap<BlockId, Option<Ve
 /// Extract the top-level key from a dotted path
 /// (`"user.profile.avatar"` -> `"user"`).
 ///
-/// Matches the granularity of [`FieldAccess::Fields`] (per top-level
+/// Matches the granularity of `FieldAccess::Fields` (per top-level
 /// `context.data` key); used by callers that receive dotted field references.
 #[must_use]
 pub fn top_level_key(path: &str) -> &str {

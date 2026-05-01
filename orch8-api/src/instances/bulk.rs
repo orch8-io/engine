@@ -22,6 +22,11 @@ pub async fn bulk_update_state(
     Json(req): Json<BulkUpdateStateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
+    if scoped_tenant.is_none() {
+        return Err(ApiError::InvalidArgument(
+            "bulk operations require a tenant_id".into(),
+        ));
+    }
     let filter = InstanceFilter {
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace),
@@ -50,6 +55,11 @@ pub async fn bulk_reschedule(
     Json(req): Json<BulkRescheduleRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, req.filter.tenant_id.as_deref());
+    if scoped_tenant.is_none() {
+        return Err(ApiError::InvalidArgument(
+            "bulk operations require a tenant_id".into(),
+        ));
+    }
     let filter = InstanceFilter {
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace),

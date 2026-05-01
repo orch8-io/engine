@@ -98,7 +98,7 @@ pub async fn list_checkpoints(
 
     let checkpoints = state
         .storage
-        .list_checkpoints(InstanceId(id))
+        .list_checkpoints(InstanceId(id), 100)
         .await
         .map_err(|e| ApiError::from_storage(e, "checkpoints"))?;
 

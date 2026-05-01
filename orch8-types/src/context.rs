@@ -92,7 +92,7 @@ impl ExecutionContext {
     /// Return a filtered copy of the context based on section-level permissions.
     /// Denied sections are replaced with their default (empty) values.
     ///
-    /// For `data`, [`FieldAccess::Fields`] trims `context.data` (which must be
+    /// For `data`, `FieldAccess::Fields` trims `context.data` (which must be
     /// a JSON object) down to the listed top-level keys. Non-object `data`
     /// falls back to "clone if any field allowed, else empty".
     #[must_use]

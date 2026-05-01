@@ -50,22 +50,26 @@ pub(super) async fn get(
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,
+    limit: u32,
 ) -> Result<Vec<CronSchedule>, StorageError> {
+    let cap = i64::from(limit.min(1000));
     let rows = if let Some(tid) = tenant_id {
         sqlx::query_as::<_, CronRow>(
             r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
                      metadata, last_triggered_at, next_fire_at, created_at, updated_at
-              FROM cron_schedules WHERE tenant_id = $1 ORDER BY created_at",
+              FROM cron_schedules WHERE tenant_id = $1 ORDER BY created_at LIMIT $2",
         )
         .bind(&tid.0)
+        .bind(cap)
         .fetch_all(&store.pool)
         .await?
     } else {
         sqlx::query_as::<_, CronRow>(
             r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
                      metadata, last_triggered_at, next_fire_at, created_at, updated_at
-              FROM cron_schedules ORDER BY created_at",
+              FROM cron_schedules ORDER BY created_at LIMIT $1",
         )
+        .bind(cap)
         .fetch_all(&store.pool)
         .await?
     };
@@ -102,12 +106,18 @@ pub(super) async fn claim_due(
     now: DateTime<Utc>,
 ) -> Result<Vec<CronSchedule>, StorageError> {
     let rows = sqlx::query_as::<_, CronRow>(
-        r"SELECT id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
-                 metadata, last_triggered_at, next_fire_at, created_at, updated_at
-          FROM cron_schedules
-          WHERE enabled = TRUE AND next_fire_at <= $1
-          ORDER BY next_fire_at
-          FOR UPDATE SKIP LOCKED",
+        r"UPDATE cron_schedules
+          SET last_triggered_at = $1, updated_at = NOW()
+          WHERE id IN (
+              SELECT id FROM cron_schedules
+              WHERE enabled = TRUE
+                AND next_fire_at <= $1
+                AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)
+              ORDER BY next_fire_at
+              FOR UPDATE SKIP LOCKED
+          )
+          RETURNING id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
+                    metadata, last_triggered_at, next_fire_at, created_at, updated_at",
     )
     .bind(now)
     .fetch_all(&store.pool)

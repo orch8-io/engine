@@ -6,7 +6,7 @@
 //! # Concurrency
 //!
 //! The terminal-state check and signal INSERT run inside a single storage
-//! transaction via [`StorageBackend::enqueue_signal_if_active`], closing the
+//! transaction via `StorageBackend::enqueue_signal_if_active`, closing the
 //! TOCTOU window where the target could transition to terminal between a
 //! pre-read and the INSERT. The handler still fetches the target once up
 //! front — but *only* for the cross-tenant guard, which must run before any

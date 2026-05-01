@@ -53,6 +53,11 @@ pub(crate) async fn create_sequence(
         warnings.push(tw.to_string());
     }
 
+    let lint_warnings = orch8_engine::lint::lint_sequence(&seq);
+    for lw in &lint_warnings {
+        warnings.push(lw.to_string());
+    }
+
     state
         .storage
         .create_sequence(&seq)

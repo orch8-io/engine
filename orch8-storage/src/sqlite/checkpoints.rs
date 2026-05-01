@@ -34,12 +34,16 @@ pub(super) async fn get_latest(
 pub(super) async fn list(
     storage: &SqliteStorage,
     instance_id: InstanceId,
+    limit: u32,
 ) -> Result<Vec<Checkpoint>, StorageError> {
-    let rows =
-        sqlx::query("SELECT * FROM checkpoints WHERE instance_id=?1 ORDER BY created_at DESC")
-            .bind(instance_id.0.to_string())
-            .fetch_all(&storage.pool)
-            .await?;
+    let cap = limit.min(1000) as i64;
+    let rows = sqlx::query(
+        "SELECT * FROM checkpoints WHERE instance_id=?1 ORDER BY created_at DESC LIMIT ?2",
+    )
+    .bind(instance_id.0.to_string())
+    .bind(cap)
+    .fetch_all(&storage.pool)
+    .await?;
     rows.iter().map(row_to_checkpoint).collect()
 }
 

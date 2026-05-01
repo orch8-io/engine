@@ -213,6 +213,59 @@ pub(super) async fn expire_timed_out(store: &PostgresStorage) -> Result<u64, Sto
     Ok(result.rows_affected())
 }
 
+pub(super) async fn retry(
+    store: &PostgresStorage,
+    old_task_id: Uuid,
+    new_task: &WorkerTask,
+    node_id: Option<orch8_types::ids::ExecutionNodeId>,
+    instance_id: orch8_types::ids::InstanceId,
+    fire_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+
+    sqlx::query("DELETE FROM worker_tasks WHERE id = $1")
+        .bind(old_task_id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        r"INSERT INTO worker_tasks
+            (id, instance_id, block_id, handler_name, queue_name, params, context,
+             attempt, timeout_ms, state, created_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          ON CONFLICT (instance_id, block_id) DO NOTHING",
+    )
+    .bind(new_task.id)
+    .bind(new_task.instance_id.0)
+    .bind(&new_task.block_id.0)
+    .bind(&new_task.handler_name)
+    .bind(&new_task.queue_name)
+    .bind(&new_task.params)
+    .bind(&new_task.context)
+    .bind(new_task.attempt)
+    .bind(new_task.timeout_ms)
+    .bind(new_task.state.to_string())
+    .bind(new_task.created_at)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(nid) = node_id {
+        sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = $1")
+            .bind(nid.0)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query("UPDATE task_instances SET state = 'scheduled', next_fire_at = $2, updated_at = NOW() WHERE id = $1")
+        .bind(instance_id.0)
+        .bind(fire_at)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(super) async fn cancel_for_block(
     store: &PostgresStorage,
     instance_id: Uuid,
@@ -289,7 +342,7 @@ pub(super) async fn stats(
     let mut qb =
         sqlx::QueryBuilder::new("SELECT state, handler_name, COUNT(*) as cnt FROM worker_tasks");
     if let Some(tid) = tenant_id {
-        qb.push(" WHERE instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+        qb.push(" WHERE instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")
             .push_bind(&tid.0)
             .push(")");
     }
@@ -318,7 +371,7 @@ pub(super) async fn stats(
         "SELECT DISTINCT worker_id FROM worker_tasks WHERE state = 'claimed' AND worker_id IS NOT NULL",
     );
     if let Some(tid) = tenant_id {
-        wqb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+        wqb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")
             .push_bind(&tid.0)
             .push(")");
     }
@@ -342,7 +395,7 @@ fn apply_worker_task_filter<'a>(
     filter: &'a orch8_types::worker_filter::WorkerTaskFilter,
 ) {
     if let Some(ref tid) = filter.tenant_id {
-        qb.push(" AND instance_id IN (SELECT id FROM instances WHERE tenant_id = ")
+        qb.push(" AND instance_id IN (SELECT id FROM task_instances WHERE tenant_id =")
             .push_bind(&tid.0)
             .push(")");
     }

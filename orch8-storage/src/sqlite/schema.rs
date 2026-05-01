@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS execution_tree (
     branch_index INTEGER,
     state TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS block_outputs (
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS block_outputs (
     output_ref TEXT,
     output_size INTEGER NOT NULL DEFAULT 0,
     attempt INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS rate_limits (
@@ -72,7 +74,8 @@ CREATE TABLE IF NOT EXISTS signal_inbox (
     payload TEXT NOT NULL DEFAULT '{}',
     delivered INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
-    delivered_at TEXT
+    delivered_at TEXT,
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS cron_schedules (
@@ -109,7 +112,8 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     heartbeat_at TEXT,
     completed_at TEXT,
     created_at TEXT NOT NULL,
-    UNIQUE(instance_id, block_id)
+    UNIQUE(instance_id, block_id),
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS resource_pools (
@@ -136,14 +140,16 @@ CREATE TABLE IF NOT EXISTS pool_resources (
     warmup_start TEXT,
     warmup_days INTEGER NOT NULL DEFAULT 0,
     warmup_start_cap INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (pool_id) REFERENCES resource_pools(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     id TEXT PRIMARY KEY,
     instance_id TEXT NOT NULL,
     checkpoint_data TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS externalized_state (
@@ -310,4 +316,4 @@ CREATE TABLE IF NOT EXISTS instance_kv_state (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;

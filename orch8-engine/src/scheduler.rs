@@ -1028,7 +1028,7 @@ async fn wake_parent_if_child(
 ///
 /// The evaluator manages an execution tree (persisted in DB) and dispatches each
 /// node to its block-type handler (`Parallel`, `Race`, `Loop`, `ForEach`, `Router`, `TryCatch`, `Step`).
-/// The evaluator returns an [`EvalOutcome`] carrying the tree state so we can
+/// The evaluator returns an `EvalOutcome` carrying the tree state so we can
 /// transition the instance without re-reading the tree from the database.
 #[allow(clippy::too_many_lines)]
 async fn process_instance_tree(
@@ -1063,7 +1063,7 @@ async fn process_instance_tree(
             ) {
                 // Terminal/paused — leave state as-is.
             } else if has_waiting_nodes {
-                crate::lifecycle::transition_instance(
+                if let Err(e) = crate::lifecycle::transition_instance(
                     storage.as_ref(),
                     instance_id,
                     Some(&instance.tenant_id),
@@ -1071,7 +1071,16 @@ async fn process_instance_tree(
                     InstanceState::Waiting,
                     None,
                 )
-                .await?;
+                .await
+                {
+                    if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
+                        return Err(e);
+                    }
+                    debug!(
+                        instance_id = %instance_id,
+                        "concurrent writer moved instance before Running→Waiting transition"
+                    );
+                }
             } else if let Err(e) = crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,

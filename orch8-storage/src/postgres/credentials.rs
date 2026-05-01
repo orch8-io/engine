@@ -46,22 +46,26 @@ pub(super) async fn get(
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,
+    limit: u32,
 ) -> Result<Vec<CredentialDef>, StorageError> {
+    let cap = i64::from(limit.min(1000));
     let rows = match tenant_id {
         Some(tid) => {
             sqlx::query_as::<_, CredentialRow>(
                 r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-                  FROM credentials WHERE tenant_id = $1 OR tenant_id = '' ORDER BY id",
+                  FROM credentials WHERE tenant_id = $1 OR tenant_id = '' ORDER BY id LIMIT $2",
             )
             .bind(&tid.0)
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }
         None => {
             sqlx::query_as::<_, CredentialRow>(
                 r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-                  FROM credentials ORDER BY id",
+                  FROM credentials ORDER BY id LIMIT $1",
             )
+            .bind(cap)
             .fetch_all(&store.pool)
             .await?
         }

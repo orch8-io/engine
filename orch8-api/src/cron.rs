@@ -56,6 +56,12 @@ pub(crate) struct UpdateCronRequest {
 #[derive(Deserialize)]
 pub(crate) struct ListCronQuery {
     tenant_id: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+fn default_limit() -> u32 {
+    100
 }
 
 #[cfg(test)]
@@ -169,7 +175,7 @@ pub(crate) async fn list_cron(
     let tenant = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
     let schedules = state
         .storage
-        .list_cron_schedules(tenant.as_ref())
+        .list_cron_schedules(tenant.as_ref(), q.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "cron_schedules"))?;
 

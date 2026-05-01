@@ -175,11 +175,20 @@ fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
-/// Calculate the next fire time from a cron expression.
+/// Calculate the next fire time from a cron expression, respecting the
+/// schedule's timezone. Falls back to UTC if the timezone is invalid.
 pub fn calculate_next_fire(schedule: &CronSchedule) -> Option<chrono::DateTime<Utc>> {
     let normalized = normalize_cron_expr(&schedule.cron_expr);
     let cron_schedule = Schedule::from_str(&normalized).ok()?;
-    cron_schedule.upcoming(Utc).next()
+    if let Ok(tz) = schedule.timezone.parse::<chrono_tz::Tz>() {
+        let now_tz = Utc::now().with_timezone(&tz);
+        cron_schedule
+            .after(&now_tz)
+            .next()
+            .map(|dt| dt.with_timezone(&Utc))
+    } else {
+        cron_schedule.upcoming(Utc).next()
+    }
 }
 
 /// Validate a cron expression. Returns an error message if invalid.

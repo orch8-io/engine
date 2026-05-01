@@ -204,8 +204,9 @@ pub async fn execute_step_node(
                                 "both primary and fallback circuit breakers open in tree path, deferring instance"
                             );
                             storage
-                                .update_instance_state(
+                                .conditional_update_instance_state(
                                     instance.id,
+                                    orch8_types::instance::InstanceState::Running,
                                     orch8_types::instance::InstanceState::Scheduled,
                                     Some(fire_at),
                                 )
@@ -232,8 +233,9 @@ pub async fn execute_step_node(
                             "circuit breaker open in tree path, deferring instance"
                         );
                         storage
-                            .update_instance_state(
+                            .conditional_update_instance_state(
                                 instance.id,
+                                orch8_types::instance::InstanceState::Running,
                                 orch8_types::instance::InstanceState::Scheduled,
                                 Some(fire_at),
                             )

@@ -42,14 +42,18 @@ pub(super) async fn get(
 pub(super) async fn list(
     storage: &SqliteStorage,
     tenant_id: Option<&TenantId>,
+    limit: u32,
 ) -> Result<Vec<CronSchedule>, StorageError> {
+    let cap = limit.min(1000) as i64;
     let rows = if let Some(tid) = tenant_id {
-        sqlx::query("SELECT * FROM cron_schedules WHERE tenant_id=?1 ORDER BY created_at")
+        sqlx::query("SELECT * FROM cron_schedules WHERE tenant_id=?1 ORDER BY created_at LIMIT ?2")
             .bind(&tid.0)
+            .bind(cap)
             .fetch_all(&storage.pool)
             .await
     } else {
-        sqlx::query("SELECT * FROM cron_schedules ORDER BY created_at")
+        sqlx::query("SELECT * FROM cron_schedules ORDER BY created_at LIMIT ?1")
+            .bind(cap)
             .fetch_all(&storage.pool)
             .await
     }?;
@@ -81,11 +85,49 @@ pub(super) async fn claim_due(
     storage: &SqliteStorage,
     now: DateTime<Utc>,
 ) -> Result<Vec<CronSchedule>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM cron_schedules WHERE enabled=1 AND next_fire_at <= ?1")
-        .bind(ts(now))
-        .fetch_all(&storage.pool)
+    let now_str = ts(now);
+
+    // SQLite lacks FOR UPDATE SKIP LOCKED, so we do a two-step approach:
+    // 1. SELECT ids that are due and haven't been claimed for this window
+    // 2. UPDATE those ids to mark them triggered
+    // 3. Return the matched schedules
+    let mut tx = storage.pool.begin().await?;
+
+    let due_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM cron_schedules \
+         WHERE enabled = 1 AND next_fire_at <= ?1 \
+           AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)",
+    )
+    .bind(&now_str)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if due_ids.is_empty() {
+        tx.commit().await?;
+        return Ok(vec![]);
+    }
+
+    for id in &due_ids {
+        sqlx::query(
+            "UPDATE cron_schedules SET last_triggered_at = ?2, updated_at = ?2 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(&now_str)
+        .execute(&mut *tx)
         .await?;
-    rows.iter().map(row_to_cron).collect()
+    }
+
+    let mut result = Vec::with_capacity(due_ids.len());
+    for id in &due_ids {
+        let row = sqlx::query("SELECT * FROM cron_schedules WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        result.push(row_to_cron(&row)?);
+    }
+
+    tx.commit().await?;
+    Ok(result)
 }
 
 pub(super) async fn update_fire_times(

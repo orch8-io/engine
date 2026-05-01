@@ -49,6 +49,12 @@ pub struct CreateTriggerRequest {
 pub struct TriggerQuery {
     #[serde(default)]
     pub tenant_id: Option<String>,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+}
+
+fn default_limit() -> u32 {
+    100
 }
 
 #[utoipa::path(post, path = "/triggers", tag = "triggers",
@@ -118,7 +124,7 @@ pub(crate) async fn list_triggers(
     let tenant_ref = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref());
     let triggers = state
         .storage
-        .list_triggers(tenant_ref.as_ref())
+        .list_triggers(tenant_ref.as_ref(), query.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?;
     Ok(Json(triggers))

@@ -349,7 +349,7 @@ pub(super) async fn save_output_complete_node_and_transition(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE execution_tree SET state = 'completed' WHERE id = $1")
+    sqlx::query("UPDATE execution_tree SET state = 'completed', completed_at = NOW() WHERE id = $1")
         .bind(node_id.0)
         .execute(&mut *tx)
         .await?;
@@ -408,7 +408,7 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query("UPDATE execution_tree SET state = 'completed' WHERE id = $1")
+    sqlx::query("UPDATE execution_tree SET state = 'completed', completed_at = NOW() WHERE id = $1")
         .bind(node_id.0)
         .execute(&mut *tx)
         .await?;

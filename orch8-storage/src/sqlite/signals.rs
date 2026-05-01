@@ -63,7 +63,7 @@ pub(super) async fn enqueue(storage: &SqliteStorage, signal: &Signal) -> Result<
 /// the caller's error — leaving a live transaction on a returned pool
 /// connection would poison subsequent users.
 ///
-/// State parsing uses [`try_parse_state`] so a corrupted `state` column
+/// State parsing uses `try_parse_state` so a corrupted `state` column
 /// surfaces as [`StorageError::Query`] instead of silently coercing to
 /// `Scheduled` (which would let the INSERT proceed on a broken row —
 /// previously possible via the permissive `parse_state` helper).
