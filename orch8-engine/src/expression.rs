@@ -628,6 +628,7 @@ impl<'a> Parser<'a> {
                     return serde_json::json!(min);
                 }
                 let range = (max - min) as u64;
+                #[allow(clippy::cast_possible_wrap)]
                 let n = (rand::random::<u64>() % range) as i64 + min;
                 serde_json::json!(n)
             }

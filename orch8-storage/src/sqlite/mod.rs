@@ -805,7 +805,7 @@ impl StorageBackend for SqliteStorage {
         .bind(&new_task.params)
         .bind(&new_task.context)
         .bind(new_task.attempt as i64)
-        .bind(new_task.timeout_ms.map(|v| v as i64))
+        .bind(new_task.timeout_ms)
         .bind(new_task.state.to_string())
         .bind(new_task.created_at.to_rfc3339())
         .execute(&mut *tx)

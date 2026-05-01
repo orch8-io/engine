@@ -94,7 +94,7 @@ impl Drop for SecretString {
         // `write_volatile` prevents the compiler from eliding the writes.
         let v = unsafe { self.0.as_mut_vec() };
         for b in v.iter_mut() {
-            unsafe { std::ptr::write_volatile(b as *mut u8, 0) };
+            unsafe { std::ptr::write_volatile(std::ptr::from_mut::<u8>(b), 0) };
         }
     }
 }

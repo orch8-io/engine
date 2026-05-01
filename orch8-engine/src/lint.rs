@@ -576,7 +576,7 @@ fn extract_identifier(s: &str) -> &str {
     &s[..end]
 }
 
-/// Lint 2: for_each safety — warn when max_iterations uses the default 1000
+/// Lint 2: `for_each` safety — warn when `max_iterations` uses the default 1000
 /// without explicit override (easy to miss for large collections).
 fn lint_for_each_safety(seq: &SequenceDefinition, warnings: &mut Vec<LintWarning>) {
     for block in &seq.blocks {
@@ -680,7 +680,7 @@ fn lint_unreachable_in_list(blocks: &[BlockDefinition], warnings: &mut Vec<LintW
         if let BlockDefinition::Step(s) = block {
             if s.handler == "fail" {
                 saw_fail = true;
-                fail_id = s.id.0.clone();
+                fail_id.clone_from(&s.id.0);
             }
         }
     }
