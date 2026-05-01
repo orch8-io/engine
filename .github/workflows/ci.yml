@@ -34,7 +34,7 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
       - name: Supply chain (licenses + advisories)
         run: |
-          cargo install --locked cargo-deny@0.19
+          cargo install --locked "cargo-deny@^0.19"
           cargo deny check
 
   test:
