@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.package]
 version = "0.3.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.92"
 license = "BUSL-1.1"
 
 [workspace.dependencies]
@@ -73,15 +73,15 @@ url = "2"
 tokio-stream = "0.1"
 
 # Misc
-rand = "0.8"
+rand = "0.8.6"
 cron = "0.15"
 moka = { version = "0.12", features = ["future", "sync"] }
 subtle = "2"
 sha2 = "0.10"
 tikv-jemallocator = "0.6"
-async-nats = "0.38"
-notify = { version = "7", features = ["serde"] }
-wasmtime = "29"
+async-nats = "0.47"
+notify = { version = "8", features = ["serde"] }
+wasmtime = "44"
 dashmap = "6"
 
 # Speed up debug builds: keep our own crates cheap to compile (opt-level 0)

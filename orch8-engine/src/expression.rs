@@ -2182,7 +2182,10 @@ mod tests {
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, f);
-        Arc::try_unwrap(warnings).unwrap().into_inner().unwrap()
+        let all = Arc::try_unwrap(warnings).unwrap().into_inner().unwrap();
+        all.into_iter()
+            .filter(|w| w.message.contains("expression arithmetic"))
+            .collect()
     }
 
     fn eval_expr(expr: &str, c: &ExecutionContext, o: &serde_json::Value) -> serde_json::Value {
