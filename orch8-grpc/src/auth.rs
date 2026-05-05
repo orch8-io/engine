@@ -90,7 +90,8 @@ pub fn auth_interceptor(
 
         match tenant_raw {
             Some(tid) => {
-                req.extensions_mut().insert(CallerTenant(TenantId::unchecked(tid)));
+                req.extensions_mut()
+                    .insert(CallerTenant(TenantId::unchecked(tid)));
             }
             None if require_tenant => {
                 return Err(Status::invalid_argument("missing x-tenant-id metadata"));
@@ -225,14 +226,18 @@ mod tests {
     fn interceptor_stamps_tenant_into_extensions() {
         let ic = auth_interceptor(None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
-        assert_eq!(caller_tenant(&req).map(|t| t.as_str()), Some("tenant-a"));
+        assert_eq!(
+            caller_tenant(&req).map(orch8_types::TenantId::as_str),
+            Some("tenant-a")
+        );
     }
 
     #[test]
     fn enforce_returns_not_found_on_mismatch() {
         let ic = auth_interceptor(None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
-        let err = enforce_tenant_match(&req, &TenantId::unchecked("tenant-b"), "instance").unwrap_err();
+        let err =
+            enforce_tenant_match(&req, &TenantId::unchecked("tenant-b"), "instance").unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
@@ -289,7 +294,10 @@ mod tests {
         let ic = auth_interceptor(None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let t = scoped_tenant_id(&req, Some(&TenantId::unchecked("tenant-b")));
-        assert_eq!(t.as_ref().map(|t| t.as_str()), Some("tenant-a"));
+        assert_eq!(
+            t.as_ref().map(orch8_types::TenantId::as_str),
+            Some("tenant-a")
+        );
     }
 
     #[test]
@@ -297,6 +305,9 @@ mod tests {
         let ic = auth_interceptor(None, false);
         let req = ic(make_req(&[])).unwrap();
         let t = scoped_tenant_id(&req, Some(&TenantId::unchecked("tenant-b")));
-        assert_eq!(t.as_ref().map(|t| t.as_str()), Some("tenant-b"));
+        assert_eq!(
+            t.as_ref().map(orch8_types::TenantId::as_str),
+            Some("tenant-b")
+        );
     }
 }

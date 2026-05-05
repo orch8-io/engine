@@ -86,7 +86,11 @@ pub async fn execute_for_each(
 
     let prior_marker = storage.get_block_output(instance.id, &fe_def.id).await?;
 
-    let snapshot_ref_key = format!("inst:{}:foreach:{}:items", instance.id.into_uuid(), fe_def.id.as_str());
+    let snapshot_ref_key = format!(
+        "inst:{}:foreach:{}:items",
+        instance.id.into_uuid(),
+        fe_def.id.as_str()
+    );
 
     let (snapshot_items, index): (Vec<serde_json::Value>, u32) = if let Some(m) = &prior_marker {
         // Subsequent tick — resolve the snapshot from externalized_state
@@ -886,7 +890,11 @@ mod tests {
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();
-        let fe_node = tree.iter().find(|n| n.block_id.as_str() == "fe").unwrap().clone();
+        let fe_node = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "fe")
+            .unwrap()
+            .clone();
 
         let outputs = OutputsSnapshot::new();
         execute_for_each(&s, &registry, &inst, &fe_node, &fe_def, &tree, &outputs)
@@ -896,7 +904,10 @@ mod tests {
         // After execution, the body should be Running and the bound item
         // should be `items[0]`.
         let after = s.get_execution_tree(inst_id).await.unwrap();
-        let body = after.iter().find(|n| n.block_id.as_str() == "body").unwrap();
+        let body = after
+            .iter()
+            .find(|n| n.block_id.as_str() == "body")
+            .unwrap();
         assert_eq!(body.state, NodeState::Running);
 
         let updated = s.get_instance(inst_id).await.unwrap().unwrap();

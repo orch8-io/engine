@@ -563,8 +563,16 @@ async fn activate_first_pending_child_only_flips_first() {
         .unwrap();
 
     let after = storage.get_execution_tree(instance).await.unwrap();
-    let state_a = after.iter().find(|n| n.block_id.as_str() == "a").unwrap().state;
-    let state_b = after.iter().find(|n| n.block_id.as_str() == "b").unwrap().state;
+    let state_a = after
+        .iter()
+        .find(|n| n.block_id.as_str() == "a")
+        .unwrap()
+        .state;
+    let state_b = after
+        .iter()
+        .find(|n| n.block_id.as_str() == "b")
+        .unwrap()
+        .state;
 
     assert_eq!(
         state_a,
@@ -636,8 +644,16 @@ async fn cancel_subtree_recursively_cancels_deep_descendants() {
         .unwrap();
 
     let after = storage.get_execution_tree(instance).await.unwrap();
-    let state_mid = after.iter().find(|n| n.block_id.as_str() == "mid").unwrap().state;
-    let state_deep = after.iter().find(|n| n.block_id.as_str() == "deep").unwrap().state;
+    let state_mid = after
+        .iter()
+        .find(|n| n.block_id.as_str() == "mid")
+        .unwrap()
+        .state;
+    let state_deep = after
+        .iter()
+        .find(|n| n.block_id.as_str() == "deep")
+        .unwrap()
+        .state;
 
     assert_eq!(state_mid, NodeState::Cancelled, "mid must be cancelled");
     assert_eq!(state_deep, NodeState::Cancelled, "deep must be cancelled");

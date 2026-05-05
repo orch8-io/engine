@@ -12,7 +12,7 @@ use super::SqliteStorage;
 pub(super) async fn create(storage: &SqliteStorage, s: &Session) -> Result<(), StorageError> {
     sqlx::query("INSERT INTO sessions (id,tenant_id,session_key,data,state,created_at,updated_at,expires_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)")
         .bind(s.id.to_string())
-        .bind(&s.tenant_id.as_str())
+        .bind(s.tenant_id.as_str())
         .bind(&s.session_key)
         .bind(serde_json::to_string(&s.data)?)
         .bind(s.state.to_string())

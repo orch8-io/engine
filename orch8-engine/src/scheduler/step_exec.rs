@@ -61,7 +61,10 @@ pub(super) async fn check_step_deadline(
         if let Some(handler) = handlers.get(&escalation.handler) {
             let mut params = escalation.params.clone();
             if let serde_json::Value::Object(ref mut map) = params {
-                map.insert("_breach_block_id".into(), serde_json::json!(step_def.id.as_str()));
+                map.insert(
+                    "_breach_block_id".into(),
+                    serde_json::json!(step_def.id.as_str()),
+                );
                 map.insert(
                     "_breach_instance_id".into(),
                     serde_json::json!(instance_id.into_uuid()),
@@ -257,7 +260,7 @@ pub async fn check_human_input(
 ) -> Result<bool, EngineError> {
     let mut signal_name = String::with_capacity(12 + step_def.id.as_str().len());
     signal_name.push_str("human_input:");
-    signal_name.push_str(&step_def.id.as_str());
+    signal_name.push_str(step_def.id.as_str());
 
     // Check if the response signal has already been delivered.
     let signals = storage.get_pending_signals(instance.id).await?;
@@ -415,7 +418,7 @@ pub(super) async fn execute_step_block(
     // Debug mode: if instance has breakpoints set and this step is in the list, pause.
     if let Some(breakpoints) = instance.metadata.get("_debug_breakpoints") {
         if let Some(arr) = breakpoints.as_array() {
-            if arr.iter().any(|v| v.as_str() == Some(&step_def.id.as_str())) {
+            if arr.iter().any(|v| v.as_str() == Some(step_def.id.as_str())) {
                 debug!(
                     instance_id = %instance_id,
                     block_id = %step_def.id,
@@ -532,7 +535,7 @@ pub(super) async fn execute_step_block(
 
     if let Err(step_err) = crate::credentials::resolve_in_value(
         storage.as_ref(),
-        &instance.tenant_id.as_str(),
+        instance.tenant_id.as_str(),
         &mut resolved_params,
     )
     .await

@@ -12,7 +12,7 @@ pub(super) async fn append(
     sqlx::query("INSERT INTO audit_log (id,instance_id,tenant_id,event_type,from_state,to_state,block_id,details,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")
         .bind(entry.id.to_string())
         .bind(entry.instance_id.into_uuid().to_string())
-        .bind(&entry.tenant_id.as_str())
+        .bind(entry.tenant_id.as_str())
         .bind(&entry.event_type)
         .bind(&entry.from_state)
         .bind(&entry.to_state)

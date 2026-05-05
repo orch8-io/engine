@@ -799,7 +799,7 @@ impl StorageBackend for SqliteStorage {
         )
         .bind(new_task.id.to_string())
         .bind(new_task.instance_id.into_uuid().to_string())
-        .bind(&new_task.block_id.as_str())
+        .bind(new_task.block_id.as_str())
         .bind(&new_task.handler_name)
         .bind(&new_task.queue_name)
         .bind(&new_task.params)

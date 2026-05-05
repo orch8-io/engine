@@ -703,7 +703,7 @@ pub fn validate_sequence_templates(seq: &SequenceDefinition) -> Vec<TemplateWarn
 fn validate_block_templates(block: &BlockDefinition, warnings: &mut Vec<TemplateWarning>) {
     match block {
         BlockDefinition::Step(s) => {
-            validate_json_templates(&s.id.as_str(), "params", &s.params, warnings);
+            validate_json_templates(s.id.as_str(), "params", &s.params, warnings);
         }
         BlockDefinition::Parallel(p) => {
             for branch in &p.branches {
@@ -720,23 +720,23 @@ fn validate_block_templates(block: &BlockDefinition, warnings: &mut Vec<Template
             }
         }
         BlockDefinition::Loop(l) => {
-            validate_expr_string(&l.id.as_str(), "condition", &l.condition, warnings);
+            validate_expr_string(l.id.as_str(), "condition", &l.condition, warnings);
             if let Some(ref break_on) = l.break_on {
-                validate_expr_string(&l.id.as_str(), "break_on", break_on, warnings);
+                validate_expr_string(l.id.as_str(), "break_on", break_on, warnings);
             }
             for b in &l.body {
                 validate_block_templates(b, warnings);
             }
         }
         BlockDefinition::ForEach(fe) => {
-            validate_template_string(&fe.id.as_str(), "collection", &fe.collection, warnings);
+            validate_template_string(fe.id.as_str(), "collection", &fe.collection, warnings);
             for b in &fe.body {
                 validate_block_templates(b, warnings);
             }
         }
         BlockDefinition::Router(r) => {
             for route in &r.routes {
-                validate_expr_string(&r.id.as_str(), "route.condition", &route.condition, warnings);
+                validate_expr_string(r.id.as_str(), "route.condition", &route.condition, warnings);
                 for b in &route.blocks {
                     validate_block_templates(b, warnings);
                 }

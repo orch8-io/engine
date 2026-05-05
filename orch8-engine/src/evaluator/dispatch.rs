@@ -156,7 +156,8 @@ pub(super) async fn dispatch_block(
             // Check if child already exists for this block.
             let children = storage.get_child_instances(instance.id).await?;
             let existing_child = children.iter().find(|c| {
-                c.metadata.get("_parent_block_id").and_then(|v| v.as_str()) == Some(&ss_def.id.as_str())
+                c.metadata.get("_parent_block_id").and_then(|v| v.as_str())
+                    == Some(ss_def.id.as_str())
             });
 
             if let Some(child) = existing_child {

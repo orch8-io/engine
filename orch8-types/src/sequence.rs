@@ -688,7 +688,9 @@ fn check_id(
         return Err(block_err("(empty)", "block id must not be empty"));
     }
     if !seen.insert(id.as_str().to_owned()) {
-        return Err(SequenceValidationError::DuplicateBlockId(id.as_str().to_owned()));
+        return Err(SequenceValidationError::DuplicateBlockId(
+            id.as_str().to_owned(),
+        ));
     }
     Ok(())
 }
@@ -698,7 +700,7 @@ fn validate_step(
     seen: &mut std::collections::HashSet<String>,
 ) -> Result<(), SequenceValidationError> {
     check_id(&s.id, seen)?;
-    let id = &s.id.as_str();
+    let id = s.id.as_str();
 
     if s.handler.is_empty() {
         return Err(block_err(id, "handler name must not be empty"));
@@ -782,7 +784,7 @@ fn validate_ab_split(
     check_id(&ab.id, seen)?;
     if ab.variants.len() < 2 {
         return Err(block_err(
-            &ab.id.as_str(),
+            ab.id.as_str(),
             "ab_split must have at least 2 variants",
         ));
     }
@@ -791,19 +793,22 @@ fn validate_ab_split(
         .iter()
         .fold(0u32, |acc, v| acc.saturating_add(v.weight));
     if total_weight == 0 {
-        return Err(block_err(&ab.id.as_str(), "ab_split total weight must be > 0"));
+        return Err(block_err(
+            ab.id.as_str(),
+            "ab_split total weight must be > 0",
+        ));
     }
     let mut names_seen = std::collections::HashSet::new();
     for v in &ab.variants {
         if v.name.trim().is_empty() {
             return Err(block_err(
-                &ab.id.as_str(),
+                ab.id.as_str(),
                 "ab_split variant name must not be empty",
             ));
         }
         if !names_seen.insert(&v.name) {
             return Err(block_err(
-                &ab.id.as_str(),
+                ab.id.as_str(),
                 format!("ab_split duplicate variant name `{}`", v.name),
             ));
         }
@@ -824,6 +829,7 @@ fn validate_children(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_block(
     block: &BlockDefinition,
     seen: &mut std::collections::HashSet<String>,
@@ -836,13 +842,13 @@ fn validate_block(
         BlockDefinition::Loop(l) => {
             check_id(&l.id, seen)?;
             if l.condition.trim().is_empty() {
-                return Err(block_err(&l.id.as_str(), "loop condition must not be empty"));
+                return Err(block_err(l.id.as_str(), "loop condition must not be empty"));
             }
             if l.body.is_empty() {
-                return Err(block_err(&l.id.as_str(), "loop body must not be empty"));
+                return Err(block_err(l.id.as_str(), "loop body must not be empty"));
             }
             if l.max_iterations == 0 {
-                return Err(block_err(&l.id.as_str(), "loop max_iterations must be > 0"));
+                return Err(block_err(l.id.as_str(), "loop max_iterations must be > 0"));
             }
             validate_children(&l.body, seen)
         }
@@ -850,16 +856,25 @@ fn validate_block(
         BlockDefinition::ForEach(fe) => {
             check_id(&fe.id, seen)?;
             if fe.collection.trim().is_empty() {
-                return Err(block_err(&fe.id.as_str(), "for_each collection must not be empty"));
+                return Err(block_err(
+                    fe.id.as_str(),
+                    "for_each collection must not be empty",
+                ));
             }
             if fe.body.is_empty() {
-                return Err(block_err(&fe.id.as_str(), "for_each body must not be empty"));
+                return Err(block_err(fe.id.as_str(), "for_each body must not be empty"));
             }
             if fe.item_var.trim().is_empty() {
-                return Err(block_err(&fe.id.as_str(), "for_each item_var must not be empty"));
+                return Err(block_err(
+                    fe.id.as_str(),
+                    "for_each item_var must not be empty",
+                ));
             }
             if fe.max_iterations == 0 {
-                return Err(block_err(&fe.id.as_str(), "for_each max_iterations must be > 0"));
+                return Err(block_err(
+                    fe.id.as_str(),
+                    "for_each max_iterations must be > 0",
+                ));
             }
             validate_children(&fe.body, seen)
         }
@@ -868,14 +883,14 @@ fn validate_block(
             check_id(&r.id, seen)?;
             if r.routes.is_empty() && r.default.is_none() {
                 return Err(block_err(
-                    &r.id.as_str(),
+                    r.id.as_str(),
                     "router must have at least one route or a default",
                 ));
             }
             for route in &r.routes {
                 if route.condition.trim().is_empty() {
                     return Err(block_err(
-                        &r.id.as_str(),
+                        r.id.as_str(),
                         "router route condition must not be empty",
                     ));
                 }
@@ -890,7 +905,10 @@ fn validate_block(
         BlockDefinition::TryCatch(tc) => {
             check_id(&tc.id, seen)?;
             if tc.try_block.is_empty() {
-                return Err(block_err(&tc.id.as_str(), "try_catch try_block must not be empty"));
+                return Err(block_err(
+                    tc.id.as_str(),
+                    "try_catch try_block must not be empty",
+                ));
             }
             validate_children(&tc.try_block, seen)?;
             validate_children(&tc.catch_block, seen)?;
@@ -904,7 +922,7 @@ fn validate_block(
             check_id(&s.id, seen)?;
             if s.sequence_name.trim().is_empty() {
                 return Err(block_err(
-                    &s.id.as_str(),
+                    s.id.as_str(),
                     "sub_sequence sequence_name must not be empty",
                 ));
             }
@@ -917,7 +935,7 @@ fn validate_block(
             check_id(&cs.id, seen)?;
             if cs.blocks.is_empty() {
                 return Err(block_err(
-                    &cs.id.as_str(),
+                    cs.id.as_str(),
                     "cancellation_scope must have at least one block",
                 ));
             }

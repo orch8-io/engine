@@ -16,8 +16,8 @@ pub(super) async fn create(store: &PostgresStorage, s: &CronSchedule) -> Result<
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
     )
     .bind(s.id)
-    .bind(&s.tenant_id.as_str())
-    .bind(&s.namespace.as_str())
+    .bind(s.tenant_id.as_str())
+    .bind(s.namespace.as_str())
     .bind(s.sequence_id.into_uuid())
     .bind(&s.cron_expr)
     .bind(&s.timezone)

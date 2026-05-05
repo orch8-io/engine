@@ -70,9 +70,16 @@ pub(crate) async fn list_approvals(
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.clone());
     let filter = InstanceFilter {
-        tenant_id: tenant_from_ctx
-            .or_else(|| params.tenant_id.clone().map(orch8_types::ids::TenantId::unchecked)),
-        namespace: params.namespace.clone().map(orch8_types::ids::Namespace::new),
+        tenant_id: tenant_from_ctx.or_else(|| {
+            params
+                .tenant_id
+                .clone()
+                .map(orch8_types::ids::TenantId::unchecked)
+        }),
+        namespace: params
+            .namespace
+            .clone()
+            .map(orch8_types::ids::Namespace::new),
         ..InstanceFilter::default()
     };
     let pagination = Pagination {

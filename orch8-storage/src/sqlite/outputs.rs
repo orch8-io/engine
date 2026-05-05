@@ -20,7 +20,7 @@ pub(super) async fn save(
     )
     .bind(output.id.to_string())
     .bind(output.instance_id.into_uuid().to_string())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(serde_json::to_string(&output.output)?)
     .bind(&output.output_ref)
     .bind(output.output_size as i64)
@@ -36,7 +36,7 @@ pub(super) async fn get(
     block_id: &BlockId,
 ) -> Result<Option<BlockOutput>, StorageError> {
     let row = sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 AND block_id=?2 ORDER BY created_at DESC LIMIT 1")
-        .bind(instance_id.into_uuid().to_string()).bind(&block_id.as_str())
+        .bind(instance_id.into_uuid().to_string()).bind(block_id.as_str())
         .fetch_optional(&storage.pool).await?;
     row.as_ref().map(row_to_output).transpose()
 }
@@ -171,7 +171,7 @@ pub(super) async fn delete_for_block(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query("DELETE FROM block_outputs WHERE instance_id=?1 AND block_id=?2")
         .bind(instance_id.into_uuid().to_string())
-        .bind(&block_id.as_str())
+        .bind(block_id.as_str())
         .execute(&storage.pool)
         .await?;
     Ok(result.rows_affected())
@@ -223,7 +223,7 @@ pub(super) async fn save_output_and_transition(
     )
     .bind(output.id.to_string())
     .bind(output.instance_id.into_uuid().to_string())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(serde_json::to_string(&output.output)?)
     .bind(&output.output_ref)
     .bind(output.output_size as i64)
@@ -264,7 +264,7 @@ pub(super) async fn save_output_merge_context_and_transition(
     )
     .bind(output.id.to_string())
     .bind(output.instance_id.into_uuid().to_string())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(serde_json::to_string(&output.output)?)
     .bind(&output.output_ref)
     .bind(output.output_size as i64)
@@ -304,7 +304,7 @@ pub(super) async fn save_output_complete_node_and_transition(
     )
     .bind(output.id.to_string())
     .bind(output.instance_id.into_uuid().to_string())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(serde_json::to_string(&output.output)?)
     .bind(&output.output_ref)
     .bind(output.output_size as i64)
@@ -360,7 +360,7 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     )
     .bind(output.id.to_string())
     .bind(output.instance_id.into_uuid().to_string())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(serde_json::to_string(&output.output)?)
     .bind(&output.output_ref)
     .bind(output.output_size as i64)

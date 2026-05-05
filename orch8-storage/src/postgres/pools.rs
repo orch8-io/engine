@@ -13,7 +13,7 @@ pub(super) async fn create(
           VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(pool.id)
-    .bind(&pool.tenant_id.as_str())
+    .bind(pool.tenant_id.as_str())
     .bind(&pool.name)
     .bind(serde_json::to_string(&pool.strategy)?.trim_matches('"'))
     .bind(pool.round_robin_index as i32)
@@ -85,7 +85,7 @@ pub(super) async fn add_resource(
     )
     .bind(resource.id)
     .bind(resource.pool_id)
-    .bind(&resource.resource_key.as_str())
+    .bind(resource.resource_key.as_str())
     .bind(&resource.name)
     .bind(resource.weight as i32)
     .bind(resource.enabled)

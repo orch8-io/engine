@@ -85,8 +85,10 @@ pub(crate) async fn create_trigger(
         ));
     }
 
-    let tenant_id =
-        crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(body.tenant_id.clone()))?;
+    let tenant_id = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &TenantId::unchecked(body.tenant_id.clone()),
+    )?;
 
     let now = chrono::Utc::now();
     let trigger = TriggerDef {

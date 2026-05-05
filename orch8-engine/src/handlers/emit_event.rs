@@ -603,7 +603,10 @@ mod tests {
         // the atomic method existed, a crash between the dedupe insert and
         // the instance create could leave this lookup returning None while
         // the dedupe row still pointed at the id.
-        let fetched = storage.get_instance(InstanceId::from_uuid(child_uuid)).await.unwrap();
+        let fetched = storage
+            .get_instance(InstanceId::from_uuid(child_uuid))
+            .await
+            .unwrap();
         assert!(
             fetched.is_some(),
             "dedupe Inserted must imply child instance persisted (finding #2)"

@@ -48,7 +48,10 @@ pub async fn execute_race(
                 // into its subtree to cancel any descendant workers.
                 if child.state == NodeState::Waiting {
                     storage
-                        .cancel_worker_tasks_for_block(instance.id.into_uuid(), &child.block_id.as_str())
+                        .cancel_worker_tasks_for_block(
+                            instance.id.into_uuid(),
+                            child.block_id.as_str(),
+                        )
                         .await?;
                 }
                 evaluator::cancel_subtree(storage, instance.id, tree, child.id).await?;

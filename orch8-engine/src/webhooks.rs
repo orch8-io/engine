@@ -513,11 +513,7 @@ mod tests {
             timeout_secs: 1,
             max_retries: 0,
         };
-        let event = instance_event(
-            "test",
-            InstanceId::new(),
-            serde_json::json!({}),
-        );
+        let event = instance_event("test", InstanceId::new(), serde_json::json!({}));
         let cancel = CancellationToken::new();
         cancel.cancel();
         emit(&config, &event, &cancel);

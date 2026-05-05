@@ -16,7 +16,7 @@ pub(super) async fn create(
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
     )
     .bind(session.id)
-    .bind(&session.tenant_id.as_str())
+    .bind(session.tenant_id.as_str())
     .bind(&session.session_key)
     .bind(&session.data)
     .bind(session.state.to_string())

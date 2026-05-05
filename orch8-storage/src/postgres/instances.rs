@@ -47,7 +47,10 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(inst.max_concurrency.map(|v| v as i32))
         .bind(&inst.idempotency_key)
         .bind(inst.session_id)
-        .bind(inst.parent_instance_id.map(|id| id.into_uuid()))
+        .bind(
+            inst.parent_instance_id
+                .map(orch8_types::InstanceId::into_uuid),
+        )
         .bind(inst.created_at)
         .bind(inst.updated_at)
 }
@@ -100,7 +103,10 @@ pub(super) async fn create_batch(
                 .push_bind(inst.max_concurrency.map(|v| v as i32))
                 .push_bind(&inst.idempotency_key)
                 .push_bind(inst.session_id)
-                .push_bind(inst.parent_instance_id.map(|id| id.into_uuid()))
+                .push_bind(
+                    inst.parent_instance_id
+                        .map(orch8_types::InstanceId::into_uuid),
+                )
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at);
         });
@@ -581,7 +587,10 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(inst.max_concurrency.map(|v| v as i32))
                 .push_bind(&inst.idempotency_key)
                 .push_bind(inst.session_id)
-                .push_bind(inst.parent_instance_id.map(|id| id.into_uuid()))
+                .push_bind(
+                    inst.parent_instance_id
+                        .map(orch8_types::InstanceId::into_uuid),
+                )
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at);
         });

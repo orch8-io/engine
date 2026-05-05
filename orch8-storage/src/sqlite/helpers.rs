@@ -70,7 +70,9 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
         metadata: parse_json(row.get::<&str, _>("metadata"))?,
         context: parse_json(row.get::<&str, _>("context"))?,
         concurrency_key: row.get::<Option<String>, _>("concurrency_key"),
-        max_concurrency: row.get::<Option<i32>, _>("max_concurrency").map(|v| v as u32),
+        max_concurrency: row
+            .get::<Option<i32>, _>("max_concurrency")
+            .map(|v| v as u32),
         idempotency_key: row.get::<Option<String>, _>("idempotency_key"),
         session_id: row
             .get::<Option<String>, _>("session_id")

@@ -153,7 +153,10 @@ async fn r1_for_each_3_over_loop_2_yields_6_inner_outputs() {
 
     // Inner step output rows = 3 outer items * 2 loop iterations = 6.
     let all = storage.get_all_outputs(inst.id).await.unwrap();
-    let inner_count = all.iter().filter(|o| o.block_id.as_str() == "inner").count();
+    let inner_count = all
+        .iter()
+        .filter(|o| o.block_id.as_str() == "inner")
+        .count();
     assert_eq!(
         inner_count,
         6,

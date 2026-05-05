@@ -80,7 +80,8 @@ pub(crate) async fn create_pool(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<CreatePoolRequest>,
 ) -> Result<(axum::http::StatusCode, Json<ResourcePool>), ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(req.tenant_id))?;
+    let tenant_id =
+        crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(req.tenant_id))?;
     let now = Utc::now();
     let pool = ResourcePool {
         id: Uuid::now_v7(),

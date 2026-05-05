@@ -329,7 +329,11 @@ async fn a3_loop_halts_on_non_retryable_error() {
     let lp_block = BlockDefinition::Loop(Box::new(loop_def.clone()));
 
     let (storage, instance, tree) = setup_tree(vec![lp_block], json!({})).await;
-    let lp_node = tree.iter().find(|n| n.block_id.as_str() == "lp").cloned().unwrap();
+    let lp_node = tree
+        .iter()
+        .find(|n| n.block_id.as_str() == "lp")
+        .cloned()
+        .unwrap();
     let body_node = tree
         .iter()
         .find(|n| n.block_id.as_str() == "body")
@@ -345,7 +349,10 @@ async fn a3_loop_halts_on_non_retryable_error() {
     .await
     .unwrap();
     let after_tick1 = storage.get_execution_tree(instance.id).await.unwrap();
-    let body_after_tick1 = after_tick1.iter().find(|n| n.block_id.as_str() == "body").unwrap();
+    let body_after_tick1 = after_tick1
+        .iter()
+        .find(|n| n.block_id.as_str() == "body")
+        .unwrap();
     assert_eq!(
         body_after_tick1.state,
         NodeState::Running,
@@ -384,7 +391,10 @@ async fn a3_loop_halts_on_non_retryable_error() {
     .unwrap();
 
     let after_tick2 = storage.get_execution_tree(instance.id).await.unwrap();
-    let lp_after = after_tick2.iter().find(|n| n.block_id.as_str() == "lp").unwrap();
+    let lp_after = after_tick2
+        .iter()
+        .find(|n| n.block_id.as_str() == "lp")
+        .unwrap();
     assert_eq!(
         lp_after.state,
         NodeState::Failed,
@@ -407,7 +417,10 @@ async fn a3_loop_halts_on_non_retryable_error() {
 
     // And the failed body child must stay Failed — a buggy reset would have
     // pushed it back to Pending on the way to a retry.
-    let body_after = after_tick2.iter().find(|n| n.block_id.as_str() == "body").unwrap();
+    let body_after = after_tick2
+        .iter()
+        .find(|n| n.block_id.as_str() == "body")
+        .unwrap();
     assert_eq!(
         body_after.state,
         NodeState::Failed,
@@ -690,7 +703,11 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
     };
 
     let (storage, instance, tree) = setup_tree(vec![fe.clone()], json!({"items": [1, 2, 3]})).await;
-    let fe_node = tree.iter().find(|n| n.block_id.as_str() == "fe").cloned().unwrap();
+    let fe_node = tree
+        .iter()
+        .find(|n| n.block_id.as_str() == "fe")
+        .cloned()
+        .unwrap();
 
     let registry = HandlerRegistry::new();
     orch8_engine::handlers::for_each::execute_for_each(
@@ -808,7 +825,11 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     };
 
     let (storage, instance, tree) = setup_tree(vec![fe.clone()], json!({"items": [1, 2]})).await;
-    let fe_node = tree.iter().find(|n| n.block_id.as_str() == "fe").cloned().unwrap();
+    let fe_node = tree
+        .iter()
+        .find(|n| n.block_id.as_str() == "fe")
+        .cloned()
+        .unwrap();
 
     let registry = HandlerRegistry::new();
 
@@ -993,7 +1014,10 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     // `try_step:Failed` and take the `fail_node` path at
     // for_each.rs:181-184.
     let tree_final = storage.get_execution_tree(instance.id).await.unwrap();
-    let fe_final = tree_final.iter().find(|n| n.block_id.as_str() == "fe").unwrap();
+    let fe_final = tree_final
+        .iter()
+        .find(|n| n.block_id.as_str() == "fe")
+        .unwrap();
     assert_ne!(
         fe_final.state,
         NodeState::Failed,
@@ -1030,7 +1054,10 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
     // Subtree reset: the try_catch and its branch children must be back
     // to Pending so the next iteration starts cleanly
     // (for_each.rs:220 → reset_subtree_to_pending).
-    let tc_post_reset = tree_final.iter().find(|n| n.block_id.as_str() == "tc").unwrap();
+    let tc_post_reset = tree_final
+        .iter()
+        .find(|n| n.block_id.as_str() == "tc")
+        .unwrap();
     assert_eq!(
         tc_post_reset.state,
         NodeState::Pending,
@@ -1098,7 +1125,11 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
     // xs = [1, 2]: two outer iterations.
     let (storage, instance, tree) = setup_tree(vec![fe_block.clone()], json!({"xs": [1, 2]})).await;
 
-    let fe_node = tree.iter().find(|n| n.block_id.as_str() == "fe").cloned().unwrap();
+    let fe_node = tree
+        .iter()
+        .find(|n| n.block_id.as_str() == "fe")
+        .cloned()
+        .unwrap();
     let inner_lp_node = tree
         .iter()
         .find(|n| n.block_id.as_str() == "inner_lp")
@@ -1960,7 +1991,10 @@ async fn a12_self_modify_injected_block_gets_execution_node() {
         "ensure_execution_tree must create an execution node for newly injected \
          blocks after the initial tree is built (evaluator.rs:56-84)"
     );
-    let injected = tree.iter().find(|n| n.block_id.as_str() == "s2_injected").unwrap();
+    let injected = tree
+        .iter()
+        .find(|n| n.block_id.as_str() == "s2_injected")
+        .unwrap();
     assert_eq!(
         injected.state,
         NodeState::Pending,

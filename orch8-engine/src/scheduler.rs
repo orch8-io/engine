@@ -620,7 +620,10 @@ async fn check_step_deadline_waiting(
         if let Some(handler) = handlers.get(&escalation.handler) {
             let mut params = escalation.params.clone();
             if let serde_json::Value::Object(ref mut map) = params {
-                map.insert("_breach_block_id".into(), serde_json::json!(step_def.id.as_str()));
+                map.insert(
+                    "_breach_block_id".into(),
+                    serde_json::json!(step_def.id.as_str()),
+                );
                 map.insert(
                     "_breach_instance_id".into(),
                     serde_json::json!(instance_id.into_uuid()),

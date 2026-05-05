@@ -270,14 +270,8 @@ mod tests {
             RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Parallel(
                 Box::new(par),
             )]));
-        assert_eq!(
-            rft.fields_for(&BlockId::new("a")),
-            Some(&["x".into()][..])
-        );
-        assert_eq!(
-            rft.fields_for(&BlockId::new("b")),
-            Some(&["y".into()][..])
-        );
+        assert_eq!(rft.fields_for(&BlockId::new("a")), Some(&["x".into()][..]));
+        assert_eq!(rft.fields_for(&BlockId::new("b")), Some(&["y".into()][..]));
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub(super) async fn create(
         ",
     )
     .bind(seq.id.into_uuid())
-    .bind(&seq.tenant_id.as_str())
-    .bind(&seq.namespace.as_str())
+    .bind(seq.tenant_id.as_str())
+    .bind(seq.namespace.as_str())
     .bind(&seq.name)
     .bind(&definition)
     .bind(seq.version)
@@ -110,8 +110,8 @@ pub(super) async fn list_all(
 ) -> Result<Vec<SequenceDefinition>, StorageError> {
     // NULL-safe filters: when a filter is None we use "true" so the row always
     // matches. Keeps a single prepared statement rather than six SQL variants.
-    let tenant = tenant_id.map(|t| t.as_str());
-    let ns = namespace.map(|n| n.as_str());
+    let tenant = tenant_id.map(orch8_types::TenantId::as_str);
+    let ns = namespace.map(orch8_types::Namespace::as_str);
 
     let rows = sqlx::query_as::<_, SequenceRow>(
         r"SELECT id, tenant_id, namespace, name, definition, version, deprecated, created_at

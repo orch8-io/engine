@@ -29,7 +29,7 @@ pub(super) async fn save(
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
     .bind(output.output_size as i32)
@@ -60,7 +60,7 @@ pub(super) async fn get(
            LIMIT 1",
     )
     .bind(instance_id.into_uuid())
-    .bind(&block_id.as_str())
+    .bind(block_id.as_str())
     .fetch_optional(&store.pool)
     .await?;
     Ok(row.map(BlockOutputRow::into_output))
@@ -95,7 +95,10 @@ pub(super) async fn get_batch(
 
     let mut map = std::collections::HashMap::with_capacity(rows.len());
     for row in rows {
-        let key = (InstanceId::from_uuid(row.instance_id), BlockId::new(row.block_id.clone()));
+        let key = (
+            InstanceId::from_uuid(row.instance_id),
+            BlockId::new(row.block_id.clone()),
+        );
         map.insert(key, row.into_output());
     }
     Ok(map)
@@ -174,7 +177,9 @@ pub(super) async fn get_completed_ids_batch(
     let mut map: std::collections::HashMap<InstanceId, Vec<BlockId>> =
         std::collections::HashMap::new();
     for (iid, bid) in rows {
-        map.entry(InstanceId::from_uuid(iid)).or_default().push(BlockId::new(bid));
+        map.entry(InstanceId::from_uuid(iid))
+            .or_default()
+            .push(BlockId::new(bid));
     }
     Ok(map)
 }
@@ -192,7 +197,7 @@ pub(super) async fn delete_for_block(
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(r"DELETE FROM block_outputs WHERE instance_id = $1 AND block_id = $2")
         .bind(instance_id.into_uuid())
-        .bind(&block_id.as_str())
+        .bind(block_id.as_str())
         .execute(&store.pool)
         .await?;
     Ok(result.rows_affected())
@@ -208,7 +213,7 @@ pub(super) async fn delete_for_blocks(
     if block_ids.is_empty() {
         return Ok(0);
     }
-    let ids: Vec<&str> = block_ids.iter().map(|b| b.as_str()).collect();
+    let ids: Vec<&str> = block_ids.iter().map(orch8_types::BlockId::as_str).collect();
     let result =
         sqlx::query(r"DELETE FROM block_outputs WHERE instance_id = $1 AND block_id = ANY($2)")
             .bind(instance_id.into_uuid())
@@ -250,7 +255,7 @@ pub(super) async fn save_output_and_transition(
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
     .bind(output.output_size as i32)
@@ -297,7 +302,7 @@ pub(super) async fn save_output_merge_context_and_transition(
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
     .bind(output.output_size as i32)
@@ -340,7 +345,7 @@ pub(super) async fn save_output_complete_node_and_transition(
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
     .bind(output.output_size as i32)
@@ -401,7 +406,7 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
-    .bind(&output.block_id.as_str())
+    .bind(output.block_id.as_str())
     .bind(&output.output)
     .bind(&output.output_ref)
     .bind(output.output_size as i32)

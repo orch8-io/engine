@@ -13,8 +13,8 @@ pub(super) async fn create(storage: &SqliteStorage, s: &CronSchedule) -> Result<
         "INSERT INTO cron_schedules (id,tenant_id,namespace,sequence_id,cron_expr,timezone,enabled,metadata,next_fire_at,last_triggered_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
     )
     .bind(s.id.to_string())
-    .bind(&s.tenant_id.as_str())
-    .bind(&s.namespace.as_str())
+    .bind(s.tenant_id.as_str())
+    .bind(s.namespace.as_str())
     .bind(s.sequence_id.into_uuid().to_string())
     .bind(&s.cron_expr)
     .bind(&s.timezone)

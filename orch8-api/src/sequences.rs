@@ -277,7 +277,11 @@ pub(crate) async fn list_sequences(
     // the filter. Anonymous/global callers may pass tenant_id to filter, or
     // omit it to see all sequences across all tenants.
     let effective_tenant = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref())
-        .or_else(|| q.tenant_id.clone().map(orch8_types::ids::TenantId::unchecked));
+        .or_else(|| {
+            q.tenant_id
+                .clone()
+                .map(orch8_types::ids::TenantId::unchecked)
+        });
     let effective_namespace = q.namespace.map(orch8_types::ids::Namespace::new);
     let limit = q.limit.unwrap_or(200).min(1000);
     let offset = q.offset.unwrap_or(0);

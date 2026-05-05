@@ -162,7 +162,7 @@ async fn worker_task_can_retry(
         return Ok(false);
     };
     let next_attempt = u32::from(task.attempt).saturating_add(1);
-    
+
     Ok(next_attempt < retry.max_attempts)
 }
 

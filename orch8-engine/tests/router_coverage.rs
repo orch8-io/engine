@@ -105,7 +105,9 @@ fn router_node(tree: &[ExecutionNode]) -> ExecutionNode {
 }
 
 fn find_by_block<'a>(tree: &'a [ExecutionNode], id: &str) -> &'a ExecutionNode {
-    tree.iter().find(|n| n.block_id.as_str() == id).expect("node")
+    tree.iter()
+        .find(|n| n.block_id.as_str() == id)
+        .expect("node")
 }
 
 async fn refresh(storage: &SqliteStorage, instance: &TaskInstance) -> Vec<ExecutionNode> {

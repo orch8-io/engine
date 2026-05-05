@@ -2257,10 +2257,7 @@ async fn context_round_trip_all_sections() {
     assert_eq!(back.context.audit.len(), 1);
     assert_eq!(back.context.audit[0].event, "started");
     assert_eq!(back.context.runtime.attempt, 3);
-    assert_eq!(
-        back.context.runtime.current_step,
-        Some(BlockId::new("s1"))
-    );
+    assert_eq!(back.context.runtime.current_step, Some(BlockId::new("s1")));
 }
 
 #[tokio::test]

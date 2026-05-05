@@ -344,9 +344,9 @@ pub(super) async fn record_or_get_emit_dedupe(
 
     let existing = uuid::Uuid::parse_str(&row.0)
         .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId::from_uuid(
-        existing,
-    )))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(
+        InstanceId::from_uuid(existing),
+    ))
 }
 
 /// Atomically record the dedupe row AND insert the child `TaskInstance` in a
@@ -413,9 +413,9 @@ pub(super) async fn create_instance_with_dedupe(
 
     let existing = uuid::Uuid::parse_str(&row.0)
         .map_err(|e| StorageError::Query(format!("invalid uuid in dedupe row: {e}")))?;
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId::from_uuid(
-        existing,
-    )))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(
+        InstanceId::from_uuid(existing),
+    ))
 }
 
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older

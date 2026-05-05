@@ -14,7 +14,7 @@ pub(super) async fn create(
 ) -> Result<(), StorageError> {
     sqlx::query("INSERT INTO resource_pools (id,tenant_id,name,strategy,round_robin_index,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7)")
         .bind(pool.id.to_string())
-        .bind(&pool.tenant_id.as_str())
+        .bind(pool.tenant_id.as_str())
         .bind(&pool.name)
         .bind(serde_json::to_string(&pool.strategy)?.trim_matches('"'))
         .bind(pool.round_robin_index as i64)
@@ -75,7 +75,7 @@ pub(super) async fn add_resource(
     sqlx::query("INSERT INTO pool_resources (id,pool_id,resource_key,name,weight,enabled,daily_cap,daily_usage,daily_usage_date,warmup_start,warmup_days,warmup_start_cap,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)")
         .bind(r.id.to_string())
         .bind(r.pool_id.to_string())
-        .bind(&r.resource_key.as_str())
+        .bind(r.resource_key.as_str())
         .bind(&r.name)
         .bind(r.weight as i64)
         .bind(r.enabled as i32)

@@ -167,8 +167,10 @@ async fn create_credential(
         ));
     }
 
-    let tenant_id =
-        crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(body.tenant_id.clone()))?;
+    let tenant_id = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &TenantId::unchecked(body.tenant_id.clone()),
+    )?;
 
     let now = chrono::Utc::now();
     let credential = CredentialDef {

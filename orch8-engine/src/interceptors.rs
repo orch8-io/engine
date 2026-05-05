@@ -334,13 +334,7 @@ mod tests {
         };
 
         for step in &["alpha", "beta"] {
-            emit_before_step(
-                &storage,
-                &interceptors,
-                instance_id,
-                &BlockId::new(*step),
-            )
-            .await;
+            emit_before_step(&storage, &interceptors, instance_id, &BlockId::new(*step)).await;
         }
 
         let a = storage

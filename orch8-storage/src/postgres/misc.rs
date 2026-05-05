@@ -334,9 +334,9 @@ pub(super) async fn record_or_get_emit_dedupe(
     .fetch_one(&store.pool)
     .await?;
 
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId::from_uuid(
-        existing,
-    )))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(
+        InstanceId::from_uuid(existing),
+    ))
 }
 
 /// Atomically record the dedupe row AND insert the child `TaskInstance` in a
@@ -398,9 +398,9 @@ pub(super) async fn create_instance_with_dedupe(
     .bind(key)
     .fetch_one(&store.pool)
     .await?;
-    Ok(crate::EmitDedupeOutcome::AlreadyExists(InstanceId::from_uuid(
-        existing,
-    )))
+    Ok(crate::EmitDedupeOutcome::AlreadyExists(
+        InstanceId::from_uuid(existing),
+    ))
 }
 
 /// Delete up to `limit` `emit_event_dedupe` rows whose `created_at` is older

@@ -136,7 +136,7 @@ pub async fn execute_step_node(
     // surface as StepError::Permanent which fails the node immediately.
     if let Err(step_err) = crate::credentials::resolve_in_value(
         storage.as_ref(),
-        &instance.tenant_id.as_str(),
+        instance.tenant_id.as_str(),
         &mut resolved_params,
     )
     .await

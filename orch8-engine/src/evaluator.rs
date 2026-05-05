@@ -930,7 +930,7 @@ pub async fn cancel_subtree(
     for node in tree {
         if to_cancel_set.contains(&node.id) && node.state == NodeState::Waiting {
             storage
-                .cancel_worker_tasks_for_block(instance_id.into_uuid(), &node.block_id.as_str())
+                .cancel_worker_tasks_for_block(instance_id.into_uuid(), node.block_id.as_str())
                 .await?;
         }
     }

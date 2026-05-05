@@ -155,9 +155,9 @@ fn lint_loop(
     all_ids: &HashSet<String>,
     warnings: &mut Vec<LintWarning>,
 ) {
-    lint_expression(&l.id.as_str(), "condition", &l.condition, warnings);
+    lint_expression(l.id.as_str(), "condition", &l.condition, warnings);
     if let Some(ref break_on) = l.break_on {
-        lint_expression(&l.id.as_str(), "break_on", break_on, warnings);
+        lint_expression(l.id.as_str(), "break_on", break_on, warnings);
     }
     lint_blocks(&l.body, all_ids, warnings);
 }
@@ -168,7 +168,7 @@ fn lint_router(
     warnings: &mut Vec<LintWarning>,
 ) {
     for route in &r.routes {
-        lint_expression(&r.id.as_str(), "route.condition", &route.condition, warnings);
+        lint_expression(r.id.as_str(), "route.condition", &route.condition, warnings);
         if route.blocks.is_empty() {
             warnings.push(LintWarning {
                 block_id: r.id.as_str().to_owned(),
@@ -226,7 +226,7 @@ fn lint_ab_split(
 
 fn lint_step(s: &StepDef, warnings: &mut Vec<LintWarning>) {
     if BUILTIN_HANDLER_NAMES.contains(&s.handler.as_str()) {
-        lint_handler_params(&s.id.as_str(), &s.handler, &s.params, warnings);
+        lint_handler_params(s.id.as_str(), &s.handler, &s.params, warnings);
     }
 
     if s.deadline.is_some() && s.timeout.is_some() {
@@ -437,7 +437,7 @@ fn lint_output_refs_in_block(
 ) {
     match block {
         BlockDefinition::Step(s) => {
-            check_refs_in_json(&s.id.as_str(), "params", &s.params, all_ids, warnings);
+            check_refs_in_json(s.id.as_str(), "params", &s.params, all_ids, warnings);
         }
         BlockDefinition::Parallel(p) => {
             for branch in &p.branches {
@@ -454,16 +454,22 @@ fn lint_output_refs_in_block(
             }
         }
         BlockDefinition::Loop(l) => {
-            check_refs_in_str(&l.id.as_str(), "condition", &l.condition, all_ids, warnings);
+            check_refs_in_str(l.id.as_str(), "condition", &l.condition, all_ids, warnings);
             if let Some(ref bo) = l.break_on {
-                check_refs_in_str(&l.id.as_str(), "break_on", bo, all_ids, warnings);
+                check_refs_in_str(l.id.as_str(), "break_on", bo, all_ids, warnings);
             }
             for b in &l.body {
                 lint_output_refs_in_block(b, all_ids, warnings);
             }
         }
         BlockDefinition::ForEach(fe) => {
-            check_refs_in_str(&fe.id.as_str(), "collection", &fe.collection, all_ids, warnings);
+            check_refs_in_str(
+                fe.id.as_str(),
+                "collection",
+                &fe.collection,
+                all_ids,
+                warnings,
+            );
             for b in &fe.body {
                 lint_output_refs_in_block(b, all_ids, warnings);
             }
@@ -471,7 +477,7 @@ fn lint_output_refs_in_block(
         BlockDefinition::Router(r) => {
             for route in &r.routes {
                 check_refs_in_str(
-                    &r.id.as_str(),
+                    r.id.as_str(),
                     "route.condition",
                     &route.condition,
                     all_ids,
@@ -501,7 +507,7 @@ fn lint_output_refs_in_block(
             }
         }
         BlockDefinition::SubSequence(s) => {
-            check_refs_in_json(&s.id.as_str(), "input", &s.input, all_ids, warnings);
+            check_refs_in_json(s.id.as_str(), "input", &s.input, all_ids, warnings);
         }
         BlockDefinition::ABSplit(ab) => {
             for v in &ab.variants {
@@ -680,7 +686,7 @@ fn lint_unreachable_in_list(blocks: &[BlockDefinition], warnings: &mut Vec<LintW
         if let BlockDefinition::Step(s) = block {
             if s.handler == "fail" {
                 saw_fail = true;
-                fail_id = s.id.as_str().to_owned();
+                s.id.as_str().clone_into(&mut fail_id);
             }
         }
     }

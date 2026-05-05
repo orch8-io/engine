@@ -463,7 +463,7 @@ pub(crate) async fn fail_task(
             match block {
                 Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
                     if let Some(retry) = &step_def.retry {
-                            u32::from(task.attempt) + 1 < retry.max_attempts
+                        u32::from(task.attempt) + 1 < retry.max_attempts
                     } else {
                         false // no retry policy → fail immediately
                     }
@@ -551,7 +551,7 @@ pub(crate) async fn fail_task(
             match block {
                 Some(orch8_types::sequence::BlockDefinition::Step(step_def)) => {
                     if let Some(retry) = &step_def.retry {
-                            u32::from(task.attempt) + 1 < retry.max_attempts
+                        u32::from(task.attempt) + 1 < retry.max_attempts
                     } else {
                         false
                     }

@@ -14,7 +14,7 @@ pub(super) async fn append(
     )
     .bind(entry.id)
     .bind(entry.instance_id.into_uuid())
-    .bind(&entry.tenant_id.as_str())
+    .bind(entry.tenant_id.as_str())
     .bind(&entry.event_type)
     .bind(&entry.from_state)
     .bind(&entry.to_state)

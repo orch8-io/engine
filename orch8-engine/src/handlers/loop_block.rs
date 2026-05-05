@@ -814,13 +814,19 @@ mod tests {
             .unwrap();
 
         let after = s.get_execution_tree(inst_id).await.unwrap();
-        let step_after = after.iter().find(|n| n.block_id.as_str() == "body").unwrap();
+        let step_after = after
+            .iter()
+            .find(|n| n.block_id.as_str() == "body")
+            .unwrap();
         assert_eq!(
             step_after.state,
             NodeState::Running,
             "body child must be activated, not skipped via stale-counter cap"
         );
-        let inner_after = after.iter().find(|n| n.block_id.as_str() == "inner_loop").unwrap();
+        let inner_after = after
+            .iter()
+            .find(|n| n.block_id.as_str() == "inner_loop")
+            .unwrap();
         assert_ne!(
             inner_after.state,
             NodeState::Completed,
@@ -886,7 +892,11 @@ mod tests {
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();
-        let lp_node = tree.iter().find(|n| n.block_id.as_str() == "lp").unwrap().clone();
+        let lp_node = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "lp")
+            .unwrap()
+            .clone();
 
         execute_loop(&s, &registry, &inst, &lp_node, &loop_def, &tree)
             .await
@@ -949,7 +959,11 @@ mod tests {
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();
-        let lp_node = tree.iter().find(|n| n.block_id.as_str() == "lp").unwrap().clone();
+        let lp_node = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "lp")
+            .unwrap()
+            .clone();
 
         execute_loop(&s, &registry, &inst, &lp_node, &loop_def, &tree)
             .await

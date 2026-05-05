@@ -1,31 +1,33 @@
-# Sequences: Create, Publish, and Generate
+# Sequences: Build, Publish, Trigger, and Extend
 
-This guide is written for two readers:
+Sequences are Orch8's portable workflow format. A sequence is JSON: it names the workflow, versions it, and describes the blocks Orch8 should run. You publish that JSON once, then start instances manually, from triggers, from webhooks, from cron, or from another sequence.
 
-- Humans who need the fastest path from an idea to a deployed Orch8 sequence.
-- LLMs that need enough exact structure to generate valid sequence JSON.
+This document is optimized for fast adoption and for LLMs that need to generate valid sequences.
 
-Public product docs describe Orch8 sequences as JSON workflows with steps, delays, conditions, retries, rate limits, crash recovery, signals, A/B split routing, and human review. The canonical wire format is the Rust API contract in `orch8-types/src/sequence.rs` and `orch8-api/src/sequences.rs`. When examples differ, prefer the Rust contract.
+## Mental Model
 
-Sources cross-checked:
+Use these building blocks:
 
-- Public docs: https://www.orch8.io/
-- REST API: `orch8-api/src/sequences.rs`
-- Sequence schema and validation: `orch8-types/src/sequence.rs`
-- Duration JSON format: `orch8-types/src/lib.rs`
-- E2E examples: `tests/e2e/client.ts`, `loadgen/src/catalog/*.ts`
+| Concept | What it is | Example |
+|---|---|---|
+| Sequence | Versioned JSON workflow definition | `customer-onboarding` v3 |
+| Block | One unit of workflow structure | `step`, `router`, `parallel`, `try_catch` |
+| Step | Calls a handler | `send_email`, `llm_call`, `wasm://normalize` |
+| Handler | Built-in, worker, plugin, or integration | `http_request`, `order_charge`, `grpc://risk-score` |
+| Instance | One running execution of a sequence | onboarding for `user_123` |
+| Trigger | Named entry point that creates instances | `POST /triggers/signup/fire` |
+| Plugin | Packaged handler code | WASM module or gRPC sidecar |
 
-## Fast Start
+Choose the simplest execution path that works:
 
-A sequence is a versioned workflow definition. Publishing a sequence means sending a complete `SequenceDefinition` JSON document to:
+1. Built-in handler: for common actions such as `noop`, `log`, `sleep`, `http_request`, `llm_call`, `tool_call`, human review, state, events, and instance queries.
+2. External worker: for app-specific business logic in your service language.
+3. Plugin: for reusable packaged handlers that should be invoked as `wasm://...` or `grpc://...`.
+4. Trigger: for anything outside Orch8 that should start a sequence.
 
-```http
-POST /sequences
-Content-Type: application/json
-X-Tenant-Id: demo
-```
+## Create a Sequence
 
-Minimal valid sequence:
+A minimal sequence:
 
 ```json
 {
@@ -39,8 +41,10 @@ Minimal valid sequence:
     {
       "type": "step",
       "id": "greet",
-      "handler": "noop",
-      "params": {}
+      "handler": "log",
+      "params": {
+        "message": "Hello {{context.data.name}}"
+      }
     }
   ],
   "created_at": "2026-05-05T12:00:00Z"
@@ -56,7 +60,7 @@ curl -s -X POST "$ORCH8_URL/sequences" \
   -d @sequence.json
 ```
 
-Run it:
+Start one instance:
 
 ```bash
 curl -s -X POST "$ORCH8_URL/instances" \
@@ -66,49 +70,72 @@ curl -s -X POST "$ORCH8_URL/instances" \
     "sequence_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d001",
     "tenant_id": "demo",
     "namespace": "default",
-    "context": { "data": { "user_id": "user_123" } },
-    "idempotency_key": "hello-world:user_123:v1"
+    "context": {
+      "data": { "name": "Alice" }
+    },
+    "idempotency_key": "hello-world:alice:v1"
   }'
 ```
 
-## Generator Contract
+## JSON Contract for LLMs
 
-An LLM generating a sequence should emit a complete JSON object with these top-level fields:
+When generating a sequence, emit one complete JSON object.
 
-| Field | Required | Notes |
-|---|---:|---|
-| `id` | yes | UUID string. Generate a new ID for each published version. |
-| `tenant_id` | yes | Must match the tenant scope. If `X-Tenant-Id` is set, the API enforces or overwrites this to the scoped tenant. |
-| `namespace` | yes | Usually `default`. Use namespaces to separate app domains. |
-| `name` | yes | Stable logical name, e.g. `customer-onboarding`. |
-| `version` | yes | Integer. Increment when publishing a changed definition. |
-| `deprecated` | no | Boolean, default `false`. Deprecated versions are hidden from latest by-name lookup. |
-| `blocks` | yes | Non-empty array of block definitions. Block IDs must be unique across the whole sequence, including nested blocks. |
-| `interceptors` | no | Optional lifecycle interceptor definition. Omit unless intentionally using interceptors. |
-| `created_at` | yes | RFC 3339 timestamp string. |
+Required top-level fields:
 
-Rules that prevent most invalid generations:
+| Field | Rule |
+|---|---|
+| `id` | UUID string. Use a new ID for each published version. |
+| `tenant_id` | Tenant that owns this sequence. |
+| `namespace` | Usually `default`; use namespaces for app domains or environments. |
+| `name` | Stable workflow name, e.g. `invoice-collection`. |
+| `version` | Integer. Increment when workflow behavior changes. |
+| `deprecated` | Boolean. Use `false` for active versions. |
+| `blocks` | Non-empty array of blocks. Every block ID must be globally unique inside the sequence. |
+| `created_at` | RFC 3339 timestamp string. |
 
-- Use snake_case block types exactly: `step`, `parallel`, `race`, `loop`, `for_each`, `router`, `try_catch`, `sub_sequence`, `ab_split`, `cancellation_scope`.
-- Do not use compact marketing router shapes like `if`, `then`, `else`, or `while`; the API expects the Rust fields documented below. `branches` is valid only for `parallel` and `race`.
-- Give every block a unique `id`. Duplicate IDs return HTTP 400.
-- Durations are numbers. Integers are milliseconds. Non-integer numbers are accepted as seconds for backwards compatibility, but generators should prefer integer milliseconds.
-- Unknown `handler` names are accepted with warnings so external workers can handle them. Built-ins include `noop`, `log`, `sleep`, `fail`, `http_request`, `llm_call`, `tool_call`, `human_review`, `self_modify`, `emit_event`, `send_signal`, `query_instance`, `set_state`, `get_state`, `delete_state`, `transform`, `assert`, and `merge_state`.
-- Put business data under instance `context.data`, tenant/app configuration under `context.config`, and keep sequence `params` for static block configuration.
+Valid block types:
 
-## Block Reference
+```text
+step
+parallel
+race
+loop
+for_each
+router
+try_catch
+sub_sequence
+ab_split
+cancellation_scope
+```
+
+Generation rules:
+
+- Use only JSON. No comments, YAML, markdown, or pseudo-code.
+- Use snake_case fields exactly as shown in this guide.
+- Every block needs a unique `id`.
+- Use integer milliseconds for durations: `1000` means one second.
+- Put per-run data in instance `context.data`.
+- Put tenant/app configuration in instance `context.config`.
+- Put static handler settings in block `params`.
+- Use `router.routes[].condition` plus `router.routes[].blocks`; do not invent `if`, `then`, or `else`.
+- Use `parallel.branches` and `race.branches` as arrays of block arrays.
+- If a handler is not built in, make sure an external worker or plugin exists for it.
+
+## Blocks
 
 ### Step
 
-Runs one handler, either built-in or external worker.
+Runs one handler.
 
 ```json
 {
   "type": "step",
-  "id": "send_welcome",
+  "id": "send_welcome_email",
   "handler": "send_email",
   "params": {
-    "template": "welcome"
+    "template": "welcome",
+    "to": "{{context.data.email}}"
   },
   "retry": {
     "max_attempts": 3,
@@ -120,104 +147,113 @@ Runs one handler, either built-in or external worker.
 }
 ```
 
-Useful step fields:
+Common step fields:
 
-| Field | Notes |
+| Field | Use |
 |---|---|
-| `handler` | Required non-empty string. Built-in handler or external worker name. |
-| `params` | JSON passed to the handler. Defaults to `{}`. |
-| `delay` | Defers before the step runs. See scheduling below. |
-| `retry` | `max_attempts > 0`, `initial_backoff <= max_backoff`, `backoff_multiplier > 0`. |
-| `timeout` | Optional duration in milliseconds. |
-| `rate_limit_key` | Defers over-limit steps instead of dropping them. |
-| `send_window` | Restricts execution to local hours/days. |
-| `context_access` | Limits what context sections a handler can read. |
-| `cancellable` | Defaults to `true`; set `false` for cleanup/finalization work. |
-| `wait_for_input` | Pauses for human input via `human_input:{block_id}` signal. |
-| `queue_name` | Routes external work to a named worker queue. |
-| `deadline` | SLA wall-clock duration from step start. |
-| `on_deadline_breach` | Handler and params to invoke on SLA breach. |
-| `fallback_handler` | Handler used when the primary handler's circuit breaker is open. |
-| `cache_key` | Template-resolved key for cached step outputs. |
+| `handler` | Built-in, external worker name, plugin handler, or integration handler. |
+| `params` | Static JSON config passed to the handler. |
+| `retry` | Automatic retry/backoff for failures. |
+| `timeout` | Max runtime in milliseconds. |
+| `delay` | Durable wait before running the step. |
+| `rate_limit_key` | Throttle this step using a named rate limit. |
+| `send_window` | Run only during specific local hours/days. |
+| `wait_for_input` | Pause for human input. |
+| `queue_name` | Route external worker work to a named queue. |
+| `deadline` | SLA duration in milliseconds. |
+| `on_deadline_breach` | Handler to run when the SLA is breached. |
+| `fallback_handler` | Alternate handler when circuit breaker is open. |
+| `cache_key` | Cache step output by template-resolved key. |
 
 ### Parallel
 
-Runs branches concurrently and waits for all branches.
+Run independent branches and continue when all complete.
 
 ```json
 {
   "type": "parallel",
-  "id": "preflight",
+  "id": "order_preflight",
   "branches": [
     [
-      { "type": "step", "id": "validate", "handler": "order_validate", "params": {} }
+      { "type": "step", "id": "validate_order", "handler": "order_validate", "params": {} }
     ],
     [
-      { "type": "step", "id": "charge", "handler": "order_charge", "params": {} }
+      { "type": "step", "id": "charge_card", "handler": "order_charge", "params": {} }
+    ],
+    [
+      { "type": "step", "id": "reserve_inventory", "handler": "order_reserve", "params": {} }
     ]
   ]
 }
 ```
 
-`branches` must contain at least one branch. Each branch is an array of blocks.
+Use for independent work that can happen at the same time.
 
 ### Race
 
-Runs branches concurrently. Default semantics are `first_to_resolve`; optional `first_to_succeed` waits for a successful branch.
+Run competing branches and keep the first result.
 
 ```json
 {
   "type": "race",
-  "id": "fastest_provider",
+  "id": "fetch_from_fastest_provider",
   "semantics": "first_to_succeed",
   "branches": [
     [
-      { "type": "step", "id": "try_primary", "handler": "primary_api", "params": {} }
+      { "type": "step", "id": "fetch_primary", "handler": "primary_api", "params": {} }
     ],
     [
-      { "type": "step", "id": "try_backup", "handler": "backup_api", "params": {} }
+      { "type": "step", "id": "fetch_backup", "handler": "backup_api", "params": {} }
     ]
   ]
 }
 ```
 
+Use for provider failover, lowest-latency fetches, or redundant AI/tool calls.
+
 ### Router
 
-Evaluates routes in order and executes the first condition that matches. If none match, `default` runs when present.
+Choose the first matching route.
 
 ```json
 {
   "type": "router",
-  "id": "route_engagement",
+  "id": "route_by_plan",
   "routes": [
     {
-      "condition": "context.data.opened == true",
+      "condition": "context.data.plan == \"enterprise\"",
       "blocks": [
-        { "type": "step", "id": "send_followup", "handler": "send_email", "params": { "template": "followup" } }
+        { "type": "step", "id": "assign_csm", "handler": "assign_csm", "params": {} }
+      ]
+    },
+    {
+      "condition": "context.data.plan == \"trial\"",
+      "blocks": [
+        { "type": "step", "id": "send_trial_tips", "handler": "send_email", "params": { "template": "trial_tips" } }
       ]
     }
   ],
   "default": [
-    { "type": "step", "id": "send_reminder", "handler": "send_email", "params": { "template": "reminder" } }
+    { "type": "step", "id": "send_standard_tips", "handler": "send_email", "params": { "template": "standard_tips" } }
   ]
 }
 ```
 
-The router must have at least one route or a default. Route conditions must be non-empty.
+Use for segmentation, approvals, error paths, and business rules.
 
 ### TryCatch
 
-Runs `try_block`; on failure runs `catch_block`; always runs `finally_block` when present.
+Recover from failures.
 
 ```json
 {
   "type": "try_catch",
-  "id": "payment_failover",
+  "id": "charge_with_backup",
   "try_block": [
-    { "type": "step", "id": "charge_stripe", "handler": "stripe_charge", "params": {} }
+    { "type": "step", "id": "charge_primary", "handler": "stripe_charge", "params": {} }
   ],
   "catch_block": [
-    { "type": "step", "id": "charge_braintree", "handler": "braintree_charge", "params": {} }
+    { "type": "step", "id": "charge_backup", "handler": "braintree_charge", "params": {} }
   ],
   "finally_block": [
     { "type": "step", "id": "record_payment_attempt", "handler": "log", "params": { "event": "payment_attempted" } }
@@ -225,11 +261,11 @@ Runs `try_block`; on failure runs `catch_block`; always runs `finally_block` whe
 }
 ```
 
-`try_block` must be non-empty. `catch_block` may be empty.
+Use when a failure should not always fail the whole workflow.
 
 ### Loop
 
-Repeats `body` while `condition` is true, up to `max_iterations`.
+Repeat while a condition is true.
 
 ```json
 {
@@ -237,7 +273,6 @@ Repeats `body` while `condition` is true, up to `max_iterations`.
   "id": "agent_loop",
   "condition": "context.data.done != true",
   "max_iterations": 10,
-  "continue_on_error": false,
   "body": [
     { "type": "step", "id": "think", "handler": "llm_call", "params": { "provider": "openai", "model": "gpt-4o-mini" } },
     { "type": "step", "id": "act", "handler": "tool_call", "params": {} }
@@ -245,16 +280,16 @@ Repeats `body` while `condition` is true, up to `max_iterations`.
 }
 ```
 
-`condition` and `body` are required. `max_iterations` defaults to `1000` and must be greater than zero.
+Always set a practical `max_iterations` for agent loops.
 
 ### ForEach
 
-Iterates over a collection expression.
+Process each item in a collection.
 
 ```json
 {
   "type": "for_each",
-  "id": "process_items",
+  "id": "process_line_items",
   "collection": "context.data.items",
   "item_var": "item",
   "max_iterations": 500,
@@ -264,63 +299,64 @@ Iterates over a collection expression.
 }
 ```
 
-`collection`, `item_var`, and `body` must be non-empty.
+Use for batch processing, fan-out, enrichment, and per-record validation.
 
 ### SubSequence
 
-Starts a child instance by sequence name and waits for it to finish.
+Call another published sequence and wait for it.
 
 ```json
 {
   "type": "sub_sequence",
-  "id": "run_reusable_onboarding_stage",
-  "sequence_name": "onboarding-stage",
+  "id": "run_risk_review",
+  "sequence_name": "risk-review",
   "version": 2,
   "input": {
-    "user_id": "{{context.data.user_id}}"
+    "customer_id": "{{context.data.customer_id}}",
+    "amount_cents": "{{context.data.amount_cents}}"
   }
 }
 ```
 
-If `version` is omitted, Orch8 resolves the latest non-deprecated version by tenant, namespace, and name.
+Use for reusable workflow components. Omit `version` to call the latest non-deprecated version.
 
 ### ABSplit
 
-Deterministically routes each instance to one weighted variant.
+Send traffic to weighted variants.
 
 ```json
 {
   "type": "ab_split",
-  "id": "subject_test",
+  "id": "email_subject_test",
   "variants": [
     {
       "name": "control",
       "weight": 70,
       "blocks": [
-        { "type": "step", "id": "send_control", "handler": "send_email", "params": { "subject": "Welcome" } }
+        { "type": "step", "id": "send_control_subject", "handler": "send_email", "params": { "subject": "Welcome" } }
       ]
     },
     {
       "name": "variant_a",
       "weight": 30,
       "blocks": [
-        { "type": "step", "id": "send_variant_a", "handler": "send_email", "params": { "subject": "You're invited" } }
+        { "type": "step", "id": "send_variant_subject", "handler": "send_email", "params": { "subject": "Your workspace is ready" } }
       ]
     }
   ]
 }
 ```
 
-Requires at least two variants, unique non-empty variant names, and total weight greater than zero.
+Use for experiments where the chosen variant must remain stable for the instance.
 
 ### CancellationScope
 
-Protects critical child blocks from external cancel signals until they finish.
+Protect critical blocks from cancellation until they complete.
 
 ```json
 {
   "type": "cancellation_scope",
-  "id": "payment_commit",
+  "id": "commit_payment",
   "blocks": [
     { "type": "step", "id": "capture_payment", "handler": "capture_payment", "params": {} },
     { "type": "step", "id": "write_ledger", "handler": "write_ledger", "params": {} }
@@ -328,11 +364,11 @@ Protects critical child blocks from external cancel signals until they finish.
 }
 ```
 
-`blocks` must be non-empty.
+Use for cleanup, ledger writes, unlocks, and other consistency-sensitive work.
 
-## Scheduling Fields
+## Scheduling
 
-Use step `delay` for durable waits:
+Durable delay:
 
 ```json
 {
@@ -350,23 +386,12 @@ Use step `delay` for durable waits:
 }
 ```
 
-`delay` fields:
-
-| Field | Notes |
-|---|---|
-| `duration` | Required duration. Prefer integer milliseconds. |
-| `business_days_only` | Skips weekends and configured holidays when true. |
-| `jitter` | Optional duration. Scheduler adds random spread around the base delay. |
-| `holidays` | Array of `YYYY-MM-DD`; merged with `context.config.holidays`. |
-| `fire_at_local` | Local wall-clock timestamp like `2026-03-08T02:30:00`; converted to UTC using `timezone` or instance timezone. |
-| `timezone` | IANA timezone for `fire_at_local`. |
-
-Use step `send_window` to restrict execution windows:
+Send window:
 
 ```json
 {
   "type": "step",
-  "id": "send_business_hours",
+  "id": "send_during_business_hours",
   "handler": "send_email",
   "params": {},
   "send_window": {
@@ -377,128 +402,400 @@ Use step `send_window` to restrict execution windows:
 }
 ```
 
-Days are `0=Monday` through `6=Sunday`. `start_hour` and `end_hour` are `0..23` and must differ.
+Rules:
+
+- Durations are integer milliseconds.
+- `business_days_only` skips weekends and configured holidays.
+- `holidays` uses `YYYY-MM-DD` and is merged with `context.config.holidays`.
+- `send_window.days` uses `0=Monday` through `6=Sunday`.
+- `fire_at_local` can target a local wall-clock timestamp, e.g. `2026-03-08T02:30:00`.
 
 ## Human Review
 
-For a human approval step, use the `human_review` handler plus `wait_for_input`.
+Use `human_review` plus `wait_for_input`.
 
 ```json
 {
   "type": "step",
-  "id": "approval",
+  "id": "manager_approval",
   "handler": "human_review",
   "params": {
-    "instructions": "Approve or reject this request",
-    "reviewer": "ops"
+    "instructions": "Approve or reject this discount request",
+    "reviewer": "sales-manager"
   },
   "wait_for_input": {
-    "prompt": "Approve deployment?",
+    "prompt": "Approve discount?",
     "timeout": 3600000,
     "choices": [
       { "label": "Approve", "value": "approved" },
       { "label": "Reject", "value": "rejected" }
     ],
-    "store_as": "approval_result"
+    "store_as": "discount_decision"
   }
 }
 ```
 
-Validation rules:
+Then route on the decision:
 
-- `choices`, when present, must be non-empty.
-- Choice `value` strings must be unique.
-- `store_as`, when present, must be non-empty.
-- If `choices` is omitted, the engine uses a yes/no default.
-
-The engine waits for a signal named `human_input:{block_id}`. A simpler integration can also update context with `update_context` and route on the updated value.
-
-## Publishing Flow
-
-Recommended flow for generated sequences:
-
-1. Generate a complete sequence JSON document.
-2. Ensure every block ID is unique.
-3. Publish with `POST /sequences`.
-4. Store the returned `id`; it is the immutable sequence version ID.
-5. Create test instances with deterministic `idempotency_key` values.
-6. Observe instance state and block outputs.
-7. Promote by creating a new version with the same `tenant_id`, `namespace`, and `name`, a higher `version`, and a new `id`.
-8. Deprecate old versions only when new starts should stop using them.
-
-Useful endpoints:
-
-| Task | Endpoint |
-|---|---|
-| Create/publish sequence | `POST /sequences` |
-| List sequences | `GET /sequences?tenant_id=demo&namespace=default` |
-| Fetch by immutable ID | `GET /sequences/{id}` |
-| Fetch latest non-deprecated by name | `GET /sequences/by-name?tenant_id=demo&namespace=default&name=hello-world` |
-| Fetch exact version by name | `GET /sequences/by-name?tenant_id=demo&namespace=default&name=hello-world&version=2` |
-| List all versions | `GET /sequences/versions?tenant_id=demo&namespace=default&name=hello-world` |
-| Deprecate a version | `POST /sequences/{id}/deprecate` |
-| Delete inactive sequence | `DELETE /sequences/{id}` |
-| Migrate active instance | `POST /sequences/migrate-instance` |
-
-Deprecation:
-
-```bash
-curl -s -X POST "$ORCH8_URL/sequences/$SEQUENCE_ID/deprecate" \
-  -H "X-Tenant-Id: demo"
+```json
+{
+  "type": "router",
+  "id": "route_discount_decision",
+  "routes": [
+    {
+      "condition": "context.data.discount_decision == \"approved\"",
+      "blocks": [
+        { "type": "step", "id": "apply_discount", "handler": "apply_discount", "params": {} }
+      ]
+    }
+  ],
+  "default": [
+    { "type": "step", "id": "notify_rejected", "handler": "send_email", "params": { "template": "discount_rejected" } }
+  ]
+}
 ```
 
-Migration:
+Use human review for approvals, compliance gates, manual QA, escalations, and human-in-the-loop agent workflows.
+
+## Publish and Version
+
+Create version 1:
+
+```bash
+curl -s -X POST "$ORCH8_URL/sequences" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d @customer-onboarding.v1.json
+```
+
+Create version 2 by keeping the same `tenant_id`, `namespace`, and `name`, then changing:
+
+- `id`: new UUID
+- `version`: higher integer
+- `blocks`: updated workflow
+- `created_at`: new timestamp
+
+Find latest active version:
+
+```bash
+curl -s "$ORCH8_URL/sequences/by-name?tenant_id=acme&namespace=default&name=customer-onboarding" \
+  -H "X-Tenant-Id: acme"
+```
+
+Find a specific version:
+
+```bash
+curl -s "$ORCH8_URL/sequences/by-name?tenant_id=acme&namespace=default&name=customer-onboarding&version=2" \
+  -H "X-Tenant-Id: acme"
+```
+
+List all versions:
+
+```bash
+curl -s "$ORCH8_URL/sequences/versions?tenant_id=acme&namespace=default&name=customer-onboarding" \
+  -H "X-Tenant-Id: acme"
+```
+
+Deprecate an old version:
+
+```bash
+curl -s -X POST "$ORCH8_URL/sequences/$OLD_SEQUENCE_ID/deprecate" \
+  -H "X-Tenant-Id: acme"
+```
+
+Deprecation stops latest-by-name lookup from selecting that version. Existing instances keep their sequence binding.
+
+Migrate a non-terminal instance to a new sequence version:
 
 ```bash
 curl -s -X POST "$ORCH8_URL/sequences/migrate-instance" \
   -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: demo" \
+  -H "X-Tenant-Id: acme" \
   -d '{
     "instance_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d010",
     "target_sequence_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d020"
   }'
 ```
 
-Migration is tenant-isolated and only valid for non-terminal instances. Completed, failed, and cancelled instances should be treated as immutable history.
+## Use Triggers
 
-Deletion is intentionally conservative. A sequence cannot be deleted while active instances still reference it in `scheduled`, `running`, `paused`, or `waiting` states.
+Triggers are named entry points that create instances from a sequence name. The request body becomes the new instance's `context.data`.
 
-## Complete Example: Onboarding Drip
+Create an internal event trigger:
+
+```bash
+curl -s -X POST "$ORCH8_URL/triggers" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{
+    "slug": "signup-created",
+    "sequence_name": "customer-onboarding",
+    "tenant_id": "acme",
+    "namespace": "default",
+    "trigger_type": "event"
+  }'
+```
+
+Fire it from a trusted service:
+
+```bash
+curl -s -X POST "$ORCH8_URL/triggers/signup-created/fire" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{
+    "user_id": "user_123",
+    "email": "alice@example.com",
+    "plan": "trial"
+  }'
+```
+
+Response:
 
 ```json
 {
-  "id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d100",
+  "instance_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d300",
+  "trigger": "signup-created",
+  "sequence_name": "customer-onboarding"
+}
+```
+
+Create a public webhook trigger:
+
+```bash
+curl -s -X POST "$ORCH8_URL/triggers" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{
+    "slug": "stripe-payment-succeeded",
+    "sequence_name": "payment-postprocess",
+    "tenant_id": "acme",
+    "namespace": "default",
+    "trigger_type": "webhook",
+    "secret": "replace-with-long-random-secret"
+  }'
+```
+
+Receive third-party events at:
+
+```http
+POST /webhooks/stripe-payment-succeeded
+x-trigger-secret: replace-with-long-random-secret
+x-trigger-timestamp: 1777982400
+x-trigger-nonce: unique-random-id
+Content-Type: application/json
+```
+
+Webhook notes:
+
+- Public webhooks require `trigger_type: "webhook"`.
+- Public webhooks require a `secret`.
+- Public webhooks require replay protection headers: `x-trigger-timestamp` and `x-trigger-nonce`.
+- Body size is limited to 1 MB.
+- Use `/triggers/{slug}/fire` for trusted internal service calls.
+- Use `/webhooks/{slug}` for public inbound third-party calls.
+
+Trigger management:
+
+```bash
+curl -s "$ORCH8_URL/triggers?tenant_id=acme" -H "X-Tenant-Id: acme"
+curl -s "$ORCH8_URL/triggers/signup-created" -H "X-Tenant-Id: acme"
+curl -s -X DELETE "$ORCH8_URL/triggers/signup-created" -H "X-Tenant-Id: acme"
+```
+
+## Use External Workers
+
+If a step handler name is not built in and is not a plugin handler, Orch8 queues it for an external worker.
+
+Sequence step:
+
+```json
+{
+  "type": "step",
+  "id": "charge_customer",
+  "handler": "billing_charge",
+  "params": {
+    "currency": "USD"
+  },
+  "retry": {
+    "max_attempts": 3,
+    "initial_backoff": 1000,
+    "max_backoff": 30000
+  },
+  "queue_name": "billing"
+}
+```
+
+Use workers when:
+
+- The logic lives in your app service.
+- You need access to internal databases or private APIs.
+- You want to deploy handler code independently from Orch8.
+- The handler is app-specific and not worth packaging as a plugin.
+
+The worker polls tasks, executes the handler, then reports success or failure. See [WORKERS.md](WORKERS.md) for the protocol.
+
+## Build Plugins
+
+Plugins turn reusable handler code into named sequence handlers.
+
+Use a plugin when:
+
+- The handler should be reused across many sequences or tenants.
+- You want a packaged capability with a stable handler name.
+- You need low-latency in-process execution from a WASM module.
+- You want to run a dedicated sidecar service over gRPC/HTTP2.
+- You are integrating a vendor/tool as a durable workflow primitive.
+
+Prefer an external worker when the handler is ordinary application business logic. Prefer a plugin when it is reusable infrastructure.
+
+### WASM Plugin
+
+Register a WASM plugin:
+
+```bash
+curl -s -X POST "$ORCH8_URL/plugins" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{
+    "name": "normalize-email",
+    "plugin_type": "wasm",
+    "source": "/opt/orch8/plugins/normalize-email.wasm",
+    "tenant_id": "acme",
+    "description": "Normalize and validate email addresses"
+  }'
+```
+
+Use it in a sequence:
+
+```json
+{
+  "type": "step",
+  "id": "normalize_email",
+  "handler": "wasm://normalize-email",
+  "params": {
+    "field": "email"
+  }
+}
+```
+
+WASM plugin contract:
+
+- Input is JSON containing `instance_id`, `block_id`, `params`, `context.data`, `context.config`, and `attempt`.
+- Output must be JSON.
+- The module must export `alloc`, `dealloc`, and `handle`.
+- Keep WASM plugins deterministic, small, and fast.
+- Good fits: validation, normalization, scoring, transformations, policy checks.
+
+### gRPC Sidecar Plugin
+
+Register a gRPC sidecar plugin:
+
+```bash
+curl -s -X POST "$ORCH8_URL/plugins" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{
+    "name": "grpc://risk-score",
+    "plugin_type": "grpc",
+    "source": "risk-service.internal:9090/RiskService.Score",
+    "tenant_id": "acme",
+    "description": "Risk scoring sidecar"
+  }'
+```
+
+Use it in a sequence:
+
+```json
+{
+  "type": "step",
+  "id": "score_risk",
+  "handler": "grpc://risk-score",
+  "params": {
+    "model": "merchant-risk-v4"
+  },
+  "timeout": 10000,
+  "retry": {
+    "max_attempts": 2,
+    "initial_backoff": 1000,
+    "max_backoff": 5000
+  }
+}
+```
+
+Sidecar request body:
+
+```json
+{
+  "instance_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d400",
+  "block_id": "score_risk",
+  "params": {
+    "model": "merchant-risk-v4"
+  },
+  "context": {
+    "data": {},
+    "config": {}
+  },
+  "attempt": 1
+}
+```
+
+Sidecar response body:
+
+```json
+{
+  "risk_score": 0.82,
+  "decision": "review"
+}
+```
+
+Plugin management:
+
+```bash
+curl -s "$ORCH8_URL/plugins?tenant_id=acme" -H "X-Tenant-Id: acme"
+curl -s "$ORCH8_URL/plugins/normalize-email" -H "X-Tenant-Id: acme"
+curl -s -X PATCH "$ORCH8_URL/plugins/normalize-email" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-Id: acme" \
+  -d '{ "enabled": false }'
+```
+
+## Complete Use Case: SaaS Signup Onboarding
+
+Sequence:
+
+```json
+{
+  "id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d500",
   "tenant_id": "acme",
-  "namespace": "lifecycle",
+  "namespace": "default",
   "name": "customer-onboarding",
   "version": 1,
   "deprecated": false,
   "blocks": [
     {
       "type": "step",
-      "id": "send_welcome",
-      "handler": "send_email",
-      "params": {
-        "template": "welcome",
-        "to": "{{context.data.email}}"
-      },
-      "retry": {
-        "max_attempts": 3,
-        "initial_backoff": 1000,
-        "max_backoff": 60000,
-        "backoff_multiplier": 2.0
-      },
-      "timeout": 30000,
-      "rate_limit_key": "email:transactional",
-      "send_window": {
-        "start_hour": 9,
-        "end_hour": 17,
-        "days": [0, 1, 2, 3, 4]
-      }
+      "id": "normalize_email",
+      "handler": "wasm://normalize-email",
+      "params": { "field": "email" }
+    },
+    {
+      "type": "parallel",
+      "id": "initial_setup",
+      "branches": [
+        [
+          { "type": "step", "id": "create_workspace", "handler": "workspace_create", "params": {} }
+        ],
+        [
+          { "type": "step", "id": "send_welcome", "handler": "send_email", "params": { "template": "welcome", "to": "{{context.data.email}}" } }
+        ],
+        [
+          { "type": "step", "id": "score_account", "handler": "grpc://risk-score", "params": { "model": "signup-risk-v1" } }
+        ]
+      ]
     },
     {
       "type": "step",
-      "id": "wait_two_days",
+      "id": "wait_for_activation",
       "handler": "noop",
       "params": {},
       "delay": {
@@ -509,45 +806,23 @@ Deletion is intentionally conservative. A sequence cannot be deleted while activ
     },
     {
       "type": "router",
-      "id": "activation_branch",
+      "id": "activation_route",
       "routes": [
         {
           "condition": "context.data.activated == true",
           "blocks": [
-            {
-              "type": "step",
-              "id": "send_success_tips",
-              "handler": "send_email",
-              "params": {
-                "template": "success_tips",
-                "to": "{{context.data.email}}"
-              }
-            }
+            { "type": "step", "id": "send_success_tips", "handler": "send_email", "params": { "template": "success_tips" } }
+          ]
+        },
+        {
+          "condition": "context.data.plan == \"enterprise\"",
+          "blocks": [
+            { "type": "step", "id": "notify_sales", "handler": "send_slack", "params": { "channel": "#sales" } }
           ]
         }
       ],
       "default": [
-        {
-          "type": "step",
-          "id": "send_activation_nudge",
-          "handler": "send_email",
-          "params": {
-            "template": "activation_nudge",
-            "to": "{{context.data.email}}"
-          }
-        },
-        {
-          "type": "step",
-          "id": "notify_csm",
-          "handler": "ap://slack.send_channel_message",
-          "params": {
-            "auth": { "access_token": "credentials://slack-bot" },
-            "props": {
-              "channel": "#customer-success",
-              "text": "User {{context.data.user_id}} has not activated."
-            }
-          }
-        }
+        { "type": "step", "id": "send_activation_nudge", "handler": "send_email", "params": { "template": "activation_nudge" } }
       ]
     }
   ],
@@ -555,55 +830,84 @@ Deletion is intentionally conservative. A sequence cannot be deleted while activ
 }
 ```
 
-Create an instance:
+Trigger:
 
 ```json
 {
-  "sequence_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d100",
+  "slug": "signup-created",
+  "sequence_name": "customer-onboarding",
   "tenant_id": "acme",
-  "namespace": "lifecycle",
-  "timezone": "America/New_York",
-  "metadata": {
-    "campaign": "onboarding"
-  },
-  "context": {
-    "data": {
-      "user_id": "user_123",
-      "email": "alice@example.com",
-      "activated": false
-    },
-    "config": {
-      "holidays": ["2026-05-25"]
-    }
-  },
-  "concurrency_key": "user:user_123:onboarding",
-  "max_concurrency": 1,
-  "idempotency_key": "customer-onboarding:user_123:v1"
+  "namespace": "default",
+  "trigger_type": "event"
 }
 ```
 
-## LLM Prompt Template
+Event payload:
 
-Use this prompt when asking an LLM to generate a sequence:
+```json
+{
+  "user_id": "user_123",
+  "email": "alice@example.com",
+  "plan": "trial",
+  "activated": false
+}
+```
+
+## More Use Cases
+
+| Use case | Sequence shape |
+|---|---|
+| Order fulfillment | `parallel` validate/charge/reserve, then ship and notify |
+| Invoice collection | send invoice, delay, router on paid/unpaid, escalate |
+| AI agent with tools | `loop` with `llm_call`, `tool_call`, and stop condition |
+| Approval workflow | `human_review`, router on decision, audit final action |
+| Data enrichment | `for_each` records, call enrichment workers, merge results |
+| Provider failover | `race` providers or `try_catch` primary/backup |
+| Payment consistency | `cancellation_scope` around capture and ledger writes |
+| Marketing test | `ab_split` subject lines or onboarding paths |
+| Webhook automation | public trigger from Stripe/GitHub/Shopify payload |
+| Reusable compliance check | `sub_sequence` called from multiple workflows |
+
+## Pre-Publish Checklist
+
+Before publishing:
+
+- JSON parses cleanly.
+- `blocks` is not empty.
+- Every block `id` is unique.
+- Every step has a non-empty `handler`.
+- Every external handler has a worker, plugin, or integration ready.
+- Every plugin handler has a registered plugin.
+- Every trigger points to an existing sequence name and namespace.
+- Durations are integer milliseconds.
+- Retries have valid positive values.
+- Routers have at least one route or a default.
+- Loops and foreach blocks have non-empty bodies and bounded iterations.
+- New behavior uses a new sequence ID and higher version.
+
+## LLM Prompt
 
 ```text
-Generate an Orch8 SequenceDefinition JSON object.
+Generate an Orch8 sequence JSON object.
 
-Hard requirements:
-- Emit only JSON.
-- Use snake_case block types from this list: step, parallel, race, loop, for_each, router, try_catch, sub_sequence, ab_split, cancellation_scope.
-- Include top-level id, tenant_id, namespace, name, version, deprecated, blocks, created_at.
-- Every block must have a globally unique id.
+Output only JSON.
+
+Requirements:
+- Include id, tenant_id, namespace, name, version, deprecated, blocks, created_at.
+- Use only these block types: step, parallel, race, loop, for_each, router, try_catch, sub_sequence, ab_split, cancellation_scope.
+- Every block id must be unique across the whole sequence.
 - Durations must be integer milliseconds.
-- Router uses routes [{ condition, blocks }] and optional default.
-- TryCatch uses try_block, catch_block, and optional finally_block.
-- Parallel and Race use branches as arrays of block arrays.
-- Do not use if/then/else, while, block, or marketing shorthand.
-- Put dynamic user fields under context.data references such as {{context.data.email}}.
-- Use external handler names only when a worker will exist; otherwise use built-ins.
+- Router shape is { type, id, routes: [{ condition, blocks }], default }.
+- Parallel and race use branches as arrays of block arrays.
+- Try/catch uses try_block, catch_block, and optional finally_block.
+- Put runtime data references under context.data, such as {{context.data.email}}.
+- Use built-in handlers when possible.
+- Use external worker handler names for app-specific business logic.
+- Use wasm://name only when a WASM plugin will be registered.
+- Use grpc://name only when a gRPC plugin will be registered.
 
 Workflow intent:
-<describe business workflow here>
+<describe workflow>
 
 Tenant:
 <tenant_id>
@@ -611,19 +915,3 @@ Tenant:
 Namespace:
 <namespace>
 ```
-
-## Pre-Publish Checklist
-
-Before sending `POST /sequences`, verify:
-
-- JSON parses cleanly.
-- Top-level `blocks` is not empty.
-- No two blocks share an `id`, even across nested branches.
-- Every step has a non-empty `handler`.
-- Every retry policy has positive `max_attempts`, positive `backoff_multiplier`, and `initial_backoff <= max_backoff`.
-- Every router has at least one `routes` entry or a `default`.
-- Every loop and foreach has a non-empty body and non-zero `max_iterations`.
-- Every `ab_split` has at least two variants and total weight greater than zero.
-- Every `sub_sequence.sequence_name` refers to a published sequence in the same tenant and namespace.
-- Unknown handlers are intentional external workers or plugin/Activepieces handlers.
-- Version changes use a new sequence `id`; do not mutate an already-published definition in place.

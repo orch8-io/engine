@@ -110,8 +110,8 @@ pub(super) async fn upsert_rate_limit(
         ",
     )
     .bind(limit.id)
-    .bind(&limit.tenant_id.as_str())
-    .bind(&limit.resource_key.as_str())
+    .bind(limit.tenant_id.as_str())
+    .bind(limit.resource_key.as_str())
     .bind(limit.max_count)
     .bind(limit.window_seconds)
     .bind(limit.current_count)

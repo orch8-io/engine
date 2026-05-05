@@ -29,7 +29,7 @@ pub(super) async fn upsert(
             cooldown_secs = EXCLUDED.cooldown_secs,
             opened_at = EXCLUDED.opened_at",
     )
-    .bind(&state.tenant_id.as_str())
+    .bind(state.tenant_id.as_str())
     .bind(&state.handler)
     .bind(state.state.to_string())
     .bind(i64::from(state.failure_count))

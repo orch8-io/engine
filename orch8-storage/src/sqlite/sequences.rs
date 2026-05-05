@@ -18,8 +18,8 @@ pub(super) async fn create(
         "INSERT INTO sequences (id, tenant_id, namespace, name, version, deprecated, blocks, interceptors, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)"
     )
     .bind(seq.id.into_uuid().to_string())
-    .bind(&seq.tenant_id.as_str())
-    .bind(&seq.namespace.as_str())
+    .bind(seq.tenant_id.as_str())
+    .bind(seq.namespace.as_str())
     .bind(&seq.name)
     .bind(seq.version)
     .bind(seq.deprecated as i32)

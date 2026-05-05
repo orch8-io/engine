@@ -163,11 +163,7 @@ fn find_block_nested_in_for_each_and_router() {
         default: Some(vec![mk_step("default-child")]),
     }));
     assert!(find_block(std::slice::from_ref(&fe), &BlockId::new("fe-child")).is_some());
-    assert!(find_block(
-        std::slice::from_ref(&router),
-        &BlockId::new("route-child")
-    )
-    .is_some());
+    assert!(find_block(std::slice::from_ref(&router), &BlockId::new("route-child")).is_some());
     assert!(find_block(&[router], &BlockId::new("default-child")).is_some());
 }
 
