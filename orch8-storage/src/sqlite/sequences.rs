@@ -79,32 +79,21 @@ pub(super) async fn list_all(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
-    // Dynamic SQL assembly: bindings are positional so a string placeholder is
-    // safe and keeps the query plan stable.
-    let mut sql = String::from("SELECT * FROM sequences");
-    let mut conds: Vec<&'static str> = Vec::new();
-    if tenant_id.is_some() {
-        conds.push("tenant_id = ?");
-    }
-    if namespace.is_some() {
-        conds.push("namespace = ?");
-    }
-    if !conds.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&conds.join(" AND "));
-    }
-    sql.push_str(" ORDER BY tenant_id, namespace, name, version DESC LIMIT ? OFFSET ?");
-
-    let mut q = sqlx::query(&sql);
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM sequences WHERE 1=1");
     if let Some(t) = tenant_id {
-        q = q.bind(&t.0);
+        qb.push(" AND tenant_id = ");
+        qb.push_bind(&t.0);
     }
     if let Some(n) = namespace {
-        q = q.bind(&n.0);
+        qb.push(" AND namespace = ");
+        qb.push_bind(&n.0);
     }
-    q = q.bind(limit as i64).bind(offset as i64);
+    qb.push(" ORDER BY tenant_id, namespace, name, version DESC LIMIT ");
+    qb.push_bind(limit as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset as i64);
 
-    let rows = q.fetch_all(&storage.pool).await?;
+    let rows = qb.build().fetch_all(&storage.pool).await?;
     rows.iter().map(row_to_sequence).collect()
 }
 
