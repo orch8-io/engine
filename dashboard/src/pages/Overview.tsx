@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { useWindowedStats } from "../hooks/useWindowedStats";
 import { useClock } from "../hooks/useClock";
 import {
@@ -97,12 +98,14 @@ const PAGE_GLOSSARY = [
 ];
 
 export default function Overview() {
+  usePageTitle("Overview");
   const navigate = useNavigate();
+  const clock = useClock();
 
-  const statsFetcher = useCallback(() => getWorkerTaskStats(), []);
-  const breakersFetcher = useCallback(() => listCircuitBreakers(), []);
-  const nodesFetcher = useCallback(() => listClusterNodes(), []);
-  const dlqFetcher = useCallback(() => listDlq({ limit: "50" }), []);
+  const statsFetcher = useCallback((signal?: AbortSignal) => getWorkerTaskStats(signal), []);
+  const breakersFetcher = useCallback((signal?: AbortSignal) => listCircuitBreakers(signal), []);
+  const nodesFetcher = useCallback((signal?: AbortSignal) => listClusterNodes(signal), []);
+  const dlqFetcher = useCallback((signal?: AbortSignal) => listDlq({ limit: "50" }, signal), []);
 
   const stats = usePolling<WorkerTaskStats>(statsFetcher);
   const breakers = usePolling<CircuitBreakerState[]>(breakersFetcher, 2000);
@@ -219,7 +222,7 @@ export default function Overview() {
             drift out of nominal, the reason appears inline — no separate alert panel needed.
           </>
         }
-        meta={<>{useClock().toLocaleTimeString()} · {activeNodes.length}/{(nodes.data ?? []).length} nodes</>}
+        meta={<>{clock.toLocaleTimeString()} · {activeNodes.length}/{(nodes.data ?? []).length} nodes</>}
       >
         <MetricRow cols={3}>
           <Metric

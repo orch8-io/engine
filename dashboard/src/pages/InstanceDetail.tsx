@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { usePageTitle } from "../hooks/usePageTitle";
 import {
   getInstance,
   getExecutionTree,
@@ -316,6 +317,7 @@ function LoadingSkeleton() {
 }
 
 export default function InstanceDetail() {
+  usePageTitle("Execution");
   const { id } = useParams<{ id: string }>();
   const [instance, setInstance] = useState<TaskInstance | null>(null);
   const [tree, setTree] = useState<ExecutionNode[]>([]);
@@ -337,13 +339,15 @@ export default function InstanceDetail() {
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
-      const [inst, t, o, failed] = await Promise.all([
-        getInstance(id),
+      const inst = await getInstance(id);
+      const [t, o, failed] = await Promise.all([
         getExecutionTree(id),
         getInstanceOutputs(id).catch(() => [] as BlockOutput[]),
         // The tasks endpoint doesn't support filtering by instance_id, so we
-        // fetch a batch of failed tasks and filter client-side.
-        listWorkerTasks({ state: "failed", limit: "50" }).catch(() => [] as WorkerTask[]),
+        // fetch a batch of failed tasks for the same tenant and filter client-side.
+        listWorkerTasks({ state: "failed", tenant_id: inst.tenant_id, limit: "200" }).catch(
+          () => [] as WorkerTask[],
+        ),
       ]);
       setInstance(inst);
       setTree(t);
@@ -371,7 +375,10 @@ export default function InstanceDetail() {
     if (["completed", "failed", "cancelled"].includes(instance.state)) return;
 
     const dispose = streamInstance(id, (ev) => {
-      if (ev.kind === "state" || ev.kind === "output" || ev.kind === "done") {
+      if (ev.kind === "error") {
+        // SSE stream errors are usually transient; keep polling via refresh.
+        refresh();
+      } else if (ev.kind === "state" || ev.kind === "output" || ev.kind === "done") {
         refresh();
       }
     });
@@ -617,6 +624,31 @@ export default function InstanceDetail() {
                       : "—"}
                   </span>
                 </Stat>
+                {instance.session_id && (
+                  <Stat label="Session" hint="Parent session grouping" mono>
+                    {instance.session_id.slice(0, 8)}…
+                  </Stat>
+                )}
+                {instance.parent_instance_id && (
+                  <Stat label="Parent" hint="Parent execution (sub-sequence)">
+                    <Link
+                      to={`/instances/${instance.parent_instance_id}`}
+                      className="font-mono text-[12px] text-signal hover:underline"
+                    >
+                      {instance.parent_instance_id.slice(0, 8)}…
+                    </Link>
+                  </Stat>
+                )}
+                {instance.concurrency_key && (
+                  <Stat label="Concurrency" hint="Key limiting parallel runs" mono>
+                    {instance.concurrency_key}
+                  </Stat>
+                )}
+                {instance.idempotency_key && (
+                  <Stat label="Idempotency" hint="Deduplication key" mono>
+                    {instance.idempotency_key}
+                  </Stat>
+                )}
               </div>
             </Section>
           )}

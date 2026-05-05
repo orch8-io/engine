@@ -20,7 +20,11 @@ export function clearApiKey() {
   localStorage.removeItem("orch8_api_key");
 }
 
-async function request<T>(path: string, params?: Record<string, string | undefined>): Promise<T> {
+async function request<T>(
+  path: string,
+  params?: Record<string, string | undefined>,
+  signal?: AbortSignal,
+): Promise<T> {
   const url = new URL(path, getApiUrl());
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -32,7 +36,7 @@ async function request<T>(path: string, params?: Record<string, string | undefin
   const apiKey = getApiKey();
   if (apiKey) headers["X-API-Key"] = apiKey;
 
-  const res = await fetch(url.toString(), { headers });
+  const res = await fetch(url.toString(), { headers, signal });
 
   if (res.status === 401) {
     throw new AuthError();
@@ -61,6 +65,9 @@ export class ApiRequestError extends Error {
   }
 }
 
+export type NodeStatus = "active" | "draining" | "stopped";
+export type Priority = 0 | 1 | 2 | 3;
+
 export interface WorkerTask {
   id: string;
   instance_id: string;
@@ -82,6 +89,8 @@ export interface WorkerTask {
   created_at: string;
 }
 
+export type WorkerTaskState = WorkerTask["state"];
+
 export interface WorkerTaskStats {
   by_state: Record<string, number>;
   by_handler: Record<string, Record<string, number>>;
@@ -89,6 +98,7 @@ export interface WorkerTaskStats {
 }
 
 export interface ListTasksParams {
+  tenant_id?: string;
   state?: string;
   handler_name?: string;
   worker_id?: string;
@@ -97,16 +107,19 @@ export interface ListTasksParams {
   offset?: string;
 }
 
-export function listWorkerTasks(params?: ListTasksParams): Promise<WorkerTask[]> {
-  return request("/workers/tasks", params as Record<string, string | undefined>);
+export function listWorkerTasks(
+  params?: ListTasksParams,
+  signal?: AbortSignal,
+): Promise<WorkerTask[]> {
+  return request("/workers/tasks", params as Record<string, string | undefined>, signal);
 }
 
-export function getWorkerTaskStats(): Promise<WorkerTaskStats> {
-  return request("/workers/tasks/stats");
+export function getWorkerTaskStats(signal?: AbortSignal): Promise<WorkerTaskStats> {
+  return request("/workers/tasks/stats", undefined, signal);
 }
 
-export function checkHealth(): Promise<void> {
-  return request("/health/live");
+export function checkHealth(signal?: AbortSignal): Promise<void> {
+  return request("/health/live", undefined, signal);
 }
 
 // ─── Instances ───────────────────────────────────────────────────────────────
@@ -119,6 +132,8 @@ export type InstanceState =
   | "completed"
   | "failed"
   | "cancelled";
+
+export const TERMINAL_STATES: InstanceState[] = ["completed", "failed", "cancelled"];
 
 export type NodeState =
   | "pending"
@@ -148,7 +163,7 @@ export interface TaskInstance {
   namespace: string;
   state: InstanceState;
   next_fire_at: string | null;
-  priority: number;
+  priority: Priority;
   timezone: string;
   metadata: Record<string, unknown>;
   context: Record<string, unknown>;
@@ -189,20 +204,23 @@ export interface ListInstancesParams {
   offset?: string;
 }
 
-export function listInstances(params?: ListInstancesParams): Promise<TaskInstance[]> {
-  return request("/instances", params as Record<string, string | undefined>);
+export function listInstances(
+  params?: ListInstancesParams,
+  signal?: AbortSignal,
+): Promise<TaskInstance[]> {
+  return request("/instances", params as Record<string, string | undefined>, signal);
 }
 
-export function getInstance(id: string): Promise<TaskInstance> {
-  return request(`/instances/${encodeURIComponent(id)}`);
+export function getInstance(id: string, signal?: AbortSignal): Promise<TaskInstance> {
+  return request(`/instances/${encodeURIComponent(id)}`, undefined, signal);
 }
 
-export function getExecutionTree(id: string): Promise<ExecutionNode[]> {
-  return request(`/instances/${encodeURIComponent(id)}/tree`);
+export function getExecutionTree(id: string, signal?: AbortSignal): Promise<ExecutionNode[]> {
+  return request(`/instances/${encodeURIComponent(id)}/tree`, undefined, signal);
 }
 
-export function getInstanceOutputs(id: string): Promise<BlockOutput[]> {
-  return request(`/instances/${encodeURIComponent(id)}/outputs`);
+export function getInstanceOutputs(id: string, signal?: AbortSignal): Promise<BlockOutput[]> {
+  return request(`/instances/${encodeURIComponent(id)}/outputs`, undefined, signal);
 }
 
 export type SignalType = "pause" | "resume" | "cancel" | "update_context" | { Custom: string };
@@ -211,15 +229,22 @@ export async function sendSignal(
   instanceId: string,
   signal_type: SignalType,
   payload: unknown = {},
+  signal?: AbortSignal,
 ): Promise<{ signal_id: string }> {
-  return mutate(`/instances/${encodeURIComponent(instanceId)}/signals`, "POST", {
-    signal_type,
-    payload,
-  });
+  return mutate(
+    `/instances/${encodeURIComponent(instanceId)}/signals`,
+    "POST",
+    { signal_type, payload },
+    undefined,
+    signal,
+  );
 }
 
-export async function retryInstance(id: string): Promise<{ id: string; state: string }> {
-  return mutate(`/instances/${encodeURIComponent(id)}/retry`, "POST");
+export async function retryInstance(
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ id: string; state: string }> {
+  return mutate(`/instances/${encodeURIComponent(id)}/retry`, "POST", undefined, undefined, signal);
 }
 
 // ─── Sequences ───────────────────────────────────────────────────────────────
@@ -236,16 +261,15 @@ export interface SequenceDefinition {
   created_at: string;
 }
 
-export function getSequence(id: string): Promise<SequenceDefinition> {
-  return request(`/sequences/${encodeURIComponent(id)}`);
+export function getSequence(id: string, signal?: AbortSignal): Promise<SequenceDefinition> {
+  return request(`/sequences/${encodeURIComponent(id)}`, undefined, signal);
 }
 
-export function listSequenceVersions(params: {
-  tenant_id: string;
-  namespace: string;
-  name: string;
-}): Promise<SequenceDefinition[]> {
-  return request("/sequences/versions", params);
+export function listSequenceVersions(
+  params: { tenant_id: string; namespace: string; name: string },
+  signal?: AbortSignal,
+): Promise<SequenceDefinition[]> {
+  return request("/sequences/versions", params, signal);
 }
 
 export interface ListSequencesParams {
@@ -257,8 +281,9 @@ export interface ListSequencesParams {
 
 export function listSequences(
   params?: ListSequencesParams,
+  signal?: AbortSignal,
 ): Promise<SequenceDefinition[]> {
-  return request("/sequences", params as Record<string, string | undefined>);
+  return request("/sequences", params as Record<string, string | undefined>, signal);
 }
 
 // ─── Operations: DLQ / circuit breakers / cluster ────────────────────────────
@@ -270,13 +295,17 @@ export interface ListDlqParams {
   limit?: string;
 }
 
-export function listDlq(params?: ListDlqParams): Promise<TaskInstance[]> {
-  return request("/instances/dlq", params as Record<string, string | undefined>);
+export function listDlq(
+  params?: ListDlqParams,
+  signal?: AbortSignal,
+): Promise<TaskInstance[]> {
+  return request("/instances/dlq", params as Record<string, string | undefined>, signal);
 }
 
 export type BreakerState = "closed" | "open" | "half_open";
 
 export interface CircuitBreakerState {
+  tenant_id: string;
   handler: string;
   state: BreakerState;
   failure_count: number;
@@ -286,30 +315,46 @@ export interface CircuitBreakerState {
   [k: string]: unknown;
 }
 
-export function listCircuitBreakers(): Promise<CircuitBreakerState[]> {
-  return request("/circuit-breakers");
+export function listCircuitBreakers(signal?: AbortSignal): Promise<CircuitBreakerState[]> {
+  return request("/circuit-breakers", undefined, signal);
 }
 
-export function resetCircuitBreaker(handler: string): Promise<null> {
-  return mutate(`/circuit-breakers/${encodeURIComponent(handler)}/reset`, "POST");
+export function resetCircuitBreaker(
+  tenantId: string,
+  handler: string,
+  signal?: AbortSignal,
+): Promise<null> {
+  return mutate(
+    `/tenants/${encodeURIComponent(tenantId)}/circuit-breakers/${encodeURIComponent(handler)}/reset`,
+    "POST",
+    undefined,
+    undefined,
+    signal,
+  );
 }
 
 export interface ClusterNode {
   id: string;
   name: string;
-  status: string;
+  status: NodeStatus;
   registered_at: string;
   last_heartbeat_at: string;
   drain: boolean;
   [k: string]: unknown;
 }
 
-export function listClusterNodes(): Promise<ClusterNode[]> {
-  return request("/cluster/nodes");
+export function listClusterNodes(signal?: AbortSignal): Promise<ClusterNode[]> {
+  return request("/cluster/nodes", undefined, signal);
 }
 
-export function drainClusterNode(id: string): Promise<null> {
-  return mutate(`/cluster/nodes/${encodeURIComponent(id)}/drain`, "POST");
+export function drainClusterNode(id: string, signal?: AbortSignal): Promise<null> {
+  return mutate(
+    `/cluster/nodes/${encodeURIComponent(id)}/drain`,
+    "POST",
+    undefined,
+    undefined,
+    signal,
+  );
 }
 
 // ─── Cron schedules ──────────────────────────────────────────────────────────
@@ -346,29 +391,34 @@ export interface UpdateCronRequest {
   metadata?: Record<string, unknown>;
 }
 
-export function listCronSchedules(tenant_id?: string): Promise<CronSchedule[]> {
-  return request("/cron", { tenant_id });
+export function listCronSchedules(
+  tenant_id?: string,
+  signal?: AbortSignal,
+): Promise<CronSchedule[]> {
+  return request("/cron", { tenant_id }, signal);
 }
 
-export function getCronSchedule(id: string): Promise<CronSchedule> {
-  return request(`/cron/${encodeURIComponent(id)}`);
+export function getCronSchedule(id: string, signal?: AbortSignal): Promise<CronSchedule> {
+  return request(`/cron/${encodeURIComponent(id)}`, undefined, signal);
 }
 
 export function createCronSchedule(
   body: CreateCronRequest,
+  signal?: AbortSignal,
 ): Promise<{ id: string; next_fire_at: string | null }> {
-  return mutate("/cron", "POST", body);
+  return mutate("/cron", "POST", body, undefined, signal);
 }
 
 export function updateCronSchedule(
   id: string,
   body: UpdateCronRequest,
+  signal?: AbortSignal,
 ): Promise<CronSchedule> {
-  return mutate(`/cron/${encodeURIComponent(id)}`, "PUT", body);
+  return mutate(`/cron/${encodeURIComponent(id)}`, "PUT", body, undefined, signal);
 }
 
-export function deleteCronSchedule(id: string): Promise<null> {
-  return mutate(`/cron/${encodeURIComponent(id)}`, "DELETE");
+export function deleteCronSchedule(id: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/cron/${encodeURIComponent(id)}`, "DELETE", undefined, undefined, signal);
 }
 
 // ─── Triggers ────────────────────────────────────────────────────────────────
@@ -400,32 +450,40 @@ export interface CreateTriggerRequest {
   config?: Record<string, unknown>;
 }
 
-export function listTriggers(tenant_id?: string): Promise<TriggerDef[]> {
-  return request("/triggers", { tenant_id });
+export function listTriggers(
+  tenant_id?: string,
+  signal?: AbortSignal,
+): Promise<TriggerDef[]> {
+  return request("/triggers", { tenant_id }, signal);
 }
 
-export function getTrigger(slug: string): Promise<TriggerDef> {
-  return request(`/triggers/${encodeURIComponent(slug)}`);
+export function getTrigger(slug: string, signal?: AbortSignal): Promise<TriggerDef> {
+  return request(`/triggers/${encodeURIComponent(slug)}`, undefined, signal);
 }
 
-export function createTrigger(body: CreateTriggerRequest): Promise<TriggerDef> {
-  return mutate("/triggers", "POST", body);
+export function createTrigger(
+  body: CreateTriggerRequest,
+  signal?: AbortSignal,
+): Promise<TriggerDef> {
+  return mutate("/triggers", "POST", body, undefined, signal);
 }
 
-export function deleteTrigger(slug: string): Promise<null> {
-  return mutate(`/triggers/${encodeURIComponent(slug)}`, "DELETE");
+export function deleteTrigger(slug: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/triggers/${encodeURIComponent(slug)}`, "DELETE", undefined, undefined, signal);
 }
 
 export function fireTrigger(
   slug: string,
   payload: Record<string, unknown> = {},
   secret?: string,
+  signal?: AbortSignal,
 ): Promise<{ instance_id: string; trigger: string; sequence_name: string }> {
   return mutate(
     `/triggers/${encodeURIComponent(slug)}/fire`,
     "POST",
     payload,
     secret ? { "x-trigger-secret": secret } : undefined,
+    signal,
   );
 }
 
@@ -467,16 +525,18 @@ export interface ListApprovalsParams {
 
 export function listApprovals(
   params?: ListApprovalsParams,
+  signal?: AbortSignal,
 ): Promise<ApprovalsResponse> {
-  return request("/approvals", params as Record<string, string | undefined>);
+  return request("/approvals", params as Record<string, string | undefined>, signal);
 }
 
 export function sendHumanInputSignal(
   instanceId: string,
   blockId: string,
   value: string,
+  signal?: AbortSignal,
 ): Promise<{ signal_id: string }> {
-  return sendSignal(instanceId, { Custom: `human_input:${blockId}` }, { value });
+  return sendSignal(instanceId, { Custom: `human_input:${blockId}` }, { value }, signal);
 }
 
 // ─── Mutations (non-GET) ─────────────────────────────────────────────────────
@@ -486,6 +546,7 @@ async function mutate<T>(
   method: string,
   body?: unknown,
   extraHeaders?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const url = new URL(path, getApiUrl());
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -497,6 +558,7 @@ async function mutate<T>(
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
 
   if (res.status === 401) throw new AuthError();
@@ -506,13 +568,308 @@ async function mutate<T>(
   return (text ? JSON.parse(text) : null) as T;
 }
 
+// ─── Sessions ────────────────────────────────────────────────────────────────
+
+export type SessionState = "active" | "paused" | "completed" | "expired";
+
+export interface Session {
+  id: string;
+  tenant_id: string;
+  session_key: string;
+  data: Record<string, unknown>;
+  state: SessionState;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+}
+
+export interface CreateSessionRequest {
+  tenant_id: string;
+  session_key: string;
+  data?: Record<string, unknown>;
+}
+
+export interface UpdateSessionDataRequest {
+  data: Record<string, unknown>;
+}
+
+export interface UpdateSessionStateRequest {
+  state: SessionState;
+}
+
+export function listSessions(signal?: AbortSignal): Promise<Session[]> {
+  return request("/sessions", undefined, signal);
+}
+
+export function getSession(id: string, signal?: AbortSignal): Promise<Session> {
+  return request(`/sessions/${encodeURIComponent(id)}`, undefined, signal);
+}
+
+export function createSession(body: CreateSessionRequest, signal?: AbortSignal): Promise<Session> {
+  return mutate("/sessions", "POST", body, undefined, signal);
+}
+
+export function updateSessionData(
+  id: string,
+  body: UpdateSessionDataRequest,
+  signal?: AbortSignal,
+): Promise<Session> {
+  return mutate(`/sessions/${encodeURIComponent(id)}/data`, "PATCH", body, undefined, signal);
+}
+
+export function updateSessionState(
+  id: string,
+  body: UpdateSessionStateRequest,
+  signal?: AbortSignal,
+): Promise<Session> {
+  return mutate(`/sessions/${encodeURIComponent(id)}/state`, "PATCH", body, undefined, signal);
+}
+
+// ─── Plugins ─────────────────────────────────────────────────────────────────
+
+export type PluginType = "wasm" | "grpc";
+
+export interface PluginDef {
+  name: string;
+  plugin_type: PluginType;
+  source: string;
+  tenant_id: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreatePluginRequest {
+  name: string;
+  plugin_type: PluginType;
+  source: string;
+  tenant_id?: string;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+  description?: string;
+}
+
+export interface UpdatePluginRequest {
+  source?: string;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+  description?: string;
+}
+
+export function listPlugins(signal?: AbortSignal): Promise<PluginDef[]> {
+  return request("/plugins", undefined, signal);
+}
+
+export function getPlugin(name: string, signal?: AbortSignal): Promise<PluginDef> {
+  return request(`/plugins/${encodeURIComponent(name)}`, undefined, signal);
+}
+
+export function createPlugin(body: CreatePluginRequest, signal?: AbortSignal): Promise<PluginDef> {
+  return mutate("/plugins", "POST", body, undefined, signal);
+}
+
+export function updatePlugin(
+  name: string,
+  body: UpdatePluginRequest,
+  signal?: AbortSignal,
+): Promise<PluginDef> {
+  return mutate(`/plugins/${encodeURIComponent(name)}`, "PATCH", body, undefined, signal);
+}
+
+export function deletePlugin(name: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/plugins/${encodeURIComponent(name)}`, "DELETE", undefined, undefined, signal);
+}
+
+// ─── Credentials ─────────────────────────────────────────────────────────────
+
+export type CredentialKind = "api_key" | "oauth2" | "basic";
+
+export interface CredentialDef {
+  id: string;
+  tenant_id: string;
+  name: string;
+  kind: CredentialKind;
+  value: string;
+  expires_at: string | null;
+  refresh_url: string | null;
+  enabled: boolean;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateCredentialRequest {
+  id: string;
+  tenant_id?: string;
+  name: string;
+  kind?: CredentialKind;
+  value: string;
+  expires_at?: string;
+  refresh_url?: string;
+  enabled?: boolean;
+  description?: string;
+}
+
+export interface UpdateCredentialRequest {
+  name?: string;
+  kind?: CredentialKind;
+  value?: string;
+  expires_at?: string | null;
+  refresh_url?: string | null;
+  enabled?: boolean;
+  description?: string | null;
+}
+
+export function listCredentials(signal?: AbortSignal): Promise<CredentialDef[]> {
+  return request("/credentials", undefined, signal);
+}
+
+export function getCredential(id: string, signal?: AbortSignal): Promise<CredentialDef> {
+  return request(`/credentials/${encodeURIComponent(id)}`, undefined, signal);
+}
+
+export function createCredential(
+  body: CreateCredentialRequest,
+  signal?: AbortSignal,
+): Promise<CredentialDef> {
+  return mutate("/credentials", "POST", body, undefined, signal);
+}
+
+export function updateCredential(
+  id: string,
+  body: UpdateCredentialRequest,
+  signal?: AbortSignal,
+): Promise<CredentialDef> {
+  return mutate(`/credentials/${encodeURIComponent(id)}`, "PATCH", body, undefined, signal);
+}
+
+export function deleteCredential(id: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/credentials/${encodeURIComponent(id)}`, "DELETE", undefined, undefined, signal);
+}
+
+// ─── Resource Pools ──────────────────────────────────────────────────────────
+
+export type RotationStrategy = "round_robin" | "weighted" | "random";
+
+export interface ResourcePool {
+  id: string;
+  tenant_id: string;
+  name: string;
+  strategy: RotationStrategy;
+  round_robin_index: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PoolResource {
+  id: string;
+  pool_id: string;
+  resource_key: string;
+  name: string;
+  weight: number;
+  enabled: boolean;
+  daily_cap: number;
+  daily_usage: number;
+  daily_usage_date: string | null;
+  warmup_start: string | null;
+  warmup_days: number;
+  warmup_start_cap: number;
+  created_at: string;
+}
+
+export interface CreatePoolRequest {
+  tenant_id: string;
+  name: string;
+  strategy?: RotationStrategy;
+}
+
+export interface AddResourceRequest {
+  resource_key: string;
+  name: string;
+  weight?: number;
+  enabled?: boolean;
+  daily_cap?: number;
+  warmup_start?: string;
+  warmup_days?: number;
+  warmup_start_cap?: number;
+}
+
+export interface UpdateResourceRequest {
+  name?: string;
+  weight?: number;
+  enabled?: boolean;
+  daily_cap?: number;
+  warmup_start?: string;
+  warmup_days?: number;
+  warmup_start_cap?: number;
+}
+
+export function listPools(signal?: AbortSignal): Promise<ResourcePool[]> {
+  return request("/pools", undefined, signal);
+}
+
+export function getPool(id: string, signal?: AbortSignal): Promise<ResourcePool> {
+  return request(`/pools/${encodeURIComponent(id)}`, undefined, signal);
+}
+
+export function createPool(body: CreatePoolRequest, signal?: AbortSignal): Promise<ResourcePool> {
+  return mutate("/pools", "POST", body, undefined, signal);
+}
+
+export function deletePool(id: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/pools/${encodeURIComponent(id)}`, "DELETE", undefined, undefined, signal);
+}
+
+export function listPoolResources(id: string, signal?: AbortSignal): Promise<PoolResource[]> {
+  return request(`/pools/${encodeURIComponent(id)}/resources`, undefined, signal);
+}
+
+export function addPoolResource(
+  poolId: string,
+  body: AddResourceRequest,
+  signal?: AbortSignal,
+): Promise<PoolResource> {
+  return mutate(`/pools/${encodeURIComponent(poolId)}/resources`, "POST", body, undefined, signal);
+}
+
+export function updatePoolResource(
+  poolId: string,
+  resourceId: string,
+  body: UpdateResourceRequest,
+  signal?: AbortSignal,
+): Promise<PoolResource> {
+  return mutate(
+    `/pools/${encodeURIComponent(poolId)}/resources/${encodeURIComponent(resourceId)}`,
+    "PUT",
+    body,
+    undefined,
+    signal,
+  );
+}
+
+export function deletePoolResource(
+  poolId: string,
+  resourceId: string,
+  signal?: AbortSignal,
+): Promise<null> {
+  return mutate(
+    `/pools/${encodeURIComponent(poolId)}/resources/${encodeURIComponent(resourceId)}`,
+    "DELETE",
+    undefined,
+    undefined,
+    signal,
+  );
+}
+
 // ─── SSE streaming ───────────────────────────────────────────────────────────
 
 export type StreamEvent =
-  | { kind: "state"; data: { state: InstanceState; updated_at: string } }
-  | { kind: "output"; data: { block_id: string; output: unknown; created_at: string } }
+  | { kind: "state"; data: { instance_id: string; state: InstanceState } }
+  | { kind: "output"; data: BlockOutput }
   | { kind: "done"; data: { state: InstanceState } }
-  | { kind: "error"; data: { message: string } };
+  | { kind: "error"; data: { error: string } };
 
 /**
  * Subscribe to an instance's SSE stream. Returns a disposer.

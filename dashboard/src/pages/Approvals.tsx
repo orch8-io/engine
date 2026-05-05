@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import {
   listApprovals,
   sendHumanInputSignal,
@@ -37,10 +38,11 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Approvals() {
+  usePageTitle("Approvals");
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const fetcher = useCallback(() => listApprovals({ limit: "100" }), []);
+  const fetcher = useCallback((signal?: AbortSignal) => listApprovals({ limit: "100" }, signal), []);
   const { data, loading, updatedAt, refresh } =
     usePolling<ApprovalsResponse>(fetcher, 5000);
 

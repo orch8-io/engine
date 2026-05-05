@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { listWorkerTasks, type WorkerTask } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
@@ -78,6 +79,7 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Tasks() {
+  usePageTitle("Tasks");
   const [stateFilter, setStateFilter] = useState("");
   const [handlerFilter, setHandlerFilter] = useState("");
   const [selected, setSelected] = useState<WorkerTask | null>(null);
@@ -85,12 +87,15 @@ export default function Tasks() {
   const didRestore = useRef(false);
 
   const fetcher = useCallback(
-    () =>
-      listWorkerTasks({
-        state: stateFilter || undefined,
-        handler_name: handlerFilter || undefined,
-        limit: "100",
-      }),
+    (signal?: AbortSignal) =>
+      listWorkerTasks(
+        {
+          state: stateFilter || undefined,
+          handler_name: handlerFilter || undefined,
+          limit: "100",
+        },
+        signal,
+      ),
     [stateFilter, handlerFilter],
   );
   const { data: tasks, loading, updatedAt, refresh, error } =

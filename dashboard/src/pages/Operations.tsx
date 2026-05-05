@@ -15,6 +15,7 @@ import {
   type WorkerTask,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
@@ -101,11 +102,12 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Operations() {
-  const dlqFetcher = useCallback(() => listDlq({ limit: "50" }), []);
-  const cbFetcher = useCallback(() => listCircuitBreakers(), []);
-  const nodesFetcher = useCallback(() => listClusterNodes(), []);
+  usePageTitle("Operations");
+  const dlqFetcher = useCallback((signal?: AbortSignal) => listDlq({ limit: "50" }, signal), []);
+  const cbFetcher = useCallback((signal?: AbortSignal) => listCircuitBreakers(signal), []);
+  const nodesFetcher = useCallback((signal?: AbortSignal) => listClusterNodes(signal), []);
   const failedTasksFetcher = useCallback(
-    () => listWorkerTasks({ state: "failed", limit: "500" }),
+    (signal?: AbortSignal) => listWorkerTasks({ state: "failed", limit: "500" }, signal),
     [],
   );
 
@@ -347,10 +349,10 @@ function BreakersSection({
 }) {
   const [pending, setPending] = useState<Set<string>>(new Set());
 
-  const reset = async (handler: string) => {
+  const reset = async (tenantId: string, handler: string) => {
     setPending((prev) => new Set(prev).add(handler));
     try {
-      await resetCircuitBreaker(handler);
+      await resetCircuitBreaker(tenantId, handler);
       showToast("Breaker reset");
       onChange();
     } catch (e) {
@@ -418,7 +420,12 @@ function BreakersSection({
           <tbody>
             {visible.map((b) => (
               <TR key={b.handler}>
-                <TD className="font-mono text-[12px]">{b.handler}</TD>
+                <TD className="font-mono text-[12px]">
+                  <div className="flex flex-col">
+                    <span>{b.handler}</span>
+                    <span className="text-[10px] text-faint">{b.tenant_id}</span>
+                  </div>
+                </TD>
                 <TD>
                   <Badge tone={BREAKER_TONE[b.state]} dot>
                     {b.state}
@@ -449,7 +456,7 @@ function BreakersSection({
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => reset(b.handler)}
+                    onClick={() => reset(b.tenant_id, b.handler)}
                     disabled={b.state === "closed" && b.failure_count === 0}
                     title="Force the breaker back to closed — only use after verifying the handler is healthy"
                   >
@@ -549,8 +556,20 @@ function NodesSection({
               <TR key={n.id}>
                 <TD className="font-mono text-[12px]">{n.name}</TD>
                 <TD>
-                  <Badge tone={n.status === "active" ? "ok" : "dim"} dot>
-                    {n.status}
+                  <Badge
+                    tone={
+                      n.drain
+                        ? "warn"
+                        : n.status === "active"
+                          ? "ok"
+                          : n.status === "draining"
+                            ? "hold"
+                            : "dim"
+                    }
+                    dot
+                    live={n.status === "active" && !n.drain}
+                  >
+                    {n.drain ? "draining" : n.status}
                   </Badge>
                 </TD>
                 <TD>

@@ -2182,7 +2182,7 @@ mod tests {
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, f);
-        let all = Arc::try_unwrap(warnings).unwrap().into_inner().unwrap();
+        let all = warnings.lock().unwrap().clone();
         all.into_iter()
             .filter(|w| w.message.contains("expression arithmetic"))
             .collect()

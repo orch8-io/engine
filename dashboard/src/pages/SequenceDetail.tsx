@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { getSequence, type SequenceDefinition } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
@@ -152,6 +153,17 @@ function BlockView({ block }: { block: BlockLike }) {
             → {block.handler}
           </span>
         )}
+        {typeof (block as unknown as Record<string, unknown>).sequence_name === "string" && (
+          <span
+            className="text-[11px] text-signal font-mono"
+            title="Sub-sequence target"
+          >
+            → {(block as unknown as Record<string, unknown>).sequence_name as string}
+            {typeof (block as unknown as Record<string, unknown>).version === "number"
+              ? ` v${(block as unknown as Record<string, unknown>).version as number}`
+              : ""}
+          </span>
+        )}
       </div>
       {open && (
         <>
@@ -241,6 +253,7 @@ function BlockView({ block }: { block: BlockLike }) {
 }
 
 export default function SequenceDetail() {
+  usePageTitle("Sequence");
   const { id } = useParams<{ id: string }>();
   const [seq, setSeq] = useState<SequenceDefinition | null>(null);
   const [error, setError] = useState<string | null>(null);

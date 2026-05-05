@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listSequences, type SequenceDefinition } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
@@ -56,18 +57,22 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Sequences() {
+  usePageTitle("Sequences");
   const navigate = useNavigate();
   const [tenant, setTenant] = useState("");
   const [namespace, setNamespace] = useState("");
   const [nameFilter, setNameFilter] = useState("");
 
   const fetcher = useCallback(
-    () =>
-      listSequences({
-        tenant_id: tenant || undefined,
-        namespace: namespace || undefined,
-        limit: "500",
-      }),
+    (signal?: AbortSignal) =>
+      listSequences(
+        {
+          tenant_id: tenant || undefined,
+          namespace: namespace || undefined,
+          limit: "500",
+        },
+        signal,
+      ),
     [tenant, namespace],
   );
   const { data: sequences, loading, error, updatedAt, refresh } =

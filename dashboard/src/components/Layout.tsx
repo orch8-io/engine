@@ -20,6 +20,10 @@ import {
   IconZap,
   IconShield,
   IconCheckCircle,
+  IconSession,
+  IconPlugin,
+  IconKey,
+  IconDatabase,
 } from "./ui/Icons";
 
 const CONN_TONE = {
@@ -36,6 +40,10 @@ const NAV = [
   { to: "/tasks", label: "Tasks", icon: IconList },
   { to: "/cron", label: "Cron", icon: IconClock },
   { to: "/triggers", label: "Triggers", icon: IconZap },
+  { to: "/sessions", label: "Sessions", icon: IconSession },
+  { to: "/plugins", label: "Plugins", icon: IconPlugin },
+  { to: "/credentials", label: "Credentials", icon: IconKey },
+  { to: "/pools", label: "Pools", icon: IconDatabase },
   { to: "/operations", label: "Operations", icon: IconShield },
   { to: "/settings", label: "Settings", icon: IconSliders },
 ];
@@ -48,7 +56,7 @@ export default function Layout() {
   const [lastPoll, setLastPoll] = useState<string>("—");
 
   const approvalsFetcher = useCallback(
-    () => listApprovals({ limit: "1" }),
+    (signal?: AbortSignal) => listApprovals({ limit: "1" }, signal),
     [],
   );
   const { data: approvalsData } = usePolling<ApprovalsResponse>(
@@ -92,7 +100,7 @@ export default function Layout() {
           <span className="eyebrow">Navigation</span>
         </div>
 
-        <nav className="flex-1 px-3 space-y-px">
+        <nav className="flex-1 px-3 space-y-px overflow-y-auto">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}

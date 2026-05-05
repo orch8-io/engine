@@ -7,6 +7,7 @@ import {
   type CronSchedule,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
@@ -59,7 +60,8 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Cron() {
-  const fetcher = useCallback(() => listCronSchedules(), []);
+  usePageTitle("Cron");
+  const fetcher = useCallback((signal?: AbortSignal) => listCronSchedules(undefined, signal), []);
   const { data, loading, updatedAt, refresh } =
     usePolling<CronSchedule[]>(fetcher);
   const [showForm, setShowForm] = useState(false);

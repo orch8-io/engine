@@ -8,6 +8,7 @@ import {
   type TriggerType,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
@@ -73,7 +74,8 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Triggers() {
-  const fetcher = useCallback(() => listTriggers(), []);
+  usePageTitle("Triggers");
+  const fetcher = useCallback((signal?: AbortSignal) => listTriggers(undefined, signal), []);
   const { data, loading, updatedAt, refresh } =
     usePolling<TriggerDef[]>(fetcher);
   const [showForm, setShowForm] = useState(false);

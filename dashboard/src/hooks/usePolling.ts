@@ -20,7 +20,7 @@ interface PollingResult<T> {
  *  - errors do NOT stop polling; back-off capped at 5× interval
  */
 export function usePolling<T>(
-  fetcher: () => Promise<T>,
+  fetcher: (signal?: AbortSignal) => Promise<T>,
   intervalMs: number = 1000,
 ): PollingResult<T> {
   const [data, setData] = useState<T | null>(null);
@@ -32,6 +32,7 @@ export function usePolling<T>(
   const abortRef = useRef<AbortController | null>(null);
   const inFlight = useRef(false);
   const errorStreak = useRef(0);
+  const hasData = useRef(false);
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
@@ -41,16 +42,17 @@ export function usePolling<T>(
     const ac = new AbortController();
     abortRef.current = ac;
 
-    const isBackground = data !== null;
+    const isBackground = hasData.current;
     if (isBackground) setReloading(true);
 
     try {
-      const d = await fetcher();
+      const d = await fetcher(ac.signal);
       if (ac.signal.aborted) return;
       setData(d);
       setError(null);
       setUpdatedAt(new Date().toISOString());
       errorStreak.current = 0;
+      hasData.current = true;
     } catch (e) {
       if (ac.signal.aborted) return;
       setError(e instanceof Error ? e : new Error(String(e)));
@@ -60,7 +62,7 @@ export function usePolling<T>(
       setLoading(false);
       setReloading(false);
     }
-  }, [fetcher, data]);
+  }, [fetcher]);
 
   useEffect(() => {
     refresh();

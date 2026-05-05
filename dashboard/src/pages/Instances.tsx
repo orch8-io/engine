@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePolling } from "../hooks/usePolling";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { useDebounce } from "../hooks/useDebounce";
 import { listInstances, type TaskInstance, type InstanceState } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -85,6 +86,7 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 ];
 
 export default function Instances() {
+  usePageTitle("Executions");
   const navigate = useNavigate();
   const [stateFilter, setStateFilter] = useState("");
   const [namespaceFilter, setNamespaceFilter] = useState("");
@@ -94,13 +96,13 @@ export default function Instances() {
   const debouncedTenant = useDebounce(tenantFilter, 300);
 
   const fetcher = useCallback(
-    () =>
+    (signal?: AbortSignal) =>
       listInstances({
         state: stateFilter || undefined,
         namespace: debouncedNamespace || undefined,
         tenant_id: debouncedTenant || undefined,
         limit: "100",
-      }),
+      }, signal),
     [stateFilter, debouncedNamespace, debouncedTenant],
   );
   const { data: instances, loading, error, updatedAt, refresh } =

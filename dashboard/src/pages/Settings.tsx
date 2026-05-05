@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { setApiUrl, setApiKey, clearApiKey, checkHealth } from "../api";
+import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Button } from "../components/ui/Button";
@@ -7,6 +8,7 @@ import { Input, FieldLabel } from "../components/ui/Input";
 import { StatusDot } from "../components/ui/StatusDot";
 
 export default function Settings() {
+  usePageTitle("Settings");
   const [url, setUrl] = useState(
     localStorage.getItem("orch8_api_url") ||
       import.meta.env.VITE_ORCH8_API_URL ||
@@ -60,7 +62,7 @@ export default function Settings() {
             <br />
             <br />
             <strong className="text-ink">Auth.</strong> The API key is sent
-            as the <code className="font-mono">Authorization: Bearer ...</code>{" "}
+            as the <code className="font-mono">X-API-Key</code>{" "}
             header on every request. Never paste a production key into a
             shared machine.
           </>

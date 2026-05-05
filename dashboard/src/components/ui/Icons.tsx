@@ -160,3 +160,33 @@ export const IconTrash = (p: P) => (
     <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
   </SVG>
 );
+
+export const IconSession = (p: P) => (
+  <SVG {...p}>
+    <path d="M4 6h16" />
+    <path d="M4 12h16" />
+    <path d="M4 18h16" />
+    <rect x="2" y="4" width="20" height="16" rx="2" />
+  </SVG>
+);
+
+export const IconPlugin = (p: P) => (
+  <SVG {...p}>
+    <path d="M14 2H10a2 2 0 0 0-2 2v2H6a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2v2a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2h2a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V4a2 2 0 0 0-2-2Z" />
+  </SVG>
+);
+
+export const IconKey = (p: P) => (
+  <SVG {...p}>
+    <circle cx="8" cy="12" r="4" />
+    <path d="M12 12h4l2 2v2h-2v2h-2v-2h-2" />
+  </SVG>
+);
+
+export const IconDatabase = (p: P) => (
+  <SVG {...p}>
+    <ellipse cx="12" cy="6" rx="8" ry="3" />
+    <path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6" />
+    <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" />
+  </SVG>
+);
