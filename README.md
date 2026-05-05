@@ -254,12 +254,13 @@ engine/
 ## Documentation
 
 - [Quick Start](docs/QUICK_START.md) — zero to first completed instance in 5 minutes
+- [Sequences](docs/SEQUENCES.md) — build, publish, trigger, and extend sequences (the workflow format)
 - [API Reference](docs/API.md) — REST endpoints, block types, error codes
 - [Architecture](docs/ARCHITECTURE.md) — execution model, schema, performance
 - [Configuration](docs/CONFIGURATION.md) — all config options and env vars
 - [Deployment](docs/DEPLOYMENT.md) — production deploys (Docker, Kubernetes, managed cloud)
 - [External Workers](docs/WORKERS.md) — writing handlers in any language
-- [Applications](docs/APPLICATIONS.md) — building applications on top of Orch8
+- [Applications](docs/APPLICATIONS.md) — embedding patterns and use cases
 - [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
 - [Externalized State](docs/EXTERNALIZATION.md) — how oversized payloads are offloaded
 - [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents
