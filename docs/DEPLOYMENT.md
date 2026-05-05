@@ -169,7 +169,7 @@ app = "orch8-engine"
 
 [env]
   ORCH8_STORAGE_BACKEND = "sqlite"
-  ORCH8_DATABASE_URL    = "sqlite:///data/orch8.db"
+  ORCH8_DATABASE_URL    = "sqlite:///data/orch8.db?mode=rwc"
   ORCH8_LOG_JSON        = "true"
 
 [http_service]

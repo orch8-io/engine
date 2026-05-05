@@ -62,7 +62,7 @@ const ORCH8_TOML_TEMPLATE: &str = r#"# Orch8.io Engine Configuration
 
 [database]
 backend = "sqlite"                         # "sqlite" or "postgres"
-url = "sqlite://orch8.db"                  # connection string
+url = "sqlite:orch8.db?mode=rwc"                    # connection string (single colon — sqlx URL form)
 # url = "postgres://orch8:orch8@localhost:5434/orch8"
 run_migrations = true
 max_connections = 64

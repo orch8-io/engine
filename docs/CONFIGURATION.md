@@ -13,16 +13,16 @@ Controls the storage backend and connection pool.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `backend` | string | `"postgres"` | Storage backend. `"sqlite"` or `"postgres"` |
-| `url` | string | — | Connection URL (required). Postgres: `"postgres://user:pass@host:5432/db"`. SQLite: `"sqlite://orch8.db"` |
+| `url` | string | — | Connection URL (required). Postgres: `"postgres://user:pass@host:5432/db"`. SQLite: `"sqlite://orch8.db?mode=rwc"` |
 | `max_connections` | integer | `64` | Connection pool size |
 | `run_migrations` | bool | `true` | Automatically apply schema migrations on startup |
 
 **SQLite connection strings:**
 
 ```
-sqlite://orch8.db            # relative path (file in cwd)
-sqlite:///data/orch8.db      # absolute path
-sqlite://:memory:            # in-memory (testing only)
+sqlite://orch8.db?mode=rwc       # relative path (file in cwd, auto-create)
+sqlite:///data/orch8.db?mode=rwc # absolute path (auto-create)
+sqlite://:memory:                # in-memory (testing only)
 ```
 
 **Postgres connection strings:**
@@ -140,7 +140,7 @@ No external dependencies. Suitable for local development and CI.
 ```toml
 [database]
 backend = "sqlite"
-url = "sqlite://orch8.db"
+url = "sqlite://orch8.db?mode=rwc"
 max_connections = 16
 run_migrations = true
 
@@ -260,7 +260,7 @@ Smallest possible footprint. Single-tenant, no auth, no encryption, no webhooks.
 ```toml
 [database]
 backend = "sqlite"
-url = "sqlite://orch8.db"
+url = "sqlite://orch8.db?mode=rwc"
 
 [engine]
 tick_interval_ms = 200
