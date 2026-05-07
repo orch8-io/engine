@@ -342,7 +342,7 @@ async fn enforce_concurrency_limits(
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
     // For each concurrency key, determine how many slots are available.
-    let mut deferred_indices = std::collections::HashSet::new();
+    let mut deferred_indices = Vec::new();
     for (key, indices) in &key_instances {
         // All instances in the group share the same max_concurrency.
         let max = instances[indices[0]].max_concurrency.unwrap_or(u32::MAX);
@@ -362,7 +362,7 @@ async fn enforce_concurrency_limits(
         // priority ordering from claim_due_instances), defer the rest.
         if slots < indices.len() {
             for &idx in &indices[slots..] {
-                deferred_indices.insert(idx);
+                deferred_indices.push(idx);
             }
         }
     }
@@ -387,9 +387,8 @@ async fn enforce_concurrency_limits(
         .await?;
 
     let mut kept = instances;
-    let mut deferred_sorted: Vec<_> = deferred_indices.into_iter().collect();
-    deferred_sorted.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in deferred_sorted {
+    deferred_indices.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in deferred_indices {
         kept.swap_remove(idx);
     }
 
