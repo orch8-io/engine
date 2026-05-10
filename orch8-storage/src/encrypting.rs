@@ -69,6 +69,17 @@ impl EncryptingStorage {
         Ok(Cow::Owned(ctx))
     }
 
+    /// Encrypt `context.data` on an `ExecutionContext` in-place, avoiding clones.
+    fn encrypt_context_mut(&self, context: &mut ExecutionContext) -> Result<(), StorageError> {
+        if !FieldEncryptor::is_encrypted(&context.data) {
+            context.data = self
+                .encryptor
+                .encrypt_value(&context.data)
+                .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn decrypt_instance(&self, instance: &mut TaskInstance) -> Result<(), StorageError> {
         if FieldEncryptor::is_encrypted(&instance.context.data) {
             instance.context.data = self
@@ -235,6 +246,10 @@ impl_encrypting_storage! {
             key: &str,
             value: &serde_json::Value,
         ) -> Result<(), StorageError> {
+            // Pre-allocate the key string outside the CAS loop to avoid
+            // redundant heap allocations on each retry.
+            let key_owned = key.to_string();
+
             // Encrypted context is a single blob — read → decrypt → merge →
             // encrypt → CAS write. Retry on contention (another writer
             // updated `updated_at` between our read and write).
@@ -249,11 +264,11 @@ impl_encrypting_storage! {
                     instance.context.data = serde_json::Value::Object(serde_json::Map::new());
                 }
                 if let Some(map) = instance.context.data.as_object_mut() {
-                    map.insert(key.to_string(), value.clone());
+                    map.insert(key_owned.clone(), value.clone());
                 }
 
-                let encrypted = self.encrypt_context(&instance.context)?;
-                if self.inner.update_instance_context_cas(id, encrypted.as_ref(), snapshot_ts).await? {
+                self.encrypt_context_mut(&mut instance.context)?;
+                if self.inner.update_instance_context_cas(id, &instance.context, snapshot_ts).await? {
                     return Ok(());
                 }
             }
