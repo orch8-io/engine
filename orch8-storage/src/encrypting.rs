@@ -69,6 +69,16 @@ impl EncryptingStorage {
         Ok(Cow::Owned(ctx))
     }
 
+    fn encrypt_context_mut(&self, context: &mut ExecutionContext) -> Result<(), StorageError> {
+        if !FieldEncryptor::is_encrypted(&context.data) {
+            context.data = self
+                .encryptor
+                .encrypt_value(&context.data)
+                .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn decrypt_instance(&self, instance: &mut TaskInstance) -> Result<(), StorageError> {
         if FieldEncryptor::is_encrypted(&instance.context.data) {
             instance.context.data = self
@@ -238,6 +248,8 @@ impl_encrypting_storage! {
             // Encrypted context is a single blob — read → decrypt → merge →
             // encrypt → CAS write. Retry on contention (another writer
             // updated `updated_at` between our read and write).
+            // Optimization: avoid string allocations in the retry loop.
+            let key_str = key.to_string();
             for _ in 0..5 {
                 let Some(mut instance) = self.inner.get_instance(id).await? else {
                     return Ok(());
@@ -249,11 +261,11 @@ impl_encrypting_storage! {
                     instance.context.data = serde_json::Value::Object(serde_json::Map::new());
                 }
                 if let Some(map) = instance.context.data.as_object_mut() {
-                    map.insert(key.to_string(), value.clone());
+                    map.insert(key_str.clone(), value.clone());
                 }
 
-                let encrypted = self.encrypt_context(&instance.context)?;
-                if self.inner.update_instance_context_cas(id, encrypted.as_ref(), snapshot_ts).await? {
+                self.encrypt_context_mut(&mut instance.context)?;
+                if self.inner.update_instance_context_cas(id, &instance.context, snapshot_ts).await? {
                     return Ok(());
                 }
             }
