@@ -288,7 +288,7 @@ async fn filter_by_concurrency_pg(
         })
         .collect();
 
-    let mut excluded = std::collections::HashSet::new();
+    let mut excluded = Vec::new();
     for (key, indices) in &keyed {
         let max = candidates[indices[0]].max_concurrency.unwrap_or(u32::MAX);
         let already_running = running_counts.get(*key).copied().unwrap_or(0);
@@ -297,15 +297,17 @@ async fn filter_by_concurrency_pg(
         let slots = (i64::from(max) - already_running).max(0) as usize;
         if slots < indices.len() {
             for &idx in &indices[slots..] {
-                excluded.insert(idx);
+                excluded.push(idx);
             }
         }
     }
 
+    excluded.sort_unstable();
+
     Ok(candidates
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !excluded.contains(idx))
+        .filter(|(idx, _)| excluded.binary_search(idx).is_err())
         .map(|(_, inst)| inst.clone())
         .collect())
 }
