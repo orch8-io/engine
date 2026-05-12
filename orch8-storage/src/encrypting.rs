@@ -72,10 +72,7 @@ impl EncryptingStorage {
     /// ⚡ Bolt: Encrypt `context.data` in-place to avoid full struct cloning.
     /// This prevents allocating a new `Cow::Owned(ExecutionContext)` on hot paths
     /// (e.g. during a CAS contention retry loop), reducing memory allocation latency.
-    fn encrypt_context_mut(
-        &self,
-        context: &mut ExecutionContext,
-    ) -> Result<(), StorageError> {
+    fn encrypt_context_mut(&self, context: &mut ExecutionContext) -> Result<(), StorageError> {
         if !FieldEncryptor::is_encrypted(&context.data) {
             context.data = self
                 .encryptor
