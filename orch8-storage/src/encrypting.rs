@@ -69,6 +69,22 @@ impl EncryptingStorage {
         Ok(Cow::Owned(ctx))
     }
 
+    /// ⚡ Bolt: Encrypt `context.data` in-place to avoid full struct cloning.
+    /// This prevents allocating a new `Cow::Owned(ExecutionContext)` on hot paths
+    /// (e.g. during a CAS contention retry loop), reducing memory allocation latency.
+    fn encrypt_context_mut(
+        &self,
+        context: &mut ExecutionContext,
+    ) -> Result<(), StorageError> {
+        if !FieldEncryptor::is_encrypted(&context.data) {
+            context.data = self
+                .encryptor
+                .encrypt_value(&context.data)
+                .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+        }
+        Ok(())
+    }
+
     fn decrypt_instance(&self, instance: &mut TaskInstance) -> Result<(), StorageError> {
         if FieldEncryptor::is_encrypted(&instance.context.data) {
             instance.context.data = self
@@ -252,8 +268,10 @@ impl_encrypting_storage! {
                     map.insert(key.to_string(), value.clone());
                 }
 
-                let encrypted = self.encrypt_context(&instance.context)?;
-                if self.inner.update_instance_context_cas(id, encrypted.as_ref(), snapshot_ts).await? {
+                // ⚡ Bolt: Mutate in-place to avoid cloning the ExecutionContext
+                // payload on each CAS retry iteration.
+                self.encrypt_context_mut(&mut instance.context)?;
+                if self.inner.update_instance_context_cas(id, &instance.context, snapshot_ts).await? {
                     return Ok(());
                 }
             }
