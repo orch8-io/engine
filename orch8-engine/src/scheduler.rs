@@ -830,7 +830,7 @@ async fn process_instance(
     // claim_due_instances already set state to Running.
     // Stamp runtime.started_at on the first run so timeout / escalation
     // handlers (e.g. human_review) can compute elapsed time.
-    let mut instance = if instance.context.runtime.started_at.is_none() {
+    let instance = if instance.context.runtime.started_at.is_none() {
         let started_at = Utc::now();
         storage
             .update_instance_started_at(instance_id, started_at)
@@ -996,18 +996,27 @@ async fn process_instance(
         match outcome {
             StepOutcome::Completed => {
                 completed_blocks.insert(step_def.id.clone());
-                instance.context.runtime.total_steps_executed += 1;
+
+                // Re-read instance from storage so we don't clobber context
+                // mutations made during step execution (e.g. check_human_input's
+                // merge_context_data). Then bump the counter and write back.
+                let mut fresh_context = storage
+                    .get_instance(instance_id)
+                    .await?
+                    .map_or_else(|| instance.context.clone(), |i| i.context);
+                fresh_context.runtime.total_steps_executed += 1;
+
                 if max_steps_per_instance > 0
-                    && instance.context.runtime.total_steps_executed > max_steps_per_instance
+                    && fresh_context.runtime.total_steps_executed > max_steps_per_instance
                 {
                     warn!(
                         instance_id = %instance_id,
-                        total = instance.context.runtime.total_steps_executed,
+                        total = fresh_context.runtime.total_steps_executed,
                         max = max_steps_per_instance,
                         "instance exceeded max_steps_per_instance, failing"
                     );
                     storage
-                        .update_instance_context(instance_id, &instance.context)
+                        .update_instance_context(instance_id, &fresh_context)
                         .await?;
                     crate::lifecycle::transition_instance(
                         storage.as_ref(),
@@ -1021,7 +1030,7 @@ async fn process_instance(
                     return Ok(());
                 }
                 storage
-                    .update_instance_context(instance_id, &instance.context)
+                    .update_instance_context(instance_id, &fresh_context)
                     .await?;
             }
             StepOutcome::Failed => {
