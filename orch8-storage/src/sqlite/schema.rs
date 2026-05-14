@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS sequences (
     namespace TEXT NOT NULL,
     name TEXT NOT NULL,
     version INTEGER NOT NULL,
-    deprecated INTEGER NOT NULL DEFAULT 0,
+    deprecated INTEGER NOT NULL DEFAULT 0 CHECK(deprecated IN (0, 1)),
     blocks TEXT NOT NULL,
     interceptors TEXT,
     created_at TEXT NOT NULL
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS signal_inbox (
     instance_id TEXT NOT NULL,
     signal_type TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
-    delivered INTEGER NOT NULL DEFAULT 0,
+    delivered INTEGER NOT NULL DEFAULT 0 CHECK(delivered IN (0, 1)),
     created_at TEXT NOT NULL,
     delivered_at TEXT,
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     sequence_id TEXT NOT NULL,
     cron_expr TEXT NOT NULL,
     timezone TEXT NOT NULL DEFAULT 'UTC',
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     metadata TEXT NOT NULL DEFAULT '{}',
     next_fire_at TEXT,
     last_triggered_at TEXT,
@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS pool_resources (
     resource_key TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
     weight INTEGER NOT NULL DEFAULT 1,
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     daily_cap INTEGER NOT NULL DEFAULT 0,
     daily_usage INTEGER NOT NULL DEFAULT 0,
     daily_usage_date TEXT,
@@ -200,7 +200,7 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
     status TEXT NOT NULL DEFAULT 'active',
     registered_at TEXT NOT NULL,
     last_heartbeat_at TEXT NOT NULL,
-    drain INTEGER NOT NULL DEFAULT 0
+    drain INTEGER NOT NULL DEFAULT 0 CHECK(drain IN (0, 1))
 );
 
 CREATE TABLE IF NOT EXISTS injected_blocks (
@@ -213,7 +213,7 @@ CREATE TABLE IF NOT EXISTS plugins (
     plugin_type TEXT NOT NULL DEFAULT 'wasm',
     source TEXT NOT NULL,
     tenant_id TEXT NOT NULL DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     config TEXT NOT NULL DEFAULT '{}',
     description TEXT,
     created_at TEXT NOT NULL,
@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS triggers (
     version INTEGER,
     tenant_id TEXT NOT NULL,
     namespace TEXT NOT NULL DEFAULT 'default',
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     secret TEXT,
     trigger_type TEXT NOT NULL DEFAULT 'webhook',
     config TEXT NOT NULL DEFAULT '{}',
@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     expires_at TEXT,
     refresh_url TEXT,
     refresh_token TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     description TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -348,7 +348,7 @@ CREATE TABLE IF NOT EXISTS rollback_policies (
     sequence_name TEXT NOT NULL,
     error_rate_threshold REAL NOT NULL DEFAULT 0.05,
     time_window_secs INTEGER NOT NULL DEFAULT 300,
-    enabled INTEGER NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(tenant_id, sequence_name)
@@ -365,7 +365,7 @@ CREATE TABLE IF NOT EXISTS rollback_history (
     threshold REAL NOT NULL,
     previous_manifest_version TEXT,
     reason TEXT NOT NULL DEFAULT 'threshold_breach',
-    alert_sent INTEGER NOT NULL DEFAULT 0
+    alert_sent INTEGER NOT NULL DEFAULT 0 CHECK(alert_sent IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_rollback_history_tenant ON rollback_history(tenant_id, sequence_name);
 CREATE INDEX IF NOT EXISTS idx_rollback_history_triggered ON rollback_history(triggered_at);

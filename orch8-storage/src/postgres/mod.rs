@@ -1336,6 +1336,36 @@ impl StorageBackend for PostgresStorage {
         Ok(())
     }
 
+    async fn ingest_telemetry_events_batch(
+        &self,
+        events: &[crate::TelemetryEvent],
+    ) -> Result<u64, StorageError> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let mut total = 0u64;
+        // Postgres limit: 65535 params. 9 params per row → batch ≤ ~7000.
+        for chunk in events.chunks(7000) {
+            let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
+                "INSERT INTO telemetry_mobile_events (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at) ",
+            );
+            qb.push_values(chunk, |mut b, event| {
+                b.push_bind(event.event_type.clone());
+                b.push_bind(event.payload.clone());
+                b.push_bind(event.device_id.clone());
+                b.push_bind(event.os_name.clone());
+                b.push_bind(event.os_version.clone());
+                b.push_bind(event.app_version.clone());
+                b.push_bind(event.sdk_version.clone());
+                b.push_bind(event.tenant_id.clone());
+                b.push_bind(event.created_at);
+            });
+            let result = qb.build().execute(&self.pool).await?;
+            total += result.rows_affected();
+        }
+        Ok(total)
+    }
+
     async fn ingest_telemetry_error(
         &self,
         error_type: &str,
@@ -1449,6 +1479,23 @@ impl StorageBackend for PostgresStorage {
         Ok(rows)
     }
 
+    async fn delete_old_telemetry_events(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM telemetry_mobile_events WHERE id IN (
+                SELECT id FROM telemetry_mobile_events WHERE received_at < $1 LIMIT $2
+            )",
+        )
+        .bind(older_than)
+        .bind(i64::from(limit))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     async fn create_rollback_policy(
         &self,
         tenant_id: &str,
@@ -1514,6 +1561,7 @@ impl StorageBackend for PostgresStorage {
     async fn list_rollback_policies(
         &self,
         tenant_id: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
         let rows: Vec<(
             i64,
@@ -1526,15 +1574,17 @@ impl StorageBackend for PostgresStorage {
             DateTime<Utc>,
         )> = if let Some(t) = tenant_id {
             sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1"
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 LIMIT $2"
             )
             .bind(t)
+            .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies"
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies LIMIT $1"
             )
+            .bind(i64::from(limit))
             .fetch_all(&self.pool)
             .await?
         };
@@ -1637,16 +1687,20 @@ impl StorageBackend for PostgresStorage {
         sequence_name: Option<&str>,
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
+        use std::fmt::Write;
         let mut query = String::from(
             "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1"
         );
+        let mut param_idx = 1u32;
         if tenant_id.is_some() {
-            query.push_str(" AND tenant_id = $1");
+            write!(query, " AND tenant_id = ${param_idx}").unwrap();
+            param_idx += 1;
         }
         if sequence_name.is_some() {
-            query.push_str(" AND sequence_name = $2");
+            write!(query, " AND sequence_name = ${param_idx}").unwrap();
+            param_idx += 1;
         }
-        query.push_str(" ORDER BY triggered_at DESC LIMIT $3");
+        write!(query, " ORDER BY triggered_at DESC LIMIT ${param_idx}").unwrap();
 
         let mut q = sqlx::query_as(&query);
         if let Some(t) = tenant_id {

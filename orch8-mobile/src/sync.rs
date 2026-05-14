@@ -143,8 +143,65 @@ impl SyncOrchestrator {
         }
     }
 
+    /// HTTP GET with exponential backoff and jitter for retryable errors
+    /// (server errors and timeouts).
+    async fn http_get_with_retry(
+        &self,
+        url: &str,
+        auth: &SyncAuth,
+        extra_headers: Option<(&str, &str)>,
+    ) -> Result<reqwest::Response, MobileError> {
+        let mut delay = Duration::from_millis(200);
+        let max_retries = 3u32;
+        let mut last_err = None;
+
+        for attempt in 0..=max_retries {
+            let mut req = self.http.get(url);
+            match auth {
+                SyncAuth::Bearer(token) => {
+                    req = req.header("authorization", format!("Bearer {token}"));
+                }
+                SyncAuth::UrlToken => {}
+            }
+            if let Some((k, v)) = extra_headers {
+                req = req.header(k, v);
+            }
+
+            match req.send().await {
+                Ok(resp) if resp.status().is_server_error() && attempt < max_retries => {
+                    let status = resp.status();
+                    warn!(attempt, %status, %url, "retryable HTTP error");
+                    tokio::time::sleep(delay).await;
+                    // Jitter: multiply by 1.5-2.5x
+                    delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
+                    last_err = Some(format!("HTTP {status}"));
+                }
+                Ok(resp) => return Ok(resp),
+                Err(e) if attempt < max_retries && e.is_timeout() => {
+                    warn!(attempt, %url, "request timeout, retrying");
+                    tokio::time::sleep(delay).await;
+                    delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
+                    last_err = Some(e.to_string());
+                }
+                Err(e) => {
+                    return Err(SyncError::Network {
+                        message: format!("request failed: {e}"),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Err(SyncError::Network {
+            message: format!(
+                "request failed after {max_retries} retries: {}",
+                last_err.unwrap_or_default()
+            ),
+        }
+        .into())
+    }
+
     /// Perform a full sync against the given manifest URL.
-    #[allow(clippy::too_many_lines)]
     pub async fn sync(
         &self,
         manifest_url: &str,
@@ -164,6 +221,46 @@ impl SyncOrchestrator {
         let manifest: Manifest = self.verify_and_parse_manifest(&manifest_bytes)?;
 
         // 3. Validate signing keys against root key and cache them.
+        let mut trusted_keys = self.cache_signing_keys(&manifest).await?;
+
+        // 4. Reconcile removed sequences.
+        let local_sequences = self.list_local_sequences().await?;
+        result.removed = self.reconcile_removed(&manifest, &local_sequences).await?;
+
+        // 5. Download and verify each sequence.
+        let (added, updated, skipped, sig_failures) = self
+            .download_and_verify_sequences(
+                &manifest,
+                auth,
+                registered_handlers,
+                &local_sequences,
+                &mut trusted_keys,
+            )
+            .await?;
+        result.added = added;
+        result.updated = updated;
+        result.skipped = skipped;
+        result.signature_failures = sig_failures;
+
+        // 6. Persist sync metadata.
+        self.persist_sync_metadata(maybe_etag).await?;
+
+        info!(
+            added = result.added,
+            updated = result.updated,
+            removed = result.removed,
+            skipped = result.skipped,
+            "sync completed"
+        );
+        Ok(result)
+    }
+
+    /// Validate signing keys from the manifest against the root key and cache them
+    /// in local storage.
+    async fn cache_signing_keys(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<HashMap<String, VerifyingKey>, MobileError> {
         let mut trusted_keys: HashMap<String, VerifyingKey> = HashMap::new();
         for entry in &manifest.signing_keys {
             let pk_bytes =
@@ -188,9 +285,17 @@ impl SyncOrchestrator {
                     message: e.to_string(),
                 })?;
         }
+        Ok(trusted_keys)
+    }
 
-        // 4. Determine what to add/update/remove.
-        let local_sequences = self.list_local_sequences().await?;
+    /// Reconcile removed sequences: process explicit removals from the manifest
+    /// and perform full reconciliation if the last sync was more than 30 days ago.
+    async fn reconcile_removed(
+        &self,
+        manifest: &Manifest,
+        local_sequences: &HashMap<String, SequenceDefinition>,
+    ) -> Result<u32, MobileError> {
+        let mut removed_count = 0u32;
         let manifest_names: HashSet<String> =
             manifest.sequences.iter().map(|s| s.name.clone()).collect();
 
@@ -204,7 +309,7 @@ impl SyncOrchestrator {
                 if let Err(e) = self.remove_local_sequence(&removed.name).await {
                     warn!(name = %removed.name, error = %e, "failed to remove local sequence");
                 } else {
-                    result.removed += 1;
+                    removed_count += 1;
                 }
             }
         }
@@ -219,13 +324,32 @@ impl SyncOrchestrator {
                     if let Err(e) = self.remove_local_sequence(name).await {
                         warn!(name = %name, error = %e, "failed to remove stale local sequence");
                     } else {
-                        result.removed += 1;
+                        removed_count += 1;
                     }
                 }
             }
         }
 
-        // 5. Download and verify each sequence.
+        Ok(removed_count)
+    }
+
+    /// Download, hash-verify, and signature-verify each sequence in the manifest,
+    /// then upsert new or updated sequences into local storage.
+    /// Returns `(added, updated, skipped, signature_failures)`.
+    #[allow(clippy::too_many_lines)]
+    async fn download_and_verify_sequences(
+        &self,
+        manifest: &Manifest,
+        auth: &SyncAuth,
+        registered_handlers: &HashSet<String>,
+        local_sequences: &HashMap<String, SequenceDefinition>,
+        trusted_keys: &mut HashMap<String, VerifyingKey>,
+    ) -> Result<(u32, u32, u32, u32), MobileError> {
+        let mut added = 0u32;
+        let mut updated = 0u32;
+        let mut skipped = 0u32;
+        let mut sig_failures = 0u32;
+
         for entry in &manifest.sequences {
             if !self.version_meets_min(&self.sdk_version, &entry.min_sdk_version) {
                 warn!(
@@ -234,7 +358,7 @@ impl SyncOrchestrator {
                     sdk = %self.sdk_version,
                     "sequence requires newer SDK — skipping"
                 );
-                result.skipped += 1;
+                skipped += 1;
                 continue;
             }
 
@@ -249,7 +373,7 @@ impl SyncOrchestrator {
                     missing = ?missing_handlers,
                     "sequence requires unregistered handlers — skipping"
                 );
-                result.skipped += 1;
+                skipped += 1;
                 continue;
             }
 
@@ -257,7 +381,7 @@ impl SyncOrchestrator {
                 Ok(json) => json,
                 Err(e) => {
                     warn!(name = %entry.name, error = %e, "failed to download sequence");
-                    result.skipped += 1;
+                    skipped += 1;
                     continue;
                 }
             };
@@ -270,7 +394,7 @@ impl SyncOrchestrator {
                     got = %computed_hash,
                     "sequence hash mismatch — skipping"
                 );
-                result.signature_failures += 1;
+                sig_failures += 1;
                 continue;
             }
 
@@ -304,7 +428,7 @@ impl SyncOrchestrator {
 
             let Some(signing_pk) = trusted_keys.get(&entry.signing_key_id) else {
                 warn!(name = %entry.name, key_id = %entry.signing_key_id, "no trusted signing key — skipping");
-                result.signature_failures += 1;
+                sig_failures += 1;
                 continue;
             };
 
@@ -325,13 +449,13 @@ impl SyncOrchestrator {
                         })?);
                     if let Err(e) = signing_pk.verify(seq_json.as_bytes(), &sig) {
                         warn!(name = %entry.name, error = %e, "sequence signature verification failed — skipping");
-                        result.signature_failures += 1;
+                        sig_failures += 1;
                         continue;
                     }
                 }
                 Err(e) => {
                     warn!(name = %entry.name, error = %e, "failed to download sequence signature — skipping");
-                    result.signature_failures += 1;
+                    sig_failures += 1;
                     continue;
                 }
             }
@@ -344,25 +468,29 @@ impl SyncOrchestrator {
             let existing = local_sequences.get(&entry.name);
             if let Some(existing_seq) = existing {
                 if existing_seq.version >= entry.version {
-                    result.skipped += 1;
+                    skipped += 1;
                     continue;
                 }
                 self.upsert_sequence(&seq).await?;
-                result.updated += 1;
+                updated += 1;
             } else {
                 self.upsert_sequence(&seq).await?;
-                result.added += 1;
+                added += 1;
             }
         }
 
-        // 6. Persist sync metadata.
+        Ok((added, updated, skipped, sig_failures))
+    }
+
+    /// Persist sync timestamp and optional `ETag` after a successful sync.
+    async fn persist_sync_metadata(&self, etag: Option<String>) -> Result<(), MobileError> {
         self.mobile_storage
             .set_sync_metadata("last_sync_ts", &Utc::now().to_rfc3339())
             .await
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
             })?;
-        if let Some(etag) = maybe_etag {
+        if let Some(etag) = etag {
             self.mobile_storage
                 .set_sync_metadata("manifest_etag", &etag)
                 .await
@@ -370,15 +498,7 @@ impl SyncOrchestrator {
                     message: e.to_string(),
                 })?;
         }
-
-        info!(
-            added = result.added,
-            updated = result.updated,
-            removed = result.removed,
-            skipped = result.skipped,
-            "sync completed"
-        );
-        Ok(result)
+        Ok(())
     }
 
     async fn fetch_manifest(
@@ -386,14 +506,6 @@ impl SyncOrchestrator {
         url: &str,
         auth: &SyncAuth,
     ) -> Result<(Vec<u8>, Option<String>), MobileError> {
-        let mut req = self.http.get(url);
-        match auth {
-            SyncAuth::Bearer(token) => {
-                req = req.header("authorization", format!("Bearer {token}"));
-            }
-            SyncAuth::UrlToken => {}
-        }
-
         let cached_etag = self
             .mobile_storage
             .get_sync_metadata("manifest_etag")
@@ -401,13 +513,9 @@ impl SyncOrchestrator {
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
             })?;
-        if let Some(etag) = cached_etag {
-            req = req.header("if-none-match", etag);
-        }
 
-        let response = req.send().await.map_err(|e| SyncError::Network {
-            message: format!("manifest fetch failed: {e}"),
-        })?;
+        let extra = cached_etag.as_deref().map(|etag| ("if-none-match", etag));
+        let response = self.http_get_with_retry(url, auth, extra).await?;
 
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok((Vec::new(), None));
@@ -465,17 +573,7 @@ impl SyncOrchestrator {
     }
 
     async fn download_sequence(&self, url: &str, auth: &SyncAuth) -> Result<String, MobileError> {
-        let mut req = self.http.get(url);
-        match auth {
-            SyncAuth::Bearer(token) => {
-                req = req.header("authorization", format!("Bearer {token}"));
-            }
-            SyncAuth::UrlToken => {}
-        }
-
-        let response = req.send().await.map_err(|e| SyncError::Network {
-            message: format!("sequence download failed: {e}"),
-        })?;
+        let response = self.http_get_with_retry(url, auth, None).await?;
 
         if !response.status().is_success() {
             return Err(SyncError::Network {
@@ -615,5 +713,159 @@ mod tests {
     fn root_key_from_base64_rejects_bad_input() {
         let result = RootKey::from_base64("not-valid-base64!!!");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn root_key_from_base64_rejects_wrong_length() {
+        let result = RootKey::from_base64(&BASE64.encode([0u8; 16]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn root_key_verify_rejects_bad_signature() {
+        let key = RootKey {
+            pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+        };
+        let result = key.verify(b"hello", &[0u8; 64]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_signing_keys_stores_in_mobile_storage() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[1u8; 32]);
+        let pk_b64 = BASE64.encode(signing_key.verifying_key().to_bytes());
+
+        let orch = SyncOrchestrator::new(
+            mobile_storage.clone(),
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+        );
+
+        let manifest = Manifest {
+            signing_keys: vec![SigningKeyEntry {
+                key_id: "test-key".to_string(),
+                public_key: pk_b64,
+            }],
+            sequences: vec![],
+            removed: vec![],
+            manifest_version: 1,
+            generated_at: Utc::now(),
+        };
+
+        let keys = orch.cache_signing_keys(&manifest).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains_key("test-key"));
+
+        let persisted = mobile_storage.get_trusted_key("test-key").await.unwrap();
+        assert!(persisted.is_some());
+    }
+
+    #[tokio::test]
+    async fn persist_sync_metadata_writes_timestamp() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let orch = SyncOrchestrator::new(
+            mobile_storage.clone(),
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+        );
+
+        orch.persist_sync_metadata(Some("etag-123".to_string()))
+            .await
+            .unwrap();
+
+        let ts = mobile_storage
+            .get_sync_metadata("last_sync_ts")
+            .await
+            .unwrap();
+        assert!(ts.is_some());
+        let etag = mobile_storage
+            .get_sync_metadata("manifest_etag")
+            .await
+            .unwrap();
+        assert_eq!(etag.as_deref(), Some("etag-123"));
+    }
+
+    #[tokio::test]
+    async fn persist_sync_metadata_without_etag() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let orch = SyncOrchestrator::new(
+            mobile_storage.clone(),
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+        );
+
+        orch.persist_sync_metadata(None).await.unwrap();
+
+        let ts = mobile_storage
+            .get_sync_metadata("last_sync_ts")
+            .await
+            .unwrap();
+        assert!(ts.is_some());
+        let etag = mobile_storage
+            .get_sync_metadata("manifest_etag")
+            .await
+            .unwrap();
+        assert!(etag.is_none());
+    }
+
+    #[test]
+    fn verify_and_parse_manifest_rejects_no_divider() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+            let orch = SyncOrchestrator::new(
+                mobile_storage,
+                sqlite,
+                RootKey {
+                    pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+                },
+                "0.4.0".to_string(),
+            );
+
+            let result = orch.verify_and_parse_manifest(b"no-newline-here");
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn version_meets_min_edge_cases() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+            let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+            let orch = SyncOrchestrator::new(
+                mobile_storage,
+                sqlite,
+                RootKey {
+                    pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+                },
+                "0.4.0".to_string(),
+            );
+
+            assert!(orch.version_meets_min("0.4", "0.4.0"));
+            assert!(orch.version_meets_min("0.4.0", "0.4"));
+            assert!(orch.version_meets_min("1", "0.9.9"));
+            assert!(!orch.version_meets_min("0", "0.0.1"));
+        });
     }
 }

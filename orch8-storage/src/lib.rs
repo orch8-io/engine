@@ -30,6 +30,20 @@ use orch8_types::signal::Signal;
 use orch8_types::trigger::TriggerDef;
 use orch8_types::worker::WorkerTask;
 
+/// Represents a single telemetry event for batch ingestion.
+#[derive(Debug, Clone)]
+pub struct TelemetryEvent {
+    pub event_type: String,
+    pub payload: String,
+    pub device_id: String,
+    pub os_name: String,
+    pub os_version: String,
+    pub app_version: String,
+    pub sdk_version: String,
+    pub tenant_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Outcome of a dedupe insert attempt for `emit_event`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitDedupeOutcome {
@@ -1362,6 +1376,32 @@ pub trait StorageBackend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Batch-insert telemetry events in a single round-trip.
+    ///
+    /// Default: falls back to one-by-one insertion.
+    async fn ingest_telemetry_events_batch(
+        &self,
+        events: &[TelemetryEvent],
+    ) -> Result<u64, StorageError> {
+        let mut count = 0u64;
+        for e in events {
+            self.ingest_telemetry_event(
+                &e.event_type,
+                &e.payload,
+                &e.device_id,
+                &e.os_name,
+                &e.os_version,
+                &e.app_version,
+                &e.sdk_version,
+                &e.tenant_id,
+                e.created_at,
+            )
+            .await?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     async fn ingest_telemetry_error(
         &self,
         _error_type: &str,
@@ -1389,6 +1429,14 @@ pub trait StorageBackend: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    async fn delete_old_telemetry_events(
+        &self,
+        _older_than: DateTime<Utc>,
+        _limit: u32,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     // === Rollback policies ===
 
     async fn create_rollback_policy(
@@ -1412,6 +1460,7 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn list_rollback_policies(
         &self,
         _tenant_id: Option<&str>,
+        _limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
         Ok(Vec::new())
     }

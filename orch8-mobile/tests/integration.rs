@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use orch8_mobile::{EngineListener, HandlerError, MobileEngineConfig, MobileError, StepHandler};
+use orch8_mobile::{
+    EngineListener, HandlerError, InstanceStateKind, MobileEngineConfig, MobileError, StepHandler,
+};
 
 struct EchoHandler;
 
@@ -64,6 +66,7 @@ fn engine_lifecycle() {
         max_stored_sequences: 10,
         max_sequence_size_bytes: 1_048_576,
         handler_timeout_ms: 5000,
+        operation_timeout_ms: 10_000,
         telemetry_enabled: false,
         environment: "production".to_string(),
         root_public_key: String::new(),
@@ -121,16 +124,18 @@ fn engine_lifecycle() {
     let state = engine.get_instance(instance_id.clone()).unwrap();
     // The instance should be Completed or still Running (depending on handler execution).
     assert!(
-        state.state == "Completed" || state.state == "Running" || state.state == "Scheduled",
-        "unexpected state: {}",
+        state.state == InstanceStateKind::Completed
+            || state.state == InstanceStateKind::Running
+            || state.state == InstanceStateKind::Scheduled,
+        "unexpected state: {:?}",
         state.state
     );
 
     // Verify active_instances doesn't include terminal instances.
     let active = engine.active_instances().unwrap();
     for inst in &active {
-        assert_ne!(inst.state, "Completed");
-        assert_ne!(inst.state, "Failed");
+        assert_ne!(inst.state, InstanceStateKind::Completed);
+        assert_ne!(inst.state, InstanceStateKind::Failed);
     }
 
     engine.shutdown();
@@ -203,7 +208,7 @@ fn cancel_instance_removes_from_active() {
     engine.cancel_instance(id.clone()).unwrap();
 
     let state = engine.get_instance(id).unwrap();
-    assert_eq!(state.state, "Cancelled");
+    assert_eq!(state.state, InstanceStateKind::Cancelled);
 }
 
 #[test]
@@ -216,4 +221,51 @@ fn shutdown_prevents_ticks() {
 
     let result = engine.tick_once();
     assert!(matches!(result, Err(MobileError::Shutdown)));
+}
+
+struct SlowHandler;
+
+impl StepHandler for SlowHandler {
+    fn execute(&self, _step_name: String, input: String) -> Result<String, HandlerError> {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        Ok(input)
+    }
+}
+
+#[test]
+fn handler_timeout_transitions_to_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+
+    let config = MobileEngineConfig {
+        handler_timeout_ms: 50,
+        operation_timeout_ms: 10_000,
+        ..MobileEngineConfig::default()
+    };
+
+    let engine = orch8_mobile::MobileEngine::new(db_path, config).unwrap();
+    engine
+        .register_handler("echo".to_string(), Arc::new(SlowHandler))
+        .unwrap();
+    engine
+        .load_sequence_from_json(test_sequence_json())
+        .unwrap();
+
+    let id = engine
+        .start("test_flow".to_string(), "{}".to_string(), None)
+        .unwrap();
+
+    for _ in 0..10 {
+        let _ = engine.tick_once();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let state = engine.get_instance(id).unwrap();
+    assert!(
+        state.state == InstanceStateKind::Waiting || state.state == InstanceStateKind::Failed,
+        "slow handler should cause Waiting (retryable timeout) or Failed, got {:?}",
+        state.state
+    );
+
+    engine.shutdown();
 }

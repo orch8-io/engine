@@ -2,20 +2,23 @@
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
+use crate::auth::{scoped_tenant_id, OptionalTenant};
 use crate::error::ApiError;
 use crate::AppState;
+
+const MAX_BATCH_SIZE: usize = 500;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/telemetry/mobile", post(ingest_telemetry))
         .route("/telemetry/mobile/errors", post(ingest_errors))
-        .route("/telemetry/mobile/dashboard", post(dashboard_queries))
+        .route("/telemetry/mobile/dashboard", get(dashboard_queries))
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,36 +63,45 @@ pub struct IngestResponse {
 /// Ingest batched telemetry events from mobile devices.
 pub(crate) async fn ingest_telemetry(
     State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
     Json(req): Json<IngestTelemetryRequest>,
 ) -> Result<(StatusCode, Json<IngestResponse>), ApiError> {
-    let tenant = req.tenant_id.unwrap_or_else(|| "default".to_string());
-    let mut accepted = 0;
-
-    for event in &req.events {
-        let created_at = event.timestamp.parse().unwrap_or_else(|_| Utc::now());
-
-        let result = state
-            .storage
-            .ingest_telemetry_event(
-                &event.event_type,
-                &event.payload,
-                &event.device.device_id,
-                &event.device.os_name,
-                &event.device.os_version,
-                &event.device.app_version,
-                &event.device.sdk_version,
-                &tenant,
-                created_at,
-            )
-            .await;
-
-        match result {
-            Ok(()) => accepted += 1,
-            Err(e) => {
-                warn!(error = %e, "failed to insert telemetry event");
-            }
-        }
+    if req.events.len() > MAX_BATCH_SIZE {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "batch size {} exceeds maximum of {MAX_BATCH_SIZE}",
+            req.events.len()
+        )));
     }
+    let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
+        .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
+
+    let events: Vec<orch8_storage::TelemetryEvent> = req
+        .events
+        .iter()
+        .map(|e| orch8_storage::TelemetryEvent {
+            event_type: e.event_type.clone(),
+            payload: e.payload.clone(),
+            device_id: e.device.device_id.clone(),
+            os_name: e.device.os_name.clone(),
+            os_version: e.device.os_version.clone(),
+            app_version: e.device.app_version.clone(),
+            sdk_version: e.device.sdk_version.clone(),
+            tenant_id: tenant.clone(),
+            created_at: e.timestamp.parse().unwrap_or_else(|_| Utc::now()),
+        })
+        .collect();
+
+    let accepted = state
+        .storage
+        .ingest_telemetry_events_batch(&events)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "batch telemetry insert failed");
+            ApiError::Internal(format!("DB error: {e}"))
+        })?;
+
+    #[allow(clippy::cast_possible_truncation)]
+    let accepted = accepted as usize;
 
     debug!(accepted, total = req.events.len(), "telemetry ingested");
     Ok((StatusCode::ACCEPTED, Json(IngestResponse { accepted })))
@@ -98,9 +110,11 @@ pub(crate) async fn ingest_telemetry(
 /// Ingest a structured error report from a mobile device.
 pub(crate) async fn ingest_errors(
     State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
     Json(req): Json<IngestErrorRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let tenant = req.tenant_id.unwrap_or_else(|| "default".to_string());
+    let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
+        .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
 
     let result = state
         .storage
@@ -179,12 +193,25 @@ async fn check_rollback(
         .await
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
 
+    // Deprecate the sequence so mobile clients stop using it on next sync.
+    let tenant = orch8_types::ids::TenantId::unchecked(tenant_id.to_string());
+    let ns = orch8_types::ids::Namespace::new("default");
+    if let Ok(Some(seq)) = state
+        .storage
+        .get_sequence_by_name(&tenant, &ns, sequence_name, None)
+        .await
+    {
+        if let Err(e) = state.storage.deprecate_sequence(seq.id).await {
+            warn!(error = %e, "failed to deprecate sequence during rollback");
+        }
+    }
+
     warn!(
         sequence = %sequence_name,
         tenant = %tenant_id,
         error_rate = %error_rate,
         threshold = %policy.error_rate_threshold,
-        "auto-rollback triggered for sequence"
+        "auto-rollback triggered — sequence deprecated"
     );
 
     Ok(())
@@ -223,9 +250,11 @@ pub struct DashboardResponse {
 
 pub(crate) async fn dashboard_queries(
     State(state): State<AppState>,
-    Json(req): Json<DashboardQueryRequest>,
+    tenant_ctx: OptionalTenant,
+    axum::extract::Query(req): axum::extract::Query<DashboardQueryRequest>,
 ) -> Result<Json<DashboardResponse>, ApiError> {
-    let tenant = req.tenant_id.unwrap_or_else(|| "default".to_string());
+    let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
+        .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
     let start = req
         .start_time
         .unwrap_or_else(|| Utc::now() - chrono::Duration::days(7));

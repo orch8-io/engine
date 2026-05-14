@@ -45,7 +45,7 @@ pub struct DeviceContext {
 pub struct TelemetryManager {
     storage: Arc<MobileStorage>,
     enabled: bool,
-    device_ctx: std::sync::RwLock<DeviceContext>,
+    device_ctx: std::sync::Mutex<DeviceContext>,
     http: reqwest::Client,
 }
 
@@ -59,7 +59,7 @@ impl TelemetryManager {
         Self {
             storage,
             enabled,
-            device_ctx: std::sync::RwLock::new(device_ctx),
+            device_ctx: std::sync::Mutex::new(device_ctx),
             http,
         }
     }
@@ -67,7 +67,7 @@ impl TelemetryManager {
     pub fn set_device_context(&self, ctx: DeviceContext) {
         *self
             .device_ctx
-            .write()
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ctx;
     }
 
@@ -129,7 +129,7 @@ impl TelemetryManager {
 
         let device_ctx = self
             .device_ctx
-            .read()
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let batch: Vec<TelemetryBatchItem> = events

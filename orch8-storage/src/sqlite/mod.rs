@@ -1428,18 +1428,63 @@ impl StorageBackend for SqliteStorage {
         _os_version: &str,
         _app_version: &str,
         _sdk_version: &str,
-        _tenant_id: &str,
+        tenant_id: &str,
         created_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
+        let enriched = match serde_json::from_str::<serde_json::Value>(payload) {
+            Ok(mut v) => {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.entry("tenant_id")
+                        .or_insert_with(|| serde_json::Value::String(tenant_id.to_string()));
+                }
+                v.to_string()
+            }
+            Err(_) => payload.to_string(),
+        };
         sqlx::query(
             "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
         )
         .bind(event_type)
-        .bind(payload)
+        .bind(&enriched)
         .bind(created_at.to_rfc3339())
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    async fn ingest_telemetry_events_batch(
+        &self,
+        events: &[crate::TelemetryEvent],
+    ) -> Result<u64, StorageError> {
+        if events.is_empty() {
+            return Ok(0);
+        }
+        let mut total = 0u64;
+        // SQLite has a variable limit of 999 by default; 3 params per row → batch ≤ 333.
+        for chunk in events.chunks(333) {
+            let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+                "INSERT INTO telemetry_events (event_type, payload, created_at) ",
+            );
+            qb.push_values(chunk, |mut b, event| {
+                let enriched = match serde_json::from_str::<serde_json::Value>(&event.payload) {
+                    Ok(mut v) => {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.entry("tenant_id").or_insert_with(|| {
+                                serde_json::Value::String(event.tenant_id.clone())
+                            });
+                        }
+                        v.to_string()
+                    }
+                    Err(_) => event.payload.clone(),
+                };
+                b.push_bind(event.event_type.clone());
+                b.push_bind(enriched);
+                b.push_bind(event.created_at.to_rfc3339());
+            });
+            let result = qb.build().execute(self.pool()).await?;
+            total += result.rows_affected();
+        }
+        Ok(total)
     }
 
     async fn ingest_telemetry_error(
@@ -1452,7 +1497,7 @@ impl StorageBackend for SqliteStorage {
         _os_version: &str,
         _app_version: &str,
         _sdk_version: &str,
-        _tenant_id: &str,
+        tenant_id: &str,
         instance_id: Option<&str>,
         sequence_name: Option<&str>,
     ) -> Result<(), StorageError> {
@@ -1461,6 +1506,7 @@ impl StorageBackend for SqliteStorage {
             "message": message,
             "instance_id": instance_id,
             "sequence_name": sequence_name,
+            "tenant_id": tenant_id,
         });
         sqlx::query(
             "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
@@ -1482,6 +1528,23 @@ impl StorageBackend for SqliteStorage {
     ) -> Result<Vec<(String, i64)>, StorageError> {
         // Dashboard queries are server-side (Postgres) only.
         Ok(Vec::new())
+    }
+
+    async fn delete_old_telemetry_events(
+        &self,
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM telemetry_events WHERE id IN (
+                SELECT id FROM telemetry_events WHERE created_at < ?1 LIMIT ?2
+            )",
+        )
+        .bind(older_than.to_rfc3339())
+        .bind(limit)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 
     async fn create_rollback_policy(
@@ -1554,22 +1617,25 @@ impl StorageBackend for SqliteStorage {
     async fn list_rollback_policies(
         &self,
         tenant_id: Option<&str>,
+        limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
         let rows: Vec<(i64, String, String, f64, i32, i32, String, String)> = if let Some(t) =
             tenant_id
         {
             sqlx::query_as(
                 "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at
-                 FROM rollback_policies WHERE tenant_id = ?"
+                 FROM rollback_policies WHERE tenant_id = ? LIMIT ?"
             )
             .bind(t)
+            .bind(limit)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as(
                 "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at
-                 FROM rollback_policies"
+                 FROM rollback_policies LIMIT ?"
             )
+            .bind(limit)
             .fetch_all(&self.pool)
             .await?
         };
@@ -1644,7 +1710,7 @@ impl StorageBackend for SqliteStorage {
 
     async fn query_error_rate(
         &self,
-        _tenant_id: &str,
+        tenant_id: &str,
         sequence_name: &str,
         window_secs: i64,
     ) -> Result<Option<f64>, StorageError> {
@@ -1656,10 +1722,12 @@ impl StorageBackend for SqliteStorage {
                COUNT(*) as total
              FROM telemetry_events
              WHERE created_at >= ?1
-               AND json_extract(payload, '$.sequence_name') = ?2",
+               AND json_extract(payload, '$.sequence_name') = ?2
+               AND json_extract(payload, '$.tenant_id') = ?3",
         )
         .bind(start_str)
         .bind(sequence_name)
+        .bind(tenant_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.and_then(|(failed, total)| {
@@ -2611,7 +2679,10 @@ mod tests {
         assert_eq!(policy.time_window_secs, 600);
 
         // List
-        let policies = storage.list_rollback_policies(Some(tenant)).await.unwrap();
+        let policies = storage
+            .list_rollback_policies(Some(tenant), 100)
+            .await
+            .unwrap();
         assert_eq!(policies.len(), 1);
 
         // List all tenants
@@ -2619,7 +2690,7 @@ mod tests {
             .create_rollback_policy("t2", seq, 0.05, 100)
             .await
             .unwrap();
-        let all = storage.list_rollback_policies(None).await.unwrap();
+        let all = storage.list_rollback_policies(None, 100).await.unwrap();
         assert_eq!(all.len(), 2);
 
         // Delete
@@ -2756,5 +2827,345 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let rate = storage.query_error_rate("t1", "seq-z", 3600).await.unwrap();
         assert!(rate.is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_ingest_telemetry_event_enriches_payload_with_tenant_id() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        storage
+            .ingest_telemetry_event(
+                "InstanceCompleted",
+                r#"{"sequence_name":"seq1"}"#,
+                "dev1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "my-tenant",
+                now,
+            )
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT payload FROM telemetry_events ORDER BY id DESC LIMIT 1")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(payload["tenant_id"], "my-tenant");
+        assert_eq!(payload["sequence_name"], "seq1");
+    }
+
+    #[tokio::test]
+    async fn sqlite_ingest_telemetry_event_preserves_existing_tenant_id() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        storage
+            .ingest_telemetry_event(
+                "InstanceCompleted",
+                r#"{"sequence_name":"seq1","tenant_id":"original"}"#,
+                "dev1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "overrider",
+                now,
+            )
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT payload FROM telemetry_events ORDER BY id DESC LIMIT 1")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(payload["tenant_id"], "original");
+    }
+
+    #[tokio::test]
+    async fn sqlite_ingest_error_includes_tenant_id() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        storage
+            .ingest_telemetry_error(
+                "RuntimeError",
+                "step failed",
+                None,
+                "dev1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "t1",
+                None,
+                Some("seq-x"),
+            )
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT payload FROM telemetry_events ORDER BY id DESC LIMIT 1")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(payload["tenant_id"], "t1");
+        assert_eq!(payload["sequence_name"], "seq-x");
+    }
+
+    #[tokio::test]
+    async fn sqlite_query_error_rate_filters_by_tenant() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+
+        // Tenant A: 1 success event
+        storage
+            .ingest_telemetry_event(
+                "InstanceCompleted",
+                r#"{"sequence_name":"seq1"}"#,
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "tenant-a",
+                now,
+            )
+            .await
+            .unwrap();
+
+        // Tenant B: 1 failed event
+        storage
+            .ingest_telemetry_error(
+                "RuntimeError",
+                "fail",
+                None,
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "tenant-b",
+                None,
+                Some("seq1"),
+            )
+            .await
+            .unwrap();
+
+        // Tenant A should have 0% error rate (1 success, 0 failures)
+        let rate_a = storage
+            .query_error_rate("tenant-a", "seq1", 3600)
+            .await
+            .unwrap();
+        assert_eq!(rate_a, Some(0.0));
+
+        // Tenant B should have 100% error rate (0 success, 1 failure)
+        let rate_b = storage
+            .query_error_rate("tenant-b", "seq1", 3600)
+            .await
+            .unwrap();
+        assert_eq!(rate_b, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn sqlite_ingest_telemetry_events_batch_inserts_multiple() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        let events = vec![
+            crate::TelemetryEvent {
+                event_type: "InstanceCompleted".to_string(),
+                payload: r#"{"sequence_name":"seq1"}"#.to_string(),
+                device_id: "d1".to_string(),
+                os_name: "iOS".to_string(),
+                os_version: "17".to_string(),
+                app_version: "1.0".to_string(),
+                sdk_version: "0.4.0".to_string(),
+                tenant_id: "t1".to_string(),
+                created_at: now,
+            },
+            crate::TelemetryEvent {
+                event_type: "InstanceFailed".to_string(),
+                payload: r#"{"sequence_name":"seq2"}"#.to_string(),
+                device_id: "d2".to_string(),
+                os_name: "Android".to_string(),
+                os_version: "14".to_string(),
+                app_version: "2.0".to_string(),
+                sdk_version: "0.4.0".to_string(),
+                tenant_id: "t1".to_string(),
+                created_at: now,
+            },
+        ];
+
+        let count = storage
+            .ingest_telemetry_events_batch(&events)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM telemetry_events")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_rollback_policies_respects_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        for i in 0..5 {
+            storage
+                .create_rollback_policy("t1", &format!("seq-{i}"), 0.1, 300)
+                .await
+                .unwrap();
+        }
+
+        let all = storage
+            .list_rollback_policies(Some("t1"), 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 5);
+
+        let limited = storage.list_rollback_policies(Some("t1"), 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_delete_old_telemetry_events_removes_old_rows() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::days(60);
+        let recent = chrono::Utc::now();
+
+        storage
+            .ingest_telemetry_event(
+                "OldEvent", "{}", "d1", "iOS", "17", "1.0", "0.4.0", "t1", old,
+            )
+            .await
+            .unwrap();
+        storage
+            .ingest_telemetry_event(
+                "RecentEvent",
+                "{}",
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.4.0",
+                "t1",
+                recent,
+            )
+            .await
+            .unwrap();
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let deleted = storage
+            .delete_old_telemetry_events(cutoff, 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM telemetry_events")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_telemetry_enriches_tenant_id() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        let events = vec![crate::TelemetryEvent {
+            event_type: "InstanceCompleted".to_string(),
+            payload: r#"{"sequence_name":"seq1"}"#.to_string(),
+            device_id: "d1".to_string(),
+            os_name: "iOS".to_string(),
+            os_version: "17".to_string(),
+            app_version: "1.0".to_string(),
+            sdk_version: "0.4.0".to_string(),
+            tenant_id: "batch-tenant".to_string(),
+            created_at: now,
+        }];
+
+        storage
+            .ingest_telemetry_events_batch(&events)
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT payload FROM telemetry_events ORDER BY id DESC LIMIT 1")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(payload["tenant_id"], "batch-tenant");
+        assert_eq!(payload["sequence_name"], "seq1");
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_telemetry_preserves_existing_tenant_id() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = chrono::Utc::now();
+        let events = vec![crate::TelemetryEvent {
+            event_type: "InstanceCompleted".to_string(),
+            payload: r#"{"sequence_name":"s","tenant_id":"original"}"#.to_string(),
+            device_id: "d1".to_string(),
+            os_name: "iOS".to_string(),
+            os_version: "17".to_string(),
+            app_version: "1.0".to_string(),
+            sdk_version: "0.4.0".to_string(),
+            tenant_id: "overrider".to_string(),
+            created_at: now,
+        }];
+
+        storage
+            .ingest_telemetry_events_batch(&events)
+            .await
+            .unwrap();
+
+        let row: (String,) =
+            sqlx::query_as("SELECT payload FROM telemetry_events ORDER BY id DESC LIMIT 1")
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(payload["tenant_id"], "original");
+    }
+
+    #[tokio::test]
+    async fn sqlite_batch_telemetry_empty_is_noop() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let count = storage.ingest_telemetry_events_batch(&[]).await.unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_delete_old_telemetry_respects_limit() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::days(60);
+
+        for _ in 0..5 {
+            storage
+                .ingest_telemetry_event(
+                    "OldEvent", "{}", "d1", "iOS", "17", "1.0", "0.4.0", "t1", old,
+                )
+                .await
+                .unwrap();
+        }
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let deleted = storage
+            .delete_old_telemetry_events(cutoff, 2)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM telemetry_events")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(row.0, 3);
     }
 }

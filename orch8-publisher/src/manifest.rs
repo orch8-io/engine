@@ -108,12 +108,30 @@ pub enum ManifestError {
     Serialization(String),
 }
 
-/// Serialize a value to canonical JSON: deterministic key ordering, no extra whitespace.
-fn canonical_json<T: Serialize>(value: &T) -> Result<String, ManifestError> {
-    // Standard serde_json::to_string preserves field declaration order,
-    // which is deterministic for the same binary. For cross-language
-    // canonicalization, a full sorting serializer would be required.
-    serde_json::to_string(value).map_err(|e| ManifestError::Serialization(e.to_string()))
+/// Serialize a value to canonical JSON: sorted keys at every level, no extra whitespace.
+/// Cross-language verifiers can reproduce the exact same bytes by sorting keys.
+pub(crate) fn canonical_json<T: Serialize>(value: &T) -> Result<String, ManifestError> {
+    let v = serde_json::to_value(value).map_err(|e| ManifestError::Serialization(e.to_string()))?;
+    let sorted = sort_json_keys(v);
+    serde_json::to_string(&sorted).map_err(|e| ManifestError::Serialization(e.to_string()))
+}
+
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: serde_json::Map<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, sort_json_keys(v)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+                .into_iter()
+                .collect();
+            serde_json::Value::Object(sorted)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_keys).collect())
+        }
+        other => other,
+    }
 }
 
 /// Filter out removed entries older than 30 days.
@@ -147,6 +165,32 @@ mod tests {
         let signed = gen.generate(vec![seq], vec![], vec![]).unwrap();
         assert!(!signed.signature_b64.is_empty());
         assert_eq!(signed.body.sequences.len(), 1);
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys() {
+        let input: serde_json::Value =
+            serde_json::json!({"z": 1, "a": {"c": 3, "b": 2}, "m": [{"y": 1, "x": 2}]});
+        let result = canonical_json(&input).unwrap();
+        assert_eq!(result, r#"{"a":{"b":2,"c":3},"m":[{"x":2,"y":1}],"z":1}"#);
+    }
+
+    #[test]
+    fn canonical_json_is_deterministic() {
+        let seq = ManifestSequence {
+            name: "test".to_string(),
+            version: 1,
+            url: "/test.json".to_string(),
+            signing_key_id: "k1".to_string(),
+            sha256: "abc".to_string(),
+            required_handlers: vec!["echo".to_string()],
+            min_sdk_version: "0.1.0".to_string(),
+        };
+        let a = canonical_json(&seq).unwrap();
+        let b = canonical_json(&seq).unwrap();
+        assert_eq!(a, b);
+        assert!(a.contains(r#""min_sdk_version":"0.1.0""#));
+        assert!(a.contains(r#""name":"test""#));
     }
 
     #[test]

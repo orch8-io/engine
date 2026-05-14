@@ -60,6 +60,22 @@ pub(crate) async fn create_policy(
     State(state): State<AppState>,
     Json(req): Json<CreatePolicyRequest>,
 ) -> Result<(StatusCode, Json<PolicyResponse>), ApiError> {
+    if req.sequence_name.is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "sequence_name is required".into(),
+        ));
+    }
+    if req.error_rate_threshold < 0.0 || req.error_rate_threshold > 1.0 {
+        return Err(ApiError::InvalidArgument(
+            "error_rate_threshold must be in [0.0, 1.0]".into(),
+        ));
+    }
+    if req.time_window_secs <= 0 {
+        return Err(ApiError::InvalidArgument(
+            "time_window_secs must be positive".into(),
+        ));
+    }
+
     let tenant = req.tenant_id.unwrap_or_else(|| "default".to_string());
 
     state
@@ -111,7 +127,7 @@ pub(crate) async fn list_policies(
 
     let policies = state
         .storage
-        .list_rollback_policies(tenant)
+        .list_rollback_policies(tenant, 100)
         .await
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
 

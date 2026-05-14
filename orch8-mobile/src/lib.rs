@@ -60,6 +60,32 @@ impl From<TickOnceResult> for TickResult {
     }
 }
 
+/// Instance lifecycle state, exposed to mobile hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum InstanceStateKind {
+    Scheduled,
+    Running,
+    Waiting,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl From<InstanceState> for InstanceStateKind {
+    fn from(s: InstanceState) -> Self {
+        match s {
+            InstanceState::Scheduled => Self::Scheduled,
+            InstanceState::Running => Self::Running,
+            InstanceState::Waiting => Self::Waiting,
+            InstanceState::Paused => Self::Paused,
+            InstanceState::Completed => Self::Completed,
+            InstanceState::Cancelled => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+}
+
 /// Summary of a stored sequence, returned by `loaded_sequences()`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct SequenceInfo {
@@ -72,7 +98,7 @@ pub struct SequenceInfo {
 pub struct InstanceSummary {
     pub instance_id: String,
     pub sequence_name: String,
-    pub state: String,
+    pub state: InstanceStateKind,
     pub created_at: String,
 }
 
@@ -81,7 +107,7 @@ pub struct InstanceSummary {
 pub struct InstanceState_ {
     pub instance_id: String,
     pub sequence_name: String,
-    pub state: String,
+    pub state: InstanceStateKind,
     pub context: String,
     pub created_at: String,
     pub updated_at: String,
@@ -109,7 +135,7 @@ pub struct MobileEngine {
     notified_waiting: Arc<Mutex<HashSet<String>>>,
     dirty: Arc<AtomicBool>,
     telemetry: Arc<telemetry::TelemetryManager>,
-    sync_orchestrator: Arc<Mutex<Option<sync::SyncOrchestrator>>>,
+    sync_orchestrator: Arc<Mutex<Option<Arc<sync::SyncOrchestrator>>>>,
 }
 
 #[uniffi::export]
@@ -160,12 +186,12 @@ impl MobileEngine {
             None
         } else {
             match sync::RootKey::from_base64(&config.root_public_key) {
-                Ok(root_key) => Some(sync::SyncOrchestrator::new(
+                Ok(root_key) => Some(Arc::new(sync::SyncOrchestrator::new(
                     mobile_storage.clone(),
                     storage.clone(),
                     root_key,
                     config.sdk_version.clone(),
-                )),
+                ))),
                 Err(e) => {
                     warn!(error = %e, "invalid root_public_key — sync disabled");
                     None
@@ -231,7 +257,7 @@ impl MobileEngine {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let _guard = self.tick_mutex.lock().await;
 
             if self.cancel.is_cancelled() {
@@ -377,7 +403,7 @@ impl MobileEngine {
         input: String,
         dedup_key: Option<String>,
     ) -> Result<String, MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             if let Some(ref key) = dedup_key {
                 let dedup = self.dedup_keys.lock().await;
                 if let Some(existing_id) = dedup.get(key) {
@@ -464,7 +490,7 @@ impl MobileEngine {
 
     /// Cancel a running instance.
     pub fn cancel_instance(&self, instance_id: String) -> Result<(), MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let id = parse_instance_id(&instance_id)?;
             self.storage
                 .update_instance_state(id, InstanceState::Cancelled, None)
@@ -482,7 +508,7 @@ impl MobileEngine {
 
     /// Get the state of a specific instance.
     pub fn get_instance(&self, instance_id: String) -> Result<InstanceState_, MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let id = parse_instance_id(&instance_id)?;
             let inst =
                 self.storage
@@ -502,7 +528,7 @@ impl MobileEngine {
             Ok(InstanceState_ {
                 instance_id: inst.id.to_string(),
                 sequence_name: seq,
-                state: format!("{:?}", inst.state),
+                state: inst.state.into(),
                 context: serde_json::to_string(&inst.context.data).unwrap_or_default(),
                 created_at: inst.created_at.to_rfc3339(),
                 updated_at: inst.updated_at.to_rfc3339(),
@@ -512,7 +538,7 @@ impl MobileEngine {
 
     /// List all non-terminal instances.
     pub fn active_instances(&self) -> Result<Vec<InstanceSummary>, MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let filter = orch8_types::filter::InstanceFilter {
                 states: Some(vec![
                     InstanceState::Scheduled,
@@ -543,7 +569,7 @@ impl MobileEngine {
                 summaries.push(InstanceSummary {
                     instance_id: inst.id.to_string(),
                     sequence_name: seq_name,
-                    state: format!("{:?}", inst.state),
+                    state: inst.state.into(),
                     created_at: inst.created_at.to_rfc3339(),
                 });
             }
@@ -559,7 +585,7 @@ impl MobileEngine {
         _step_name: String,
         output: String,
     ) -> Result<(), MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let id = parse_instance_id(&instance_id)?;
 
             let inst =
@@ -597,7 +623,7 @@ impl MobileEngine {
 
     /// Load a sequence directly from a JSON string, bypassing sync.
     pub fn load_sequence_from_json(&self, json: String) -> Result<(), MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             if json.len() as u64 > self.config.max_sequence_size_bytes {
                 return Err(MobileError::ResourceLimit {
                     message: format!(
@@ -645,7 +671,7 @@ impl MobileEngine {
 
     /// List all sequences stored locally.
     pub fn loaded_sequences(&self) -> Result<Vec<SequenceInfo>, MobileError> {
-        self.runtime.block_on(async {
+        self.run_with_timeout(async {
             let tenant = TenantId::new("mobile").expect("valid tenant");
             let ns = Namespace::new("default");
             let seqs = self
@@ -679,11 +705,13 @@ impl MobileEngine {
                 .map(String::from)
                 .collect()
         };
-        self.runtime.block_on(async {
-            let orch_guard = self.sync_orchestrator.lock().await;
-            let orch = orch_guard.as_ref().ok_or_else(|| MobileError::Engine {
-                message: "sync not configured — set root_public_key in config".to_string(),
-            })?;
+        self.run_with_timeout(async {
+            let orch = {
+                let guard = self.sync_orchestrator.lock().await;
+                Arc::clone(guard.as_ref().ok_or_else(|| MobileError::Engine {
+                    message: "sync not configured — set root_public_key in config".to_string(),
+                })?)
+            };
 
             let auth = match token_provider {
                 Some(provider) => sync::SyncAuth::Bearer(provider.current_token()),
@@ -709,8 +737,7 @@ impl MobileEngine {
 
     /// Flush buffered telemetry to the remote endpoint.
     pub fn flush_telemetry(&self, endpoint_url: String) -> Result<FlushResult, MobileError> {
-        self.runtime
-            .block_on(async { self.telemetry.flush(&endpoint_url).await })
+        self.run_with_timeout(async { self.telemetry.flush(&endpoint_url).await })
     }
 
     /// Set device context for telemetry.
@@ -730,6 +757,23 @@ impl MobileEngine {
 }
 
 impl MobileEngine {
+    fn run_with_timeout<F, T>(&self, fut: F) -> Result<T, MobileError>
+    where
+        F: std::future::Future<Output = Result<T, MobileError>>,
+    {
+        let timeout = Duration::from_millis(self.config.operation_timeout_ms);
+        self.runtime.block_on(async {
+            tokio::time::timeout(timeout, fut)
+                .await
+                .map_err(|_| MobileError::Engine {
+                    message: format!(
+                        "operation timed out after {}ms",
+                        self.config.operation_timeout_ms
+                    ),
+                })?
+        })
+    }
+
     async fn count_active_instances(&self) -> Result<u64, MobileError> {
         let filter = orch8_types::filter::InstanceFilter {
             states: Some(vec![
@@ -976,5 +1020,37 @@ mod tests {
     #[test]
     fn parse_instance_id_invalid() {
         assert!(parse_instance_id("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn instance_state_kind_from_instance_state() {
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Scheduled),
+            InstanceStateKind::Scheduled
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Running),
+            InstanceStateKind::Running
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Waiting),
+            InstanceStateKind::Waiting
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Paused),
+            InstanceStateKind::Paused
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Completed),
+            InstanceStateKind::Completed
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Failed),
+            InstanceStateKind::Failed
+        );
+        assert_eq!(
+            InstanceStateKind::from(InstanceState::Cancelled),
+            InstanceStateKind::Cancelled
+        );
     }
 }

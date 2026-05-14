@@ -12,11 +12,12 @@ type HmacSha256 = Hmac<Sha256>;
 /// Trait for CDN backends (S3, R2, GCS, etc.).
 #[async_trait::async_trait]
 pub trait CdnBackend: Send + Sync {
-    /// Upload bytes to `path` with the given `cache_control`.
+    /// Upload bytes to `path` with the given `content_type` and `cache_control`.
     async fn upload(
         &self,
         path: &str,
         bytes: Vec<u8>,
+        content_type: Option<&str>,
         cache_control: Option<&str>,
     ) -> Result<(), CdnError>;
 
@@ -108,9 +109,24 @@ impl S3CdnBackend {
             HeaderValue::from_str(host).map_err(|e| CdnError::Upload(e.to_string()))?,
         );
 
-        let canonical_headers =
-            format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
-        let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+        let content_type = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let (canonical_headers, signed_headers) = if content_type.is_empty() {
+            (
+                format!(
+                    "host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+                ),
+                "host;x-amz-content-sha256;x-amz-date".to_string(),
+            )
+        } else {
+            (
+                format!("content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"),
+                "content-type;host;x-amz-content-sha256;x-amz-date".to_string(),
+            )
+        };
 
         let canonical_request = format!(
             "{method}\n{uri}\n{query_string}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
@@ -146,6 +162,7 @@ impl CdnBackend for S3CdnBackend {
         &self,
         path: &str,
         bytes: Vec<u8>,
+        content_type: Option<&str>,
         cache_control: Option<&str>,
     ) -> Result<(), CdnError> {
         let url_str = self.url(path);
@@ -153,6 +170,12 @@ impl CdnBackend for S3CdnBackend {
         let payload_hash = hex::encode(Sha256::digest(&bytes));
 
         let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ct) = content_type {
+            headers.insert(
+                "content-type",
+                HeaderValue::from_str(ct).map_err(|e| CdnError::Upload(e.to_string()))?,
+            );
+        }
         if let Some(cc) = cache_control {
             headers.insert(
                 "cache-control",
@@ -286,6 +309,7 @@ impl CdnBackend for MemoryCdnBackend {
         &self,
         path: &str,
         bytes: Vec<u8>,
+        _content_type: Option<&str>,
         cache_control: Option<&str>,
     ) -> Result<(), CdnError> {
         let mut store = self.store.lock().unwrap();
@@ -315,7 +339,12 @@ mod tests {
     async fn memory_backend_roundtrip() {
         let backend = MemoryCdnBackend::new();
         backend
-            .upload("test.txt", b"hello".to_vec(), Some("max-age=3600"))
+            .upload(
+                "test.txt",
+                b"hello".to_vec(),
+                Some("text/plain"),
+                Some("max-age=3600"),
+            )
             .await
             .unwrap();
         let etag = backend.get_etag("test.txt").await.unwrap();

@@ -19,6 +19,8 @@ pub struct MobileEngineConfig {
     pub max_sequence_size_bytes: u64,
     /// Handler timeout in milliseconds — after this, step transitions to Waiting (default: 30000).
     pub handler_timeout_ms: u64,
+    /// Operation timeout in milliseconds for synchronous API calls like start/cancel/get (default: 10000).
+    pub operation_timeout_ms: u64,
     /// Enable telemetry collection (default: true).
     pub telemetry_enabled: bool,
     /// Target environment: "production" or "staging" (default: "production").
@@ -42,6 +44,7 @@ impl Default for MobileEngineConfig {
             max_stored_sequences: 50,
             max_sequence_size_bytes: 1_048_576,
             handler_timeout_ms: 30_000,
+            operation_timeout_ms: 10_000,
             telemetry_enabled: true,
             environment: "production".to_string(),
             root_public_key: String::new(),
@@ -81,6 +84,7 @@ mod tests {
         assert_eq!(config.max_stored_sequences, 50);
         assert_eq!(config.max_sequence_size_bytes, 1_048_576);
         assert_eq!(config.handler_timeout_ms, 30_000);
+        assert_eq!(config.operation_timeout_ms, 10_000);
         assert!(config.telemetry_enabled);
         assert_eq!(config.environment, "production");
         assert!(config.root_public_key.is_empty());
