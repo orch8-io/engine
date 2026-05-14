@@ -27,7 +27,7 @@ use orch8_types::sequence::SequenceDefinition;
 
 use crate::error::EngineError;
 
-type ByNameKey = (TenantId, Namespace, String, Option<i32>);
+type ByNameKey = (TenantId, Namespace, Arc<str>, Option<i32>);
 
 /// Unified cache for sequence definitions, backing both by-id and by-name
 /// lookups. Clone-safe (cheap: inner moka caches are `Arc`-shared).
@@ -93,7 +93,7 @@ impl SequenceCache {
         let key: ByNameKey = (
             tenant_id.clone(),
             namespace.clone(),
-            name.to_string(),
+            Arc::from(name),
             version,
         );
         if let Some(seq) = self.by_name.get(&key).await {
@@ -121,7 +121,7 @@ impl SequenceCache {
         let name_key: ByNameKey = (
             seq.tenant_id.clone(),
             seq.namespace.clone(),
-            seq.name.clone(),
+            Arc::from(seq.name.as_str()),
             Some(seq.version),
         );
         self.by_name.insert(name_key, Arc::clone(seq)).await;
@@ -135,20 +135,17 @@ impl SequenceCache {
         let seq_view = self.by_id.get(&sequence_id).await;
         self.by_id.invalidate(&sequence_id).await;
         if let Some(seq) = seq_view {
+            let arc_name: Arc<str> = Arc::from(seq.name.as_str());
             let name_key: ByNameKey = (
                 seq.tenant_id.clone(),
                 seq.namespace.clone(),
-                seq.name.clone(),
+                Arc::clone(&arc_name),
                 Some(seq.version),
             );
             self.by_name.invalidate(&name_key).await;
             // Also clear the "latest version" alias the caller may have used.
-            let latest_key: ByNameKey = (
-                seq.tenant_id.clone(),
-                seq.namespace.clone(),
-                seq.name.clone(),
-                None,
-            );
+            let latest_key: ByNameKey =
+                (seq.tenant_id.clone(), seq.namespace.clone(), arc_name, None);
             self.by_name.invalidate(&latest_key).await;
         }
     }
@@ -209,7 +206,7 @@ mod tests {
         let seq = mk_seq("flow-a", 1);
         storage.create_sequence(&seq).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         let got = cache.get_by_id(&storage, seq.id).await.unwrap();
         assert_eq!(got.name, "flow-a");
         assert_eq!(got.version, 1);
@@ -224,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn get_by_id_returns_not_found_for_missing_sequence() {
         let storage = SqliteStorage::in_memory().await.unwrap();
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         let err = cache
             .get_by_id(&storage, SequenceId::new())
             .await
@@ -242,7 +239,7 @@ mod tests {
         let seq = mk_seq("flow-b", 2);
         storage.create_sequence(&seq).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         let got = cache
             .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-b", Some(2))
             .await
@@ -258,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn get_by_name_returns_none_for_missing_sequence() {
         let storage = SqliteStorage::in_memory().await.unwrap();
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         let got = cache
             .get_by_name(
                 &storage,
@@ -278,7 +275,7 @@ mod tests {
         let seq = mk_seq("flow-c", 1);
         storage.create_sequence(&seq).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         // Warm both caches via by-name lookup.
         let _ = cache
             .get_by_name(&storage, &seq.tenant_id, &seq.namespace, "flow-c", Some(1))
@@ -308,7 +305,7 @@ mod tests {
         storage.create_sequence(&seq1).await.unwrap();
         storage.create_sequence(&seq2).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         cache.get_by_id(&storage, seq1.id).await.unwrap();
         cache.get_by_id(&storage, seq2.id).await.unwrap();
 
@@ -350,7 +347,7 @@ mod tests {
         storage.create_sequence(&seq_v1).await.unwrap();
         storage.create_sequence(&seq_v2).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         let got = cache
             .get_by_name(
                 &storage,
@@ -372,7 +369,7 @@ mod tests {
         let seq = mk_seq("flow-g", 3);
         storage.create_sequence(&seq).await.unwrap();
 
-        let cache = SequenceCache::new(100, Duration::from_mins(1));
+        let cache = SequenceCache::new(100, Duration::from_secs(60));
         // First lookup by id.
         let _ = cache.get_by_id(&storage, seq.id).await.unwrap();
 

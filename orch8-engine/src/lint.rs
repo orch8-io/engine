@@ -1129,7 +1129,7 @@ mod tests {
             params: json!({}),
             delay: None,
             retry: None,
-            timeout: Some(Duration::from_mins(1)),
+            timeout: Some(Duration::from_secs(60)),
             rate_limit_key: None,
             send_window: None,
             context_access: None,

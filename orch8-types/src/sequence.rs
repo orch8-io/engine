@@ -1748,7 +1748,7 @@ mod tests {
         if let BlockDefinition::Step(ref mut sd) = s {
             sd.retry = Some(RetryPolicy {
                 max_attempts: 3,
-                initial_backoff: Duration::from_mins(1),
+                initial_backoff: Duration::from_secs(60),
                 max_backoff: Duration::from_secs(10),
                 backoff_multiplier: 2.0,
             });

@@ -54,7 +54,7 @@ pub async fn run_tick_loop(
     // callers in evaluator/triggers can cut DB roundtrips on sub-sequence
     // resolution and trigger firing without reshaping this plumbing.
     let sequence_cache: Arc<SequenceCache> =
-        Arc::new(SequenceCache::new(1_000, Duration::from_mins(5)));
+        Arc::new(SequenceCache::new(1_000, Duration::from_secs(300)));
 
     // Share WebhookConfig via Arc to avoid cloning per instance.
     let webhook_config = Arc::new(config.webhooks.clone());

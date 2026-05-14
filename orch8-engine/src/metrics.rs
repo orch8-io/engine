@@ -53,13 +53,21 @@ pub fn inc_by(name: &'static str, n: u64) {
 }
 
 /// Record a counter increment with labels.
-pub fn inc_with(name: &'static str, labels: &[(&'static str, &str)]) {
-    let pairs: Vec<(String, String)> = labels
+///
+/// All keys and values must be `'static` so they can be borrowed by
+/// `metrics::SharedString` (a `Cow<'static, str>`) without allocation.
+/// The only allocation is the temporary `Vec<Label>`.
+pub fn inc_with(name: &'static str, labels: &[(&'static str, &'static str)]) {
+    let key_labels: Vec<metrics::Label> = labels
         .iter()
-        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .map(|(k, v)| metrics::Label::from_static_parts(k, v))
         .collect();
-    counter!(name, &pairs).increment(1);
+    let key = metrics::Key::from_parts(name, key_labels);
+    metrics::with_recorder(|r| r.register_counter(&key, &METADATA)).increment(1);
 }
+
+static METADATA: metrics::Metadata<'static> =
+    metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
 /// Record a gauge value.
 pub fn set_gauge(name: &'static str, value: f64) {

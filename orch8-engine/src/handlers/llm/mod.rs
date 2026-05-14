@@ -1,0 +1,302 @@
+//! Built-in `llm_call` handler — universal LLM integration.
+//!
+//! Supports all major providers through two API formats:
+//! - **OpenAI-compatible**: `OpenAI`, `Deepseek`, `Qwen`, `Perplexity`, `Gemini`, `Groq`, `Together`, `Mistral`
+//! - **Anthropic**: Claude (uses the `Messages` API)
+//!
+//! ## Params
+//!
+//! | Field | Type | Default | Description |
+//! |-------|------|---------|-------------|
+//! | `provider` | string | `"openai"` | Provider name (see below) |
+//! | `providers` | array | — | Failover list of `{provider, api_key, model}` objects |
+//! | `base_url` | string | per-provider | Override API base URL |
+//! | `api_key` | string | — | API key (direct) |
+//! | `api_key_env` | string | — | Env var name containing API key |
+//! | `model` | string | per-provider | Model identifier |
+//! | `messages` | array | `[]` | Chat messages (`{role, content}`) |
+//! | `system` | string | — | System prompt (Anthropic shorthand) |
+//! | `temperature` | number | — | Sampling temperature |
+//! | `max_tokens` | number | `4096` | Max output tokens |
+//! | `tools` | array | — | Tool/function definitions |
+//! | `tool_choice` | string/object | — | Tool selection strategy |
+//! | `total_timeout_secs` | number | `120` | Cumulative timeout across all failover attempts (0 disables) |
+//! | `per_provider_timeout_secs` | number | `60` | Per-provider timeout in failover mode |
+//!
+//! ## Providers
+//!
+//! | Name | Base URL | Format |
+//! |------|----------|--------|
+//! | `openai` | `api.openai.com/v1` | OpenAI |
+//! | `anthropic` | `api.anthropic.com/v1` | Anthropic |
+//! | `gemini` | `generativelanguage.googleapis.com/v1beta/openai` | OpenAI |
+//! | `deepseek` | `api.deepseek.com` | OpenAI |
+//! | `qwen` | `dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI |
+//! | `perplexity` | `api.perplexity.ai` | OpenAI |
+//! | `groq` | `api.groq.com/openai/v1` | OpenAI |
+//! | `together` | `api.together.xyz/v1` | OpenAI |
+//! | `mistral` | `api.mistral.ai/v1` | OpenAI |
+//! | `openrouter` | `openrouter.ai/api/v1` | OpenAI |
+
+mod anthropic;
+mod common;
+mod openai;
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tracing::warn;
+
+use orch8_types::error::StepError;
+
+use self::common::{permanent, resolve_api_key, resolve_base_url, retryable};
+use super::StepContext;
+
+/// Shared HTTP client for all LLM calls (connection pooling, TLS, keep-alive).
+pub(crate) fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .pool_max_idle_per_host(8)
+            .timeout(Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to build optimized HTTP client, using default");
+                reqwest::Client::new()
+            })
+    })
+}
+
+/// Main handler: routes to the correct provider API.
+///
+/// If the params contain a `providers` array, iterates through each provider
+/// in order, attempting the call. On failure, tries the next provider.
+/// The output includes a `tried` array listing providers attempted in order.
+pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
+    if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
+        return handle_llm_call_failover(&ctx.params, providers).await;
+    }
+
+    let provider = ctx
+        .params
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("openai");
+
+    let api_key = resolve_api_key(&ctx.params, provider)?;
+    let base = resolve_base_url(&ctx.params, provider);
+
+    if provider == "anthropic" {
+        anthropic::call_anthropic(&ctx.params, &api_key, &base).await
+    } else {
+        openai::call_openai_compat(&ctx.params, &api_key, &base, provider).await
+    }
+}
+
+/// Default per-provider timeout in failover mode.
+const DEFAULT_PER_PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default cumulative timeout across all failover attempts.
+const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Failover logic: iterate through providers, try each one, stop on first success.
+///
+/// Applies both a per-provider timeout and a cumulative timeout across all
+/// attempts. Override via `total_timeout_secs` (0 disables the cumulative cap).
+async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
+    if providers.is_empty() {
+        return Err(permanent("providers array is empty".to_string()));
+    }
+
+    let total_timeout = params
+        .get("total_timeout_secs")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs);
+
+    if total_timeout.is_zero() {
+        return failover_inner(params, providers).await;
+    }
+
+    match tokio::time::timeout(total_timeout, failover_inner(params, providers)).await {
+        Ok(result) => result,
+        Err(_) => Err(retryable(format!(
+            "all providers exceeded total timeout of {total_timeout:?}"
+        ))),
+    }
+}
+
+async fn failover_inner(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
+    let per_attempt_timeout = params
+        .get("per_provider_timeout_secs")
+        .and_then(Value::as_u64)
+        .map_or(DEFAULT_PER_PROVIDER_TIMEOUT, Duration::from_secs);
+
+    let mut tried: Vec<String> = Vec::new();
+    let mut last_error: Option<StepError> = None;
+
+    for provider_config in providers {
+        let provider_name = provider_config
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("openai");
+
+        tried.push(provider_name.to_string());
+
+        let merged = merge_provider_params(params, provider_config);
+
+        let api_key = match resolve_api_key(&merged, provider_name) {
+            Ok(key) => key,
+            Err(e) => {
+                warn!(provider = %provider_name, error = %e, "llm_call failover: skipping provider (key resolution failed)");
+                last_error = Some(e);
+                continue;
+            }
+        };
+
+        let base = resolve_base_url(&merged, provider_name);
+        if !super::builtin::is_url_safe(&base).await {
+            warn!(provider = %provider_name, base_url = %base, "llm_call: rejected unsafe base_url");
+            last_error = Some(permanent(format!(
+                "provider {provider_name}: base_url '{base}' targets an internal or non-public address"
+            )));
+            continue;
+        }
+
+        let attempt = async {
+            if provider_name == "anthropic" {
+                anthropic::call_anthropic(&merged, &api_key, &base).await
+            } else {
+                openai::call_openai_compat(&merged, &api_key, &base, provider_name).await
+            }
+        };
+
+        let result = if per_attempt_timeout.is_zero() {
+            attempt.await
+        } else {
+            match tokio::time::timeout(per_attempt_timeout, attempt).await {
+                Ok(r) => r,
+                Err(_) => Err(retryable(format!(
+                    "provider {provider_name} timed out after {per_attempt_timeout:?}"
+                ))),
+            }
+        };
+
+        match result {
+            Ok(mut output) => {
+                if let Some(obj) = output.as_object_mut() {
+                    obj.insert("tried".into(), json!(tried));
+                }
+                return Ok(output);
+            }
+            Err(e) => {
+                warn!(provider = %provider_name, error = %e, "llm_call failover: provider failed, trying next");
+                last_error = Some(e);
+            }
+        }
+    }
+
+    let error_msg = match last_error.as_ref() {
+        Some(e) => format!("all providers failed, last error: {e}"),
+        None => "all providers failed".to_string(),
+    };
+
+    Err(permanent(error_msg))
+}
+
+fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value {
+    let mut merged = if let Some(base_obj) = base_params.as_object() {
+        let mut obj = serde_json::Map::with_capacity(base_obj.len());
+        for (k, v) in base_obj {
+            if k == "providers" {
+                continue;
+            }
+            obj.insert(k.clone(), v.clone());
+        }
+        serde_json::Value::Object(obj)
+    } else {
+        base_params.clone()
+    };
+
+    if let (Some(merged_obj), Some(config_obj)) =
+        (merged.as_object_mut(), provider_config.as_object())
+    {
+        for (key, value) in config_obj {
+            merged_obj.insert(key.clone(), value.clone());
+        }
+    }
+
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_providers_returns_error() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(handle_llm_call_failover(&json!({}), &[]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_total_timeout_is_reasonable() {
+        assert_eq!(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs(120));
+        assert!(DEFAULT_TOTAL_TIMEOUT > DEFAULT_PER_PROVIDER_TIMEOUT);
+    }
+
+    #[test]
+    fn cumulative_timeout_returns_error_on_empty_providers_before_timeout() {
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(handle_llm_call_failover(&json!({}), &[]));
+        assert!(matches!(result, Err(StepError::Permanent { .. })));
+    }
+
+    #[test]
+    fn cumulative_timeout_can_be_disabled_via_zero() {
+        let params = json!({"total_timeout_secs": 0});
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(handle_llm_call_failover(&params, &[]));
+        assert!(matches!(result, Err(StepError::Permanent { .. })));
+    }
+
+    #[test]
+    fn merge_provider_params_overlays_fields() {
+        let base = json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "provider": "openai",
+            "api_key": "base-key",
+            "model": "gpt-4o",
+            "providers": [{"provider": "anthropic"}],
+        });
+        let config = json!({
+            "provider": "anthropic",
+            "api_key": "override-key",
+            "model": "claude-sonnet-4-20250514",
+        });
+        let merged = merge_provider_params(&base, &config);
+        assert_eq!(merged.get("provider").unwrap(), "anthropic");
+        assert_eq!(merged.get("api_key").unwrap(), "override-key");
+        assert_eq!(merged.get("model").unwrap(), "claude-sonnet-4-20250514");
+        assert!(merged.get("messages").is_some());
+        assert!(merged.get("providers").is_none());
+    }
+
+    #[test]
+    fn merge_provider_params_preserves_base_when_empty_override() {
+        let base = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "model": "gpt-4",
+            "providers": [{"provider": "anthropic"}],
+        });
+        let config = json!({});
+        let merged = merge_provider_params(&base, &config);
+        assert_eq!(merged["model"], "gpt-4");
+        assert!(merged.get("providers").is_none());
+        assert!(merged.get("messages").is_some());
+    }
+}

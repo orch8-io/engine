@@ -6,7 +6,7 @@ use tracing::warn;
 static TOKEN_CACHE: LazyLock<moka::sync::Cache<String, Arc<[Token]>>> = LazyLock::new(|| {
     moka::sync::Cache::builder()
         .max_capacity(10_000)
-        .time_to_idle(std::time::Duration::from_mins(10))
+        .time_to_idle(std::time::Duration::from_secs(600))
         .build()
 });
 

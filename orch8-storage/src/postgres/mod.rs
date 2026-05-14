@@ -59,6 +59,7 @@ impl PostgresStorage {
         Self::with_min_connections(database_url, max_connections, 2, search_path).await
     }
 
+    #[allow(clippy::duration_suboptimal_units)]
     pub async fn with_min_connections(
         database_url: &str,
         max_connections: u32,
@@ -69,7 +70,7 @@ impl PostgresStorage {
             .max_connections(max_connections)
             .min_connections(min_connections)
             .acquire_timeout(std::time::Duration::from_secs(10))
-            .idle_timeout(std::time::Duration::from_mins(5));
+            .idle_timeout(std::time::Duration::from_secs(300));
 
         if let Some(schema) = search_path {
             if !schema

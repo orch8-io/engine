@@ -44,7 +44,8 @@ async function request<T>(
   if (!res.ok) {
     throw new ApiRequestError(res.status, await res.text());
   }
-  return res.json();
+  const text = await res.text();
+  return (text ? JSON.parse(text) : null) as T;
 }
 
 export class AuthError extends Error {
@@ -204,11 +205,12 @@ export interface ListInstancesParams {
   offset?: string;
 }
 
-export function listInstances(
+export async function listInstances(
   params?: ListInstancesParams,
   signal?: AbortSignal,
 ): Promise<TaskInstance[]> {
-  return request("/instances", params as Record<string, string | undefined>, signal);
+  const raw = await request<TaskInstance[] | { items: TaskInstance[] }>("/instances", params as Record<string, string | undefined>, signal);
+  return Array.isArray(raw) ? raw : raw.items;
 }
 
 export function getInstance(id: string, signal?: AbortSignal): Promise<TaskInstance> {
@@ -279,11 +281,12 @@ export interface ListSequencesParams {
   offset?: string;
 }
 
-export function listSequences(
+export async function listSequences(
   params?: ListSequencesParams,
   signal?: AbortSignal,
 ): Promise<SequenceDefinition[]> {
-  return request("/sequences", params as Record<string, string | undefined>, signal);
+  const raw = await request<SequenceDefinition[] | { items: SequenceDefinition[] }>("/sequences", params as Record<string, string | undefined>, signal);
+  return Array.isArray(raw) ? raw : raw.items;
 }
 
 // ─── Operations: DLQ / circuit breakers / cluster ────────────────────────────

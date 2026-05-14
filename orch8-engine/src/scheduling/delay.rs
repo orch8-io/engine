@@ -131,7 +131,7 @@ mod tests {
     fn simple_delay() {
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_hours(1),
+            duration: StdDuration::from_secs(3600),
             business_days_only: false,
             jitter: None,
             holidays: vec![],
@@ -207,9 +207,9 @@ mod tests {
     fn jitter_stays_within_bounds() {
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_hours(1),
+            duration: StdDuration::from_secs(3600),
             business_days_only: false,
-            jitter: Some(StdDuration::from_mins(1)),
+            jitter: Some(StdDuration::from_secs(60)),
             holidays: vec![],
             fire_at_local: None,
             timezone: None,
@@ -226,7 +226,7 @@ mod tests {
         // With 10s jitter, 200 samples should not all be identical.
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_mins(1),
+            duration: StdDuration::from_secs(60),
             business_days_only: false,
             jitter: Some(StdDuration::from_secs(10)),
             holidays: vec![],
@@ -272,7 +272,7 @@ mod tests {
     fn no_jitter_is_deterministic() {
         let from = Utc::now();
         let delay = DelaySpec {
-            duration: StdDuration::from_mins(2),
+            duration: StdDuration::from_secs(120),
             business_days_only: false,
             jitter: None,
             holidays: vec![],
@@ -326,7 +326,7 @@ mod tests {
         let delay = DelaySpec {
             duration: StdDuration::from_secs(10),
             business_days_only: false,
-            jitter: Some(StdDuration::from_mins(1)),
+            jitter: Some(StdDuration::from_secs(60)),
             holidays: vec![],
             fire_at_local: None,
             timezone: None,
@@ -541,7 +541,7 @@ mod tests {
             .unwrap()
             .and_utc();
         let delay = DelaySpec {
-            duration: StdDuration::from_mins(2),
+            duration: StdDuration::from_secs(120),
             business_days_only: false,
             jitter: None,
             holidays: vec![],
@@ -681,7 +681,7 @@ mod tests {
             .unwrap()
             .and_utc();
         let delay = DelaySpec {
-            duration: StdDuration::from_mins(5),
+            duration: StdDuration::from_secs(300),
             business_days_only: false,
             jitter: None,
             holidays: vec![],

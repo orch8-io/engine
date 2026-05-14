@@ -115,8 +115,7 @@ pub async fn execute_step_dry(
 
     let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
         let names = handlers.handler_names();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &name_refs);
+        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &names);
         match suggestion {
             Some(s) => {
                 EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
@@ -274,8 +273,7 @@ pub async fn execute_step(
 
     let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
         let names = handlers.handler_names();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &name_refs);
+        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &names);
         match suggestion {
             Some(s) => {
                 EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
@@ -460,7 +458,7 @@ mod tests {
     #[test]
     fn backoff_exponential() {
         let initial = Duration::from_secs(1);
-        let max = Duration::from_mins(1);
+        let max = Duration::from_secs(60);
         let multiplier = 2.0;
 
         assert_eq!(

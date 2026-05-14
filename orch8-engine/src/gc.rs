@@ -52,7 +52,7 @@ const fn error_kind(err: &StorageError) -> &'static str {
 pub const GC_BATCH_LIMIT: u32 = 1_000;
 
 /// Default cadence between sweep ticks.
-pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_mins(5);
+pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Default TTL for `emit_event_dedupe` rows.
 ///
@@ -61,10 +61,9 @@ pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_mins(5);
 /// should not rely on dedupe beyond this window; see the `emit_event` design
 /// doc for rationale.
 ///
-/// Encoded as hours (`30` days × `24` hours = `720` hours) because
-/// `Duration::from_days` is not yet a `const fn` on the toolchain this crate
-/// targets.
-pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_hours(720);
+/// Encoded as seconds (`30` days × `24` hours × `3600` seconds = `2_592_000` seconds)
+/// so the value can be used in a `const` context with `Duration::from_secs`.
+pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
 
 /// Run the expiry sweeper until `cancel` fires.
 ///
@@ -310,13 +309,13 @@ mod tests {
 
     #[test]
     fn gc_default_interval_is_five_minutes() {
-        assert_eq!(GC_DEFAULT_INTERVAL, Duration::from_mins(5));
+        assert_eq!(GC_DEFAULT_INTERVAL, Duration::from_secs(300));
     }
 
     #[test]
     fn emit_dedupe_default_ttl_is_30_days() {
         // 30 days = 720 hours
-        assert_eq!(EMIT_DEDUPE_DEFAULT_TTL, Duration::from_hours(720));
+        assert_eq!(EMIT_DEDUPE_DEFAULT_TTL, Duration::from_secs(2_592_000));
     }
 
     #[test]

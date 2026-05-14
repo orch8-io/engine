@@ -313,8 +313,8 @@ impl Engine {
         set.spawn(async move {
             credentials::run_refresh_loop(
                 storage,
-                std::time::Duration::from_mins(1),
-                std::time::Duration::from_mins(5),
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(300),
                 cancel,
             )
             .await;

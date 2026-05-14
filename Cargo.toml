@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.92"
+rust-version = "1.75"
 license = "BUSL-1.1"
 
 [workspace.dependencies]
@@ -106,3 +106,4 @@ must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 option_if_let_else = "allow"
+duration_suboptimal_units = "allow"

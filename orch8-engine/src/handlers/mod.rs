@@ -72,9 +72,9 @@ pub struct StepContext {
 /// Supports mock overrides for testing: when a mock is registered for a handler
 /// name, it takes precedence over the real handler.
 pub struct HandlerRegistry {
-    handlers: HashMap<String, StepHandler>,
+    handlers: HashMap<Arc<str>, StepHandler>,
     /// Mock overrides. When present, `get()` returns the mock instead of the real handler.
-    mocks: HashMap<String, StepHandler>,
+    mocks: HashMap<Arc<str>, StepHandler>,
     /// Optional circuit breaker registry. When present, step dispatch sites
     /// (fast path in `scheduler::step_exec` and tree path in
     /// `handlers::step_block`) consult it before invoking a handler and record
@@ -113,10 +113,8 @@ impl HandlerRegistry {
         F: Fn(StepContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
-        self.handlers.insert(
-            name.to_string(),
-            Box::new(move |ctx| Box::pin(handler(ctx))),
-        );
+        self.handlers
+            .insert(Arc::from(name), Box::new(move |ctx| Box::pin(handler(ctx))));
     }
 
     /// Look up a handler by name. Mocks take precedence over real handlers.
@@ -129,14 +127,14 @@ impl HandlerRegistry {
     }
 
     /// Return all registered handler names (both real and mock).
-    pub fn handler_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
+    pub fn handler_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
             .handlers
             .keys()
             .chain(self.mocks.keys())
-            .cloned()
+            .map(AsRef::as_ref)
             .collect();
-        names.sort();
+        names.sort_unstable();
         names.dedup();
         names
     }
@@ -145,7 +143,7 @@ impl HandlerRegistry {
     /// The mock takes precedence over any real handler with the same name.
     pub fn set_mock(&mut self, name: &str, response: serde_json::Value) {
         self.mocks.insert(
-            name.to_string(),
+            Arc::from(name),
             Box::new(move |_ctx| {
                 let val = response.clone();
                 Box::pin(async move { Ok(val) })
@@ -157,7 +155,7 @@ impl HandlerRegistry {
     /// If `retryable` is true, returns `StepError::Retryable`; otherwise `StepError::Permanent`.
     pub fn set_mock_error(&mut self, name: &str, message: String, retryable: bool) {
         self.mocks.insert(
-            name.to_string(),
+            Arc::from(name),
             Box::new(move |_ctx| {
                 let msg = message.clone();
                 Box::pin(async move {
@@ -183,10 +181,8 @@ impl HandlerRegistry {
         F: Fn(StepContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
-        self.mocks.insert(
-            name.to_string(),
-            Box::new(move |ctx| Box::pin(handler(ctx))),
-        );
+        self.mocks
+            .insert(Arc::from(name), Box::new(move |ctx| Box::pin(handler(ctx))));
     }
 
     /// Remove a single mock, restoring the real handler.

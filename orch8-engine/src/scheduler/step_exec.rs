@@ -273,12 +273,9 @@ pub async fn check_human_input(
                 // poison message can't replay forever) but keep the block waiting
                 // by falling through to the reschedule branch.
                 let candidate = signal.payload.get("value").and_then(|v| v.as_str());
-                let accepted = match candidate {
-                    Some(v) => human_def.effective_choices().iter().any(|c| c.value == v),
-                    None => false,
-                };
-
-                if !accepted {
+                let Some(value) = candidate
+                    .filter(|v| human_def.effective_choices().iter().any(|c| c.value == **v))
+                else {
                     warn!(
                         instance_id = %instance.id,
                         block_id = %step_def.id,
@@ -288,12 +285,10 @@ pub async fn check_human_input(
                     );
                     storage.mark_signal_delivered(signal.id).await?;
                     continue;
-                }
+                };
 
                 // Valid input — canonical output shape and context merge.
-                let value = candidate
-                    .expect("candidate is Some when accepted")
-                    .to_string();
+                let value = value.to_string();
                 let store_key = human_def
                     .store_as
                     .clone()

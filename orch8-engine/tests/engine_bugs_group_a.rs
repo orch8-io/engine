@@ -1317,7 +1317,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
 //         orch8-storage/src/sqlite/workers.rs:168 / postgres/mod.rs:488.
 //
 // Observation: the `Engine::spawn_background_tasks` reaper uses hardcoded
-// `Duration::from_secs(30)` tick + `Duration::from_mins(1)` stale threshold.
+// `Duration::from_secs(30)` tick + `Duration::from_secs(60)` stale threshold.
 // That wall-clock coupling is what makes retry-backoff e2e tests race.
 //
 // What we CAN test at unit level today: the storage primitive itself —
