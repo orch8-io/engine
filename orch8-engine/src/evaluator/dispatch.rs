@@ -59,6 +59,13 @@ pub(super) async fn dispatch_block(
                 )
                 .await;
             }
+            // Bump the per-instance step counter so max_steps_per_instance
+            // enforcement (checked at the scheduler level) sees accurate counts.
+            if matches!(result, Ok(true)) {
+                let mut ctx = instance.context.clone();
+                ctx.runtime.total_steps_executed += 1;
+                let _ = storage.update_instance_context(instance.id, &ctx).await;
+            }
             result
         }
         BlockDefinition::Parallel(par_def) => {

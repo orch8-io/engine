@@ -1,0 +1,7 @@
+module Orch8MobileFFI {
+    header "Orch8MobileFFI.h"
+    export *
+    use "Darwin"
+    use "_Builtin_stdbool"
+    use "_Builtin_stdint"
+}

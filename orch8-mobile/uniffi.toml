@@ -1,0 +1,6 @@
+[bindings.swift]
+module_name = "Orch8Mobile"
+generate_immutable_records = true
+
+[bindings.kotlin]
+package_name = "io.orch8.mobile"

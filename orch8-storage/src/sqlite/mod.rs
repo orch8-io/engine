@@ -79,6 +79,11 @@ pub struct SqliteStorage {
 }
 
 impl SqliteStorage {
+    /// Access the underlying `SqlitePool`.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Create a new in-memory SQLite storage with all tables.
     pub async fn in_memory() -> Result<Self, StorageError> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -112,6 +117,30 @@ impl SqliteStorage {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
+            .connect_with(opts)
+            .await
+            .map_err(|e| StorageError::Connection(e.to_string()))?;
+
+        let storage = Self { pool };
+        storage.create_tables().await?;
+        Ok(storage)
+    }
+
+    /// Create a file-backed SQLite storage tuned for mobile use.
+    ///
+    /// Uses WAL journal mode for concurrent reads during writes, 5 connections
+    /// (1 writer + 4 reader capacity under WAL), a 5-second busy timeout to
+    /// handle contention gracefully, and foreign keys for cascade deletes.
+    pub async fn file_mobile(path: &str) -> Result<Self, StorageError> {
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
+            .map_err(|e| StorageError::Connection(e.to_string()))?
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5))
+            .foreign_keys(true);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
             .connect_with(opts)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
@@ -1387,6 +1416,333 @@ impl StorageBackend for SqliteStorage {
     async fn ping(&self) -> Result<(), StorageError> {
         misc::ping(self).await
     }
+
+    // === Telemetry ===
+
+    async fn ingest_telemetry_event(
+        &self,
+        event_type: &str,
+        payload: &str,
+        _device_id: &str,
+        _os_name: &str,
+        _os_version: &str,
+        _app_version: &str,
+        _sdk_version: &str,
+        _tenant_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind(event_type)
+        .bind(payload)
+        .bind(created_at.to_rfc3339())
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn ingest_telemetry_error(
+        &self,
+        error_type: &str,
+        message: &str,
+        _stack_trace: Option<&str>,
+        _device_id: &str,
+        _os_name: &str,
+        _os_version: &str,
+        _app_version: &str,
+        _sdk_version: &str,
+        _tenant_id: &str,
+        instance_id: Option<&str>,
+        sequence_name: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let payload = serde_json::json!({
+            "error_type": error_type,
+            "message": message,
+            "instance_id": instance_id,
+            "sequence_name": sequence_name,
+        });
+        sqlx::query(
+            "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        )
+        .bind("InstanceFailed")
+        .bind(payload.to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn query_telemetry_dashboard(
+        &self,
+        _query_type: &str,
+        _tenant_id: &str,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        // Dashboard queries are server-side (Postgres) only.
+        Ok(Vec::new())
+    }
+
+    async fn create_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate_threshold: f64,
+        time_window_secs: i32,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(tenant_id, sequence_name) DO UPDATE SET
+               error_rate_threshold = excluded.error_rate_threshold,
+               time_window_secs = excluded.time_window_secs,
+               enabled = 1,
+               updated_at = datetime('now')"
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .bind(error_rate_threshold)
+        .bind(time_window_secs)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        let row: Option<(i64, String, String, f64, i32, i32, String, String)> = sqlx::query_as(
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at
+             FROM rollback_policies WHERE tenant_id = ? AND sequence_name = ?"
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(
+                id,
+                tenant_id,
+                sequence_name,
+                error_rate_threshold,
+                time_window_secs,
+                enabled,
+                created_at,
+                updated_at,
+            )| {
+                orch8_types::rollback::RollbackPolicy {
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    error_rate_threshold,
+                    time_window_secs,
+                    enabled: enabled != 0,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                        .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc)),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                        .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc)),
+                }
+            },
+        ))
+    }
+
+    async fn list_rollback_policies(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        let rows: Vec<(i64, String, String, f64, i32, i32, String, String)> = if let Some(t) =
+            tenant_id
+        {
+            sqlx::query_as(
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at
+                 FROM rollback_policies WHERE tenant_id = ?"
+            )
+            .bind(t)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at
+                 FROM rollback_policies"
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    error_rate_threshold,
+                    time_window_secs,
+                    enabled,
+                    created_at,
+                    updated_at,
+                )| {
+                    orch8_types::rollback::RollbackPolicy {
+                        id,
+                        tenant_id,
+                        sequence_name,
+                        error_rate_threshold,
+                        time_window_secs,
+                        enabled: enabled != 0,
+                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at).map_or_else(
+                            |_| chrono::Utc::now(),
+                            |dt| dt.with_timezone(&chrono::Utc),
+                        ),
+                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at).map_or_else(
+                            |_| chrono::Utc::now(),
+                            |dt| dt.with_timezone(&chrono::Utc),
+                        ),
+                    }
+                },
+            )
+            .collect())
+    }
+
+    async fn delete_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM rollback_policies WHERE tenant_id = ? AND sequence_name = ?")
+            .bind(tenant_id)
+            .bind(sequence_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn record_rollback(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate: f64,
+        threshold: f64,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO rollback_history (tenant_id, sequence_name, error_rate, threshold, reason)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .bind(error_rate)
+        .bind(threshold)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn query_error_rate(
+        &self,
+        _tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<Option<f64>, StorageError> {
+        let start = chrono::Utc::now() - chrono::Duration::seconds(window_secs);
+        let start_str = start.to_rfc3339();
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            r"SELECT
+               COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
+               COUNT(*) as total
+             FROM telemetry_events
+             WHERE created_at >= ?1
+               AND json_extract(payload, '$.sequence_name') = ?2",
+        )
+        .bind(start_str)
+        .bind(sequence_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(failed, total)| {
+            if total > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                Some(failed as f64 / total as f64)
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn list_rollback_history(
+        &self,
+        tenant_id: Option<&str>,
+        sequence_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
+        let mut query = String::from(
+            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1"
+        );
+        if tenant_id.is_some() {
+            query.push_str(" AND tenant_id = ?");
+        }
+        if sequence_name.is_some() {
+            query.push_str(" AND sequence_name = ?");
+        }
+        query.push_str(" ORDER BY triggered_at DESC LIMIT ?");
+
+        let mut q = sqlx::query_as(&query);
+        if let Some(t) = tenant_id {
+            q = q.bind(t);
+        }
+        if let Some(s) = sequence_name {
+            q = q.bind(s);
+        }
+        q = q.bind(limit);
+
+        let rows: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            f64,
+            f64,
+            Option<String>,
+            String,
+            i32,
+        )> = q.fetch_all(&self.pool).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    triggered_at,
+                    error_rate,
+                    threshold,
+                    previous_manifest_version,
+                    reason,
+                    alert_sent,
+                )| {
+                    orch8_types::rollback::RollbackHistory {
+                        id,
+                        tenant_id,
+                        sequence_name,
+                        triggered_at: chrono::DateTime::parse_from_rfc3339(&triggered_at)
+                            .map_or_else(
+                                |_| chrono::Utc::now(),
+                                |dt| dt.with_timezone(&chrono::Utc),
+                            ),
+                        error_rate,
+                        threshold,
+                        previous_manifest_version,
+                        reason,
+                        alert_sent: alert_sent != 0,
+                    }
+                },
+            )
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -2213,5 +2569,192 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    // ── Rollback policy tests ──
+
+    #[tokio::test]
+    async fn sqlite_rollback_policy_crud() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let tenant = "t1";
+        let seq = "seq-a";
+
+        // Create
+        storage
+            .create_rollback_policy(tenant, seq, 0.1, 300)
+            .await
+            .unwrap();
+
+        // Read
+        let policy = storage
+            .get_rollback_policy(tenant, seq)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.tenant_id, tenant);
+        assert_eq!(policy.sequence_name, seq);
+        assert!((policy.error_rate_threshold - 0.1).abs() < f64::EPSILON);
+        assert_eq!(policy.time_window_secs, 300);
+        assert!(policy.enabled);
+
+        // Update via create (upsert)
+        storage
+            .create_rollback_policy(tenant, seq, 0.2, 600)
+            .await
+            .unwrap();
+        let policy = storage
+            .get_rollback_policy(tenant, seq)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!((policy.error_rate_threshold - 0.2).abs() < f64::EPSILON);
+        assert_eq!(policy.time_window_secs, 600);
+
+        // List
+        let policies = storage.list_rollback_policies(Some(tenant)).await.unwrap();
+        assert_eq!(policies.len(), 1);
+
+        // List all tenants
+        storage
+            .create_rollback_policy("t2", seq, 0.05, 100)
+            .await
+            .unwrap();
+        let all = storage.list_rollback_policies(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Delete
+        storage.delete_rollback_policy(tenant, seq).await.unwrap();
+        assert!(storage
+            .get_rollback_policy(tenant, seq)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn sqlite_rollback_history_recorded() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        storage
+            .record_rollback("t1", "seq-x", 0.15, 0.1, "threshold_breach")
+            .await
+            .unwrap();
+
+        let rows: Vec<(i64, String, String, f64, f64, String)> =
+            sqlx::query_as("SELECT id, tenant_id, sequence_name, error_rate, threshold, reason FROM rollback_history")
+                .fetch_all(&storage.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (_, tenant, seq, rate, threshold, reason) = &rows[0];
+        assert_eq!(tenant, "t1");
+        assert_eq!(seq, "seq-x");
+        assert!((rate - 0.15).abs() < f64::EPSILON);
+        assert!((threshold - 0.1).abs() < f64::EPSILON);
+        assert_eq!(reason, "threshold_breach");
+    }
+
+    #[tokio::test]
+    async fn sqlite_query_error_rate_computes_from_telemetry() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let seq = "seq-y";
+
+        // Insert 2 failed and 1 success event
+        for _ in 0..2 {
+            storage
+                .ingest_telemetry_error(
+                    "RuntimeError",
+                    "boom",
+                    None,
+                    "d1",
+                    "iOS",
+                    "17",
+                    "1.0",
+                    "0.1",
+                    "t1",
+                    Some("i1"),
+                    Some(seq),
+                )
+                .await
+                .unwrap();
+        }
+        storage
+            .ingest_telemetry_event(
+                "InstanceCompleted",
+                &serde_json::json!({"sequence_name": seq}).to_string(),
+                "d1",
+                "iOS",
+                "17",
+                "1.0",
+                "0.1",
+                "t1",
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+
+        let rate = storage.query_error_rate("t1", seq, 3600).await.unwrap();
+        assert!(rate.is_some());
+        // 2 failed out of 3 total where sequence_name matches
+        // Wait - the success event also has sequence_name in payload,
+        // so total = 3, failed = 2
+        assert!((rate.unwrap() - 0.666_666).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn sqlite_list_rollback_history_filtered() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+
+        storage
+            .record_rollback("t1", "seq-a", 0.1, 0.05, "r1")
+            .await
+            .unwrap();
+        storage
+            .record_rollback("t1", "seq-b", 0.2, 0.1, "r2")
+            .await
+            .unwrap();
+        storage
+            .record_rollback("t2", "seq-a", 0.3, 0.15, "r3")
+            .await
+            .unwrap();
+
+        // All
+        let all = storage
+            .list_rollback_history(None, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Filter by tenant
+        let t1 = storage
+            .list_rollback_history(Some("t1"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(t1.len(), 2);
+
+        // Filter by sequence
+        let seq_a = storage
+            .list_rollback_history(None, Some("seq-a"), 100)
+            .await
+            .unwrap();
+        assert_eq!(seq_a.len(), 2);
+
+        // Filter by both
+        let both = storage
+            .list_rollback_history(Some("t1"), Some("seq-a"), 100)
+            .await
+            .unwrap();
+        assert_eq!(both.len(), 1);
+        assert!((both[0].error_rate - 0.1).abs() < f64::EPSILON);
+
+        // Limit
+        let limited = storage.list_rollback_history(None, None, 2).await.unwrap();
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_query_error_rate_returns_none_when_no_events() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let rate = storage.query_error_rate("t1", "seq-z", 3600).await.unwrap();
+        assert!(rate.is_none());
     }
 }

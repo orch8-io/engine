@@ -1301,4 +1301,401 @@ impl StorageBackend for PostgresStorage {
     async fn ping(&self) -> Result<(), StorageError> {
         misc::ping(self).await
     }
+
+    // === Telemetry ===
+
+    async fn ingest_telemetry_event(
+        &self,
+        event_type: &str,
+        payload: &str,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
+        tenant_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO telemetry_mobile_events
+               (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ",
+        )
+        .bind(event_type)
+        .bind(payload)
+        .bind(device_id)
+        .bind(os_name)
+        .bind(os_version)
+        .bind(app_version)
+        .bind(sdk_version)
+        .bind(tenant_id)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn ingest_telemetry_error(
+        &self,
+        error_type: &str,
+        message: &str,
+        stack_trace: Option<&str>,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
+        tenant_id: &str,
+        instance_id: Option<&str>,
+        sequence_name: Option<&str>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO telemetry_mobile_errors
+               (error_type, message, stack_trace, device_id, os_name, os_version, app_version, sdk_version, tenant_id, instance_id, sequence_name)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ",
+        )
+        .bind(error_type)
+        .bind(message)
+        .bind(stack_trace)
+        .bind(device_id)
+        .bind(os_name)
+        .bind(os_version)
+        .bind(app_version)
+        .bind(sdk_version)
+        .bind(tenant_id)
+        .bind(instance_id)
+        .bind(sequence_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn query_telemetry_dashboard(
+        &self,
+        query_type: &str,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        let rows: Vec<(String, i64)> = match query_type {
+            "sync_completed_versions" => {
+                sqlx::query_as(
+                    r"SELECT COALESCE(payload->>'version', 'unknown') as version, COUNT(*) as cnt
+                       FROM telemetry_mobile_events
+                       WHERE event_type = 'SyncCompleted'
+                         AND tenant_id = $1
+                         AND received_at BETWEEN $2 AND $3
+                       GROUP BY payload->>'version'
+                       ORDER BY cnt DESC
+                       LIMIT 50",
+                )
+                .bind(tenant_id)
+                .bind(start)
+                .bind(end)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            "error_rate_per_sequence" => {
+                sqlx::query_as(
+                    r"SELECT COALESCE(sequence_name, 'unknown') as name, COUNT(*) as cnt
+                       FROM telemetry_mobile_errors
+                       WHERE tenant_id = $1
+                         AND received_at BETWEEN $2 AND $3
+                       GROUP BY sequence_name
+                       ORDER BY cnt DESC
+                       LIMIT 50",
+                )
+                .bind(tenant_id)
+                .bind(start)
+                .bind(end)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            "top_failing_steps" => sqlx::query_as(
+                r"SELECT COALESCE(payload->>'step_name', 'unknown') as step_name, COUNT(*) as cnt
+                       FROM telemetry_mobile_events
+                       WHERE event_type = 'InstanceFailed'
+                         AND tenant_id = $1
+                         AND received_at BETWEEN $2 AND $3
+                       GROUP BY payload->>'step_name'
+                       ORDER BY cnt DESC
+                       LIMIT 50",
+            )
+            .bind(tenant_id)
+            .bind(start)
+            .bind(end)
+            .fetch_all(&self.pool)
+            .await?,
+            "device_os_breakdown" => {
+                sqlx::query_as(
+                    r"SELECT COALESCE(os_name, 'unknown') as os_name, COUNT(*) as cnt
+                       FROM telemetry_mobile_events
+                       WHERE tenant_id = $1
+                         AND received_at BETWEEN $2 AND $3
+                       GROUP BY os_name
+                       ORDER BY cnt DESC
+                       LIMIT 50",
+                )
+                .bind(tenant_id)
+                .bind(start)
+                .bind(end)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            _ => Vec::new(),
+        };
+        Ok(rows)
+    }
+
+    async fn create_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate_threshold: f64,
+        time_window_secs: i32,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (tenant_id, sequence_name) DO UPDATE SET
+               error_rate_threshold = EXCLUDED.error_rate_threshold,
+               time_window_secs = EXCLUDED.time_window_secs,
+               enabled = 1,
+               updated_at = NOW()"
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .bind(error_rate_threshold)
+        .bind(time_window_secs)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        let row: Option<(i64, String, String, f64, i32, bool, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2"
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(
+                id,
+                tenant_id,
+                sequence_name,
+                error_rate_threshold,
+                time_window_secs,
+                enabled,
+                created_at,
+                updated_at,
+            )| {
+                orch8_types::rollback::RollbackPolicy {
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    error_rate_threshold,
+                    time_window_secs,
+                    enabled,
+                    created_at,
+                    updated_at,
+                }
+            },
+        ))
+    }
+
+    async fn list_rollback_policies(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        let rows: Vec<(
+            i64,
+            String,
+            String,
+            f64,
+            i32,
+            bool,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        )> = if let Some(t) = tenant_id {
+            sqlx::query_as(
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1"
+            )
+            .bind(t)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, created_at, updated_at FROM rollback_policies"
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    error_rate_threshold,
+                    time_window_secs,
+                    enabled,
+                    created_at,
+                    updated_at,
+                )| {
+                    orch8_types::rollback::RollbackPolicy {
+                        id,
+                        tenant_id,
+                        sequence_name,
+                        error_rate_threshold,
+                        time_window_secs,
+                        enabled,
+                        created_at,
+                        updated_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    async fn delete_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2")
+            .bind(tenant_id)
+            .bind(sequence_name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn record_rollback(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate: f64,
+        threshold: f64,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO rollback_history (tenant_id, sequence_name, error_rate, threshold, reason) VALUES ($1, $2, $3, $4, $5)"
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .bind(error_rate)
+        .bind(threshold)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn query_error_rate(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<Option<f64>, StorageError> {
+        let start = Utc::now() - chrono::Duration::seconds(window_secs);
+        let row: Option<(i64, i64)> = sqlx::query_as(
+            r"SELECT
+               COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
+               COUNT(*) as total
+             FROM telemetry_mobile_events
+             WHERE tenant_id = $1
+               AND payload->>'sequence_name' = $2
+               AND created_at >= $3",
+        )
+        .bind(tenant_id)
+        .bind(sequence_name)
+        .bind(start)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(failed, total)| {
+            if total > 0 {
+                #[allow(clippy::cast_precision_loss)]
+                Some(failed as f64 / total as f64)
+            } else {
+                None
+            }
+        }))
+    }
+
+    async fn list_rollback_history(
+        &self,
+        tenant_id: Option<&str>,
+        sequence_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
+        let mut query = String::from(
+            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1"
+        );
+        if tenant_id.is_some() {
+            query.push_str(" AND tenant_id = $1");
+        }
+        if sequence_name.is_some() {
+            query.push_str(" AND sequence_name = $2");
+        }
+        query.push_str(" ORDER BY triggered_at DESC LIMIT $3");
+
+        let mut q = sqlx::query_as(&query);
+        if let Some(t) = tenant_id {
+            q = q.bind(t);
+        }
+        if let Some(s) = sequence_name {
+            q = q.bind(s);
+        }
+        q = q.bind(i64::from(limit));
+
+        let rows: Vec<(
+            i64,
+            String,
+            String,
+            DateTime<Utc>,
+            f64,
+            f64,
+            Option<String>,
+            String,
+            bool,
+        )> = q.fetch_all(&self.pool).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    tenant_id,
+                    sequence_name,
+                    triggered_at,
+                    error_rate,
+                    threshold,
+                    previous_manifest_version,
+                    reason,
+                    alert_sent,
+                )| {
+                    orch8_types::rollback::RollbackHistory {
+                        id,
+                        tenant_id,
+                        sequence_name,
+                        triggered_at,
+                        error_rate,
+                        threshold,
+                        previous_manifest_version,
+                        reason,
+                        alert_sent,
+                    }
+                },
+            )
+            .collect())
+    }
 }

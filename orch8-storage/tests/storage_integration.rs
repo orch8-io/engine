@@ -2247,6 +2247,7 @@ async fn context_round_trip_all_sections() {
             current_step_started_at: None,
             resource_key: None,
             instance_id: None,
+            total_steps_executed: 0,
         },
     };
     s.create_instance(&inst).await.unwrap();
@@ -2483,6 +2484,7 @@ async fn merge_context_data_preserves_other_sections() {
             current_step_started_at: None,
             resource_key: None,
             instance_id: None,
+            total_steps_executed: 0,
         },
     };
     s.create_instance(&inst).await.unwrap();

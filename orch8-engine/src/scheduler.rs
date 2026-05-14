@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::config::{SchedulerConfig, WebhookConfig};
+use orch8_types::filter::InstanceFilter;
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
@@ -24,6 +25,74 @@ mod step_exec;
 mod tests;
 
 pub use step_exec::check_human_input;
+
+/// Result of a single tick execution, suitable for mobile/embedded callers
+/// that drive the engine manually rather than via the continuous tick loop.
+#[derive(Debug, Clone, Default)]
+pub struct TickOnceResult {
+    /// Number of instances that advanced during this tick.
+    pub instances_advanced: u32,
+    /// Number of individual steps executed during this tick.
+    pub steps_executed: u32,
+    /// True if there are still scheduled instances that could run on the next tick.
+    pub has_pending_work: bool,
+}
+
+/// Execute a single scheduling pass: claim due instances, process them, handle
+/// signals, and return a summary. This is the mobile/embedded entry point —
+/// the caller controls tick cadence rather than the engine running its own loop.
+pub async fn tick_once(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    semaphore: &Arc<Semaphore>,
+    config: &SchedulerConfig,
+    sequence_cache: &Arc<SequenceCache>,
+    cancel: &CancellationToken,
+) -> Result<TickOnceResult, EngineError> {
+    let webhook_config = Arc::new(config.webhooks.clone());
+
+    process_tick(
+        storage,
+        handlers,
+        semaphore,
+        config.batch_size,
+        config.max_instances_per_tenant,
+        &webhook_config,
+        sequence_cache,
+        config.externalize_output_threshold,
+        config.max_steps_per_instance,
+        cancel,
+    )
+    .await?;
+
+    process_signalled_instances(storage, config.batch_size).await?;
+
+    process_waiting_deadlines(
+        storage,
+        handlers,
+        sequence_cache,
+        &webhook_config,
+        cancel,
+        config.batch_size,
+    )
+    .await?;
+
+    let scheduled_filter = InstanceFilter {
+        states: Some(vec![InstanceState::Scheduled]),
+        ..InstanceFilter::default()
+    };
+    let has_pending = storage
+        .count_instances(&scheduled_filter)
+        .await
+        .unwrap_or(0)
+        > 0;
+
+    Ok(TickOnceResult {
+        instances_advanced: 0,
+        steps_executed: 0,
+        has_pending_work: has_pending,
+    })
+}
 
 /// Pre-fetched data for an instance, gathered in batch before spawning tasks.
 #[derive(Clone)]
@@ -91,6 +160,7 @@ pub async fn run_tick_loop(
                     &webhook_config,
                     &sequence_cache,
                     externalize_threshold,
+                    config.max_steps_per_instance,
                     &cancel,
                 ).await {
                     error!(error = %e, "tick processing failed");
@@ -146,6 +216,7 @@ async fn process_tick(
     webhook_config: &Arc<WebhookConfig>,
     sequence_cache: &Arc<SequenceCache>,
     externalize_threshold: u32,
+    max_steps_per_instance: u32,
     cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
@@ -260,6 +331,7 @@ async fn process_tick(
                     instance,
                     data,
                     externalize_threshold,
+                    max_steps_per_instance,
                     &cancel,
                 )
                 .await
@@ -745,6 +817,7 @@ async fn process_instance(
     instance: orch8_types::instance::TaskInstance,
     prefetched: PrefetchedData,
     externalize_threshold: u32,
+    max_steps_per_instance: u32,
     cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
@@ -757,7 +830,7 @@ async fn process_instance(
     // claim_due_instances already set state to Running.
     // Stamp runtime.started_at on the first run so timeout / escalation
     // handlers (e.g. human_review) can compute elapsed time.
-    let instance = if instance.context.runtime.started_at.is_none() {
+    let mut instance = if instance.context.runtime.started_at.is_none() {
         let started_at = Utc::now();
         storage
             .update_instance_started_at(instance_id, started_at)
@@ -868,6 +941,7 @@ async fn process_instance(
             webhook_config,
             &instance,
             &sequence,
+            max_steps_per_instance,
             cancel,
         )
         .await;
@@ -922,6 +996,33 @@ async fn process_instance(
         match outcome {
             StepOutcome::Completed => {
                 completed_blocks.insert(step_def.id.clone());
+                instance.context.runtime.total_steps_executed += 1;
+                if max_steps_per_instance > 0
+                    && instance.context.runtime.total_steps_executed > max_steps_per_instance
+                {
+                    warn!(
+                        instance_id = %instance_id,
+                        total = instance.context.runtime.total_steps_executed,
+                        max = max_steps_per_instance,
+                        "instance exceeded max_steps_per_instance, failing"
+                    );
+                    storage
+                        .update_instance_context(instance_id, &instance.context)
+                        .await?;
+                    crate::lifecycle::transition_instance(
+                        storage.as_ref(),
+                        instance_id,
+                        Some(&instance.tenant_id),
+                        InstanceState::Running,
+                        InstanceState::Failed,
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                storage
+                    .update_instance_context(instance_id, &instance.context)
+                    .await?;
             }
             StepOutcome::Failed => {
                 // Interceptor: on_failure
@@ -1039,10 +1140,35 @@ async fn process_instance_tree(
     webhook_config: &WebhookConfig,
     instance: &orch8_types::instance::TaskInstance,
     sequence: &SequenceDefinition,
+    max_steps_per_instance: u32,
     cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     use crate::evaluator::EvalOutcome;
     let instance_id = instance.id;
+
+    if max_steps_per_instance > 0 {
+        let fresh = storage.get_instance(instance_id).await?;
+        if let Some(inst) = fresh {
+            if inst.context.runtime.total_steps_executed > max_steps_per_instance {
+                warn!(
+                    instance_id = %instance_id,
+                    total = inst.context.runtime.total_steps_executed,
+                    max = max_steps_per_instance,
+                    "instance exceeded max_steps_per_instance (tree path), failing"
+                );
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    InstanceState::Running,
+                    InstanceState::Failed,
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    }
 
     match crate::evaluator::evaluate(storage, handlers, instance, sequence).await {
         Ok(EvalOutcome::MoreWork { has_waiting_nodes }) => {

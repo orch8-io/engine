@@ -373,3 +373,77 @@ async fn migrate_instance_rejects_cross_tenant_target_sequence() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn unpublish_sequence_works() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let body = json!({
+        "id": Uuid::now_v7(),
+        "tenant_id": "t1",
+        "namespace": "default",
+        "name": "seq-to-unpublish",
+        "version": 1,
+        "deprecated": false,
+        "blocks": [{ "type": "step", "id": "s1", "handler": "noop", "params": {}, "cancellable": true }],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    });
+
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = client
+        .post(format!(
+            "{}/sequences/seq-to-unpublish/unpublish",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "delete": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn promote_sequence_works() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let body = json!({
+        "id": Uuid::now_v7(),
+        "tenant_id": "t1",
+        "namespace": "default",
+        "name": "seq-to-promote",
+        "version": 1,
+        "deprecated": false,
+        "blocks": [{ "type": "step", "id": "s1", "handler": "noop", "params": {}, "cancellable": true }],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    });
+
+    let resp = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let resp = client
+        .post(format!("{}/sequences/seq-to-promote/promote", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(created["version"], 2);
+}

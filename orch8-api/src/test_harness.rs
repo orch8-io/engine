@@ -59,6 +59,7 @@ pub async fn spawn_test_server() -> TestServer {
         stream_limiter: Arc::new(tokio::sync::Semaphore::new(
             crate::DEFAULT_MAX_CONCURRENT_STREAMS,
         )),
+        publisher: None,
     };
 
     // Attach tenant middleware (require_tenant = false) so `X-Tenant-Id`

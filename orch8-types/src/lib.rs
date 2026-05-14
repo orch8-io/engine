@@ -19,6 +19,7 @@ pub mod output;
 pub mod plugin;
 pub mod pool;
 pub mod rate_limit;
+pub mod rollback;
 pub mod sequence;
 pub mod session;
 pub mod signal;

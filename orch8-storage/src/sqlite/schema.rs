@@ -311,9 +311,69 @@ CREATE TABLE IF NOT EXISTS instance_kv_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (instance_id, key)
 );
+
+-- Mobile-specific tables (orch8-mobile) ──────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS telemetry_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry_events(created_at);
+
+CREATE TABLE IF NOT EXISTS sync_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS trusted_keys (
+    key_id TEXT PRIMARY KEY,
+    public_key TEXT NOT NULL,
+    trusted_since TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS mobile_dedup (
+    dedup_key TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Rollback policy tables (server-side, also in SQLite for testing) ────────────
+
+CREATE TABLE IF NOT EXISTS rollback_policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    sequence_name TEXT NOT NULL,
+    error_rate_threshold REAL NOT NULL DEFAULT 0.05,
+    time_window_secs INTEGER NOT NULL DEFAULT 300,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(tenant_id, sequence_name)
+);
+CREATE INDEX IF NOT EXISTS idx_rollback_policies_tenant ON rollback_policies(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_rollback_policies_enabled ON rollback_policies(enabled);
+
+CREATE TABLE IF NOT EXISTS rollback_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    sequence_name TEXT NOT NULL,
+    triggered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    error_rate REAL NOT NULL,
+    threshold REAL NOT NULL,
+    previous_manifest_version TEXT,
+    reason TEXT NOT NULL DEFAULT 'threshold_breach',
+    alert_sent INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_rollback_history_tenant ON rollback_history(tenant_id, sequence_name);
+CREATE INDEX IF NOT EXISTS idx_rollback_history_triggered ON rollback_history(triggered_at);
+
+-- End mobile-specific tables ─────────────────────────────────────────────────
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 2;
+pub(super) const SCHEMA_VERSION: i64 = 4;

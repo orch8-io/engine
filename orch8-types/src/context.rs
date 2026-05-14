@@ -156,6 +156,10 @@ pub struct RuntimeContext {
     pub resource_key: Option<ResourceKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
+    /// Total number of step executions for this instance (including retries).
+    /// Used by mobile SDK to enforce `max_steps_per_instance`.
+    #[serde(default)]
+    pub total_steps_executed: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -186,6 +190,7 @@ mod tests {
                 current_step_started_at: None,
                 resource_key: None,
                 instance_id: None,
+                total_steps_executed: 0,
             },
         }
     }

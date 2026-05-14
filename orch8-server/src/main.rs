@@ -207,6 +207,7 @@ fn build_app_state(
         stream_limiter: std::sync::Arc::new(tokio::sync::Semaphore::new(
             orch8_api::DEFAULT_MAX_CONCURRENT_STREAMS,
         )),
+        publisher: None,
     }
 }
 

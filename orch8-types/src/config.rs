@@ -269,6 +269,11 @@ pub struct SchedulerConfig {
     /// Set to a smaller value in tests to reduce cron fire latency.
     #[serde(default = "default_cron_tick_secs")]
     pub cron_tick_secs: u64,
+    /// Maximum total step executions (including retries) for a single instance.
+    /// When exceeded the instance is failed. `0` means unlimited (default).
+    /// Primarily used by the mobile SDK to prevent runaway workflows on-device.
+    #[serde(default)]
+    pub max_steps_per_instance: u32,
 }
 
 impl Default for SchedulerConfig {
@@ -290,6 +295,7 @@ impl Default for SchedulerConfig {
             node_reaper_tick_secs: default_node_reaper_tick_secs(),
             node_reaper_stale_secs: default_node_reaper_stale_secs(),
             cron_tick_secs: default_cron_tick_secs(),
+            max_steps_per_instance: 0,
         }
     }
 }
@@ -823,6 +829,7 @@ mod tests {
         assert_eq!(cfg.node_reaper_tick_secs, 60);
         assert_eq!(cfg.node_reaper_stale_secs, 120);
         assert_eq!(cfg.cron_tick_secs, 10);
+        assert_eq!(cfg.max_steps_per_instance, 0);
     }
 
     #[test]

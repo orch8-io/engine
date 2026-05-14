@@ -20,6 +20,8 @@ pub fn routes() -> Router<AppState> {
         .route("/sequences", post(create_sequence).get(list_sequences))
         .route("/sequences/{id}", get(get_sequence).delete(delete_sequence))
         .route("/sequences/{id}/deprecate", post(deprecate_sequence))
+        .route("/sequences/{name}/unpublish", post(unpublish_sequence))
+        .route("/sequences/{name}/promote", post(promote_sequence))
         .route("/sequences/by-name", get(get_sequence_by_name))
         .route("/sequences/versions", get(list_sequence_versions))
         .route("/sequences/migrate-instance", post(migrate_instance))
@@ -381,6 +383,100 @@ pub(crate) async fn migrate_instance(
         "from_sequence_id": instance.sequence_id,
         "to_sequence_id": req.target_sequence_id,
     })))
+}
+
+/// Unpublish a sequence: mark all versions as deprecated and optionally delete.
+#[derive(Deserialize)]
+pub(crate) struct UnpublishRequest {
+    #[serde(default)]
+    delete: bool,
+}
+
+pub(crate) async fn unpublish_sequence(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(name): Path<String>,
+    Json(req): Json<UnpublishRequest>,
+) -> Result<StatusCode, ApiError> {
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, None)
+        .unwrap_or_else(|| orch8_types::ids::TenantId::unchecked("default".to_string()));
+    let namespace = orch8_types::ids::Namespace::new("default");
+
+    let versions = state
+        .storage
+        .list_sequence_versions(&tenant_id, &namespace, &name)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+
+    for seq in versions {
+        crate::auth::enforce_tenant_access(
+            &tenant_ctx,
+            &seq.tenant_id,
+            &format!("sequence {}", seq.id),
+        )?;
+
+        state
+            .storage
+            .deprecate_sequence(seq.id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+
+        if req.delete {
+            state
+                .storage
+                .delete_sequence(seq.id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Promote a sequence from staging to production.
+/// Copies the latest staging version to a new production version.
+pub(crate) async fn promote_sequence(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, None)
+        .unwrap_or_else(|| orch8_types::ids::TenantId::unchecked("default".to_string()));
+    let namespace = orch8_types::ids::Namespace::new("default");
+
+    let versions = state
+        .storage
+        .list_sequence_versions(&tenant_id, &namespace, &name)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+
+    let latest = versions
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::NotFound(format!("sequence {name}")))?;
+
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &latest.tenant_id,
+        &format!("sequence {}", latest.id),
+    )?;
+
+    // Create a new version with bumped version number.
+    let mut promoted = latest.clone();
+    promoted.id = orch8_types::ids::SequenceId::new();
+    promoted.version += 1;
+    promoted.created_at = chrono::Utc::now();
+
+    state
+        .storage
+        .create_sequence(&promoted)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "id": promoted.id, "version": promoted.version })),
+    ))
 }
 
 #[cfg(test)]

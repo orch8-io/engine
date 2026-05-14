@@ -3,6 +3,8 @@ members = [
     "orch8-types",
     "orch8-storage",
     "orch8-engine",
+    "orch8-mobile",
+    "orch8-publisher",
     "orch8-api",
     "orch8-grpc",
     "orch8-server",

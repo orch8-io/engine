@@ -1,0 +1,140 @@
+//! Error budget / auto-rollback policy endpoints.
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::error::ApiError;
+use crate::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/rollback-policies", post(create_policy))
+        .route("/rollback-policies", get(list_policies))
+        .route("/rollback-policies/{name}", get(get_policy))
+        .route("/rollback-policies/{name}", delete(delete_policy))
+}
+
+// ── Requests / Responses ──
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePolicyRequest {
+    pub tenant_id: Option<String>,
+    pub sequence_name: String,
+    pub error_rate_threshold: f64,
+    pub time_window_secs: i32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PolicyResponse {
+    pub id: i64,
+    pub tenant_id: String,
+    pub sequence_name: String,
+    pub error_rate_threshold: f64,
+    pub time_window_secs: i32,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<orch8_types::rollback::RollbackPolicy> for PolicyResponse {
+    fn from(p: orch8_types::rollback::RollbackPolicy) -> Self {
+        Self {
+            id: p.id,
+            tenant_id: p.tenant_id,
+            sequence_name: p.sequence_name,
+            error_rate_threshold: p.error_rate_threshold,
+            time_window_secs: p.time_window_secs,
+            enabled: p.enabled,
+            created_at: p.created_at.to_rfc3339(),
+            updated_at: p.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+// ── Handlers ──
+
+pub(crate) async fn create_policy(
+    State(state): State<AppState>,
+    Json(req): Json<CreatePolicyRequest>,
+) -> Result<(StatusCode, Json<PolicyResponse>), ApiError> {
+    let tenant = req.tenant_id.unwrap_or_else(|| "default".to_string());
+
+    state
+        .storage
+        .create_rollback_policy(
+            &tenant,
+            &req.sequence_name,
+            req.error_rate_threshold,
+            req.time_window_secs,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+
+    let policy = state
+        .storage
+        .get_rollback_policy(&tenant, &req.sequence_name)
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
+        .ok_or_else(|| ApiError::Internal("Policy not found after creation".into()))?;
+
+    Ok((StatusCode::CREATED, Json(policy.into())))
+}
+
+pub(crate) async fn get_policy(
+    State(state): State<AppState>,
+    axum::extract::Path(sequence_name): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<PolicyResponse>, ApiError> {
+    let tenant = params
+        .get("tenant_id")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+
+    let policy = state
+        .storage
+        .get_rollback_policy(&tenant, &sequence_name)
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
+        .ok_or_else(|| ApiError::Internal(format!("Policy not found for {sequence_name}")))?;
+
+    Ok(Json(policy.into()))
+}
+
+pub(crate) async fn list_policies(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<PolicyResponse>>, ApiError> {
+    let tenant = params.get("tenant_id").map(String::as_str);
+
+    let policies = state
+        .storage
+        .list_rollback_policies(tenant)
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+
+    Ok(Json(
+        policies.into_iter().map(PolicyResponse::from).collect(),
+    ))
+}
+
+pub(crate) async fn delete_policy(
+    State(state): State<AppState>,
+    axum::extract::Path(sequence_name): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<StatusCode, ApiError> {
+    let tenant = params
+        .get("tenant_id")
+        .cloned()
+        .unwrap_or_else(|| "default".to_string());
+
+    state
+        .storage
+        .delete_rollback_policy(&tenant, &sequence_name)
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}

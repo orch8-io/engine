@@ -13,7 +13,9 @@
 //!
 //! WASM modules are cached by file path to avoid repeated compilation.
 
-use serde_json::{json, Value};
+#[cfg(feature = "wasm")]
+use serde_json::json;
+use serde_json::Value;
 
 use orch8_types::error::StepError;
 
@@ -436,6 +438,7 @@ fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepE
 
 /// Fallback when WASM feature is disabled.
 #[cfg(not(feature = "wasm"))]
+#[allow(clippy::unused_async)]
 pub async fn handle_wasm_plugin(_ctx: StepContext, _wasm_path: &str) -> Result<Value, StepError> {
     Err(StepError::Permanent {
         message: "WASM plugin support is not enabled (compile with --features wasm)".into(),

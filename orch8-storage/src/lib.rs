@@ -44,6 +44,7 @@ pub enum EmitDedupeOutcome {
 /// Object-safe for `dyn StorageBackend` dispatch.
 /// Every method returns `Result<T, StorageError>`.
 /// Batch methods exist for hot paths.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait StorageBackend: Send + Sync + 'static {
     // === Sequences ===
@@ -1342,4 +1343,113 @@ pub trait StorageBackend: Send + Sync + 'static {
     // === Health ===
 
     async fn ping(&self) -> Result<(), StorageError>;
+
+    // === Telemetry (mobile) ===
+    // Default no-ops so decorator backends don't break.
+
+    async fn ingest_telemetry_event(
+        &self,
+        _event_type: &str,
+        _payload: &str,
+        _device_id: &str,
+        _os_name: &str,
+        _os_version: &str,
+        _app_version: &str,
+        _sdk_version: &str,
+        _tenant_id: &str,
+        _created_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn ingest_telemetry_error(
+        &self,
+        _error_type: &str,
+        _message: &str,
+        _stack_trace: Option<&str>,
+        _device_id: &str,
+        _os_name: &str,
+        _os_version: &str,
+        _app_version: &str,
+        _sdk_version: &str,
+        _tenant_id: &str,
+        _instance_id: Option<&str>,
+        _sequence_name: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn query_telemetry_dashboard(
+        &self,
+        _query_type: &str,
+        _tenant_id: &str,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Vec<(String, i64)>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    // === Rollback policies ===
+
+    async fn create_rollback_policy(
+        &self,
+        _tenant_id: &str,
+        _sequence_name: &str,
+        _error_rate_threshold: f64,
+        _time_window_secs: i32,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn get_rollback_policy(
+        &self,
+        _tenant_id: &str,
+        _sequence_name: &str,
+    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_rollback_policies(
+        &self,
+        _tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_rollback_policy(
+        &self,
+        _tenant_id: &str,
+        _sequence_name: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn record_rollback(
+        &self,
+        _tenant_id: &str,
+        _sequence_name: &str,
+        _error_rate: f64,
+        _threshold: f64,
+        _reason: &str,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn query_error_rate(
+        &self,
+        _tenant_id: &str,
+        _sequence_name: &str,
+        _window_secs: i64,
+    ) -> Result<Option<f64>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_rollback_history(
+        &self,
+        _tenant_id: Option<&str>,
+        _sequence_name: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
+        Ok(Vec::new())
+    }
 }

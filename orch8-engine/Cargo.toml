@@ -32,6 +32,7 @@ wasmtime = { workspace = true, optional = true }
 
 [features]
 default = ["nats", "file-watch", "wasm"]
+embedded = []
 nats = ["dep:async-nats"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]

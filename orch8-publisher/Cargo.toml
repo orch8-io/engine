@@ -1,0 +1,30 @@
+[package]
+name = "orch8-publisher"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+orch8-types = { path = "../orch8-types" }
+reqwest = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+hex = "0.4"
+hmac = "0.12"
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }
+rand = "0.8"
+
+[lints]
+workspace = true
