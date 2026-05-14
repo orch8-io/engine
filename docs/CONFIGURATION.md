@@ -122,6 +122,13 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_REQUIRE_TENANT_HEADER` | `false` | Enforce `X-Tenant-Id` header |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
 
+### Built-in Handlers
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_LLM_DEFAULT_MODEL_OPENAI` | `gpt-4o` | Default model for the `llm_call` handler when provider is OpenAI-compatible and no `model` param is set |
+| `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC` | `claude-sonnet-4-6` | Default model for the `llm_call` handler when provider is `anthropic` and no `model` param is set |
+
 ### Logging
 
 | Variable | Default | Description |
