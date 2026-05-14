@@ -61,10 +61,15 @@ pub(super) async fn dispatch_block(
             }
             // Bump the per-instance step counter so max_steps_per_instance
             // enforcement (checked at the scheduler level) sees accurate counts.
+            // Re-read context from storage first so we don't clobber mutations
+            // made during step execution (e.g. check_human_input's merge_context_data).
             if matches!(result, Ok(true)) {
-                let mut ctx = instance.context.clone();
-                ctx.runtime.total_steps_executed += 1;
-                let _ = storage.update_instance_context(instance.id, &ctx).await;
+                if let Some(mut inst) = storage.get_instance(instance.id).await.ok().flatten() {
+                    inst.context.runtime.total_steps_executed += 1;
+                    let _ = storage
+                        .update_instance_context(instance.id, &inst.context)
+                        .await;
+                }
             }
             result
         }
