@@ -23,7 +23,7 @@ jobs:
       SQLX_OFFLINE: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1a97b10f1a2 # 1.92.0
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # 1.92.0
         with:
           toolchain: "1.92.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
@@ -40,7 +40,7 @@ jobs:
       SQLX_OFFLINE: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1a97b10f1a2 # stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
@@ -109,7 +109,7 @@ jobs:
           haskell: true
           large-packages: true
           swap-storage: true
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1a97b10f1a2 # stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -141,7 +141,7 @@ jobs:
       ORCH8_DATABASE_URL: postgres://orch8:orch8@localhost:5434/orch8
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e18c1a97b10f1a2 # stable
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - uses: actions/setup-node@49933ea5288caeca8642195f2b846f45aa3f8c19 # v4.4.0
         with:
