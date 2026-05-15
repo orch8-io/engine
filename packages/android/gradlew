@@ -1,0 +1,20 @@
+#!/bin/sh
+# Gradle wrapper stub — delegates to the system Gradle or downloads the wrapper.
+# For full wrapper support, run: cd packages/android && gradle wrapper
+
+set -e
+
+APP_BASE_NAME=$(basename "$0")
+APP_HOME=$(cd "$(dirname "$0")" && pwd -P)
+
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+
+if [ -f "$CLASSPATH" ]; then
+    exec java -classpath "$CLASSPATH" \
+        org.gradle.wrapper.GradleWrapperMain "$@"
+else
+    echo "Gradle wrapper JAR not found."
+    echo "Run 'cd $APP_HOME && gradle wrapper' to generate it, or use the system Gradle."
+    echo "Falling back to system gradle…"
+    exec gradle "$@"
+fi

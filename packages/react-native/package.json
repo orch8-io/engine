@@ -1,0 +1,29 @@
+{
+  "name": "react-native-orch8",
+  "version": "0.1.0",
+  "description": "React Native bridge for the Orch8 Mobile SDK",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "react-native-orch8.podspec"
+  ],
+  "scripts": {
+    "typescript": "tsc --noEmit"
+  },
+  "keywords": ["react-native", "orch8", "workflow", "orchestration"],
+  "repository": "https://github.com/orch8-io/react-native-orch8",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": "*",
+    "react-native": ">=0.71.0"
+  },
+  "devDependencies": {
+    "react": "18.3.1",
+    "react-native": "0.76.0",
+    "typescript": "~5.6.0"
+  }
+}

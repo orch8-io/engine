@@ -7,6 +7,7 @@
 node_modules/
 dist/
 .DS_Store
+.build
 
 # Internal AI-tool learning logs — not for public repo
 .jules/
