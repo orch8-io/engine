@@ -110,8 +110,8 @@ pub(super) async fn batch_save(
         return Ok(());
     }
 
-    let mut compressed: Vec<(String, Vec<u8>, i64)> = Vec::with_capacity(entries.len());
-    let mut inline: Vec<(String, serde_json::Value, i64)> = Vec::with_capacity(entries.len());
+    let mut compressed: Vec<(&str, Vec<u8>, i64)> = Vec::with_capacity(entries.len());
+    let mut inline: Vec<(&str, &serde_json::Value, i64)> = Vec::with_capacity(entries.len());
 
     for (ref_key, payload) in entries {
         let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
@@ -119,9 +119,9 @@ pub(super) async fn batch_save(
 
         if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
             let c = compress(payload)?;
-            compressed.push((ref_key.clone(), c, raw_size));
+            compressed.push((ref_key.as_str(), c, raw_size));
         } else {
-            inline.push((ref_key.clone(), payload.clone(), raw_size));
+            inline.push((ref_key.as_str(), payload, raw_size));
         }
     }
 
