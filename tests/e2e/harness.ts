@@ -247,6 +247,7 @@ export async function startServer(
       ORCH8_TICK_INTERVAL_MS: "100",
       ORCH8_CRON_TICK_SECS: "1",
       ORCH8_ALLOW_INTERNAL_URLS: "1",
+      ORCH8_RUN_MIGRATIONS: "true",
       // Surface a full backtrace if the server panics — the CI cascade
       // we chased in April 2026 died silently because this was unset.
       RUST_BACKTRACE: process.env.RUST_BACKTRACE ?? "full",

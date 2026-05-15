@@ -518,6 +518,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_REQUIRE_TENANT_HEADER") {
         config.api.require_tenant_header = val == "true" || val == "1";
     }
+    if let Ok(val) = std::env::var("ORCH8_RUN_MIGRATIONS") {
+        config.database.run_migrations = val == "true" || val == "1";
+    }
     if let Ok(val) = std::env::var("ORCH8_DATABASE_SEARCH_PATH") {
         if !val.is_empty() {
             config.database.search_path = Some(val);
