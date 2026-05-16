@@ -225,45 +225,48 @@ impl CircuitBreakerRegistry {
             }
         }
 
-        let key = Key(tenant_id.clone(), handler.to_string());
+        // Mid path: if the breaker is Open, we acquire a write lock via get_mut
+        // to potentially mutate it, without allocating a new Key string.
+        if let Some(mut breaker) = self.breakers.get_mut(q) {
+            return match breaker.state {
+                BreakerState::Closed | BreakerState::HalfOpen => Ok(()),
+                BreakerState::Open => {
+                    if let Some(opened_at) = breaker.opened_at {
+                        #[allow(clippy::cast_sign_loss)]
+                        let elapsed = (now - opened_at).num_seconds().max(0) as u64;
+                        if elapsed >= breaker.cooldown_secs {
+                            breaker.state = BreakerState::HalfOpen;
+                            // Cooldown elapsed: transitioning to HalfOpen means the
+                            // breaker is no longer protecting — remove from
+                            // durable store so a crash now doesn't revive it.
+                            let snapshot = breaker.clone();
+                            drop(breaker);
+                            self.spawn_delete(&snapshot);
+                            Ok(())
+                        } else {
+                            Err(breaker.cooldown_secs - elapsed)
+                        }
+                    } else {
+                        // No opened_at means it was just set — cooldown starts now
+                        breaker.opened_at = Some(now);
+                        let cooldown = breaker.cooldown_secs;
+                        let snapshot = breaker.clone();
+                        drop(breaker);
+                        self.spawn_upsert(&snapshot);
+                        Err(cooldown)
+                    }
+                }
+            };
+        }
 
-        // Slow path: if the breaker is Open (or doesn't exist yet), we acquire
-        // a write lock to potentially mutate it (e.g. initialize it, or check
-        // if cooldown elapsed and transition to HalfOpen).
-        let mut breaker = self
-            .breakers
+        // Slow path: if the breaker doesn't exist yet, we acquire
+        // a write lock to initialize it.
+        let key = Key(tenant_id.clone(), handler.to_string());
+        self.breakers
             .entry(key)
             .or_insert_with(|| self.default_breaker(tenant_id, handler));
 
-        match breaker.state {
-            BreakerState::Closed | BreakerState::HalfOpen => Ok(()),
-            BreakerState::Open => {
-                if let Some(opened_at) = breaker.opened_at {
-                    #[allow(clippy::cast_sign_loss)]
-                    let elapsed = (now - opened_at).num_seconds().max(0) as u64;
-                    if elapsed >= breaker.cooldown_secs {
-                        breaker.state = BreakerState::HalfOpen;
-                        // Cooldown elapsed: transitioning to HalfOpen means the
-                        // breaker is no longer protecting — remove from
-                        // durable store so a crash now doesn't revive it.
-                        let snapshot = breaker.clone();
-                        drop(breaker);
-                        self.spawn_delete(&snapshot);
-                        Ok(())
-                    } else {
-                        Err(breaker.cooldown_secs - elapsed)
-                    }
-                } else {
-                    // No opened_at means it was just set — cooldown starts now
-                    breaker.opened_at = Some(now);
-                    let cooldown = breaker.cooldown_secs;
-                    let snapshot = breaker.clone();
-                    drop(breaker);
-                    self.spawn_upsert(&snapshot);
-                    Err(cooldown)
-                }
-            }
-        }
+        Ok(())
     }
 
     /// Record a successful execution for a tenant+handler. Clears failures and
@@ -301,9 +304,22 @@ impl CircuitBreakerRegistry {
     /// which also persists the transition.
     pub fn record_failure(&self, tenant_id: &TenantId, handler: &str) {
         let now = Utc::now();
-        let key = Key(tenant_id.clone(), handler.to_string());
+        let search = KeyRef(tenant_id, handler);
+        let q: &dyn CircuitKey = &search;
         let mut tripped_snapshot = None;
-        {
+
+        if let Some(mut breaker) = self.breakers.get_mut(q) {
+            breaker.failure_count += 1;
+
+            if breaker.failure_count >= breaker.failure_threshold
+                && breaker.state != BreakerState::Open
+            {
+                breaker.state = BreakerState::Open;
+                breaker.opened_at = Some(now);
+                tripped_snapshot = Some(breaker.clone());
+            }
+        } else {
+            let key = Key(tenant_id.clone(), handler.to_string());
             let mut breaker = self
                 .breakers
                 .entry(key)
@@ -319,6 +335,7 @@ impl CircuitBreakerRegistry {
                 tripped_snapshot = Some(breaker.clone());
             }
         }
+
         if let Some(snap) = tripped_snapshot {
             self.spawn_upsert(&snap);
         }
