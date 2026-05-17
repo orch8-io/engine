@@ -152,6 +152,15 @@ impl InstanceLifecycleManager {
     /// Cancel a running instance.
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), MobileError> {
         let id = parse_instance_id(instance_id)?;
+
+        let _ = self
+            .storage
+            .get_instance(id)
+            .await?
+            .ok_or_else(|| MobileError::NotFound {
+                message: format!("instance '{instance_id}' not found"),
+            })?;
+
         self.storage
             .update_instance_state(id, InstanceState::Cancelled, None)
             .await?;

@@ -1,118 +1,72 @@
-//! Load test for error budget / auto-rollback calculation.
+//! Functional tests for error-budget auto-rollback logic.
 //!
-//! Verifies that rollback checks perform correctly under high-volume telemetry
-//! ingestion and that hysteresis (cooldown + confirmation window) works as expected.
+//! Verifies that rollback checks respect thresholds, cooldown hysteresis, and
+//! handle concurrent error ingestion correctly.
 
 use orch8_api::test_harness::spawn_test_server;
 use orch8_storage::AdminStore;
 
-#[tokio::test]
-async fn rollback_high_volume_telemetry_ingestion() {
-    let server = spawn_test_server().await;
-    let client = reqwest::Client::new();
-    let seq = "high-volume-seq";
+const TENANT: &str = "default";
 
-    // Create a policy: 10% error rate threshold, 5-minute window.
+/// Helper: create a rollback policy for a given sequence under the default tenant.
+async fn create_policy(
+    client: &reqwest::Client,
+    base_url: &str,
+    seq: &str,
+    error_rate_threshold: f64,
+    time_window_secs: u32,
+) {
     let resp = client
-        .post(format!("{}/rollback-policies", server.base_url))
+        .post(format!("{base_url}/rollback-policies"))
         .json(&serde_json::json!({
             "sequence_name": seq,
-            "error_rate_threshold": 0.1,
-            "time_window_secs": 300
+            "error_rate_threshold": error_rate_threshold,
+            "time_window_secs": time_window_secs
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201);
+    assert_eq!(resp.status(), 201, "policy creation failed for {seq}");
+}
 
-    // Ingest 100 success events in batches of 50.
-    for _ in 0..2 {
-        let events: Vec<serde_json::Value> = (0..50)
-            .map(|i| {
-                serde_json::json!({
-                    "event_type": "InstanceCompleted",
-                    "payload": serde_json::json!({"sequence_name": seq, "i": i}).to_string(),
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                    "device": {
-                        "device_id": format!("device-{i}"),
-                        "os_name": "iOS",
-                        "os_version": "17",
-                        "app_version": "1.0",
-                        "sdk_version": "0.1"
-                    }
-                })
-            })
-            .collect();
-        let resp = client
-            .post(format!("{}/telemetry/mobile", server.base_url))
-            .json(&serde_json::json!({ "events": events }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-    }
-
-    // Ingest 5 errors (5% error rate) — below threshold, no rollback.
-    for i in 0..5 {
-        let resp = client
-            .post(format!("{}/telemetry/mobile/errors", server.base_url))
-            .json(&serde_json::json!({
-                "error_type": "RuntimeError",
-                "message": format!("error {i}"),
+/// Helper: ingest a batch of success events.
+async fn ingest_success_batch(client: &reqwest::Client, base_url: &str, seq: &str, count: usize) {
+    let events: Vec<serde_json::Value> = (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "event_type": "InstanceCompleted",
+                "payload": serde_json::json!({"sequence_name": seq}).to_string(),
+                "timestamp": chrono::Utc::now().to_rfc3339(),
                 "device": {
-                    "device_id": format!("device-err-{i}"),
+                    "device_id": format!("d-{i}"),
                     "os_name": "iOS",
                     "os_version": "17",
                     "app_version": "1.0",
                     "sdk_version": "0.1"
-                },
-                "sequence_name": seq
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
-    }
-
-    // Verify no rollback triggered (5% < 10% threshold).
-    let history = server
-        .storage
-        .list_rollback_history(None, None, 100)
-        .await
-        .unwrap();
-    assert!(
-        history.is_empty(),
-        "rollback should NOT trigger at 5% error rate (threshold 10%)"
-    );
-}
-
-#[tokio::test]
-async fn rollback_cooldown_prevents_flapping() {
-    let server = spawn_test_server().await;
-    let client = reqwest::Client::new();
-    let seq = "flappy-seq";
-
-    // Create policy: 0% threshold (any error triggers), 1-hour cooldown.
+                }
+            })
+        })
+        .collect();
     let resp = client
-        .post(format!("{}/rollback-policies", server.base_url))
-        .json(&serde_json::json!({
-            "sequence_name": seq,
-            "error_rate_threshold": 0.0,
-            "time_window_secs": 3600
-        }))
+        .post(format!("{base_url}/telemetry/mobile"))
+        .json(&serde_json::json!({ "events": events }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 201);
+    assert_eq!(resp.status(), 202);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["accepted"], count, "not all events were accepted");
+}
 
-    // First error — should trigger rollback.
+/// Helper: ingest a single error event.
+async fn ingest_error(client: &reqwest::Client, base_url: &str, seq: &str, msg: &str) {
     let resp = client
-        .post(format!("{}/telemetry/mobile/errors", server.base_url))
+        .post(format!("{base_url}/telemetry/mobile/errors"))
         .json(&serde_json::json!({
             "error_type": "RuntimeError",
-            "message": "first error",
+            "message": msg,
             "device": {
-                "device_id": "d1",
+                "device_id": "d-err",
                 "os_name": "iOS",
                 "os_version": "17",
                 "app_version": "1.0",
@@ -124,6 +78,60 @@ async fn rollback_cooldown_prevents_flapping() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
+}
+
+#[tokio::test]
+async fn error_rate_below_threshold_does_not_trigger_rollback() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq = "below-threshold-seq";
+
+    create_policy(&client, &server.base_url, seq, 0.1, 300).await;
+
+    // 100 successes + 5 errors = 5% error rate (below 10% threshold).
+    ingest_success_batch(&client, &server.base_url, seq, 100).await;
+    for i in 0..5 {
+        ingest_error(&client, &server.base_url, seq, &format!("error {i}")).await;
+    }
+
+    // Verify error rate was computed correctly.
+    let rate = server
+        .storage
+        .query_error_rate(TENANT, seq, 300)
+        .await
+        .unwrap();
+    assert!(
+        rate.is_some(),
+        "error rate should be computable with events present"
+    );
+    let rate = rate.unwrap();
+    assert!(
+        rate < 0.1,
+        "error rate {rate} should be below 0.1 threshold"
+    );
+
+    let history = server
+        .storage
+        .list_rollback_history(None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        history.is_empty(),
+        "rollback should NOT trigger at {rate:.1}% error rate (threshold 10%)"
+    );
+}
+
+#[tokio::test]
+async fn cooldown_prevents_duplicate_rollback_triggers() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq = "cooldown-seq";
+
+    // 0% threshold = any error triggers; default cooldown prevents re-trigger.
+    create_policy(&client, &server.base_url, seq, 0.0, 3600).await;
+
+    // First error triggers rollback.
+    ingest_error(&client, &server.base_url, seq, "first error").await;
 
     let history = server
         .storage
@@ -132,25 +140,8 @@ async fn rollback_cooldown_prevents_flapping() {
         .unwrap();
     assert_eq!(history.len(), 1, "first error should trigger rollback");
 
-    // Second error immediately after — should NOT trigger due to cooldown.
-    let resp = client
-        .post(format!("{}/telemetry/mobile/errors", server.base_url))
-        .json(&serde_json::json!({
-            "error_type": "RuntimeError",
-            "message": "second error",
-            "device": {
-                "device_id": "d2",
-                "os_name": "iOS",
-                "os_version": "17",
-                "app_version": "1.0",
-                "sdk_version": "0.1"
-            },
-            "sequence_name": seq
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
+    // Second error immediately after — cooldown should prevent re-trigger.
+    ingest_error(&client, &server.base_url, seq, "second error").await;
 
     let history = server
         .storage
@@ -160,79 +151,41 @@ async fn rollback_cooldown_prevents_flapping() {
     assert_eq!(
         history.len(),
         1,
-        "second error within cooldown should NOT trigger another rollback"
+        "second error within cooldown must NOT trigger another rollback"
     );
 }
 
 #[tokio::test]
-async fn rollback_batch_stress() {
+async fn sequential_errors_above_threshold_trigger_single_rollback() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();
-    let seq = "stress-seq";
+    let seq = "threshold-breach-seq";
 
-    // Create policy: 50% threshold.
-    let resp = client
-        .post(format!("{}/rollback-policies", server.base_url))
-        .json(&serde_json::json!({
-            "sequence_name": seq,
-            "error_rate_threshold": 0.5,
-            "time_window_secs": 3600
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
+    // 50% threshold.
+    create_policy(&client, &server.base_url, seq, 0.5, 3600).await;
 
-    // Ingest max batch (500 events).
-    let events: Vec<serde_json::Value> = (0..500)
-        .map(|i| {
-            serde_json::json!({
-                "event_type": "InstanceCompleted",
-                "payload": serde_json::json!({"sequence_name": seq}).to_string(),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "device": {
-                    "device_id": format!("d-{i}"),
-                    "os_name": "Android",
-                    "os_version": "14",
-                    "app_version": "2.0",
-                    "sdk_version": "0.1"
-                }
-            })
-        })
-        .collect();
-    let resp = client
-        .post(format!("{}/telemetry/mobile", server.base_url))
-        .json(&serde_json::json!({ "events": events }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 202);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["accepted"], 500);
+    // Ingest 500 success events as baseline.
+    ingest_success_batch(&client, &server.base_url, seq, 500).await;
 
-    // Ingest errors to bring rate above 50%.
+    // Ingest enough errors to breach the 50% threshold.
+    // 500 successes + 600 errors = ~54.5% error rate.
     for i in 0..600 {
-        let resp = client
-            .post(format!("{}/telemetry/mobile/errors", server.base_url))
-            .json(&serde_json::json!({
-                "error_type": "RuntimeError",
-                "message": format!("stress error {i}"),
-                "device": {
-                    "device_id": format!("d-err-{i}"),
-                    "os_name": "Android",
-                    "os_version": "14",
-                    "app_version": "2.0",
-                    "sdk_version": "0.1"
-                },
-                "sequence_name": seq
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 202);
+        ingest_error(&client, &server.base_url, seq, &format!("error {i}")).await;
     }
 
-    // Rollback should have been triggered once (cooldown prevents multiple).
+    // Verify error rate is above threshold.
+    let rate = server
+        .storage
+        .query_error_rate(TENANT, seq, 3600)
+        .await
+        .unwrap();
+    assert!(
+        rate.is_some_and(|r| r >= 0.5),
+        "error rate should be >= 50% after 600 errors on 500 successes, got {rate:?}"
+    );
+
+    // Exactly one rollback: first error that breaches threshold triggers it,
+    // cooldown prevents all subsequent errors from triggering again.
     let history = server
         .storage
         .list_rollback_history(None, None, 100)

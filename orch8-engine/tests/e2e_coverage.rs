@@ -1,239 +1,36 @@
+#![allow(clippy::items_after_statements)]
 //! End-to-end coverage tests for features previously lacking integration tests.
 //!
 //! Each test drives the evaluator loop to completion (or a targeted state)
 //! and asserts the resulting execution tree, instance state, and side effects.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use chrono::Utc;
 use serde_json::json;
+use std::sync::Arc;
 
 use orch8_engine::evaluator::{self, EvalOutcome};
 use orch8_engine::handlers::{builtin::register_builtins, HandlerRegistry};
 use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
-use orch8_types::context::{ExecutionContext, RuntimeContext};
-use orch8_types::error::StepError;
 use orch8_types::execution::NodeState;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
-use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+use orch8_types::instance::InstanceState;
 use orch8_types::sequence::{
     ABSplitDef, ABVariant, BlockDefinition, CancellationScopeDef, ForEachDef, LoopDef, ParallelDef,
-    RetryPolicy, Route, RouterDef, SequenceDefinition, SequenceStatus, StepDef, SubSequenceDef,
-    TryCatchDef,
+    Route, RouterDef, SequenceDefinition, SequenceStatus, StepDef, SubSequenceDef, TryCatchDef,
 };
 use orch8_types::signal::{Signal, SignalType};
+
+mod common;
+use common::*;
 
 // ================================================================
 // HELPERS
 // ================================================================
 
-fn mk_step(id: &str, handler: &str) -> BlockDefinition {
-    BlockDefinition::Step(Box::new(StepDef {
-        id: BlockId::new(id),
-        handler: handler.into(),
-        params: json!({}),
-        delay: None,
-        retry: None,
-        timeout: None,
-        rate_limit_key: None,
-        send_window: None,
-        context_access: None,
-        cancellable: true,
-        wait_for_input: None,
-        queue_name: None,
-        deadline: None,
-        on_deadline_breach: None,
-        fallback_handler: None,
-        cache_key: None,
-    }))
-}
-
-#[allow(dead_code)]
-fn mk_step_with_params(id: &str, handler: &str, params: serde_json::Value) -> BlockDefinition {
-    BlockDefinition::Step(Box::new(StepDef {
-        id: BlockId::new(id),
-        handler: handler.into(),
-        params,
-        delay: None,
-        retry: None,
-        timeout: None,
-        rate_limit_key: None,
-        send_window: None,
-        context_access: None,
-        cancellable: true,
-        wait_for_input: None,
-        queue_name: None,
-        deadline: None,
-        on_deadline_breach: None,
-        fallback_handler: None,
-        cache_key: None,
-    }))
-}
-
-fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDefinition {
-    BlockDefinition::Step(Box::new(StepDef {
-        id: BlockId::new(id),
-        handler: handler.into(),
-        params: json!({}),
-        delay: None,
-        retry: Some(RetryPolicy {
-            max_attempts,
-            initial_backoff: Duration::from_millis(1),
-            max_backoff: Duration::from_millis(10),
-            backoff_multiplier: 1.0,
-        }),
-        timeout: None,
-        rate_limit_key: None,
-        send_window: None,
-        context_access: None,
-        cancellable: true,
-        wait_for_input: None,
-        queue_name: None,
-        deadline: None,
-        on_deadline_breach: None,
-        fallback_handler: None,
-        cache_key: None,
-    }))
-}
-
-fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
-    BlockDefinition::Step(Box::new(StepDef {
-        id: BlockId::new(id),
-        handler: handler.into(),
-        params: json!({}),
-        delay: None,
-        retry: None,
-        timeout: None,
-        rate_limit_key: None,
-        send_window: None,
-        context_access: None,
-        cancellable: false,
-        wait_for_input: None,
-        queue_name: None,
-        deadline: None,
-        on_deadline_breach: None,
-        fallback_handler: None,
-        cache_key: None,
-    }))
-}
-
-fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
-    SequenceDefinition {
-        id: SequenceId::new(),
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        name: "test-flow".into(),
-        version: 1,
-        deprecated: false,
-        blocks,
-        interceptors: None,
-        created_at: Utc::now(),
-        status: orch8_types::sequence::SequenceStatus::Production,
-    }
-}
-
-fn mk_instance(seq_id: SequenceId) -> TaskInstance {
-    mk_instance_with_ctx(seq_id, json!({}))
-}
-
-fn mk_instance_with_ctx(seq_id: SequenceId, data: serde_json::Value) -> TaskInstance {
-    let now = Utc::now();
-    TaskInstance {
-        id: InstanceId::new(),
-        sequence_id: seq_id,
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        state: InstanceState::Running,
-        next_fire_at: None,
-        priority: Priority::Normal,
-        timezone: "UTC".into(),
-        metadata: json!({}),
-        context: ExecutionContext {
-            data,
-            config: json!({}),
-            audit: vec![],
-            runtime: RuntimeContext::default(),
-        },
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: None,
-        created_at: now,
-        updated_at: now,
-    }
-}
-
-async fn setup(
-    blocks: Vec<BlockDefinition>,
-) -> (Arc<dyn StorageBackend>, SequenceDefinition, TaskInstance) {
-    setup_with_ctx(blocks, json!({})).await
-}
-
-async fn setup_with_ctx(
-    blocks: Vec<BlockDefinition>,
-    ctx_data: serde_json::Value,
-) -> (Arc<dyn StorageBackend>, SequenceDefinition, TaskInstance) {
-    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
-    let seq = mk_sequence(blocks);
-    storage.create_sequence(&seq).await.unwrap();
-    let inst = mk_instance_with_ctx(seq.id, ctx_data);
-    storage.create_instance(&inst).await.unwrap();
-    (storage, seq, inst)
-}
-
-async fn drive(
-    storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
-    instance_id: InstanceId,
-    sequence: &SequenceDefinition,
-) {
-    for _ in 0..2000 {
-        // Ensure instance is in Running state for the evaluator.
-        let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
-        match inst.state {
-            InstanceState::Completed
-            | InstanceState::Failed
-            | InstanceState::Cancelled
-            | InstanceState::Waiting
-            | InstanceState::Paused => return,
-            InstanceState::Scheduled => {
-                // Simulate scheduler picking up: force to Running.
-                storage
-                    .update_instance_state(instance_id, InstanceState::Running, None)
-                    .await
-                    .unwrap();
-            }
-            _ => {}
-        }
-        let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
-        let outcome = evaluator::evaluate(storage, handlers, &inst, sequence)
-            .await
-            .unwrap();
-        if let EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } = outcome
-        {
-            let new_state = if any_cancelled && !any_failed {
-                InstanceState::Cancelled
-            } else if any_failed {
-                InstanceState::Failed
-            } else {
-                InstanceState::Completed
-            };
-            storage
-                .update_instance_state(instance_id, new_state, None)
-                .await
-                .unwrap();
-            return;
-        }
-    }
-    panic!("evaluator did not terminate within 2000 ticks");
-}
-
-/// Drive a limited number of ticks (for tests that check intermediate state).
+/// e2e_coverage-specific `drive_n`: does NOT transition Scheduled -> Running,
+/// so retryable errors that reschedule the instance leave it Scheduled and
+/// `drive_n` returns early. This preserves the behaviour of tests that rely on
+/// the evaluator being called only once for retryable failures.
 async fn drive_n(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -253,54 +50,6 @@ async fn drive_n(
             return;
         }
     }
-}
-
-fn node_state(tree: &[orch8_types::execution::ExecutionNode], block_id: &str) -> NodeState {
-    tree.iter()
-        .find(|n| n.block_id.as_str() == block_id)
-        .unwrap_or_else(|| panic!("node '{block_id}' not found in tree"))
-        .state
-}
-
-fn registry() -> HandlerRegistry {
-    let mut reg = HandlerRegistry::new();
-    register_builtins(&mut reg);
-    reg
-}
-
-fn registry_with_fail() -> HandlerRegistry {
-    let mut reg = registry();
-    reg.register("fail", |_ctx| {
-        Box::pin(async {
-            Err(StepError::Permanent {
-                message: "intentional failure".into(),
-                details: None,
-            })
-        })
-    });
-    reg
-}
-
-fn registry_with_retryable_fail() -> HandlerRegistry {
-    let mut reg = registry();
-    reg.register("retryable_fail", |_ctx| {
-        Box::pin(async {
-            Err(StepError::Retryable {
-                message: "transient failure".into(),
-                details: None,
-            })
-        })
-    });
-    // Also register "fail" for permanent failures.
-    reg.register("fail", |_ctx| {
-        Box::pin(async {
-            Err(StepError::Permanent {
-                message: "intentional failure".into(),
-                details: None,
-            })
-        })
-    });
-    reg
 }
 
 /// Registry with a handler that sets context data.

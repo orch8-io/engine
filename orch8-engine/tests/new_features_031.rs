@@ -10,7 +10,6 @@ use std::sync::Arc;
 use chrono::Utc;
 use serde_json::json;
 
-use orch8_engine::evaluator::{self, EvalOutcome};
 use orch8_engine::handlers::{builtin::register_builtins, HandlerRegistry};
 use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
@@ -19,30 +18,12 @@ use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
 
+mod common;
+use common::*;
+
 // ================================================================
 // HELPERS
 // ================================================================
-
-fn mk_step(id: &str, handler: &str, params: serde_json::Value) -> BlockDefinition {
-    BlockDefinition::Step(Box::new(StepDef {
-        id: BlockId::new(id),
-        handler: handler.into(),
-        params,
-        delay: None,
-        retry: None,
-        timeout: None,
-        rate_limit_key: None,
-        send_window: None,
-        context_access: None,
-        cancellable: true,
-        wait_for_input: None,
-        queue_name: None,
-        deadline: None,
-        on_deadline_breach: None,
-        fallback_handler: None,
-        cache_key: None,
-    }))
-}
 
 fn mk_step_cached(
     id: &str,
@@ -70,109 +51,6 @@ fn mk_step_cached(
     }))
 }
 
-fn mk_sequence(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
-    SequenceDefinition {
-        id: SequenceId::new(),
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        name: "test-flow".into(),
-        version: 1,
-        deprecated: false,
-        blocks,
-        interceptors: None,
-        created_at: Utc::now(),
-        status: orch8_types::sequence::SequenceStatus::Production,
-    }
-}
-
-fn mk_instance_with_ctx(seq_id: SequenceId, data: serde_json::Value) -> TaskInstance {
-    let now = Utc::now();
-    TaskInstance {
-        id: InstanceId::new(),
-        sequence_id: seq_id,
-        tenant_id: TenantId::unchecked("t"),
-        namespace: Namespace::new("ns"),
-        state: InstanceState::Running,
-        next_fire_at: None,
-        priority: Priority::Normal,
-        timezone: "UTC".into(),
-        metadata: json!({}),
-        context: ExecutionContext {
-            data,
-            config: json!({}),
-            audit: vec![],
-            runtime: RuntimeContext::default(),
-        },
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: None,
-        created_at: now,
-        updated_at: now,
-    }
-}
-
-async fn setup(
-    blocks: Vec<BlockDefinition>,
-    ctx_data: serde_json::Value,
-) -> (Arc<dyn StorageBackend>, SequenceDefinition, TaskInstance) {
-    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
-    let seq = mk_sequence(blocks);
-    storage.create_sequence(&seq).await.unwrap();
-    let inst = mk_instance_with_ctx(seq.id, ctx_data);
-    storage.create_instance(&inst).await.unwrap();
-    (storage, seq, inst)
-}
-
-async fn drive(
-    storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
-    instance_id: InstanceId,
-    sequence: &SequenceDefinition,
-) {
-    for _ in 0..500 {
-        let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
-        match inst.state {
-            InstanceState::Completed
-            | InstanceState::Failed
-            | InstanceState::Cancelled
-            | InstanceState::Waiting
-            | InstanceState::Paused => return,
-            InstanceState::Scheduled => {
-                storage
-                    .update_instance_state(instance_id, InstanceState::Running, None)
-                    .await
-                    .unwrap();
-            }
-            _ => {}
-        }
-        let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
-        let outcome = evaluator::evaluate(storage, handlers, &inst, sequence)
-            .await
-            .unwrap();
-        if let EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } = outcome
-        {
-            let new_state = if any_cancelled && !any_failed {
-                InstanceState::Cancelled
-            } else if any_failed {
-                InstanceState::Failed
-            } else {
-                InstanceState::Completed
-            };
-            storage
-                .update_instance_state(instance_id, new_state, None)
-                .await
-                .unwrap();
-            return;
-        }
-    }
-    panic!("drive loop did not terminate");
-}
-
 fn default_handlers() -> HandlerRegistry {
     let mut r = HandlerRegistry::new();
     register_builtins(&mut r);
@@ -185,8 +63,8 @@ fn default_handlers() -> HandlerRegistry {
 
 #[tokio::test]
 async fn transform_end_to_end() {
-    let (storage, seq, inst) = setup(
-        vec![mk_step(
+    let (storage, seq, inst) = setup_with_ctx(
+        vec![mk_step_with_params(
             "t1",
             "transform",
             json!({"result": "computed", "value": 42}),
@@ -211,8 +89,8 @@ async fn transform_end_to_end() {
 
 #[tokio::test]
 async fn transform_resolves_context_templates() {
-    let (storage, seq, inst) = setup(
-        vec![mk_step(
+    let (storage, seq, inst) = setup_with_ctx(
+        vec![mk_step_with_params(
             "t1",
             "transform",
             json!({"greeting": "hello {{ data.name }}"}),
@@ -240,8 +118,12 @@ async fn transform_resolves_context_templates() {
 
 #[tokio::test]
 async fn assert_passing_completes() {
-    let (storage, seq, inst) = setup(
-        vec![mk_step("a1", "assert", json!({"condition": "true"}))],
+    let (storage, seq, inst) = setup_with_ctx(
+        vec![mk_step_with_params(
+            "a1",
+            "assert",
+            json!({"condition": "true"}),
+        )],
         json!({}),
     )
     .await;
@@ -261,8 +143,8 @@ async fn assert_passing_completes() {
 
 #[tokio::test]
 async fn assert_failing_causes_instance_failure() {
-    let (storage, seq, inst) = setup(
-        vec![mk_step(
+    let (storage, seq, inst) = setup_with_ctx(
+        vec![mk_step_with_params(
             "a1",
             "assert",
             json!({"condition": "false", "message": "should not be zero"}),
@@ -290,15 +172,15 @@ async fn assert_failing_causes_instance_failure() {
 
 #[tokio::test]
 async fn merge_state_stores_and_readable_via_get_state() {
-    let (storage, seq, inst) = setup(
+    let (storage, seq, inst) = setup_with_ctx(
         vec![
-            mk_step(
+            mk_step_with_params(
                 "ms1",
                 "merge_state",
                 json!({"values": {"color": "green", "score": 99}}),
             ),
-            mk_step("gs1", "get_state", json!({"key": "color"})),
-            mk_step("gs2", "get_state", json!({"key": "score"})),
+            mk_step_with_params("gs1", "get_state", json!({"key": "color"})),
+            mk_step_with_params("gs2", "get_state", json!({"key": "score"})),
         ],
         json!({}),
     )
@@ -330,14 +212,14 @@ async fn merge_state_stores_and_readable_via_get_state() {
 
 #[tokio::test]
 async fn state_template_reads_kv_state() {
-    let (storage, seq, inst) = setup(
+    let (storage, seq, inst) = setup_with_ctx(
         vec![
-            mk_step(
+            mk_step_with_params(
                 "s1",
                 "set_state",
                 json!({"key": "flavor", "value": "vanilla"}),
             ),
-            mk_step("t1", "transform", json!({"picked": "{{ state.flavor }}"})),
+            mk_step_with_params("t1", "transform", json!({"picked": "{{ state.flavor }}"})),
         ],
         json!({}),
     )
@@ -358,10 +240,10 @@ async fn state_template_reads_kv_state() {
 
 #[tokio::test]
 async fn state_template_with_merge_state() {
-    let (storage, seq, inst) = setup(
+    let (storage, seq, inst) = setup_with_ctx(
         vec![
-            mk_step("ms1", "merge_state", json!({"values": {"x": 10, "y": 20}})),
-            mk_step(
+            mk_step_with_params("ms1", "merge_state", json!({"values": {"x": 10, "y": 20}})),
+            mk_step_with_params(
                 "t1",
                 "transform",
                 json!({"sum_label": "{{ state.x }}+{{ state.y }}"}),

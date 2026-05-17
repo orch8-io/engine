@@ -333,4 +333,102 @@ async fn process_signals_leaves_human_input_signals_pending() {
         }
         other => panic!("unexpected signal type: {other:?}"),
     }
+
+    // Verify the non-human "ping" signal was actually delivered (not in pending).
+    assert!(
+        !pending.iter().any(|s| s.id == other.id),
+        "non-human custom signal 'ping' must have been marked delivered"
+    );
+}
+
+#[tokio::test]
+async fn allow_comment_true_accepts_value_with_extra_comment_field() {
+    let def = HumanInputDef {
+        prompt: "decide".into(),
+        timeout: None,
+        escalation_handler: None,
+        choices: Some(vec![
+            HumanChoice {
+                label: "Approve".into(),
+                value: "approve".into(),
+            },
+            HumanChoice {
+                label: "Reject".into(),
+                value: "reject".into(),
+            },
+        ]),
+        store_as: Some("decision".into()),
+        allow_comment: true,
+    };
+    let (storage, instance, step) = setup(mk_step("review_c", def)).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+
+    // Payload includes both value and comment — value must still be validated
+    // and accepted; the extra comment field must not cause rejection.
+    enqueue_human_signal(
+        &storage,
+        instance.id,
+        "review_c",
+        json!({"value": "approve", "comment": "looks good to me"}),
+    )
+    .await;
+
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("check_human_input ok");
+    assert!(!deferred, "valid value with comment should not defer");
+
+    let out = storage
+        .get_block_output(instance.id, &step.id)
+        .await
+        .unwrap()
+        .expect("block output written");
+    assert_eq!(out.output, json!({"value": "approve"}));
+
+    let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(
+        refreshed.context.data.get("decision"),
+        Some(&json!("approve"))
+    );
+}
+
+#[tokio::test]
+async fn custom_choices_with_no_store_as_uses_block_id_as_key() {
+    let def = HumanInputDef {
+        prompt: "pick one".into(),
+        timeout: None,
+        escalation_handler: None,
+        choices: Some(vec![
+            HumanChoice {
+                label: "Alpha".into(),
+                value: "alpha".into(),
+            },
+            HumanChoice {
+                label: "Beta".into(),
+                value: "beta".into(),
+            },
+        ]),
+        store_as: None,
+        allow_comment: false,
+    };
+    let (storage, instance, step) = setup(mk_step("picker", def)).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+
+    enqueue_human_signal(&storage, instance.id, "picker", json!({"value": "beta"})).await;
+
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("check_human_input ok");
+    assert!(!deferred);
+
+    let out = storage
+        .get_block_output(instance.id, &step.id)
+        .await
+        .unwrap()
+        .expect("block output written");
+    assert_eq!(out.output, json!({"value": "beta"}));
+
+    // store_as is None → key defaults to block id "picker".
+    let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.context.data.get("picker"), Some(&json!("beta")));
 }

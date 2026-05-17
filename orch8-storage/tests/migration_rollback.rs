@@ -1,13 +1,20 @@
-//! Validation tests for down/rollback migration scripts.
+//! Structural validation tests for down/rollback migration scripts.
 //!
 //! These tests verify structural correctness of the rollback SQL files in
-//! `migrations/down/`. They do NOT execute the SQL against a live database
-//! (that requires a running Postgres instance); instead they check:
+//! `migrations/down/` via static analysis. They do NOT execute the SQL against
+//! a live database (that requires a running Postgres instance); instead they
+//! catch common authoring errors:
 //!
 //!   1. Every rollback file has a matching forward migration.
-//!   2. Each rollback file is non-empty and contains the expected SQL operations.
+//!   2. Each rollback file is non-empty, terminates statements with `;`, and
+//!      contains the expected DDL operations.
 //!   3. Forward-rollback pairs are semantically consistent (e.g. a forward
 //!      CREATE TABLE has a rollback DROP TABLE for the same table name).
+//!   4. Drop ordering is correct (indexes before tables).
+//!
+//! Limitations: these are lint-level checks — they cannot catch syntax errors,
+//! wrong casing, or runtime failures. For that, run rollbacks against an actual
+//! Postgres instance in CI.
 //!
 //! Running only this file:
 //!
@@ -328,6 +335,21 @@ fn rollback_037_drops_rollback_tables() {
         drop_index_count >= 4,
         "{name}: expected at least 4 DROP INDEX statements, found {drop_index_count}"
     );
+}
+
+#[test]
+fn rollback_statements_end_with_semicolons() {
+    let rollbacks = read_sql_files(&down_dir());
+
+    for (num, (name, content)) in &rollbacks {
+        let sql_body = strip_comments(content);
+        let trimmed = sql_body.trim();
+        assert!(
+            trimmed.ends_with(';'),
+            "Rollback file {name} (#{num:03}) does not end with a semicolon — \
+             likely a truncated or incomplete SQL statement"
+        );
+    }
 }
 
 #[test]
