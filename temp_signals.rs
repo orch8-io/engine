@@ -254,18 +254,13 @@ async fn cancel_scoped(
     let mut has_non_cancellable_active = false;
 
     // Collect IDs of CancellationScope nodes so we can check ancestry.
-    let mut scope_node_ids: Vec<_> = tree
+    let scope_node_ids: std::collections::HashSet<_> = tree
         .iter()
         .filter(|n| n.block_type == BlockType::CancellationScope)
         .map(|n| n.id)
         .collect();
-    scope_node_ids.sort_unstable();
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
-
-    // Sort tree for O(log n) parent lookups
-    let mut sorted_tree: Vec<_> = tree.iter().collect();
-    sorted_tree.sort_unstable_by_key(|n| n.id);
 
     for node in &tree {
         let is_active = matches!(
@@ -280,13 +275,13 @@ async fn cancel_scoped(
         // node itself is also non-cancellable — cancelling it would
         // terminate the scope (and its children) before they had a chance
         // to drain, defeating the purpose of the scope in the first place.
-        let inside_scope = is_descendant_of_any(&sorted_tree, node, &scope_node_ids);
+        let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
         let is_scope_node = node.block_type == BlockType::CancellationScope;
 
         // Nodes inside a try-catch `finally` branch (branch_index == 2) are
         // non-cancellable: the finally block must run to completion regardless
         // of external signals. This mirrors Java/Python try-finally semantics.
-        let inside_finally = is_inside_finally_branch(&tree, &sorted_tree, node);
+        let inside_finally = is_inside_finally_branch(&tree, node);
 
         // Check per-step cancellable flag.
         let step_cancellable = block_map
@@ -317,7 +312,6 @@ async fn cancel_scoped(
 /// run to completion.
 fn is_inside_finally_branch(
     tree: &[orch8_types::execution::ExecutionNode],
-    sorted_tree: &[&orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
 ) -> bool {
     use orch8_types::execution::BlockType;
@@ -352,11 +346,7 @@ fn is_inside_finally_branch(
         let Some(parent_id) = current.parent_id else {
             return false;
         };
-        let Some(parent) = sorted_tree
-            .binary_search_by_key(&parent_id, |n| n.id)
-            .ok()
-            .map(|idx| sorted_tree[idx])
-        else {
+        let Some(parent) = tree.iter().find(|n| n.id == parent_id) else {
             return false;
         };
         if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
@@ -368,19 +358,17 @@ fn is_inside_finally_branch(
 
 /// Check if `node` is a descendant of any node whose ID is in `ancestor_ids`.
 fn is_descendant_of_any(
-    sorted_tree: &[&orch8_types::execution::ExecutionNode],
+    tree: &[orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
-    ancestor_ids: &[orch8_types::ids::ExecutionNodeId],
+    ancestor_ids: &std::collections::HashSet<orch8_types::ids::ExecutionNodeId>,
 ) -> bool {
+    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     let mut current_parent = node.parent_id;
     while let Some(pid) = current_parent {
-        if ancestor_ids.binary_search(&pid).is_ok() {
+        if ancestor_ids.contains(&pid) {
             return true;
         }
-        current_parent = sorted_tree
-            .binary_search_by_key(&pid, |n| n.id)
-            .ok()
-            .and_then(|idx| sorted_tree[idx].parent_id);
+        current_parent = node_map.get(&pid).copied().and_then(|n| n.parent_id);
     }
     false
 }
@@ -1180,20 +1168,16 @@ mod tests {
             completed_at: None,
         };
         let tree = vec![root.clone(), child.clone(), grandchild.clone()];
-        let mut sorted_tree: Vec<_> = tree.iter().collect();
-        sorted_tree.sort_unstable_by_key(|n| n.id);
-        let mut ancestors = vec![root.id];
-        ancestors.sort_unstable();
-
-        assert!(is_descendant_of_any(&sorted_tree, &grandchild, &ancestors));
-        assert!(is_descendant_of_any(&sorted_tree, &child, &ancestors));
+        let ancestors = std::collections::HashSet::from([root.id]);
+        assert!(is_descendant_of_any(&tree, &grandchild, &ancestors));
+        assert!(is_descendant_of_any(&tree, &child, &ancestors));
         // Root is not a descendant of itself.
-        assert!(!is_descendant_of_any(&sorted_tree, &root, &ancestors));
+        assert!(!is_descendant_of_any(&tree, &root, &ancestors));
         // Unknown ancestor — returns false.
         assert!(!is_descendant_of_any(
-            &sorted_tree,
+            &tree,
             &grandchild,
-            &[ExecutionNodeId::new()]
+            &std::collections::HashSet::from([ExecutionNodeId::new()])
         ));
     }
 }

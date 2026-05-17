@@ -5,15 +5,54 @@ use uuid::Uuid;
 /// Newtype wrappers prevent mixing up UUIDs at compile time.
 /// Zero cost at runtime (transparent newtypes).
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+)]
 #[sqlx(transparent)]
 pub struct InstanceId(Uuid);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+)]
 #[sqlx(transparent)]
 pub struct SequenceId(Uuid);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, ToSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    sqlx::Type,
+    ToSchema,
+)]
 #[sqlx(transparent)]
 pub struct ExecutionNodeId(Uuid);
 
