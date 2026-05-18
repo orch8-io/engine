@@ -207,9 +207,9 @@ impl InstanceLifecycleManager {
         let signal = orch8_types::signal::Signal {
             id: uuid::Uuid::now_v7(),
             instance_id: id,
-            signal_type: orch8_types::signal::SignalType::Custom(
-                format!("human_input:{step_name}"),
-            ),
+            signal_type: orch8_types::signal::SignalType::Custom(format!(
+                "human_input:{step_name}"
+            )),
             payload,
             delivered: false,
             created_at: chrono::Utc::now(),
