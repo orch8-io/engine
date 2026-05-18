@@ -115,7 +115,6 @@ fn wait_for_state(
     );
 }
 
-/// Complete a waiting step and return the current_step name that was waiting.
 fn complete_waiting_step(engine: &MobileEngine, instance_id: &str, step: &str, value: &str) {
     let output = format!(r#"{{"value":"{value}"}}"#);
     engine
