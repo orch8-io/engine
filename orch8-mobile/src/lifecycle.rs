@@ -204,6 +204,17 @@ impl InstanceLifecycleManager {
 
         let payload: serde_json::Value = serde_json::from_str(output)?;
 
+        // Merge output into instance context so it's immediately available.
+        let mut context = inst.context;
+        if let serde_json::Value::Object(map) = &payload {
+            for (k, v) in map {
+                context.data[k] = v.clone();
+            }
+        } else {
+            context.data[step_name] = payload.clone();
+        }
+        self.storage.update_instance_context(id, &context).await?;
+
         let signal = orch8_types::signal::Signal {
             id: uuid::Uuid::now_v7(),
             instance_id: id,
@@ -216,6 +227,9 @@ impl InstanceLifecycleManager {
             delivered_at: None,
         };
         self.storage.enqueue_signal(&signal).await?;
+        self.storage
+            .update_instance_state(id, InstanceState::Scheduled, Some(chrono::Utc::now()))
+            .await?;
 
         debug!(instance_id = %instance_id, step_name = %step_name, "enqueued human_input signal");
         Ok(())
