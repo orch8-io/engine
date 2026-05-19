@@ -58,7 +58,7 @@ impl PostgresStorage {
         Self::with_min_connections(database_url, max_connections, 2, search_path).await
     }
 
-
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     pub async fn with_min_connections(
         database_url: &str,
         max_connections: u32,

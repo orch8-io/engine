@@ -24,12 +24,12 @@ pub(crate) use bulk::{
     __path_bulk_reschedule, __path_bulk_update_state, __path_list_dlq, bulk_reschedule,
     bulk_update_state, list_dlq,
 };
+pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
 pub(crate) use checkpoints::{
     __path_get_latest_checkpoint, __path_list_checkpoints, __path_prune_checkpoints,
     __path_save_checkpoint, get_latest_checkpoint, list_checkpoints, prune_checkpoints,
     save_checkpoint,
 };
-pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
 pub use inject::InjectBlocksRequest;
 pub(crate) use inject::{__path_inject_blocks, inject_blocks};
 pub(crate) use lifecycle::{
