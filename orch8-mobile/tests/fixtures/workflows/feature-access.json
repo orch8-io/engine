@@ -1,0 +1,137 @@
+{
+  "id": "00000000-0000-0000-0000-000000000003",
+  "tenant_id": "mobile",
+  "namespace": "default",
+  "name": "feature-access",
+  "version": 1,
+  "deprecated": false,
+  "blocks": [
+    {
+      "type": "step",
+      "id": "check_eligibility",
+      "handler": "check_eligibility",
+      "params": { "feature": "premium_analytics" },
+      "cancellable": true
+    },
+    {
+      "type": "step",
+      "id": "fetch_feature_config",
+      "handler": "fetch_feature_config",
+      "params": {},
+      "cancellable": true
+    },
+    {
+      "type": "step",
+      "id": "evaluate_rules",
+      "handler": "evaluate_rules",
+      "params": { "rule_set": "feature_gate_v2" },
+      "cancellable": true
+    },
+    {
+      "type": "step",
+      "id": "consent_request",
+      "handler": "request_consent",
+      "params": { "data_usage": "analytics_and_personalization" },
+      "cancellable": true,
+      "wait_for_input": {
+        "prompt": "This feature collects usage data for analytics. Do you consent to data collection?",
+        "timeout": 300000,
+        "choices": [
+          { "label": "I Agree", "value": "consented" },
+          { "label": "No Thanks", "value": "declined" }
+        ],
+        "store_as": "consent_decision"
+      }
+    },
+    {
+      "type": "router",
+      "id": "consent_gate",
+      "routes": [
+        {
+          "condition": "context.data.consent_decision == 'declined'",
+          "blocks": [
+            {
+              "type": "step",
+              "id": "show_limited_access_banner",
+              "handler": "show_banner",
+              "params": {
+                "title": "Limited Access",
+                "message": "Without data consent, some features will be restricted. You can change this in Settings anytime.",
+                "style": "info"
+              },
+              "cancellable": true
+            }
+          ]
+        }
+      ],
+      "default": [
+        {
+          "type": "step",
+          "id": "verify_identity",
+          "handler": "verify_identity",
+          "params": { "method": "biometric" },
+          "cancellable": true
+        },
+        {
+          "type": "step",
+          "id": "access_approval",
+          "handler": "request_approval",
+          "params": { "reviewer": "security_team", "reason": "premium_feature_access" },
+          "cancellable": true,
+          "wait_for_input": {
+            "prompt": "Your request for premium feature access is being reviewed by the security team.",
+            "timeout": 86400000,
+            "choices": [
+              { "label": "Grant Access", "value": "approved" },
+              { "label": "Deny Access", "value": "denied" }
+            ],
+            "store_as": "access_decision"
+          }
+        },
+        {
+          "type": "router",
+          "id": "access_gate",
+          "routes": [
+            {
+              "condition": "context.data.access_decision == 'denied'",
+              "blocks": [
+                {
+                  "type": "step",
+                  "id": "show_denied_banner",
+                  "handler": "show_banner",
+                  "params": {
+                    "title": "Access Denied",
+                    "message": "Your request for premium access was denied. Please contact your administrator for more details.",
+                    "style": "error"
+                  },
+                  "cancellable": true
+                }
+              ]
+            }
+          ],
+          "default": [
+            {
+              "type": "step",
+              "id": "show_access_granted_banner",
+              "handler": "show_banner",
+              "params": {
+                "title": "Access Granted!",
+                "message": "Premium Analytics is now unlocked. Explore your new dashboards and insights!",
+                "style": "success"
+              },
+              "cancellable": true
+            },
+            {
+              "type": "step",
+              "id": "activate_feature",
+              "handler": "activate_feature",
+              "params": { "feature": "premium_analytics", "tier": "full" },
+              "cancellable": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "created_at": "2026-05-17T00:00:00Z"
+}

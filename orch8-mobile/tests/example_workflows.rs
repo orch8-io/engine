@@ -22,13 +22,11 @@ impl EngineListener for NoopListener {
 }
 
 fn load_workflow(name: &str) -> String {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest.parent().unwrap().parent().unwrap();
-    let path = repo_root
-        .join("mobile-examples/workflows")
-        .join(format!("{name}.json"));
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+    let path = format!(
+        "{}/tests/fixtures/workflows/{name}.json",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
 }
 
 fn make_engine() -> Arc<MobileEngine> {
