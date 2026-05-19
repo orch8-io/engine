@@ -1667,7 +1667,7 @@ impl crate::TelemetryStore for SqliteStorage {
                     }
                     Err(_) => event.payload.clone(),
                 };
-                b.push_bind(event.event_type.clone());
+                b.push_bind(&event.event_type);
                 b.push_bind(enriched);
                 b.push_bind(event.created_at.to_rfc3339());
             });

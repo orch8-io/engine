@@ -58,7 +58,7 @@ impl PostgresStorage {
         Self::with_min_connections(database_url, max_connections, 2, search_path).await
     }
 
-    #[allow(clippy::duration_suboptimal_units)]
+    #[allow(unknown_lints, clippy::duration_suboptimal_units)]
     pub async fn with_min_connections(
         database_url: &str,
         max_connections: u32,
@@ -1477,14 +1477,14 @@ impl crate::TelemetryStore for PostgresStorage {
                 "INSERT INTO telemetry_mobile_events (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at) ",
             );
             qb.push_values(chunk, |mut b, event| {
-                b.push_bind(event.event_type.clone());
-                b.push_bind(event.payload.clone());
-                b.push_bind(event.device_id.clone());
-                b.push_bind(event.os_name.clone());
-                b.push_bind(event.os_version.clone());
-                b.push_bind(event.app_version.clone());
-                b.push_bind(event.sdk_version.clone());
-                b.push_bind(event.tenant_id.clone());
+                b.push_bind(&event.event_type);
+                b.push_bind(&event.payload);
+                b.push_bind(&event.device_id);
+                b.push_bind(&event.os_name);
+                b.push_bind(&event.os_version);
+                b.push_bind(&event.app_version);
+                b.push_bind(&event.sdk_version);
+                b.push_bind(&event.tenant_id);
                 b.push_bind(event.created_at);
             });
             let result = qb.build().execute(&self.pool).await?;
