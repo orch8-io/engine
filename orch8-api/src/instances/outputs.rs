@@ -38,6 +38,10 @@ pub async fn get_outputs(
         .await
         .map_err(|e| ApiError::from_storage(e, "outputs"))?;
 
+    // Strip internal sentinel rows (in-progress markers written before handler
+    // execution for crash-recovery). They are not user-visible outputs.
+    outputs.retain(|o| o.output_ref.as_deref() != Some("__in_progress__"));
+
     // Inflate externalization markers in-place so API consumers see real data.
     // See `docs/CONTEXT_MANAGEMENT.md` §8.5.
     //

@@ -184,6 +184,11 @@ pub(crate) async fn stream_instance(
                 .await
             {
                 Ok(outputs) => {
+                    // Filter out internal sentinel rows before streaming.
+                    let outputs: Vec<_> = outputs
+                        .into_iter()
+                        .filter(|o| o.output_ref.as_deref() != Some("__in_progress__"))
+                        .collect();
                     if !outputs.is_empty() {
                         for output in &outputs {
                             // Serialisation of owned `BlockOutput` is infallible in practice —
