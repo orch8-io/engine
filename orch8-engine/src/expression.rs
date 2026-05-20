@@ -90,9 +90,21 @@ pub fn evaluate(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> serde_json::Value {
-    let tokens = tokenize_cached(expr.trim());
+    let tokens = tokenize_cached(strip_template_braces(expr.trim()));
     let mut parser = Parser::new(&tokens, context, outputs);
     parser.parse_ternary()
+}
+
+/// Strip `{{ }}` template wrappers if present so callers can pass either
+/// `"context.data.x == 1"` or `"{{ context.data.x == 1 }}"`.
+fn strip_template_braces(expr: &str) -> &str {
+    let s = expr.trim();
+    if let Some(inner) = s.strip_prefix("{{") {
+        if let Some(inner) = inner.strip_suffix("}}") {
+            return inner.trim();
+        }
+    }
+    s
 }
 
 /// Check if an expression evaluates to a truthy value.
@@ -1440,6 +1452,35 @@ mod tests {
             &ctx(),
             &outputs()
         ));
+    }
+
+    #[test]
+    fn template_braces_stripped_from_condition() {
+        assert!(evaluate_condition(
+            "{{ context.data.active }}",
+            &ctx(),
+            &outputs()
+        ));
+        assert!(evaluate_condition(
+            "{{ context.data.count > 3 }}",
+            &ctx(),
+            &outputs()
+        ));
+        assert!(!evaluate_condition(
+            "{{ context.data.count > 10 }}",
+            &ctx(),
+            &outputs()
+        ));
+    }
+
+    #[test]
+    fn strip_template_braces_edge_cases() {
+        assert_eq!(strip_template_braces("hello"), "hello");
+        assert_eq!(strip_template_braces("{{ x }}"), "x");
+        assert_eq!(strip_template_braces("{{x}}"), "x");
+        assert_eq!(strip_template_braces("{{ x + 1 }}"), "x + 1");
+        assert_eq!(strip_template_braces("{x}"), "{x}");
+        assert_eq!(strip_template_braces("{{ x"), "{{ x");
     }
 
     #[test]
