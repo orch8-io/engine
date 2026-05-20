@@ -73,6 +73,7 @@ pub async fn api_key_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     if expected_key.is_empty() {
+        tracing::warn!("API key is empty — authentication disabled");
         return Ok(next.run(request).await);
     }
 

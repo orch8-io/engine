@@ -101,7 +101,11 @@ impl TelemetryManager {
                 "telemetry buffer at {}% — auto-flush",
                 AUTO_FLUSH_PCT
             );
-            let endpoint = self.last_endpoint.lock().unwrap().clone();
+            let endpoint = self
+                .last_endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             if let Some(endpoint) = endpoint {
                 if let Err(e) = self.flush(&endpoint).await {
                     tracing::warn!(error = %e, "auto-flush failed");
@@ -164,7 +168,11 @@ impl TelemetryManager {
             })?;
 
         if response.status().is_success() {
-            *self.last_endpoint.lock().unwrap() = Some(endpoint_url.to_string());
+            *self
+                .last_endpoint
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(endpoint_url.to_string());
             let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
             let deleted = self
                 .storage

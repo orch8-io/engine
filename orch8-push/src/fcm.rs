@@ -62,7 +62,10 @@ impl FcmProvider {
 
     async fn get_or_refresh_token(&self) -> Result<String, PushError> {
         {
-            let cached = self.cached_token.lock().unwrap();
+            let cached = self
+                .cached_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(ref ct) = *cached {
                 if ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL {
                     return Ok(ct.token.clone());
@@ -110,7 +113,10 @@ impl FcmProvider {
             .map_err(|e| PushError::Delivery(format!("FCM token parse failed: {e}")))?;
 
         let access_token = token_resp.access_token.clone();
-        let mut cached = self.cached_token.lock().unwrap();
+        let mut cached = self
+            .cached_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *cached = Some(CachedToken {
             token: access_token.clone(),
             created_at: Instant::now(),

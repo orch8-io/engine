@@ -359,10 +359,11 @@ pub(super) async fn execute_step_block(
     {
         let step_started = chrono::Utc::now();
         if let Some(mut inst) = storage.get_instance(instance_id).await? {
+            let expected_updated_at = inst.updated_at;
             inst.context.runtime.current_step = Some(step_def.id.clone());
             inst.context.runtime.current_step_started_at = Some(step_started);
             storage
-                .update_instance_context(instance_id, &inst.context)
+                .update_instance_context_cas(instance_id, &inst.context, expected_updated_at)
                 .await?;
         }
     }

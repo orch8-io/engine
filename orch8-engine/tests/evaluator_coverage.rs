@@ -319,7 +319,7 @@ async fn evaluate_first_step_fails_marks_sequence_failed() {
     assert_eq!(final_inst.state, InstanceState::Failed);
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
     assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
-    assert_eq!(node_state(&tree, "s2"), NodeState::Pending);
+    assert_eq!(node_state(&tree, "s2"), NodeState::Cancelled);
 }
 
 // 16
@@ -336,7 +336,7 @@ async fn evaluate_middle_step_fails_subsequent_not_run() {
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
     assert_eq!(node_state(&tree, "s1"), NodeState::Completed);
     assert_eq!(node_state(&tree, "s2"), NodeState::Failed);
-    assert_eq!(node_state(&tree, "s3"), NodeState::Pending);
+    assert_eq!(node_state(&tree, "s3"), NodeState::Cancelled);
 }
 
 // 17
@@ -1225,7 +1225,7 @@ async fn sla_deadline_only_checks_running_nodes() {
     drive(&storage, &reg, inst.id, &seq).await;
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
     assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
-    assert_eq!(node_state(&tree, "s2"), NodeState::Pending);
+    assert_eq!(node_state(&tree, "s2"), NodeState::Cancelled);
 }
 
 // 53

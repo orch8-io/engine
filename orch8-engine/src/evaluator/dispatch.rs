@@ -66,9 +66,12 @@ pub(super) async fn dispatch_block(
             if matches!(result, Ok(true)) {
                 if let Some(mut inst) = storage.get_instance(instance.id).await.ok().flatten() {
                     inst.context.runtime.total_steps_executed += 1;
-                    let _ = storage
+                    if let Err(e) = storage
                         .update_instance_context(instance.id, &inst.context)
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(instance_id = %instance.id, error = %e, "failed to update step counter");
+                    }
                 }
             }
             result

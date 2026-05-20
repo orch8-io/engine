@@ -1525,3 +1525,185 @@ async fn activate_first_pending_child_activates_after_completed() {
         "Pending sibling should activate after Completed predecessor"
     );
 }
+
+// ---------------------------------------------------------------------------
+// check_termination tests (C5 fix validation)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn check_termination_all_completed_returns_done() {
+    let tree = vec![
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s1",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        ),
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s2",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        ),
+    ];
+    let result = check_termination(&tree);
+    assert!(result.is_some());
+    match result.unwrap() {
+        EvalOutcome::Done {
+            any_failed,
+            any_cancelled,
+        } => {
+            assert!(!any_failed);
+            assert!(!any_cancelled);
+        }
+        EvalOutcome::MoreWork { .. } => panic!("expected Done"),
+    }
+}
+
+#[test]
+fn check_termination_root_failed_returns_done_with_failed() {
+    let root_id = ExecutionNodeId::new();
+    let child_id = ExecutionNodeId::new();
+    let tree = vec![
+        mk_node(
+            root_id,
+            None,
+            "s1",
+            BlockType::Step,
+            NodeState::Failed,
+            None,
+        ),
+        mk_node(
+            child_id,
+            Some(root_id),
+            "s2",
+            BlockType::Step,
+            NodeState::Pending,
+            None,
+        ),
+    ];
+    let result = check_termination(&tree);
+    assert!(result.is_some());
+    match result.unwrap() {
+        EvalOutcome::Done {
+            any_failed,
+            any_cancelled,
+        } => {
+            assert!(any_failed);
+            assert!(!any_cancelled);
+        }
+        EvalOutcome::MoreWork { .. } => panic!("expected Done"),
+    }
+}
+
+#[test]
+fn check_termination_root_cancelled_returns_done_with_cancelled() {
+    let tree = vec![mk_node(
+        ExecutionNodeId::new(),
+        None,
+        "s1",
+        BlockType::Step,
+        NodeState::Cancelled,
+        None,
+    )];
+    let result = check_termination(&tree);
+    assert!(result.is_some());
+    match result.unwrap() {
+        EvalOutcome::Done {
+            any_failed,
+            any_cancelled,
+        } => {
+            assert!(!any_failed);
+            assert!(any_cancelled);
+        }
+        EvalOutcome::MoreWork { .. } => panic!("expected Done"),
+    }
+}
+
+#[test]
+fn check_termination_still_running_returns_none() {
+    let tree = vec![
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s1",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        ),
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s2",
+            BlockType::Step,
+            NodeState::Running,
+            None,
+        ),
+    ];
+    assert!(check_termination(&tree).is_none());
+}
+
+#[test]
+fn check_termination_mixed_completed_and_skipped_returns_done() {
+    let tree = vec![
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s1",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+        ),
+        mk_node(
+            ExecutionNodeId::new(),
+            None,
+            "s2",
+            BlockType::Step,
+            NodeState::Skipped,
+            None,
+        ),
+    ];
+    let result = check_termination(&tree);
+    assert!(result.is_some());
+    match result.unwrap() {
+        EvalOutcome::Done {
+            any_failed,
+            any_cancelled,
+        } => {
+            assert!(!any_failed);
+            assert!(!any_cancelled);
+        }
+        EvalOutcome::MoreWork { .. } => panic!("expected Done"),
+    }
+}
+
+#[test]
+fn check_termination_ignores_child_node_states() {
+    let root_id = ExecutionNodeId::new();
+    let tree = vec![
+        mk_node(
+            root_id,
+            None,
+            "par",
+            BlockType::Parallel,
+            NodeState::Running,
+            None,
+        ),
+        mk_node(
+            ExecutionNodeId::new(),
+            Some(root_id),
+            "s1",
+            BlockType::Step,
+            NodeState::Failed,
+            None,
+        ),
+    ];
+    assert!(
+        check_termination(&tree).is_none(),
+        "child failure should not trigger termination when root is still running"
+    );
+}

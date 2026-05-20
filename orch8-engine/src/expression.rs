@@ -48,6 +48,16 @@ pub fn try_evaluate(
         return Ok(serde_json::Value::Null);
     }
     let tokens = tokenize_cached(trimmed);
+    // Fail fast if the tokenizer flagged any errors.
+    for (pos, tok) in tokens.iter().enumerate() {
+        if let Token::Error(msg) = tok {
+            return Err(ExprError {
+                message: msg.clone(),
+                position: pos,
+                expr: expr.to_string(),
+            });
+        }
+    }
     let mut parser = Parser::new(&tokens, context, outputs);
     let result = parser.parse_ternary();
     if parser.pos < tokens.len() {
@@ -138,6 +148,7 @@ enum Token {
     Question,
     Colon,
     In,
+    Error(String),
 }
 
 fn tokenize(input: &str) -> Vec<Token> {
@@ -260,7 +271,10 @@ fn tokenize_complex(chars: &[char], i: usize, tokens: &mut Vec<Token>) -> usize 
         }
         (c, _) if c.is_ascii_digit() => tokenize_number(chars, i, tokens),
         (c, _) if c.is_ascii_alphabetic() || c == '_' => tokenize_word(chars, i, tokens),
-        _ => i + 1,
+        (c, _) => {
+            tokens.push(Token::Error(format!("unexpected character '{c}'")));
+            i + 1
+        }
     }
 }
 
@@ -590,6 +604,10 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 serde_json::Value::Array(items)
+            }
+            Some(Token::Error(msg)) => {
+                warn!(error = %msg, "tokenizer error in expression");
+                serde_json::Value::Null
             }
             _ => serde_json::Value::Null,
         }

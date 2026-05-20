@@ -809,3 +809,26 @@ async fn wait_for_drain_waits_for_permits_returned() {
         .expect("drain task panicked");
     assert_eq!(sem.available_permits(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Exponential backoff formula tests (H12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backoff_formula_doubles_with_cap() {
+    let compute_backoff = |failures: u32| -> u64 {
+        100u64
+            .saturating_mul(2u64.saturating_pow(failures))
+            .min(5000)
+    };
+
+    assert_eq!(compute_backoff(0), 100);
+    assert_eq!(compute_backoff(1), 200);
+    assert_eq!(compute_backoff(2), 400);
+    assert_eq!(compute_backoff(3), 800);
+    assert_eq!(compute_backoff(4), 1600);
+    assert_eq!(compute_backoff(5), 3200);
+    assert_eq!(compute_backoff(6), 5000, "should cap at 5000ms");
+    assert_eq!(compute_backoff(10), 5000, "should stay at cap");
+    assert_eq!(compute_backoff(u32::MAX), 5000, "should never overflow");
+}

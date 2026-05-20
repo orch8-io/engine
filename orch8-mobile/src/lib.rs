@@ -407,8 +407,8 @@ impl MobileEngine {
                 .await
         });
         match &result {
-            Ok(id) => eprintln!("[orch8] started instance {id} for {sequence_name}"),
-            Err(e) => eprintln!("[orch8] start failed for {sequence_name}: {e}"),
+            Ok(id) => tracing::debug!("[orch8] started instance {id} for {sequence_name}"),
+            Err(e) => tracing::warn!("[orch8] start failed for {sequence_name}: {e}"),
         }
         result
     }

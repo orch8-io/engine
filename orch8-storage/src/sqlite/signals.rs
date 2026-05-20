@@ -133,7 +133,7 @@ pub(super) async fn get_pending(
     instance_id: InstanceId,
 ) -> Result<Vec<Signal>, StorageError> {
     let rows = sqlx::query(
-        "SELECT * FROM signal_inbox WHERE instance_id=?1 AND delivered=0 ORDER BY created_at",
+        "SELECT * FROM signal_inbox WHERE instance_id=?1 AND delivered=0 ORDER BY created_at ASC",
     )
     .bind(instance_id.into_uuid().to_string())
     .fetch_all(&storage.pool)
@@ -153,7 +153,7 @@ pub(super) async fn get_pending_batch(
     for id in instance_ids {
         separated.push_bind(id.to_string());
     }
-    separated.push_unseparated(") AND delivered=0 ORDER BY created_at");
+    separated.push_unseparated(") AND delivered=0 ORDER BY created_at ASC");
     let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<Signal>> =

@@ -181,6 +181,13 @@ pub async fn execute_for_each(
     // Hard cap: completed.
     if index >= effective_max {
         evaluator::complete_node(storage, node.id).await?;
+
+        // Clean up the item variable from context to prevent data leakage
+        // to subsequent steps. The last iteration's item value would
+        // otherwise persist in `context.data` and be visible to steps that
+        // run after the for_each block.
+        cleanup_item_var(storage, instance.id, &fe_def.item_var).await;
+
         debug!(
             instance_id = %instance.id,
             block_id = %fe_def.id,
@@ -276,6 +283,23 @@ async fn bind_item_var(
         .merge_context_data(instance.id, item_var, &item)
         .await?;
     Ok(())
+}
+
+/// Remove the `item_var` key from `context.data` after `for_each` completes.
+///
+/// This prevents the last iteration's item value from leaking into
+/// subsequent steps. The cleanup is best-effort: if the instance was
+/// concurrently deleted or the context is not an object, we silently skip.
+async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId, item_var: &str) {
+    if let Ok(Some(mut inst)) = storage.get_instance(instance_id).await {
+        if let Some(data) = inst.context.data.as_object_mut() {
+            if data.remove(item_var).is_some() {
+                let _ = storage
+                    .update_instance_context(instance_id, &inst.context)
+                    .await;
+            }
+        }
+    }
 }
 
 /// Walk the subtree rooted at `root_id` (exclusive) and transition every

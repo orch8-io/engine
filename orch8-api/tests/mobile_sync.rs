@@ -1,6 +1,6 @@
 //! E2E tests for mobile sync endpoints.
 //!
-//! Tests the full phone ↔ server flow: device registration, status reporting,
+//! Tests the full phone <-> server flow: device registration, status reporting,
 //! approval requests, command delivery, and adaptive sync intervals.
 
 use orch8_api::test_harness::spawn_test_server_with_mobile_sync;
@@ -34,6 +34,7 @@ async fn register_device() {
 
     let resp = client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "platform": "ios",
@@ -56,8 +57,21 @@ async fn sync_empty_returns_ok() {
     let srv = spawn_test_server_with_mobile_sync().await;
     let client = reqwest::Client::new();
 
+    // Register device first so tenant ownership check passes.
+    client
+        .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({
+            "device_id": DEVICE_ID,
+            "platform": "ios",
+        }))
+        .send()
+        .await
+        .unwrap();
+
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([])))
         .send()
         .await
@@ -81,6 +95,7 @@ async fn sync_status_updates_are_stored() {
     // Register device first.
     client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "platform": "android",
@@ -116,6 +131,7 @@ async fn sync_status_updates_are_stored() {
             "{}/mobile/status?device_id={}",
             srv.base_url, DEVICE_ID
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap();
@@ -136,9 +152,22 @@ async fn sync_status_coalesces_per_instance() {
     let srv = spawn_test_server_with_mobile_sync().await;
     let client = reqwest::Client::new();
 
+    // Register device first so tenant ownership check passes.
+    client
+        .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({
+            "device_id": DEVICE_ID,
+            "platform": "ios",
+        }))
+        .send()
+        .await
+        .unwrap();
+
     // First sync: Running.
     client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(
             json!([{
                 "instance_id": "inst-002",
@@ -155,6 +184,7 @@ async fn sync_status_coalesces_per_instance() {
     // Second sync: Completed.
     client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(
             json!([{
                 "instance_id": "inst-002",
@@ -173,6 +203,7 @@ async fn sync_status_coalesces_per_instance() {
             "{}/mobile/status?device_id={}",
             srv.base_url, DEVICE_ID
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap();
@@ -189,6 +220,18 @@ async fn sync_status_coalesces_per_instance() {
 async fn sync_approval_request_is_stored() {
     let srv = spawn_test_server_with_mobile_sync().await;
     let client = reqwest::Client::new();
+
+    // Register device first so tenant ownership check passes.
+    client
+        .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({
+            "device_id": DEVICE_ID,
+            "platform": "ios",
+        }))
+        .send()
+        .await
+        .unwrap();
 
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
@@ -214,6 +257,7 @@ async fn sync_approval_request_is_stored() {
     // Verify via GET /mobile/approvals.
     let resp = client
         .get(format!("{}/mobile/approvals?state=pending", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap();
@@ -227,7 +271,7 @@ async fn sync_approval_request_is_stored() {
 }
 
 // ---------------------------------------------------------------------------
-// Approval resolution → command creation → delivery via sync
+// Approval resolution -> command creation -> delivery via sync
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -238,6 +282,7 @@ async fn resolve_approval_creates_command_delivered_on_next_sync() {
     // Register device.
     client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "platform": "ios",
@@ -266,6 +311,7 @@ async fn resolve_approval_creates_command_delivered_on_next_sync() {
     // Admin fetches and resolves the approval.
     let approvals: serde_json::Value = client
         .get(format!("{}/mobile/approvals?state=pending", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap()
@@ -280,6 +326,7 @@ async fn resolve_approval_creates_command_delivered_on_next_sync() {
             "{}/mobile/approvals/{}/resolve",
             srv.base_url, approval_id
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({ "output": { "decision": "approved", "comment": "Looks good" } }))
         .send()
         .await
@@ -289,6 +336,7 @@ async fn resolve_approval_creates_command_delivered_on_next_sync() {
     // Phone syncs again — should receive the complete_step command.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([])))
         .send()
         .await
@@ -318,6 +366,7 @@ async fn command_ack_prevents_redelivery() {
     // Register + create a command directly.
     client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({ "device_id": DEVICE_ID, "platform": "ios" }))
         .send()
         .await
@@ -325,6 +374,7 @@ async fn command_ack_prevents_redelivery() {
 
     client
         .post(format!("{}/mobile/commands", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "command_type": "cancel_instance",
@@ -337,6 +387,7 @@ async fn command_ack_prevents_redelivery() {
     // First sync: receives the command.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([])))
         .send()
         .await
@@ -348,6 +399,7 @@ async fn command_ack_prevents_redelivery() {
     // Second sync: ACK the command.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([cmd_id])))
         .send()
         .await
@@ -371,6 +423,7 @@ async fn create_command_delivered_on_sync() {
 
     client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({ "device_id": DEVICE_ID, "platform": "android" }))
         .send()
         .await
@@ -378,6 +431,7 @@ async fn create_command_delivered_on_sync() {
 
     let resp = client
         .post(format!("{}/mobile/commands", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "command_type": "complete_step",
@@ -395,6 +449,7 @@ async fn create_command_delivered_on_sync() {
     // Sync picks it up.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([])))
         .send()
         .await
@@ -406,7 +461,7 @@ async fn create_command_delivered_on_sync() {
 }
 
 // ---------------------------------------------------------------------------
-// Full round-trip: register → sync status → approval → resolve → command → ACK
+// Full round-trip: register -> sync status -> approval -> resolve -> command -> ACK
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -418,6 +473,7 @@ async fn full_round_trip() {
     // 1. Register device.
     let resp = client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": DEVICE_ID,
             "platform": "ios",
@@ -465,6 +521,7 @@ async fn full_round_trip() {
             "{}/mobile/status?device_id={}",
             srv.base_url, DEVICE_ID
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap()
@@ -476,6 +533,7 @@ async fn full_round_trip() {
 
     let approvals: serde_json::Value = client
         .get(format!("{}/mobile/approvals?state=pending", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap()
@@ -491,6 +549,7 @@ async fn full_round_trip() {
             "{}/mobile/approvals/{}/resolve",
             srv.base_url, approval_id
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({ "output": { "verified": true, "doc_type": "passport" } }))
         .send()
         .await
@@ -500,6 +559,7 @@ async fn full_round_trip() {
     // 5. Phone syncs and receives the command (simulating push wake-up).
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&sync_body(json!([]), json!([]), json!([])))
         .send()
         .await
@@ -544,6 +604,7 @@ async fn full_round_trip() {
             "{}/mobile/status?device_id={}",
             srv.base_url, DEVICE_ID
         ))
+        .header("X-Tenant-Id", "tenant-1")
         .send()
         .await
         .unwrap()
@@ -586,6 +647,7 @@ async fn commands_scoped_to_device() {
     for dev in ["device-A", "device-B"] {
         client
             .post(format!("{}/mobile/devices/register", srv.base_url))
+            .header("X-Tenant-Id", "tenant-1")
             .json(&json!({ "device_id": dev, "platform": "ios" }))
             .send()
             .await
@@ -595,6 +657,7 @@ async fn commands_scoped_to_device() {
     // Create command for device-A only.
     client
         .post(format!("{}/mobile/commands", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": "device-A",
             "command_type": "cancel_instance",
@@ -607,6 +670,7 @@ async fn commands_scoped_to_device() {
     // Device-A sync: should see the command.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": "device-A",
             "status_updates": [],
@@ -622,6 +686,7 @@ async fn commands_scoped_to_device() {
     // Device-B sync: should NOT see the command.
     let resp = client
         .post(format!("{}/mobile/sync", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
         .json(&json!({
             "device_id": "device-B",
             "status_updates": [],
@@ -646,6 +711,7 @@ async fn resolve_approval_twice_returns_not_found() {
 
     client
         .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "t1")
         .json(&json!({ "device_id": DEVICE_ID, "platform": "ios" }))
         .send()
         .await
@@ -670,6 +736,7 @@ async fn resolve_approval_twice_returns_not_found() {
 
     let approvals: serde_json::Value = client
         .get(format!("{}/mobile/approvals?state=pending", srv.base_url))
+        .header("X-Tenant-Id", "t1")
         .send()
         .await
         .unwrap()
@@ -681,15 +748,17 @@ async fn resolve_approval_twice_returns_not_found() {
     // First resolve: OK.
     let resp = client
         .post(format!("{}/mobile/approvals/{}/resolve", srv.base_url, id))
+        .header("X-Tenant-Id", "t1")
         .json(&json!({ "output": "yes" }))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Second resolve: already resolved → 404.
+    // Second resolve: already resolved -> 404.
     let resp = client
         .post(format!("{}/mobile/approvals/{}/resolve", srv.base_url, id))
+        .header("X-Tenant-Id", "t1")
         .json(&json!({ "output": "no" }))
         .send()
         .await

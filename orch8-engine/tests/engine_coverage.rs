@@ -3830,7 +3830,8 @@ async fn sequence_first_step_fails_stops_execution() {
     drive(&storage, &reg, inst.id, &seq).await;
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
     assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
-    assert_eq!(node_state(&tree, "s2"), NodeState::Pending);
+    // s2 never started; batch-cancelled after fail-fast.
+    assert_eq!(node_state(&tree, "s2"), NodeState::Cancelled);
 }
 
 /// 81. Context data flows through steps (`set_state` + later step sees it).

@@ -1151,16 +1151,19 @@ impl crate::AdminStore for PostgresStorage {
         sequence_name: &str,
         error_rate_threshold: f64,
         time_window_secs: i32,
-        _cooldown_secs: Option<i32>,
-        _confirmation_window_secs: Option<i32>,
-        _webhook_url: Option<&str>,
+        cooldown_secs: Option<i32>,
+        confirmation_window_secs: Option<i32>,
+        webhook_url: Option<&str>,
     ) -> Result<(), StorageError> {
         sqlx::query(
-            r"INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs)
-             VALUES ($1, $2, $3, $4)
+            r"INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs, cooldown_secs, confirmation_window_secs, webhook_url)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (tenant_id, sequence_name) DO UPDATE SET
                error_rate_threshold = EXCLUDED.error_rate_threshold,
                time_window_secs = EXCLUDED.time_window_secs,
+               cooldown_secs = EXCLUDED.cooldown_secs,
+               confirmation_window_secs = EXCLUDED.confirmation_window_secs,
+               webhook_url = EXCLUDED.webhook_url,
                enabled = 1,
                updated_at = NOW()"
         )
@@ -1168,6 +1171,9 @@ impl crate::AdminStore for PostgresStorage {
         .bind(sequence_name)
         .bind(error_rate_threshold)
         .bind(time_window_secs)
+        .bind(cooldown_secs.unwrap_or(3600))
+        .bind(confirmation_window_secs.unwrap_or(60))
+        .bind(webhook_url)
         .execute(&self.pool)
         .await?;
         Ok(())

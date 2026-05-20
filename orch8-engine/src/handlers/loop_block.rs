@@ -3,7 +3,7 @@ use tracing::{debug, warn};
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId};
-use orch8_types::instance::TaskInstance;
+use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::output::BlockOutput;
 use orch8_types::sequence::LoopDef;
 
@@ -202,16 +202,30 @@ pub async fn execute_loop(
         reset_subtree_to_pending(storage, tree, instance.id, node.id).await?;
 
         // poll_interval: defer re-execution by setting next_fire_at.
+        // Use CAS (conditional_update_instance_state) so that a Cancel
+        // signal processed between this write and the next evaluator tick
+        // is not silently overwritten. The instance is Running when the
+        // loop handler executes; if a cancel has already transitioned it
+        // to Cancelled, the CAS returns false and the write is safely
+        // skipped.
         if let Some(interval_secs) = loop_def.poll_interval {
             let next_fire = chrono::Utc::now()
                 + chrono::Duration::seconds(i64::try_from(interval_secs).unwrap_or(5));
-            storage
-                .update_instance_state(
+            let transitioned = storage
+                .conditional_update_instance_state(
                     instance.id,
-                    orch8_types::instance::InstanceState::Scheduled,
+                    InstanceState::Running,
+                    InstanceState::Scheduled,
                     Some(next_fire),
                 )
                 .await?;
+            if !transitioned {
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %loop_def.id,
+                    "CAS for poll_interval reschedule failed — instance state changed concurrently"
+                );
+            }
         }
     }
 

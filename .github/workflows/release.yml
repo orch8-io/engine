@@ -40,7 +40,8 @@ jobs:
             echo "CI status: $STATUS (attempt $i/30)"
             sleep 10
           done
-          echo "WARNING: CI status not available after 5 minutes — proceeding"
+          echo "ERROR: CI status not available after 5 minutes — aborting release"
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

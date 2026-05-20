@@ -357,6 +357,41 @@ pub async fn evaluate(
 
         // Check termination conditions on root nodes.
         if let Some(outcome) = check_termination(&ctx.tree) {
+            // [C5] When a root node has failed/cancelled, transition all
+            // non-terminal nodes (Pending, Running, Waiting) to Cancelled
+            // so the tree does not contain orphaned live nodes.
+            if matches!(
+                outcome,
+                EvalOutcome::Done {
+                    any_failed: true,
+                    ..
+                } | EvalOutcome::Done {
+                    any_cancelled: true,
+                    ..
+                }
+            ) {
+                let non_terminal_ids: Vec<ExecutionNodeId> = ctx
+                    .tree
+                    .iter()
+                    .filter(|n| {
+                        matches!(
+                            n.state,
+                            NodeState::Pending | NodeState::Running | NodeState::Waiting
+                        )
+                    })
+                    .map(|n| n.id)
+                    .collect();
+                if !non_terminal_ids.is_empty() {
+                    debug!(
+                        instance_id = %instance_id,
+                        count = non_terminal_ids.len(),
+                        "evaluate: batch-cancelling non-terminal nodes after root failure/cancellation"
+                    );
+                    storage
+                        .update_nodes_state(&non_terminal_ids, NodeState::Cancelled)
+                        .await?;
+                }
+            }
             return Ok(outcome);
         }
 

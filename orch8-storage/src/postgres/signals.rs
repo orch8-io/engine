@@ -92,7 +92,7 @@ pub(super) async fn get_pending(
     let rows = sqlx::query_as::<_, SignalRow>(
         r"SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
            FROM signal_inbox WHERE instance_id = $1 AND delivered = FALSE
-           ORDER BY created_at",
+           ORDER BY created_at ASC",
     )
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
@@ -111,7 +111,7 @@ pub(super) async fn get_pending_batch(
     let rows = sqlx::query_as::<_, SignalRow>(
         r"SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
            FROM signal_inbox WHERE instance_id = ANY($1) AND delivered = FALSE
-           ORDER BY created_at",
+           ORDER BY created_at ASC",
     )
     .bind(&uuids)
     .fetch_all(&store.pool)

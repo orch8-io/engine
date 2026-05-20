@@ -152,8 +152,8 @@ async fn sequential_step_failure_stops_sequence() {
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
     assert_eq!(node_state(&tree, "s1"), NodeState::Completed);
     assert_eq!(node_state(&tree, "s2"), NodeState::Failed);
-    // s3 should not have been started.
-    assert_eq!(node_state(&tree, "s3"), NodeState::Pending);
+    // s3 should not have been started; cancelled after fail-fast.
+    assert_eq!(node_state(&tree, "s3"), NodeState::Cancelled);
 }
 
 // --- 3. A/B Split ---

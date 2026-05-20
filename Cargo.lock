@@ -2582,7 +2582,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orch8-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "axum 0.8.9",
  "chrono",
@@ -2608,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2628,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-nats",
  "base64",
@@ -2662,7 +2662,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-grpc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2681,7 +2681,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-mobile"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chrono",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-publisher"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-push"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -3115,7 +3115,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -3211,9 +3211,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.12"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49df843a9161c85bb8aae55f101bc0bac8bcafd637a620d9122fd7e0b2f7422e"
+checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",

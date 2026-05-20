@@ -137,18 +137,18 @@ impl TickController {
         let sync_reporter = sync_reporter.map(Arc::clone);
 
         runtime.handle().spawn(async move {
-            eprintln!("[orch8] tick loop task spawned, interval={tick_interval:?}");
+            tracing::debug!("[orch8] tick loop task spawned, interval={tick_interval:?}");
             let mut ticker = tokio::time::interval(tick_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tick_count: u64 = 0;
 
             loop {
                 tokio::select! {
-                    () = cancel.cancelled() => { eprintln!("[orch8] tick loop: cancel signal"); break; }
-                    () = loop_cancel.cancelled() => { eprintln!("[orch8] tick loop: loop_cancel signal"); break; }
+                    () = cancel.cancelled() => { tracing::debug!("[orch8] tick loop: cancel signal"); break; }
+                    () = loop_cancel.cancelled() => { tracing::debug!("[orch8] tick loop: loop_cancel signal"); break; }
                     _ = ticker.tick() => {
                         if tick_count.is_multiple_of(50) {
-                            eprintln!("[orch8] tick #{tick_count}");
+                            tracing::debug!("[orch8] tick #{tick_count}");
                         }
                         let ps = PowerState::from_atomic(
                             power_state.load(Ordering::Acquire),
@@ -173,9 +173,9 @@ impl TickController {
                         // stacking when listeners call back into the engine
                         // (e.g. completeStep from onStepPending).
                         {
-                            eprintln!("[orch8] tick #{tick_count}: acquiring mutex");
+                            tracing::trace!("[orch8] tick #{tick_count}: acquiring mutex");
                             let _guard = tick_mutex.lock().await;
-                            eprintln!("[orch8] tick #{tick_count}: calling tick_once");
+                            tracing::trace!("[orch8] tick #{tick_count}: calling tick_once");
                             let tick_result = tokio::time::timeout(
                                 tick_budget,
                                 tick_once(
@@ -183,14 +183,14 @@ impl TickController {
                                     &config, &seq_cache, &cancel,
                                 ),
                             ).await;
-                            eprintln!("[orch8] tick #{tick_count}: tick_once done");
+                            tracing::trace!("[orch8] tick #{tick_count}: tick_once done");
                             match tick_result {
                                 Ok(Ok(ref r)) => {
-                                    eprintln!("[orch8] tick #{tick_count}: advanced={} steps={} pending={}", r.instances_advanced, r.steps_executed, r.has_pending_work);
+                                    tracing::debug!("[orch8] tick #{tick_count}: advanced={} steps={} pending={}", r.instances_advanced, r.steps_executed, r.has_pending_work);
                                 }
-                                Ok(Err(ref e)) => eprintln!("[orch8] tick #{tick_count} error: {e}"),
+                                Ok(Err(ref e)) => tracing::warn!("[orch8] tick #{tick_count} error: {e}"),
                                 Err(_) => {
-                                    eprintln!("[orch8] tick #{tick_count}: TIMEOUT after {}ms", tick_budget.as_millis());
+                                    tracing::warn!("[orch8] tick #{tick_count}: TIMEOUT after {}ms", tick_budget.as_millis());
                                 }
                             }
                             // _guard dropped here — mutex released before notifications

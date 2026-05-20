@@ -382,9 +382,43 @@ struct ResolveApprovalRequest {
 
 async fn resolve_approval(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<String>,
     Json(req): Json<ResolveApprovalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = tenant_ctx
+        .as_ref()
+        .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
+        .unwrap_or_default();
+
+    // Fetch the approval first (read-only) to verify existence and tenant
+    // ownership BEFORE performing the irreversible DB mutation. This prevents
+    // a cross-tenant attacker from resolving approvals they don't own.
+    let approval = state
+        .storage
+        .get_mobile_approval(&id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "mobile_approval_requests"))?;
+
+    let Some(ref approval) = approval else {
+        return Err(ApiError::NotFound(format!(
+            "approval {id} not found or already resolved"
+        )));
+    };
+
+    if approval.state != "pending" {
+        return Err(ApiError::NotFound(format!(
+            "approval {id} not found or already resolved"
+        )));
+    }
+
+    if !tenant_id.is_empty() && approval.tenant_id != tenant_id {
+        return Err(ApiError::NotFound(format!(
+            "approval {id} not found or already resolved"
+        )));
+    }
+
+    // Tenant ownership verified — now perform the DB mutation.
     let resolution = req.output.to_string();
 
     let approval = state
@@ -394,6 +428,8 @@ async fn resolve_approval(
         .map_err(|e| ApiError::from_storage(e, "mobile_approval_requests"))?;
 
     let Some(approval) = approval else {
+        // Could happen if the approval was concurrently resolved between
+        // the get and the update — treat as already resolved.
         return Err(ApiError::NotFound(format!(
             "approval {id} not found or already resolved"
         )));

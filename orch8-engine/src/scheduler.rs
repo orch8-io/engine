@@ -182,6 +182,8 @@ pub async fn run_tick_loop(
         "starting tick loop"
     );
 
+    let mut consecutive_failures: u32 = 0;
+
     loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -214,9 +216,20 @@ pub async fn run_tick_loop(
                         // permits on completion. We intentionally drop the
                         // handles here — `wait_for_drain` at shutdown is the
                         // only place that needs to await them.
+                        consecutive_failures = 0;
                     }
                     Err(e) => {
-                        error!(error = %e, "tick processing failed");
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+                        let backoff_ms = 100u64
+                            .saturating_mul(2u64.saturating_pow(consecutive_failures))
+                            .min(5000);
+                        error!(
+                            error = %e,
+                            consecutive_failures,
+                            backoff_ms,
+                            "tick processing failed, backing off"
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     }
                 }
                 // Process signals for paused/waiting instances that won't be

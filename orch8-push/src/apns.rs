@@ -58,7 +58,10 @@ impl ApnsProvider {
     }
 
     fn get_or_refresh_token(&self) -> Result<String, PushError> {
-        let mut cached = self.cached_token.lock().unwrap();
+        let mut cached = self
+            .cached_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(ref ct) = *cached {
             if ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL {
                 return Ok(ct.token.clone());

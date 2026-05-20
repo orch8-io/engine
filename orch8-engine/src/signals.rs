@@ -113,8 +113,9 @@ async fn process_signals_inner(
                 warn!(
                     instance_id = %instance_id,
                     current_state = %current_state,
-                    "cannot pause instance in current state"
+                    "cannot pause instance in current state — marking signal delivered"
                 );
+                storage.mark_signal_delivered(signal.id).await?;
             }
             SignalAction::Resume => {
                 if current_state == InstanceState::Paused {
@@ -242,16 +243,22 @@ async fn process_signals_inner(
 }
 
 /// Cancel all cancellable nodes and return `true` if any non-cancellable nodes are still active.
+///
+/// Collects all cancellable node IDs into a Vec and batch-updates them in a
+/// single `update_nodes_state` call, avoiding N individual UPDATE queries for
+/// large execution trees.
 async fn cancel_scoped(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     sequence_def: &SequenceDefinition,
 ) -> Result<bool, EngineError> {
     use orch8_types::execution::BlockType;
+    use orch8_types::ids::ExecutionNodeId;
     use orch8_types::sequence::BlockDefinition;
 
     let tree = storage.get_execution_tree(instance_id).await?;
     let mut has_non_cancellable_active = false;
+    let mut cancellable_node_ids: Vec<ExecutionNodeId> = Vec::new();
 
     // Collect IDs of CancellationScope nodes so we can check ancestry.
     let scope_node_ids: std::collections::HashSet<_> = tree
@@ -295,12 +302,18 @@ async fn cancel_scoped(
         let is_cancellable = step_cancellable && !inside_scope && !is_scope_node && !inside_finally;
 
         if is_cancellable {
-            storage
-                .update_node_state(node.id, NodeState::Cancelled)
-                .await?;
+            cancellable_node_ids.push(node.id);
         } else {
             has_non_cancellable_active = true;
         }
+    }
+
+    // Batch-update all cancellable nodes in a single round-trip instead of
+    // N individual UPDATE queries.
+    if !cancellable_node_ids.is_empty() {
+        storage
+            .update_nodes_state(&cancellable_node_ids, NodeState::Cancelled)
+            .await?;
     }
 
     Ok(has_non_cancellable_active)
@@ -1179,5 +1192,176 @@ mod tests {
             &grandchild,
             &std::collections::HashSet::from([ExecutionNodeId::new()])
         ));
+    }
+
+    // H21: pause signal on invalid state is marked delivered (no infinite retry)
+    #[tokio::test]
+    async fn pause_signal_on_invalid_state_is_delivered_not_retried() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Completed, None)
+            .await
+            .unwrap();
+
+        let sig = mk_signal(inst.id, SignalType::Pause, json!({}));
+        let sig_id = sig.id;
+        storage.enqueue_signal(&sig).await.unwrap();
+
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Completed,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r);
+        let pending = storage.get_pending_signals(inst.id).await.unwrap();
+        assert!(
+            pending.iter().all(|s| s.id != sig_id),
+            "pause signal on completed must be marked delivered to prevent infinite retry"
+        );
+    }
+
+    // H4: batch cancel uses single update_nodes_state call
+    #[tokio::test]
+    async fn scoped_cancel_batch_cancels_multiple_cancellable_nodes() {
+        use orch8_types::execution::BlockType;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let seq = mk_sequence(vec![
+            mk_step_block("a", true),
+            mk_step_block("b", true),
+            mk_step_block("c", true),
+        ]);
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "a",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "b",
+            BlockType::Step,
+            None,
+            NodeState::Pending,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "c",
+            BlockType::Step,
+            None,
+            NodeState::Waiting,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(r, "all nodes cancellable — full cancel should proceed");
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        for node in &tree {
+            assert_eq!(
+                node.state,
+                NodeState::Cancelled,
+                "node {} should be Cancelled",
+                node.block_id
+            );
+        }
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    // H4: mixed cancellable/non-cancellable batch cancel
+    #[tokio::test]
+    async fn scoped_cancel_batch_only_cancels_cancellable_nodes() {
+        use orch8_types::execution::BlockType;
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let inst = mk_instance_with_state(InstanceState::Scheduled);
+        storage.create_instance(&inst).await.unwrap();
+        storage
+            .update_instance_state(inst.id, InstanceState::Running, None)
+            .await
+            .unwrap();
+
+        let seq = mk_sequence(vec![
+            mk_step_block("cancel_me", true),
+            mk_step_block("keep_me", false),
+        ]);
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "cancel_me",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+        insert_node(
+            &storage,
+            inst.id,
+            None,
+            "keep_me",
+            BlockType::Step,
+            None,
+            NodeState::Running,
+        )
+        .await;
+
+        let sig = mk_signal(inst.id, SignalType::Cancel, json!({}));
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Running,
+            vec![sig],
+            Some(&seq),
+        )
+        .await
+        .unwrap();
+        assert!(!r, "non-cancellable node present — should not fully cancel");
+        let tree = storage.get_execution_tree(inst.id).await.unwrap();
+        let cancellable = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "cancel_me")
+            .unwrap();
+        assert_eq!(cancellable.state, NodeState::Cancelled);
+        let non_cancellable = tree
+            .iter()
+            .find(|n| n.block_id.as_str() == "keep_me")
+            .unwrap();
+        assert_eq!(non_cancellable.state, NodeState::Running);
     }
 }
