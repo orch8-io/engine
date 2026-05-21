@@ -18,6 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # -- Server binaries (4 targets) ------------------------------------------
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -85,6 +86,7 @@ jobs:
             orch8-*.tar.gz
             orch8-*.tar.gz.sha256
 
+  # -- Docker image ----------------------------------------------------------
   docker:
     name: Docker Image
     runs-on: ubuntu-latest
@@ -121,16 +123,270 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # -- iOS builds (3 targets) -----------------------------------------------
+  ios:
+    name: iOS (${{ matrix.target }})
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-ios
+            label: device
+          - target: aarch64-apple-ios-sim
+            label: sim-arm64
+          - target: x86_64-apple-ios
+            label: sim-x64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Ensure cargo on PATH
+        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: ios-${{ matrix.target }}
+
+      - name: Build liborch8_mobile
+        run: cargo build --profile mobile-release --target ${{ matrix.target }} -p orch8-mobile
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+
+      - name: Upload static library
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: liborch8_mobile-${{ matrix.label }}
+          path: target/${{ matrix.target }}/mobile-release/liborch8_mobile.a
+
+  # -- Android builds (3 targets) -------------------------------------------
+  android:
+    name: Android (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-linux-android
+            label: arm64-v8a
+          - target: armv7-linux-androideabi
+            label: armeabi-v7a
+          - target: x86_64-linux-android
+            label: x86_64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Ensure cargo on PATH
+        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: android-${{ matrix.target }}
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+
+      - name: Configure NDK toolchain
+        run: |
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          TOOLCHAIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_armv7_linux_androideabi=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
+          echo "CC_x86_64_linux_android=${TOOLCHAIN}/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "AR_armv7_linux_androideabi=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+
+      - name: Build liborch8_mobile
+        run: cargo build --profile mobile-release --target ${{ matrix.target }} -p orch8-mobile
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: liborch8_mobile-${{ matrix.label }}
+          path: target/${{ matrix.target }}/mobile-release/liborch8_mobile.so
+
+  # -- Generate Swift + Kotlin bindings --------------------------------------
+  bindings:
+    name: Generate bindings
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - name: Ensure cargo on PATH
+        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: Build library for binding generation
+        run: cargo build -p orch8-mobile
+
+      - name: Generate Swift bindings
+        run: |
+          cargo run -p orch8-mobile --features bindgen --bin uniffi-bindgen -- \
+            generate --library target/debug/liborch8_mobile.dylib \
+            --language swift --out-dir bindings/swift
+
+      - name: Generate Kotlin bindings
+        run: |
+          cargo run -p orch8-mobile --features bindgen --bin uniffi-bindgen -- \
+            generate --library target/debug/liborch8_mobile.dylib \
+            --language kotlin --out-dir bindings/kotlin
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bindings
+          path: bindings/
+
+  # -- Package XCFramework ---------------------------------------------------
+  xcframework:
+    name: XCFramework
+    runs-on: macos-latest
+    timeout-minutes: 20
+    needs: [ios, bindings]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download iOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+
+      - name: Build XCFramework
+        run: |
+          mkdir -p build/ios-device build/ios-sim-arm64 build/ios-sim-x64 build/headers
+
+          cp artifacts/liborch8_mobile-device/liborch8_mobile.a build/ios-device/
+          cp artifacts/liborch8_mobile-sim-arm64/liborch8_mobile.a build/ios-sim-arm64/
+          cp artifacts/liborch8_mobile-sim-x64/liborch8_mobile.a build/ios-sim-x64/
+
+          cp artifacts/bindings/swift/Orch8MobileFFI.h build/headers/
+          cp artifacts/bindings/swift/Orch8MobileFFI.modulemap build/headers/module.modulemap
+
+          lipo -create \
+            build/ios-sim-arm64/liborch8_mobile.a \
+            build/ios-sim-x64/liborch8_mobile.a \
+            -output build/liborch8_mobile-sim.a
+
+          xcodebuild -create-xcframework \
+            -library build/ios-device/liborch8_mobile.a -headers build/headers \
+            -library build/liborch8_mobile-sim.a -headers build/headers \
+            -output build/Orch8Mobile.xcframework
+
+      - name: Package XCFramework
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          cd build && zip -r "../Orch8Mobile-${TAG}.xcframework.zip" Orch8Mobile.xcframework
+          cd .. && shasum -a 256 "Orch8Mobile-${TAG}.xcframework.zip" > "Orch8Mobile-${TAG}.xcframework.zip.sha256"
+
+      - name: Upload XCFramework archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: xcframework
+          path: |
+            Orch8Mobile-*.xcframework.zip
+            Orch8Mobile-*.xcframework.zip.sha256
+
+  # -- Package Android AAR ---------------------------------------------------
+  aar:
+    name: Android AAR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [android, bindings]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          gradle-version: "8.9"
+
+      - name: Download Android artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts
+
+      - name: Assemble AAR
+        working-directory: packages/android
+        run: |
+          mkdir -p orch8-mobile/src/main/jniLibs/arm64-v8a
+          mkdir -p orch8-mobile/src/main/jniLibs/armeabi-v7a
+          mkdir -p orch8-mobile/src/main/jniLibs/x86_64
+          mkdir -p orch8-mobile/src/main/java/io/orch8/mobile
+
+          cp ../../artifacts/liborch8_mobile-arm64-v8a/liborch8_mobile.so orch8-mobile/src/main/jniLibs/arm64-v8a/
+          cp ../../artifacts/liborch8_mobile-armeabi-v7a/liborch8_mobile.so orch8-mobile/src/main/jniLibs/armeabi-v7a/
+          cp ../../artifacts/liborch8_mobile-x86_64/liborch8_mobile.so orch8-mobile/src/main/jniLibs/x86_64/
+          cp ../../artifacts/bindings/kotlin/io/orch8/mobile/orch8_mobile.kt orch8-mobile/src/main/java/io/orch8/mobile/
+
+          gradle :orch8-mobile:assembleRelease
+
+      - name: Package AAR
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          cp packages/android/orch8-mobile/build/outputs/aar/orch8-mobile-release.aar "orch8-mobile-${TAG}.aar"
+          shasum -a 256 "orch8-mobile-${TAG}.aar" > "orch8-mobile-${TAG}.aar.sha256"
+
+      - name: Upload AAR
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aar
+          path: |
+            orch8-mobile-*.aar
+            orch8-mobile-*.aar.sha256
+
+  # -- Package Swift + Kotlin bindings ---------------------------------------
+  bindings-archive:
+    name: Package bindings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [bindings]
+    steps:
+      - name: Download bindings
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: bindings
+          path: bindings
+
+      - name: Package
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          zip -r "orch8-bindings-${TAG}.zip" bindings/
+          shasum -a 256 "orch8-bindings-${TAG}.zip" > "orch8-bindings-${TAG}.zip.sha256"
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bindings-archive
+          path: |
+            orch8-bindings-*.zip
+            orch8-bindings-*.zip.sha256
+
+  # -- GitHub Release --------------------------------------------------------
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [build, docker]
+    needs: [build, docker, xcframework, aar, bindings-archive]
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
-          pattern: binaries-*
+          pattern: "{binaries-*,xcframework,aar,bindings-archive}"
           merge-multiple: true
 
       - name: Create release
@@ -140,7 +396,14 @@ jobs:
           files: |
             artifacts/orch8-*.tar.gz
             artifacts/orch8-*.tar.gz.sha256
+            artifacts/Orch8Mobile-*.xcframework.zip
+            artifacts/Orch8Mobile-*.xcframework.zip.sha256
+            artifacts/orch8-mobile-*.aar
+            artifacts/orch8-mobile-*.aar.sha256
+            artifacts/orch8-bindings-*.zip
+            artifacts/orch8-bindings-*.zip.sha256
 
+  # -- install.sh smoke test -------------------------------------------------
   install-sh-smoke:
     name: install.sh Smoke Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -158,8 +421,6 @@ jobs:
           INSTALL_DIR: ${{ runner.temp }}/orch8-bin
         run: |
           mkdir -p "$INSTALL_DIR"
-          # The release was just created — give GitHub's API a moment to surface it.
-          # Up to 2 minutes (12 x 10s) to handle API propagation delays.
           for i in $(seq 1 12); do
             if curl -sSL https://api.github.com/repos/orch8-io/engine/releases/latest 2>/dev/null \
               | grep -q '"tag_name"'; then
