@@ -30,7 +30,7 @@ This creates:
 my-project/
   orch8.toml          # Config (SQLite by default)
   sequence.json       # Example sequence definition
-  docker-compose.yml  # Engine + Postgres stack (for Option B)
+  docker-compose.yml  # Postgres stack (for Option B)
 ```
 
 ### 3. Start the engine
@@ -53,19 +53,19 @@ curl -s -X POST http://localhost:8080/sequences \
     "version": 1,
     "blocks": [
       {
-        "type": "Step",
+        "type": "step",
         "id": "greet",
         "handler": "noop",
         "params": { "message": "Hello from Orch8!" }
       },
       {
-        "type": "Step",
+        "type": "step",
         "id": "wait",
         "handler": "noop",
         "delay": "2s"
       },
       {
-        "type": "Step",
+        "type": "step",
         "id": "finish",
         "handler": "noop",
         "params": { "message": "Done." }
@@ -134,7 +134,13 @@ cd my-project
 docker compose up -d
 ```
 
-This starts Postgres on port 5432 and the engine on port 8080. Wait a few seconds for Postgres to be healthy, then check the engine:
+This starts Postgres on port 5434 (mapped from 5432). Start the engine separately:
+
+```bash
+orch8-server --config orch8.toml
+```
+
+Wait a few seconds for Postgres to be healthy, then check the engine:
 
 ```bash
 curl -s http://localhost:8080/health/ready

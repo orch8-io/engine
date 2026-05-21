@@ -16,6 +16,7 @@ Controls the storage backend and connection pool.
 | `url` | string | — | Connection URL (required). Postgres: `"postgres://user:pass@host:5432/db"`. SQLite: `"sqlite://orch8.db?mode=rwc"` |
 | `max_connections` | integer | `64` | Connection pool size |
 | `run_migrations` | bool | `true` | Automatically apply schema migrations on startup |
+| `search_path` | string | — | Postgres schema name for schema-per-instance isolation. When set, the engine runs `SET search_path TO <value>` on every connection |
 
 **SQLite connection strings:**
 
@@ -48,7 +49,14 @@ Controls the scheduler tick loop, concurrency, crash recovery, webhooks, and enc
 | `stale_instance_threshold_secs` | integer | `300` | Instances in `running` state longer than this are considered stale and recovered |
 | `max_instances_per_tenant` | integer | `0` | Max instances a single tenant can claim per tick (0 = no limit) |
 | `externalize_output_threshold` | integer | `0` | Step outputs larger than this (bytes) are stored in `externalized_state` instead of inline (0 = disabled) |
+| `max_context_bytes` | integer | `262144` | Maximum serialized size of a single instance's context in bytes. Writes exceeding this are rejected with 413. `0` disables the check |
+| `externalization_mode` | object | `{"type":"threshold","bytes":65536}` | How the engine externalizes payloads. Options: `{"type":"never"}`, `{"type":"threshold","bytes":N}`, `{"type":"always_outputs"}` |
 | `encryption_key` | string | `""` | AES-256-GCM key for encrypting sensitive context fields at rest. Must be exactly 64 hex characters. Empty means no encryption. |
+| `worker_reaper_tick_secs` | integer | `30` | How often the worker-task reaper scans for stale claimed tasks (seconds) |
+| `worker_reaper_stale_secs` | integer | `60` | How old a worker task's heartbeat can be before the reaper resets it (seconds) |
+| `node_reaper_tick_secs` | integer | `60` | How often the cluster-node reaper scans for dead nodes (seconds) |
+| `node_reaper_stale_secs` | integer | `120` | How old a cluster node's heartbeat can be before the reaper marks it dead (seconds) |
+| `max_steps_per_instance` | integer | `0` | Maximum total step executions (including retries) per instance. `0` means unlimited |
 
 ### [engine.webhooks]
 
@@ -97,6 +105,8 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_STORAGE_BACKEND` | `postgres` | `sqlite` or `postgres` |
 | `ORCH8_DATABASE_URL` | — | Connection string (required) |
 | `ORCH8_DATABASE_MAX_CONNECTIONS` | `64` | Connection pool size |
+| `ORCH8_DATABASE_SEARCH_PATH` | — | Postgres schema name for schema-per-instance isolation |
+| `ORCH8_RUN_MIGRATIONS` | `true` | Set to `false` to skip automatic migrations on startup |
 
 ### Engine
 
@@ -121,6 +131,7 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_API_KEY` | — | Set to enable API key authentication |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `false` | Enforce `X-Tenant-Id` header |
 | `ORCH8_MAX_CONCURRENT_REQUESTS` | `0` | Global in-flight request cap (0 = unlimited). Legacy `ORCH8_RATE_LIMIT_RPS` still accepted. |
+| `ORCH8_MOBILE_SYNC_ENABLED` | `false` | Set to `true` or `1` to enable mobile sync API endpoints (`/mobile/*`) |
 
 ### Built-in Handlers
 

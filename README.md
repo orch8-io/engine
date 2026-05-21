@@ -69,7 +69,7 @@ orch8-server --insecure
 ### With Docker Compose
 
 ```bash
-docker compose up -d   # starts Postgres + engine
+docker compose up -d   # starts Postgres
 ```
 
 ### Create a Sequence
@@ -118,7 +118,7 @@ The TypeScript SDK includes both workflow authoring (sequence builder, deploy vi
 
 The engine compiles to native iOS and Android libraries via [UniFFI](https://mozilla.github.io/uniffi-rs/). Workflows execute locally on-device — offline-first, battery-aware. The server acts as a mailbox: stores status updates, queues commands, dispatches silent push notifications.
 
-See [Mobile Sync Architecture](docs/engine/MOBILE_SYNC.md) for the full design.
+See [Mobile SDK](docs/MOBILE_SDK.md) for the full design.
 
 ## Architecture
 
@@ -135,6 +135,12 @@ orch8-engine          Scheduler, evaluator, handlers, signals, cron,
 orch8-storage         StorageBackend trait + Postgres + SQLite + encrypting wrapper
     |
 orch8-types           Domain types, config, IDs, errors
+    |
+orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
+    |
+orch8-push            APNs/FCM push notification providers
+    |
+orch8-publisher       Event publishing (webhooks, NATS)
     |
 orch8-cli             CLI tool (init, sequence, instance, signal, health)
 ```
@@ -173,7 +179,7 @@ See [Configuration Reference](docs/CONFIGURATION.md) for the full list.
 
 ## API Surface
 
-59 documented REST endpoints covering:
+68 documented REST endpoints covering:
 
 - **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup
 - **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ
@@ -187,6 +193,7 @@ See [Configuration Reference](docs/CONFIGURATION.md) for the full list.
 - **Circuit Breakers** — per-tenant/handler state, manual reset
 - **Plugins** — WASM and gRPC plugin registration
 - **Approvals** — human-in-the-loop approval inbox
+- **Mobile** — device registration, sync, approvals, commands
 - **Cluster** — node listing, heartbeat, drain
 - **Health** — liveness, readiness, Prometheus metrics
 
@@ -217,12 +224,12 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**2,028 tests** across two layers:
+**4,347 tests** across two layers:
 
 | Layer | Tests | Scope |
 |-------|-------|-------|
-| **Rust unit + integration** | 1,255 | Storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, full engine integration |
-| **TypeScript E2E** | 773 | 202 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming |
+| **Rust unit + integration** | 3,148 | Storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery |
+| **TypeScript E2E** | 1,199 | 202 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync |
 
 **Coverage by feature area:**
 
@@ -247,16 +254,19 @@ engine/
   orch8-cli/          CLI binary
   orch8-engine/       Core scheduler, evaluator, handlers
   orch8-grpc/         gRPC service (tonic + protobuf)
+  orch8-mobile/       UniFFI bindings for iOS/Android
+  orch8-publisher/    Event publishing (webhooks, NATS)
+  orch8-push/         Push notification providers (APNs/FCM)
   orch8-server/       Server binary, config, startup
   orch8-storage/      Storage trait + Postgres + SQLite impls
   orch8-types/        Shared domain types and config
   proto/              Protobuf service definitions
-  migrations/         29 SQL migrations (Postgres schema)
-  tests/e2e/          202 TypeScript E2E test files (773 test cases)
+  migrations/         41 SQL migrations (Postgres schema)
+  tests/e2e/          202 TypeScript E2E test files (1,199 test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
-  examples/           Example workflows (email classifier, etc.)
+  examples/           Example workflows (email classifier, iOS, Android)
   scripts/            Dev scripts (dev-up, dev-down)
   docs/               Documentation
 ```
@@ -273,6 +283,7 @@ engine/
 - [Applications](docs/APPLICATIONS.md) — embedding patterns and use cases
 - [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
 - [Externalized State](docs/EXTERNALIZATION.md) — how oversized payloads are offloaded
+- [Mobile SDK](docs/MOBILE_SDK.md) — UniFFI bindings, iOS/Android setup, offline-first execution
 - [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents
 - [Changelog](CHANGELOG.md)
 
@@ -304,7 +315,7 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 
 ## Status & Limitations
 
-Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 2,028 tests covering core paths. Honest about what it isn't yet:
+Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 4,347 tests covering core paths. Honest about what it isn't yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
 - **No replay debugger or time-skipping test tooling.** Temporal's SDKs ship deterministic replay + timer-skip helpers; we don't.
@@ -319,11 +330,13 @@ If any of these are dealbreakers, file an issue — the gap-to-feature roadmap i
 This project is licensed under the [Business Source License 1.1 (BUSL-1.1)](LICENSE).
 
 **You can:**
+
 - Use Orch8 in production for your own applications
 - Modify and extend the source code
 - Self-host for your team or company
 
 **You cannot:**
+
 - Offer Orch8 as a hosted or embedded service to third parties competing with us
 
 The license converts to Apache 2.0 four years from publication.

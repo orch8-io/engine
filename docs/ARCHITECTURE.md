@@ -39,6 +39,12 @@ orch8-storage         StorageBackend trait + PostgresStorage + SqliteStorage
     |
 orch8-types           Domain types, IDs, config, errors (zero-dependency)
     |
+orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
+    |
+orch8-push            APNs/FCM push notification providers
+    |
+orch8-publisher       Event publishing (webhooks, NATS)
+    |
 orch8-cli             CLI tool (init, sequence, instance, signal, health)
 ```
 

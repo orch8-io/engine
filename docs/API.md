@@ -1112,6 +1112,69 @@ Child blocks inside a cancellation scope cannot be cancelled by external cancel 
 
 ---
 
+## Mobile Sync
+
+Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints are tenant-scoped when `X-Tenant-Id` is provided.
+
+### Sync
+
+**`POST /mobile/sync`** — Bidirectional sync endpoint. Devices push status updates, approval requests, and step delegations; server responds with pending commands.
+
+**Request body:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `device_id` | string | Device identifier (required) |
+| `status_updates` | array | Instance status updates from device |
+| `approval_requests` | array | Human-in-the-loop approval requests |
+| `step_delegations` | array | Step delegation requests |
+| `command_acks` | array | Command IDs the device has processed |
+
+**Response:** `{ "commands": [...], "sync_interval_secs": 30 }`
+
+### Register Device
+
+**`POST /mobile/devices/register`** — Register a mobile device for push notifications.
+
+### List Devices
+
+**`GET /mobile/devices`** — List registered mobile devices.
+
+### List Approvals
+
+**`GET /mobile/approvals`** — List pending human-in-the-loop approval requests.
+
+### Resolve Approval
+
+**`POST /mobile/approvals/{id}/resolve`** — Resolve a pending approval request.
+
+### List Status
+
+**`GET /mobile/status`** — List mobile instance status reports.
+
+### Create Command
+
+**`POST /mobile/commands`** — Queue a command for a mobile device.
+
+---
+
+## Additional Endpoints
+
+The following endpoint groups are available via the OpenAPI spec (Swagger UI at `/swagger-ui/`) but not yet fully documented here:
+
+- **Sessions** — Stateful multi-instance coordination
+- **Pools** — Resource pool management with weighted allocation
+- **Credentials** — Encrypted credential vault with OAuth2 refresh
+- **Triggers** — Webhook and event-driven instance creation
+- **Circuit Breakers** — Per-tenant/handler state, manual reset
+- **Plugins** — WASM and gRPC plugin registration
+- **Approvals** — Human-in-the-loop approval inbox
+- **Cluster** — Node listing, heartbeat, drain
+- **Webhooks** — Webhook subscription management
+- **Telemetry** — Execution telemetry and rollback history
+
+---
+
 ## Error Responses
 
 All error responses follow this format:
@@ -1124,7 +1187,11 @@ All error responses follow this format:
 
 | Status Code | Meaning |
 |-------------|---------|
-| `400` | Bad request (invalid JSON, missing required field, invalid state transition) |
+| `400` | Bad request (invalid JSON, missing required field, invalid argument) |
+| `401` | Unauthorized (missing or invalid API key) |
+| `403` | Forbidden (insufficient permissions) |
 | `404` | Resource not found (instance, sequence, cron schedule, worker task) |
-| `409` | Conflict (state transition not allowed from current state) |
+| `409` | Conflict (state transition not allowed, duplicate resource) |
+| `413` | Payload too large (context exceeds `max_context_bytes`) |
 | `500` | Internal server error |
+| `503` | Service unavailable (storage connection failure) |
