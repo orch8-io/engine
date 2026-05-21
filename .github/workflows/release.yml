@@ -30,21 +30,26 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           SHA=$(git rev-parse HEAD)
-          # Wait up to 5 minutes for CI check-runs to complete
-          for i in $(seq 1 30); do
-            RESULT=$(gh api "repos/$REPO/commits/$SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name != "Verify CI Status")] | if length == 0 then "pending" elif all(.conclusion == "success" or .conclusion == "skipped") then "success" elif any(.conclusion == "failure") then "failure" else "pending" end' 2>/dev/null || echo "pending")
-            if [ "$RESULT" = "success" ]; then
-              echo "CI passed for $SHA"
-              exit 0
-            elif [ "$RESULT" = "failure" ]; then
-              echo "CI failed for $SHA — aborting release"
-              exit 1
+          CI_WORKFLOW="ci.yml"
+          # Wait up to 15 minutes for the CI workflow to complete
+          for i in $(seq 1 90); do
+            RUN=$(gh api "repos/$REPO/actions/workflows/$CI_WORKFLOW/runs?head_sha=$SHA&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion)"' 2>/dev/null || echo "")
+            STATUS=$(echo "$RUN" | cut -d' ' -f1)
+            CONCLUSION=$(echo "$RUN" | cut -d' ' -f2)
+            if [ "$STATUS" = "completed" ]; then
+              if [ "$CONCLUSION" = "success" ]; then
+                echo "CI passed for $SHA"
+                exit 0
+              else
+                echo "CI failed ($CONCLUSION) for $SHA — aborting release"
+                exit 1
+              fi
             fi
-            echo "CI status: $RESULT (attempt $i/30)"
+            echo "CI status: ${STATUS:-waiting} (attempt $i/90)"
             sleep 10
           done
-          echo "ERROR: CI status not available after 5 minutes — aborting release"
+          echo "ERROR: CI not completed after 15 minutes — aborting release"
           exit 1
 
   build:
