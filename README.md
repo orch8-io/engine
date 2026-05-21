@@ -109,10 +109,13 @@ All SDKs live in their own repositories under the [orch8-io](https://github.com/
 | Language | Package | Install | Repo |
 |----------|---------|---------|------|
 | TypeScript | `@orch8.io/sdk` | `npm install @orch8.io/sdk` | [sdk-node](https://github.com/orch8-io/sdk-node) |
+| Expo / React Native | `@orch8.io/expo` | `npx expo install @orch8.io/expo` | [sdk-expo](https://github.com/orch8-io/sdk-expo) |
 | Python | `orch8-io-sdk` | `pip install orch8-io-sdk` | [sdk-python](https://github.com/orch8-io/sdk-python) |
 | Go | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` | [sdk-go](https://github.com/orch8-io/sdk-go) |
 
 The TypeScript SDK includes both workflow authoring (sequence builder, deploy via REST) and worker support (task polling, handler registration, concurrent execution).
+
+The Expo SDK provides a REST client, React hooks, and a native engine bridge for running workflows on-device with offline-first execution and push-notification-based approvals.
 
 ### Mobile SDK
 
