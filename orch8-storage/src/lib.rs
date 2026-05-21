@@ -392,7 +392,7 @@ pub trait InstanceStore: Send + Sync + 'static {
         concurrency_key: &str,
     ) -> Result<i64, StorageError> {
         let mut map = self
-            .count_running_by_concurrency_keys(&[concurrency_key.to_owned()])
+            .count_running_by_concurrency_keys(&[concurrency_key])
             .await?;
         Ok(map.remove(concurrency_key).unwrap_or(0))
     }
@@ -401,7 +401,7 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// Returns a map from key to count.
     async fn count_running_by_concurrency_keys(
         &self,
-        concurrency_keys: &[String],
+        concurrency_keys: &[&str],
     ) -> Result<HashMap<String, i64>, StorageError>;
 
     /// Returns the 1-based position of an instance among running instances

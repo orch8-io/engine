@@ -47,7 +47,7 @@ pub(super) async fn count_running_by_concurrency_key(
 
 pub(super) async fn count_running_by_concurrency_keys(
     store: &PostgresStorage,
-    concurrency_keys: &[String],
+    concurrency_keys: &[&str],
 ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
     if concurrency_keys.is_empty() {
         return Ok(std::collections::HashMap::new());
