@@ -108,12 +108,14 @@ jobs:
           name: binaries-${{ matrix.target }}
           path: artifacts
 
-      - name: Extract binaries
+      - name: Prepare Docker context
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p docker-ctx
           tar -xzf "artifacts/orch8-${TAG}-${{ matrix.target }}.tar.gz"
-          cp "orch8-${TAG}-${{ matrix.target }}/orch8-server" .
-          cp "orch8-${TAG}-${{ matrix.target }}/orch8" .
+          cp "orch8-${TAG}-${{ matrix.target }}/orch8-server" docker-ctx/
+          cp "orch8-${TAG}-${{ matrix.target }}/orch8" docker-ctx/
+          cp Dockerfile.release docker-ctx/Dockerfile
 
       - name: Log in to GHCR
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -136,8 +138,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.16.0
         with:
-          context: .
-          file: Dockerfile.release
+          context: docker-ctx
+          file: docker-ctx/Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
           tags: |
