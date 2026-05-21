@@ -121,7 +121,7 @@ The Expo SDK provides a REST client, React hooks, and a native engine bridge for
 
 The engine compiles to native iOS and Android libraries via [UniFFI](https://mozilla.github.io/uniffi-rs/). Workflows execute locally on-device — offline-first, battery-aware. The server acts as a mailbox: stores status updates, queues commands, dispatches silent push notifications.
 
-See [Mobile SDK](docs/MOBILE_SDK.md) for the full design.
+See [Mobile SDK](docs/MOBILE_SDK.md) for the full design and [mobile-examples](https://github.com/orch8-io/mobile-examples) for complete iOS and Android sample apps.
 
 ## Architecture
 
