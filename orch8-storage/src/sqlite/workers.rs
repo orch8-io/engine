@@ -21,7 +21,7 @@ pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<()
     .bind(&t.handler_name)
     .bind(serde_json::to_string(&t.params)?)
     .bind(serde_json::to_string(&t.context)?)
-    .bind(t.state.to_string())
+    .bind(t.state.as_str())
     .bind(&t.worker_id)
     .bind(&t.queue_name)
     .bind(t.output.as_ref().map(serde_json::to_string).transpose()?)
@@ -375,7 +375,7 @@ pub(super) async fn list(
             qb.push(" AND state IN (");
             let mut separated = qb.separated(",");
             for state in states {
-                separated.push_bind(state.to_string());
+                separated.push_bind(state.as_str());
             }
             separated.push_unseparated(")");
         }

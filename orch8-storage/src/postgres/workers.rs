@@ -401,7 +401,7 @@ fn apply_worker_task_filter<'a>(
     }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
-            let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
+            let state_strings: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
             qb.push(" AND state = ANY(")
                 .push_bind(state_strings)
                 .push(")");

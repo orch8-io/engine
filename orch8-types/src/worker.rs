@@ -32,14 +32,21 @@ impl FromStr for WorkerTaskState {
     }
 }
 
+impl WorkerTaskState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Claimed => "claimed",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 impl std::fmt::Display for WorkerTaskState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pending => f.write_str("pending"),
-            Self::Claimed => f.write_str("claimed"),
-            Self::Completed => f.write_str("completed"),
-            Self::Failed => f.write_str("failed"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

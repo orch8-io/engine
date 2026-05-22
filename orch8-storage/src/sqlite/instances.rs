@@ -76,7 +76,7 @@ pub(super) async fn create_batch(
                 .push_bind(i.sequence_id.into_uuid().to_string())
                 .push_bind(i.tenant_id.as_str())
                 .push_bind(i.namespace.as_str())
-                .push_bind(i.state.to_string())
+                .push_bind(i.state.as_str())
                 .push_bind(i.next_fire_at.map(ts))
                 .push_bind(i.priority as i16)
                 .push_bind(&i.timezone)
@@ -275,7 +275,7 @@ pub(super) async fn update_state(
 ) -> Result<(), StorageError> {
     sqlx::query("UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1")
         .bind(id.to_string())
-        .bind(new_state.to_string())
+        .bind(new_state.as_str())
         .bind(next_fire_at.map(ts))
         .bind(ts(Utc::now()))
         .execute(&storage.pool)
@@ -319,10 +319,10 @@ pub(super) async fn conditional_update_state(
         "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5",
     )
     .bind(id.to_string())
-    .bind(new_state.to_string())
+    .bind(new_state.as_str())
     .bind(next_fire_at.map(ts))
     .bind(ts(Utc::now()))
-    .bind(expected_state.to_string())
+    .bind(expected_state.as_str())
     .execute(&storage.pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -695,7 +695,7 @@ pub(super) async fn bulk_update_state(
     new_state: InstanceState,
 ) -> Result<u64, StorageError> {
     let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state=");
-    qb.push_bind(new_state.to_string());
+    qb.push_bind(new_state.as_str());
     qb.push(", updated_at=");
     qb.push_bind(ts(Utc::now()));
     qb.push(" WHERE 1=1");

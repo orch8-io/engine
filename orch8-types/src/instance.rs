@@ -88,11 +88,10 @@ impl InstanceState {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
-}
 
-impl std::fmt::Display for InstanceState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Scheduled => "scheduled",
             Self::Running => "running",
             Self::Waiting => "waiting",
@@ -100,8 +99,13 @@ impl std::fmt::Display for InstanceState {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
-        };
-        f.write_str(s)
+        }
+    }
+}
+
+impl std::fmt::Display for InstanceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

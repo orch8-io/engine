@@ -37,7 +37,7 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(inst.sequence_id.into_uuid())
         .bind(inst.tenant_id.as_str())
         .bind(inst.namespace.as_str())
-        .bind(inst.state.to_string())
+        .bind(inst.state.as_str())
         .bind(inst.next_fire_at)
         .bind(inst.priority as i16)
         .bind(&inst.timezone)
@@ -93,7 +93,7 @@ pub(super) async fn create_batch(
                 .push_bind(inst.sequence_id.into_uuid())
                 .push_bind(inst.tenant_id.as_str())
                 .push_bind(inst.namespace.as_str())
-                .push_bind(inst.state.to_string())
+                .push_bind(inst.state.as_str())
                 .push_bind(inst.next_fire_at)
                 .push_bind(inst.priority as i16)
                 .push_bind(&inst.timezone)
@@ -326,7 +326,7 @@ pub(super) async fn update_state(
         ",
     )
     .bind(id.into_uuid())
-    .bind(new_state.to_string())
+    .bind(new_state.as_str())
     .bind(next_fire_at)
     .execute(&store.pool)
     .await?;
@@ -369,9 +369,9 @@ pub(super) async fn conditional_update_state(
         ",
     )
     .bind(id.into_uuid())
-    .bind(new_state.to_string())
+    .bind(new_state.as_str())
     .bind(next_fire_at)
-    .bind(expected_state.to_string())
+    .bind(expected_state.as_str())
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -579,7 +579,7 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(inst.sequence_id.into_uuid())
                 .push_bind(inst.tenant_id.as_str())
                 .push_bind(inst.namespace.as_str())
-                .push_bind(inst.state.to_string())
+                .push_bind(inst.state.as_str())
                 .push_bind(inst.next_fire_at)
                 .push_bind(inst.priority as i16)
                 .push_bind(&inst.timezone)
@@ -807,7 +807,7 @@ pub(super) async fn bulk_update_state(
     new_state: InstanceState,
 ) -> Result<u64, StorageError> {
     let mut qb = sqlx::QueryBuilder::new("UPDATE task_instances SET state = ");
-    qb.push_bind(new_state.to_string());
+    qb.push_bind(new_state.as_str());
     qb.push(", updated_at = NOW() WHERE 1=1");
     apply_instance_filter(&mut qb, filter);
 
@@ -852,7 +852,7 @@ fn apply_instance_filter<'a>(
     }
     if let Some(ref states) = filter.states {
         if !states.is_empty() {
-            let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
+            let state_strings: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
             qb.push(" AND state = ANY(")
                 .push_bind(state_strings)
                 .push(")");

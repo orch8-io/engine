@@ -307,7 +307,7 @@ pub(super) fn apply_filter_sql<'q>(
             qb.push(" AND state IN (");
             let mut separated = qb.separated(",");
             for state in states {
-                separated.push_bind(state.to_string());
+                separated.push_bind(state.as_str());
             }
             separated.push_unseparated(")");
         }
