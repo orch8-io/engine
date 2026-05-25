@@ -224,7 +224,7 @@ pub(super) async fn claim_due(
     }
 
     // Step 2: Filter by concurrency limits within the transaction.
-    let instances = filter_by_concurrency_pg(&mut tx, &all_candidates).await?;
+    let instances = filter_by_concurrency_pg(&mut tx, all_candidates).await?;
 
     if !instances.is_empty() {
         // Step 3: Only update the filtered instances to Running.
@@ -253,7 +253,7 @@ pub(super) async fn claim_due(
 /// Filter candidates by `concurrency_key` / `max_concurrency` within a transaction.
 async fn filter_by_concurrency_pg(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    candidates: &[TaskInstance],
+    candidates: Vec<TaskInstance>,
 ) -> Result<Vec<TaskInstance>, StorageError> {
     let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
@@ -263,7 +263,7 @@ async fn filter_by_concurrency_pg(
     }
 
     if keyed.is_empty() {
-        return Ok(candidates.to_vec());
+        return Ok(candidates);
     }
 
     // Batch-fetch running counts for all concurrency keys in a single query
@@ -305,10 +305,10 @@ async fn filter_by_concurrency_pg(
     excluded.sort_unstable();
 
     Ok(candidates
-        .iter()
+        .into_iter()
         .enumerate()
         .filter(|(idx, _)| excluded.binary_search(idx).is_err())
-        .map(|(_, inst)| inst.clone())
+        .map(|(_, inst)| inst)
         .collect())
 }
 

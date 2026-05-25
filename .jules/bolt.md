@@ -17,3 +17,7 @@
 ## 2025-10-23 - [Zero-Allocation JSON Value Ownership Transfer]
 **Learning:** Functions like `save_interceptor_output` were taking `serde_json::Value` by reference, causing an internal `output.clone()` when allocating the `BlockOutput` struct. Since several callers possessed an explicitly cloned object already (e.g. `emit_on_signal` mutated and then referenced an already cloned params object), they were paying a double-clone tax for a single insert.
 **Action:** Always map functions that eventually own heavy objects like `serde_json::Value` to accept them by value (`output: serde_json::Value`). This pushes the clone decision to the caller, preventing deep-cloning entirely where the caller already has ownership or is generating the object dynamically.
+
+## 2025-10-24 - [Avoid Deep Cloning Large Structs in Filter Pipelines]
+**Learning:** In the `claim_due` hot path across all database backends, an earlier implementation built an index of elements to exclude and then filtered the candidate slice by allocating a new `Vec` and calling `.clone()` on every retained `TaskInstance`. Since `TaskInstance` holds deep `serde_json::Value` trees (like `context`), this created massive, unnecessary memory allocation and deep-copy overhead simply to trim a few excluded elements.
+**Action:** When filtering temporary vectors containing deep structs on a hot path, pass ownership of the `Vec` into the filtering function and use `into_iter` to selectively retain elements, avoiding any `clone()` calls.
