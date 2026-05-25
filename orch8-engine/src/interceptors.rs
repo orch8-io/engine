@@ -22,7 +22,7 @@ pub async fn emit_before_step(
 ) {
     if let Some(ref action) = interceptors.before_step {
         let block_id = BlockId::new(format!("_interceptor:before:{}", step_block_id.as_str()));
-        save_interceptor_output(storage, instance_id, block_id, &action.params).await;
+        save_interceptor_output(storage, instance_id, block_id, action.params.clone()).await;
     }
 }
 
@@ -35,7 +35,7 @@ pub async fn emit_after_step(
 ) {
     if let Some(ref action) = interceptors.after_step {
         let block_id = BlockId::new(format!("_interceptor:after:{}", step_block_id.as_str()));
-        save_interceptor_output(storage, instance_id, block_id, &action.params).await;
+        save_interceptor_output(storage, instance_id, block_id, action.params.clone()).await;
     }
 }
 
@@ -57,7 +57,7 @@ pub async fn emit_on_signal(
                 "_signal": signal_info,
             });
         }
-        save_interceptor_output(storage, instance_id, block_id, &output).await;
+        save_interceptor_output(storage, instance_id, block_id, output).await;
     }
 }
 
@@ -69,7 +69,7 @@ pub async fn emit_on_complete(
 ) {
     if let Some(ref action) = interceptors.on_complete {
         let block_id = BlockId::new("_interceptor:on_complete");
-        save_interceptor_output(storage, instance_id, block_id, &action.params).await;
+        save_interceptor_output(storage, instance_id, block_id, action.params.clone()).await;
     }
 }
 
@@ -81,7 +81,7 @@ pub async fn emit_on_failure(
 ) {
     if let Some(ref action) = interceptors.on_failure {
         let block_id = BlockId::new("_interceptor:on_failure");
-        save_interceptor_output(storage, instance_id, block_id, &action.params).await;
+        save_interceptor_output(storage, instance_id, block_id, action.params.clone()).await;
     }
 }
 
@@ -90,16 +90,17 @@ async fn save_interceptor_output(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     block_id: BlockId,
-    output: &serde_json::Value,
+    output: serde_json::Value,
 ) {
+    let output_size =
+        serde_json::to_vec(&output).map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
     let bo = BlockOutput {
         id: uuid::Uuid::now_v7(),
         instance_id,
         block_id: block_id.clone(),
-        output: output.clone(),
+        output,
         output_ref: None,
-        output_size: serde_json::to_vec(output)
-            .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX)),
+        output_size,
         attempt: 0,
         created_at: Utc::now(),
     };
