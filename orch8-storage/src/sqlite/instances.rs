@@ -188,7 +188,7 @@ async fn claim_due_inner(
     // would exceed max_concurrency are never set to Running. This prevents
     // a window where the test (or any observer) could see more Running
     // instances than allowed.
-    let instances = filter_by_concurrency(&mut *conn, &all_candidates).await?;
+    let instances = filter_by_concurrency(&mut *conn, all_candidates).await?;
 
     if !instances.is_empty() {
         let mut qb =
@@ -212,7 +212,7 @@ async fn claim_due_inner(
 /// fill the remaining slots.
 async fn filter_by_concurrency(
     conn: &mut sqlx::SqliteConnection,
-    candidates: &[TaskInstance],
+    candidates: Vec<TaskInstance>,
 ) -> Result<Vec<TaskInstance>, StorageError> {
     // Group candidates by concurrency_key.
     let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
@@ -223,7 +223,7 @@ async fn filter_by_concurrency(
     }
 
     if keyed.is_empty() {
-        return Ok(candidates.to_vec());
+        return Ok(candidates);
     }
 
     // Single batched COUNT query for all concurrency keys.
@@ -260,10 +260,10 @@ async fn filter_by_concurrency(
     excluded.sort_unstable();
 
     Ok(candidates
-        .iter()
+        .into_iter()
         .enumerate()
         .filter(|(idx, _)| excluded.binary_search(idx).is_err())
-        .map(|(_, inst)| inst.clone())
+        .map(|(_, inst)| inst)
         .collect())
 }
 
