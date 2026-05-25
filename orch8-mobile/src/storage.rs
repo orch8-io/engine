@@ -63,17 +63,14 @@ impl MobileStorage {
         if ids.is_empty() {
             return Ok(0);
         }
-        // SQLite doesn't support binding arrays directly; build an IN clause.
-        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
-        let sql = format!(
-            "DELETE FROM telemetry_events WHERE id IN ({})",
-            placeholders.join(",")
-        );
-        let mut query = sqlx::query(&sql);
+        // SQLite doesn't support binding arrays directly; build an IN clause safely using QueryBuilder.
+        let mut qb = sqlx::QueryBuilder::new("DELETE FROM telemetry_events WHERE id IN (");
+        let mut separated = qb.separated(",");
         for id in ids {
-            query = query.bind(id);
+            separated.push_bind(id);
         }
-        let result = query.execute(self.pool()).await?;
+        separated.push_unseparated(")");
+        let result = qb.build().execute(self.pool()).await?;
         Ok(result.rows_affected())
     }
 

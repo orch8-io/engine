@@ -504,7 +504,7 @@ async fn enforce_concurrency_limits(
     }
 
     // Batch count running instances for all concurrency keys in a single query.
-    let keys: Vec<String> = key_instances.keys().map(|&k| k.to_owned()).collect();
+    let keys: Vec<&str> = key_instances.keys().copied().collect();
     let running_counts = storage.count_running_by_concurrency_keys(&keys).await?;
 
     // For each concurrency key, determine how many slots are available.

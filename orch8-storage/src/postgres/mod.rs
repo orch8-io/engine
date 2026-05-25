@@ -362,7 +362,7 @@ impl crate::InstanceStore for PostgresStorage {
 
     async fn count_running_by_concurrency_keys(
         &self,
-        concurrency_keys: &[String],
+        concurrency_keys: &[&str],
     ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
         misc::count_running_by_concurrency_keys(self, concurrency_keys).await
     }
