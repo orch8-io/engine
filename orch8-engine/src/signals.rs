@@ -261,11 +261,13 @@ async fn cancel_scoped(
     let mut cancellable_node_ids: Vec<ExecutionNodeId> = Vec::new();
 
     // Collect IDs of CancellationScope nodes so we can check ancestry.
-    let scope_node_ids: std::collections::HashSet<_> = tree
+    let mut scope_node_ids: Vec<ExecutionNodeId> = tree
         .iter()
         .filter(|n| n.block_type == BlockType::CancellationScope)
         .map(|n| n.id)
         .collect();
+    scope_node_ids.sort_unstable();
+    scope_node_ids.dedup();
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 
@@ -373,15 +375,14 @@ fn is_inside_finally_branch(
 fn is_descendant_of_any(
     tree: &[orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
-    ancestor_ids: &std::collections::HashSet<orch8_types::ids::ExecutionNodeId>,
+    ancestor_ids: &[orch8_types::ids::ExecutionNodeId],
 ) -> bool {
-    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     let mut current_parent = node.parent_id;
     while let Some(pid) = current_parent {
-        if ancestor_ids.contains(&pid) {
+        if ancestor_ids.binary_search(&pid).is_ok() {
             return true;
         }
-        current_parent = node_map.get(&pid).copied().and_then(|n| n.parent_id);
+        current_parent = tree.iter().find(|n| n.id == pid).and_then(|n| n.parent_id);
     }
     false
 }
@@ -1181,16 +1182,21 @@ mod tests {
             completed_at: None,
         };
         let tree = vec![root.clone(), child.clone(), grandchild.clone()];
-        let ancestors = std::collections::HashSet::from([root.id]);
+        let mut ancestors = vec![root.id];
+        ancestors.sort_unstable();
+        ancestors.dedup();
         assert!(is_descendant_of_any(&tree, &grandchild, &ancestors));
         assert!(is_descendant_of_any(&tree, &child, &ancestors));
         // Root is not a descendant of itself.
         assert!(!is_descendant_of_any(&tree, &root, &ancestors));
         // Unknown ancestor — returns false.
+        let mut unknown_ancestors = vec![ExecutionNodeId::new()];
+        unknown_ancestors.sort_unstable();
+        unknown_ancestors.dedup();
         assert!(!is_descendant_of_any(
             &tree,
             &grandchild,
-            &std::collections::HashSet::from([ExecutionNodeId::new()])
+            &unknown_ancestors
         ));
     }
 

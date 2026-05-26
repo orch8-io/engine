@@ -21,3 +21,7 @@
 ## 2025-10-24 - [Avoid Deep Cloning Large Structs in Filter Pipelines]
 **Learning:** In the `claim_due` hot path across all database backends, an earlier implementation built an index of elements to exclude and then filtered the candidate slice by allocating a new `Vec` and calling `.clone()` on every retained `TaskInstance`. Since `TaskInstance` holds deep `serde_json::Value` trees (like `context`), this created massive, unnecessary memory allocation and deep-copy overhead simply to trim a few excluded elements.
 **Action:** When filtering temporary vectors containing deep structs on a hot path, pass ownership of the `Vec` into the filtering function and use `into_iter` to selectively retain elements, avoiding any `clone()` calls.
+
+## 2025-02-12 - [Zero-Allocation State Checks in Execution Trees]
+**Learning:** Avoid instantiating `HashMap` or `HashSet` structures on every call within hot loops or recursive tree traversals (e.g., `is_descendant_of_any` and `cancel_subtree`). The previous implementation repeatedly allocated new `HashMap`s during deep recursion, creating severe algorithmic overhead and compounding allocation latency.
+**Action:** Replace small-to-medium set lookups on hot paths with sorted `Vec` instances and `.binary_search()`. For parent tracking inside tree recursive loops, prefer iterating over the slice directly (`tree.iter().find(...)`) rather than building a full `HashMap` inside the function scope.

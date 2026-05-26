@@ -146,14 +146,15 @@ pub async fn ensure_execution_tree(
     let existing = storage.get_execution_tree(instance.id).await?;
     if !existing.is_empty() {
         // Check for newly injected blocks that don't have execution nodes yet.
-        let mut existing_block_ids = std::collections::HashSet::with_capacity(existing.len());
-        for n in &existing {
-            existing_block_ids.insert(n.block_id.as_str());
-        }
+        let mut existing_block_ids: Vec<&str> =
+            existing.iter().map(|n| n.block_id.as_str()).collect();
+        existing_block_ids.sort_unstable();
+        existing_block_ids.dedup();
+
         let mut new_nodes = Vec::with_capacity(blocks.len());
         for block in blocks {
             let (bid, _) = block_meta(block);
-            if !existing_block_ids.contains(bid.as_str()) {
+            if existing_block_ids.binary_search(&bid.as_str()).is_err() {
                 build_nodes(
                     instance.id,
                     None,
@@ -1143,13 +1144,13 @@ pub async fn cancel_subtree(
         }
     }
 
-    // Build a HashSet for O(1) lookup when scanning the tree.
-    let to_cancel_set: std::collections::HashSet<ExecutionNodeId> =
-        to_cancel.iter().copied().collect();
+    // Sort and dedup for O(log N) lookup when scanning the tree.
+    to_cancel.sort_unstable();
+    to_cancel.dedup();
 
     // Cancel worker tasks for any Waiting descendants before we flip their state.
     for node in tree {
-        if to_cancel_set.contains(&node.id) && node.state == NodeState::Waiting {
+        if to_cancel.binary_search(&node.id).is_ok() && node.state == NodeState::Waiting {
             storage
                 .cancel_worker_tasks_for_block(instance_id.into_uuid(), node.block_id.as_str())
                 .await?;
