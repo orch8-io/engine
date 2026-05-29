@@ -770,6 +770,101 @@ mod tests {
         assert_ne!(rp.get("instance_id"), rt.get("instance_id"));
     }
 
+    /// An empty `dedupe_key` would create a scope-wide global lock (every
+    /// caller colliding on `""`), which is almost certainly a config bug —
+    /// the handler rejects it as Permanent before touching storage.
+    #[tokio::test]
+    async fn emit_event_rejects_empty_dedupe_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        // A trigger isn't even required — the empty-key guard runs first.
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "",
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("dedupe_key") && message.contains("empty"),
+                    "expected empty-key message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
+    /// A non-string `dedupe_key` (here a number) is a type error → Permanent.
+    #[tokio::test]
+    async fn emit_event_rejects_non_string_dedupe_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": 42,
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("dedupe_key") && message.contains("string"),
+                    "expected non-string-key message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
+    /// A bare `dedupe_scope` without a `dedupe_key` must still surface a config
+    /// error if the scope is invalid — the scope string is parsed even when no
+    /// key is present, so a typo fails loudly rather than silently ignored.
+    #[tokio::test]
+    async fn emit_event_rejects_invalid_scope_even_without_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_scope": "galaxy",
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("invalid dedupe_scope"),
+                    "expected invalid-scope message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn emit_event_rejects_invalid_dedupe_scope() {
         let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());

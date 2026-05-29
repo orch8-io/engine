@@ -199,4 +199,61 @@ mod tests {
         let result = handle_self_modify(ctx).await.unwrap();
         assert_eq!(result["injected_count"], 2);
     }
+
+    /// Position 0 must be preserved verbatim in the output (it is NOT treated
+    /// as "absent/append" — `0` is a real, distinct insertion point handled by
+    /// the splice logic in `apply_self_modify`).
+    #[tokio::test]
+    async fn valid_blocks_with_position_zero() {
+        let s = make_storage().await;
+        let blocks = json!([valid_step_block()]);
+        let ctx = mk_ctx(json!({"blocks": blocks, "position": 0}), s);
+        let result = handle_self_modify(ctx).await.unwrap();
+        assert_eq!(result["position"], 0);
+        assert_eq!(result["injected_count"], 1);
+    }
+
+    /// A composite block (here a Router) is a valid injection target — the
+    /// handler validates against the full `BlockDefinition` enum, not just
+    /// `Step`. This proves `self_modify` can splice control-flow blocks, not
+    /// only leaf steps.
+    #[tokio::test]
+    async fn valid_composite_block_injects() {
+        let s = make_storage().await;
+        let router = serde_json::to_value(orch8_types::sequence::BlockDefinition::Router(
+            Box::new(orch8_types::sequence::RouterDef {
+                id: BlockId::new("injected_router"),
+                routes: vec![orch8_types::sequence::Route {
+                    condition: "true".into(),
+                    blocks: vec![orch8_types::sequence::BlockDefinition::Step(Box::new(
+                        orch8_types::sequence::StepDef {
+                            id: BlockId::new("route_step"),
+                            handler: "noop".into(),
+                            params: json!({}),
+                            delay: None,
+                            retry: None,
+                            timeout: None,
+                            rate_limit_key: None,
+                            send_window: None,
+                            context_access: None,
+                            cancellable: true,
+                            wait_for_input: None,
+                            queue_name: None,
+                            deadline: None,
+                            on_deadline_breach: None,
+                            fallback_handler: None,
+                            cache_key: None,
+                        },
+                    ))],
+                }],
+                default: None,
+            }),
+        ))
+        .unwrap();
+
+        let ctx = mk_ctx(json!({"blocks": [router]}), s);
+        let result = handle_self_modify(ctx).await.unwrap();
+        assert_eq!(result["_self_modify"], true);
+        assert_eq!(result["injected_count"], 1);
+    }
 }

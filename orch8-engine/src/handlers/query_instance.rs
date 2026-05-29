@@ -361,4 +361,143 @@ mod tests {
 
         assert!(matches!(err, StepError::Permanent { .. }));
     }
+
+    /// An empty-string `instance_id` is a distinct path from a malformed UUID
+    /// ("not-a-uuid") — it must also fail uuid parsing and return Permanent.
+    #[tokio::test]
+    async fn query_instance_rejects_empty_instance_id() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(&caller, storage_dyn, json!({ "instance_id": "" }));
+        let err = handle_query_instance(ctx).await.unwrap_err();
+
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    /// A non-string `instance_id` (number) must fail param parsing → Permanent.
+    #[tokio::test]
+    async fn query_instance_rejects_non_string_instance_id() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(&caller, storage_dyn, json!({ "instance_id": 123 }));
+        let err = handle_query_instance(ctx).await.unwrap_err();
+
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    /// The returned `context` must be the target's actual context, byte-for-byte
+    /// — `query_instance` is a read primitive, so data fidelity is the contract.
+    #[tokio::test]
+    async fn query_instance_echoes_target_context() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        let mut target = mk_instance("T1");
+        target.context = ExecutionContext {
+            data: json!({"order_id": 7, "items": ["a", "b"]}),
+            config: json!({"feature_flag": true}),
+            audit: vec![],
+            runtime: RuntimeContext::default(),
+        };
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.to_string() }),
+        );
+        let result = handle_query_instance(ctx).await.unwrap();
+
+        assert_eq!(result["found"], json!(true));
+        assert_eq!(result["context"]["data"]["order_id"], json!(7));
+        assert_eq!(result["context"]["data"]["items"], json!(["a", "b"]));
+        assert_eq!(result["context"]["config"]["feature_flag"], json!(true));
+    }
+
+    /// `node_is_terminal` treats `Skipped` as terminal. When every node is
+    /// terminal — including a Skipped one that completed last — `current_node`
+    /// must fall back to the most-recently-completed node regardless of which
+    /// terminal variant it carries.
+    #[tokio::test]
+    async fn query_instance_current_node_treats_skipped_as_terminal() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        let target = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let t0 = Utc::now();
+        let t_early = t0 + chrono::Duration::seconds(1);
+        let t_late = t0 + chrono::Duration::seconds(3);
+        // A completed node, then a Skipped node that "finished" later. Since
+        // Skipped counts as terminal, the all-terminal fallback picks the
+        // latest by completed_at — the Skipped one.
+        let done = mk_node(
+            target.id,
+            "stepA",
+            NodeState::Completed,
+            Some(t0),
+            Some(t_early),
+        );
+        let skipped = mk_node(
+            target.id,
+            "stepB",
+            NodeState::Skipped,
+            Some(t0),
+            Some(t_late),
+        );
+        storage.create_execution_node(&done).await.unwrap();
+        storage.create_execution_node(&skipped).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.to_string() }),
+        );
+        let result = handle_query_instance(ctx).await.unwrap();
+
+        assert_eq!(
+            result["current_node"],
+            json!("stepB"),
+            "skipped node counts as terminal and is the latest by completed_at"
+        );
+    }
+
+    /// A non-terminal node is preferred over a Skipped (terminal) node even
+    /// when the skipped one started later — `current_node` reports live work.
+    #[tokio::test]
+    async fn query_instance_current_node_prefers_running_over_skipped() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1");
+        let target = mk_instance("T1");
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        let t0 = Utc::now();
+        let t2 = t0 + chrono::Duration::seconds(2);
+        // The skipped node started LATER than the running one, yet a live
+        // (non-terminal) node must still win regardless of start time.
+        let running = mk_node(target.id, "live", NodeState::Running, Some(t0), None);
+        let skipped = mk_node(target.id, "skip", NodeState::Skipped, Some(t2), Some(t2));
+        storage.create_execution_node(&running).await.unwrap();
+        storage.create_execution_node(&skipped).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": target.id.to_string() }),
+        );
+        let result = handle_query_instance(ctx).await.unwrap();
+
+        assert_eq!(result["current_node"], json!("live"));
+    }
 }

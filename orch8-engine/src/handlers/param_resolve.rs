@@ -385,4 +385,270 @@ mod tests {
         assert_eq!(out["lvl1"]["lvl2"][0], "bob");
         assert_eq!(out["lvl1"]["lvl2"][1]["deep"], "bob");
     }
+
+    // ─── apply_self_modify ───────────────────────────────────────────────
+    //
+    // The self-modify handler only emits a marker output; this helper is the
+    // code that actually mutates the instance's `injected_blocks`. It was
+    // previously exercised only indirectly through `step_block`/`step_exec`
+    // with mock handlers. The tests below pin its contract directly so the
+    // injection invariants — especially "positionless append must NOT clobber
+    // prior injections" — can't silently regress.
+
+    /// Minimal block-shaped JSON. `apply_self_modify` does not validate the
+    /// `BlockDefinition` shape (that's the handler's job) — it stores whatever
+    /// array it's given — so a lightweight object is sufficient and keeps the
+    /// test focused on the merge/splice logic.
+    fn blk(id: &str) -> serde_json::Value {
+        json!({ "type": "step", "id": id, "handler": "noop", "params": {} })
+    }
+
+    /// PR-SM1: no `_self_modify` marker → `NotApplicable`, and storage is
+    /// untouched (the common success path for ordinary steps).
+    #[tokio::test]
+    async fn apply_self_modify_no_marker_is_not_applicable() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        let res = apply_self_modify(&s, inst.id, &json!({"result": "ok"})).await;
+        assert_eq!(res, SelfModifyResult::NotApplicable);
+        assert_eq!(s.get_injected_blocks(inst.id).await.unwrap(), None);
+    }
+
+    /// PR-SM2: marker present but explicitly `false` → `NotApplicable`.
+    #[tokio::test]
+    async fn apply_self_modify_marker_false_is_not_applicable() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": false, "blocks": [blk("x")]}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::NotApplicable);
+        assert_eq!(s.get_injected_blocks(inst.id).await.unwrap(), None);
+    }
+
+    /// PR-SM3: marker present but `blocks` missing → Failed, nothing stored.
+    #[tokio::test]
+    async fn apply_self_modify_missing_blocks_fails() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        let res = apply_self_modify(&s, inst.id, &json!({"_self_modify": true})).await;
+        assert_eq!(res, SelfModifyResult::Failed);
+        assert_eq!(s.get_injected_blocks(inst.id).await.unwrap(), None);
+    }
+
+    /// PR-SM4: `blocks` present but not an array → Failed.
+    #[tokio::test]
+    async fn apply_self_modify_blocks_not_array_fails() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": "nope"}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Failed);
+        assert_eq!(s.get_injected_blocks(inst.id).await.unwrap(), None);
+    }
+
+    /// PR-SM5: positionless append into an empty list stores exactly the new
+    /// blocks, in order.
+    #[tokio::test]
+    async fn apply_self_modify_append_to_empty() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("a"), blk("b")]}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    /// PR-SM6 (regression): a positionless append MUST preserve blocks injected
+    /// by an earlier self-modify call — it appends, it does not clobber. This
+    /// is the exact invariant called out in the function's comment; the agent
+    /// self-extension pattern depends on it.
+    #[tokio::test]
+    async fn apply_self_modify_append_preserves_prior_injections() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        // First injection.
+        apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("first")]}),
+        )
+        .await;
+        // Second injection, also positionless — must append after "first".
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("second")]}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["first", "second"],
+            "second append must not clobber the first injection"
+        );
+    }
+
+    /// PR-SM7: position 0 splices the new blocks at the FRONT of the existing
+    /// injected list.
+    #[tokio::test]
+    async fn apply_self_modify_position_zero_inserts_at_front() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("orig")]}),
+        )
+        .await;
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("front")], "position": 0}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["front", "orig"]);
+    }
+
+    /// PR-SM8: a positioned splice inserts into the MIDDLE of an existing list
+    /// without dropping any element.
+    #[tokio::test]
+    async fn apply_self_modify_position_splices_into_middle() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("a"), blk("c")]}),
+        )
+        .await;
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("b")], "position": 1}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    /// PR-SM9: a position past the end of the list is clamped to the end
+    /// (append semantics) rather than panicking on an out-of-range splice.
+    #[tokio::test]
+    async fn apply_self_modify_position_beyond_len_clamps_to_end() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("a")]}),
+        )
+        .await;
+        let res = apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("z")], "position": 999}),
+        )
+        .await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["a", "z"]);
+    }
+
+    /// PR-SM10: an empty `blocks` array is a successful no-op injection —
+    /// existing injected blocks are preserved unchanged.
+    #[tokio::test]
+    async fn apply_self_modify_empty_blocks_preserves_existing() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+
+        apply_self_modify(
+            &s,
+            inst.id,
+            &json!({"_self_modify": true, "blocks": [blk("keep")]}),
+        )
+        .await;
+        let res =
+            apply_self_modify(&s, inst.id, &json!({"_self_modify": true, "blocks": []})).await;
+        assert_eq!(res, SelfModifyResult::Applied);
+
+        let stored = s.get_injected_blocks(inst.id).await.unwrap().unwrap();
+        let ids: Vec<&str> = stored
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["keep"]);
+    }
 }
