@@ -51,13 +51,13 @@ const MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MB
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
-    let url = ctx
-        .params
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| permanent("missing required param: url"))?;
+    // Endpoint comes from an explicit `url`, or a named `server` resolved from
+    // the read-only `context.config.mcp_servers` registry (engine-local; the
+    // managed multi-tenant catalog is a cloud concern). A named server may
+    // also supply auth headers.
+    let (url, server_headers) = resolve_endpoint(&ctx.params, &ctx.context.config)?;
 
-    if !super::builtin::is_url_safe(url).await {
+    if !super::builtin::is_url_safe(&url).await {
         return Err(permanent(
             "blocked: URL targets a private/internal network address",
         ));
@@ -109,7 +109,18 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_PROTOCOL_VERSION);
 
-    let extra_headers = ctx.params.get("headers").and_then(Value::as_object);
+    // Merge per-step `headers` over any server-supplied headers (step wins).
+    let mut headers = server_headers;
+    if let Some(h) = ctx.params.get("headers").and_then(Value::as_object) {
+        for (k, v) in h {
+            headers.insert(k.clone(), v.clone());
+        }
+    }
+    let extra_headers = if headers.is_empty() {
+        None
+    } else {
+        Some(&headers)
+    };
 
     debug!(url = %url, action = %action, "mcp_call: handshaking");
 
@@ -117,7 +128,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
     //    `Mcp-Session-Id` header we must echo on subsequent requests.
     let init_req = build_initialize_request(ID_INITIALIZE, protocol_version);
     let (init_status, init_ct, init_body, session_id) =
-        post_jsonrpc(url, &init_req, timeout, extra_headers, None).await?;
+        post_jsonrpc(&url, &init_req, timeout, extra_headers, None).await?;
     parse_jsonrpc_response(init_status, &init_ct, &init_body, ID_INITIALIZE)?;
 
     // 2. notifications/initialized — a fire-and-forget notification (no id,
@@ -125,7 +136,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
     //    return 202 Accepted with an empty body.
     let initialized = build_initialized_notification();
     let _ = post_jsonrpc(
-        url,
+        &url,
         &initialized,
         timeout,
         extra_headers,
@@ -136,8 +147,14 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
     debug!(url = %url, action = %action, "mcp_call: dispatching request");
 
     // 3. the actual request.
-    let (status, content_type, body, _) =
-        post_jsonrpc(url, &primary, timeout, extra_headers, session_id.as_deref()).await?;
+    let (status, content_type, body, _) = post_jsonrpc(
+        &url,
+        &primary,
+        timeout,
+        extra_headers,
+        session_id.as_deref(),
+    )
+    .await?;
     let result = parse_jsonrpc_response(status, &content_type, &body, ID_REQUEST)?;
 
     match action {
@@ -227,6 +244,57 @@ async fn post_jsonrpc(
     }
 
     Ok((status, content_type, body_bytes.to_vec(), session_id))
+}
+
+/// Resolve the MCP endpoint and any server-supplied auth headers.
+///
+/// Order of precedence:
+/// 1. an explicit `url` param → used as-is, no extra headers.
+/// 2. a named `server` param → looked up in the read-only
+///    `context.config.mcp_servers` map (`{ "<name>": { url, token?, headers? } }`).
+///    A `token` becomes an `Authorization: Bearer <token>` header.
+///
+/// The managed, multi-tenant server catalog is a cloud concern; this is the
+/// engine-local resolution that works offline from per-instance config.
+fn resolve_endpoint(
+    params: &Value,
+    config: &Value,
+) -> Result<(String, serde_json::Map<String, Value>), StepError> {
+    let mut headers = serde_json::Map::new();
+
+    if let Some(url) = params.get("url").and_then(Value::as_str) {
+        return Ok((url.to_string(), headers));
+    }
+
+    let Some(server) = params.get("server").and_then(Value::as_str) else {
+        return Err(permanent("mcp_call: missing `url` or `server`"));
+    };
+
+    let entry = config
+        .get("mcp_servers")
+        .and_then(|m| m.get(server))
+        .ok_or_else(|| {
+            permanent(format!(
+                "mcp_call: unknown server {server:?} (no context.config.mcp_servers entry)"
+            ))
+        })?;
+
+    let url = entry
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| permanent(format!("mcp_call: server {server:?} has no url")))?
+        .to_string();
+
+    if let Some(token) = entry.get("token").and_then(Value::as_str) {
+        headers.insert("Authorization".into(), json!(format!("Bearer {token}")));
+    }
+    if let Some(h) = entry.get("headers").and_then(Value::as_object) {
+        for (k, v) in h {
+            headers.insert(k.clone(), v.clone());
+        }
+    }
+
+    Ok((url, headers))
 }
 
 // ---- Pure request builders (unit-tested without a network) -----------------
@@ -558,6 +626,65 @@ mod tests {
         let out = interpret_tools_call_result("t", &json!({}));
         assert_eq!(out["result"], json!([]));
         assert_eq!(out["is_error"], false);
+    }
+
+    #[test]
+    fn resolve_endpoint_explicit_url() {
+        let (url, headers) =
+            resolve_endpoint(&json!({ "url": "https://x.example/mcp" }), &json!({})).unwrap();
+        assert_eq!(url, "https://x.example/mcp");
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_endpoint_named_server_with_token_and_headers() {
+        let config = json!({
+            "mcp_servers": {
+                "github": {
+                    "url": "https://gh.example/mcp",
+                    "token": "ghp_x",
+                    "headers": { "X-Org": "acme" }
+                }
+            }
+        });
+        let (url, headers) = resolve_endpoint(&json!({ "server": "github" }), &config).unwrap();
+        assert_eq!(url, "https://gh.example/mcp");
+        assert_eq!(headers["Authorization"], "Bearer ghp_x");
+        assert_eq!(headers["X-Org"], "acme");
+    }
+
+    #[test]
+    fn resolve_endpoint_unknown_server_is_permanent() {
+        let err = resolve_endpoint(&json!({ "server": "nope" }), &json!({ "mcp_servers": {} }))
+            .unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => assert!(message.contains("unknown server")),
+            other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_endpoint_server_without_url_is_permanent() {
+        let config = json!({ "mcp_servers": { "s": { "token": "t" } } });
+        let err = resolve_endpoint(&json!({ "server": "s" }), &config).unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[test]
+    fn resolve_endpoint_missing_both_is_permanent() {
+        let err = resolve_endpoint(&json!({ "tool_name": "x" }), &json!({})).unwrap_err();
+        assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[test]
+    fn resolve_endpoint_url_takes_precedence_over_server() {
+        let config = json!({ "mcp_servers": { "s": { "url": "https://server.example" } } });
+        let (url, _) = resolve_endpoint(
+            &json!({ "url": "https://explicit.example", "server": "s" }),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(url, "https://explicit.example");
     }
 }
 

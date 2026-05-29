@@ -286,3 +286,205 @@ describe("agent Handler — ReAct loop (mock LLM + tool)", () => {
     assert.equal(out.tool_calls_made, 2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tool auto-discovery (MCP) and auto-memory (recall + store).
+// ---------------------------------------------------------------------------
+
+interface ComboMock {
+  baseUrl: string;
+  received: Array<{ path: string; body: any }>;
+  chatCalls: number;
+  close(): Promise<void>;
+}
+
+/**
+ * One server playing three roles, routed by path / JSON-RPC method:
+ *   - POST /chat/completions → OpenAI-compatible LLM
+ *   - POST /embeddings       → embeddings (fixed vector [1,0,0])
+ *   - POST / (JSON-RPC)      → MCP server (initialize/list/call)
+ */
+function startComboMock(opts: { llmTurns: "discover" | "answerOnly" }): Promise<ComboMock> {
+  return new Promise((resolvePromise) => {
+    const state = { chatCalls: 0 };
+    const received: Array<{ path: string; body: any }> = [];
+
+    const server = createServer((req, res) => {
+      void (async () => {
+        const body = await readBody(req);
+        const path = req.url ?? "";
+        received.push({ path, body });
+        res.setHeader("Content-Type", "application/json");
+
+        if (path.includes("/embeddings")) {
+          res.end(
+            JSON.stringify({ data: [{ index: 0, embedding: [1, 0, 0] }], model: "m" }),
+          );
+          return;
+        }
+
+        if (path.includes("/chat/completions")) {
+          state.chatCalls += 1;
+          if (opts.llmTurns === "discover" && state.chatCalls === 1) {
+            res.end(JSON.stringify(toolCallTurn())); // ask for get_weather
+          } else {
+            res.end(JSON.stringify(answerTurn("blue")));
+          }
+          return;
+        }
+
+        // MCP JSON-RPC.
+        const method = body?.method as string | undefined;
+        const id = body?.id;
+        if (method === "initialize") {
+          res.end(JSON.stringify({ jsonrpc: "2.0", id, result: { capabilities: { tools: {} } } }));
+        } else if (method === "notifications/initialized") {
+          res.statusCode = 202;
+          res.end();
+        } else if (method === "tools/list") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              result: {
+                tools: [
+                  { name: "get_weather", description: "weather", inputSchema: { type: "object" } },
+                ],
+              },
+            }),
+          );
+        } else if (method === "tools/call") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              result: { content: [{ type: "text", text: "sunny" }], isError: false },
+            }),
+          );
+        } else {
+          res.statusCode = 400;
+          res.end("{}");
+        }
+      })();
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as AddressInfo).port;
+      resolvePromise({
+        baseUrl: `http://127.0.0.1:${port}`,
+        received,
+        get chatCalls() {
+          return state.chatCalls;
+        },
+        close: () => new Promise<void>((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+describe("agent — tool auto-discovery & auto-memory", () => {
+  let server: ServerHandle | undefined;
+  let combo: ComboMock | undefined;
+
+  before(async () => {
+    server = await startServer();
+  });
+  after(async () => {
+    await stopServer(server);
+  });
+  beforeEach(async () => {
+    if (combo) await combo.close();
+    combo = undefined;
+  });
+  after(async () => {
+    if (combo) await combo.close();
+  });
+
+  it("auto-discovers MCP tools when no schema is provided", async () => {
+    combo = await startComboMock({ llmTurns: "discover" });
+    const tenantId = `agent-disc-${uuid().slice(0, 8)}`;
+    const seq = testSequence(
+      "agent-discover",
+      [
+        step("s1", "agent", {
+          provider: "openai",
+          base_url: combo.baseUrl,
+          api_key: "test-key",
+          model: "gpt-4o-mini",
+          goal: "weather in SF?",
+          // No `tools` → discovered from the MCP server.
+          tool_dispatch: { type: "mcp", url: combo.baseUrl },
+          max_iterations: 4,
+        }),
+      ],
+      { tenantId },
+    );
+    await client.createSequence(seq);
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(id, "completed", { timeoutMs: 20_000 });
+
+    // The MCP server was asked to list tools.
+    assert.ok(
+      combo.received.some((r) => r.body?.method === "tools/list"),
+      "agent should call tools/list to discover tools",
+    );
+    // The first LLM turn was given the discovered tool schema.
+    const firstChat = combo.received.find((r) => r.path.includes("/chat/completions"));
+    const tools = (firstChat!.body as { tools?: Array<{ function: { name: string } }> }).tools;
+    assert.ok(tools && tools.some((t) => t.function.name === "get_weather"), "discovered tool forwarded to LLM");
+
+    const out = (await client.getOutputs(id)).find((o) => o.block_id === "s1")!.output as {
+      final: string;
+      stop_reason: string;
+    };
+    assert.equal(out.stop_reason, "completed");
+    assert.equal(out.final, "blue");
+  });
+
+  it("recalls prior memory and stores the final answer (auto_memory)", async () => {
+    combo = await startComboMock({ llmTurns: "answerOnly" });
+    const tenantId = `agent-mem-${uuid().slice(0, 8)}`;
+    const seq = testSequence(
+      "agent-auto-memory",
+      [
+        // Seed a memory in this instance's KV (precomputed embedding).
+        step("seed", "memory_store", {
+          key: "pref",
+          text: "the user's favourite colour is blue",
+          embedding: [1, 0, 0],
+        }),
+        step("s1", "agent", {
+          provider: "openai",
+          base_url: combo.baseUrl,
+          api_key: "test-key",
+          model: "gpt-4o-mini",
+          goal: "what is my favourite colour?",
+          auto_memory: { base_url: combo.baseUrl, api_key: "test-key", recall_k: 1 },
+        }),
+      ],
+      { tenantId },
+    );
+    await client.createSequence(seq);
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(id, "completed", { timeoutMs: 20_000 });
+
+    // The recalled memory was injected as a system message to the LLM.
+    const chat = combo.received.find((r) => r.path.includes("/chat/completions"));
+    const messages = (chat!.body as { messages: Array<{ role: string; content: string }> }).messages;
+    assert.equal(messages[0]!.role, "system");
+    assert.match(messages[0]!.content, /favourite colour is blue/);
+
+    // The agent's final answer was stored as a new memory (embeddings called
+    // for recall + store).
+    const embedCalls = combo.received.filter((r) => r.path.includes("/embeddings")).length;
+    assert.ok(embedCalls >= 2, `expected recall+store embeddings, got ${embedCalls}`);
+  });
+});

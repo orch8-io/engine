@@ -312,4 +312,36 @@ describe("mcp_call Handler (mock MCP server)", () => {
     const final = await client.waitForState(id, ["completed", "failed"], { timeoutMs: 10_000 });
     assert.equal(final.state, "failed");
   });
+
+  it("resolves a named server from context.config.mcp_servers", async () => {
+    mock = await startMcpMock();
+    const tenantId = `mcp-named-${uuid().slice(0, 8)}`;
+    const seq = testSequence(
+      "mcp-named-server",
+      [step("s1", "mcp_call", { server: "testmock", tool_name: "echo", arguments: { q: "hi" } })],
+      { tenantId },
+    );
+    await client.createSequence(seq);
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      // The engine-local registry: resolve `server: "testmock"` → this url.
+      context: { config: { mcp_servers: { testmock: { url: mock.baseUrl } } } },
+    });
+    await client.waitForState(id, "completed", { timeoutMs: 15_000 });
+
+    const outputs = await client.getOutputs(id);
+    const out = outputs.find((o) => o.block_id === "s1")!.output as {
+      tool_name: string;
+      is_error: boolean;
+    };
+    assert.equal(out.tool_name, "echo");
+    assert.equal(out.is_error, false);
+    // The handshake reached the resolved server.
+    assert.deepEqual(
+      mock.received.map((r) => r.method),
+      ["initialize", "notifications/initialized", "tools/call"],
+    );
+  });
 });
