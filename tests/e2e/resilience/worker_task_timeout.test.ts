@@ -9,16 +9,15 @@
  * anchored at `claimed_at` (which the storage layer sets as the initial
  * `heartbeat_at`, per `orch8-storage/src/postgres/workers.rs::claim`).
  *
- * Engine gap: neither the tick interval nor the stale threshold is
- * configurable per-test or via env. A `StepDef.timeout` field exists but
- * is stamped onto the WorkerTask row as `timeout_ms` and is not enforced
- * by the reaper today — reclamation is purely heartbeat-driven. Closing
- * that gap (e.g. wiring StepDef.timeout into the reaper, or exposing
- * `ORCH8_RECLAIM_THRESHOLD_MS`) would let this test run in seconds
- * rather than minutes.
+ * The reaper cadence/threshold come from `SchedulerConfig` and are now
+ * env-overridable (`ORCH8_WORKER_REAPER_TICK_SECS` /
+ * `ORCH8_WORKER_REAPER_STALE_SECS`). This suite boots its own server with
+ * a 1s tick / 2s stale window so reclamation happens in seconds instead of
+ * the production defaults (30s / 60s) that made the test run for minutes.
  *
- * This test is SELF_MANAGED in `run-e2e.ts` because it touches
- * globally-scoped worker_tasks rows.
+ * This test is SELF_MANAGED in `self-managed.ts` because it touches
+ * globally-scoped worker_tasks rows AND needs the low-threshold env that
+ * the shared attach-mode server doesn't set.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -29,8 +28,10 @@ import type { WorkerTask } from "../client.ts";
 
 const client = new Orch8Client();
 
-const RECLAIM_TIMEOUT_MS = 120_000;
-const POLL_INTERVAL_MS = 1_000;
+// With a 2s stale window + 1s reaper tick (set via env below) reclamation
+// lands within ~3-5s. Keep a generous ceiling for slow/loaded CI runners.
+const RECLAIM_TIMEOUT_MS = 30_000;
+const POLL_INTERVAL_MS = 500;
 
 async function waitFor<T>(
   fn: () => Promise<T | undefined | null>,
@@ -49,7 +50,12 @@ describe("Worker Task Claim Timeout", () => {
   let server: ServerHandle | undefined;
 
   before(async () => {
-    server = await startServer();
+    server = await startServer({
+      env: {
+        ORCH8_WORKER_REAPER_TICK_SECS: "1",
+        ORCH8_WORKER_REAPER_STALE_SECS: "2",
+      },
+    });
   });
 
   after(async () => {

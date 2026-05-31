@@ -579,6 +579,30 @@ fn apply_env_overrides(config: &mut EngineConfig) {
             config.engine.cron_tick_secs = n;
         }
     }
+    // Reaper cadence/threshold overrides. Defaults (tick 30s / stale 60s for
+    // worker tasks, 60s / 120s for nodes) are sane for production but make
+    // reclamation tests wait minutes; the E2E harness sets these low so the
+    // worker-reaper suites run in seconds.
+    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_TICK_SECS") {
+        if let Ok(n) = val.parse() {
+            config.engine.worker_reaper_tick_secs = n;
+        }
+    }
+    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_STALE_SECS") {
+        if let Ok(n) = val.parse() {
+            config.engine.worker_reaper_stale_secs = n;
+        }
+    }
+    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_TICK_SECS") {
+        if let Ok(n) = val.parse() {
+            config.engine.node_reaper_tick_secs = n;
+        }
+    }
+    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_STALE_SECS") {
+        if let Ok(n) = val.parse() {
+            config.engine.node_reaper_stale_secs = n;
+        }
+    }
     if let Ok(val) = std::env::var("ORCH8_BATCH_SIZE") {
         if let Ok(n) = val.parse() {
             config.engine.batch_size = n;
