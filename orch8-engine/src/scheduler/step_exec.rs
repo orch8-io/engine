@@ -733,14 +733,23 @@ pub(super) async fn execute_step_block(
                 }
             }
             // Handler returned cleanly with a retryable error — the side
-            // effect either didn't happen or is idempotent. Remove the
-            // in-progress sentinel so the block is eligible for retry.
+            // effect either didn't happen or is idempotent. Clear the
+            // in-progress sentinel so the block is eligible for retry, then
+            // persist a retry marker so the attempt counter advances.
             //
-            // Log failures rather than silently dropping them: if this
-            // delete fails the retry cycle still works (the sentinel was
-            // only there to block re-execution after a crash), but the
-            // `block_outputs` table accumulates orphan rows that no cleanup
-            // path will ever reclaim — surface the pattern to operators.
+            // The marker is essential: `compute_attempt` derives the next
+            // attempt from the most-recent `BlockOutput`. The sentinel we
+            // just deleted carried `attempt = u16::MAX`, and without a
+            // replacement marker `get_block_output` would return `None` on
+            // the next tick → `attempt` resets to 0 → `handle_retryable_failure`
+            // never sees `attempt >= max_attempts` → the step retries forever
+            // and never reaches the DLQ. This mirrors the tree path's
+            // `__retry__` marker in `handlers::step_block` so retry-count
+            // semantics are identical across both dispatch paths.
+            //
+            // Log failures rather than silently dropping them: a failed
+            // delete leaks an orphan sentinel row, and a failed marker save
+            // stalls the attempt counter (worst case: a few extra retries).
             if let Err(err) = storage
                 .delete_block_outputs(instance_id, &step_def.id)
                 .await
@@ -750,6 +759,24 @@ pub(super) async fn execute_step_block(
                     block_id = %step_def.id,
                     error = %err,
                     "failed to delete in-progress sentinel after retryable failure -- leaked row"
+                );
+            }
+            let retry_marker = orch8_types::output::BlockOutput {
+                id: uuid::Uuid::now_v7(),
+                instance_id,
+                block_id: step_def.id.clone(),
+                output: serde_json::json!({ "_retry_marker": true, "error": message }),
+                output_ref: Some("__retry__".into()),
+                output_size: 0,
+                attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+                created_at: chrono::Utc::now(),
+            };
+            if let Err(err) = storage.save_block_output(&retry_marker).await {
+                tracing::warn!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    error = %err,
+                    "failed to save retry marker after retryable failure -- attempt counter may not advance"
                 );
             }
 

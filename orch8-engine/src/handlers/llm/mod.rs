@@ -89,6 +89,19 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .timeout(Duration::from_secs(300))
+            // SSRF: the initial URL is validated by `is_url_safe`, but reqwest
+            // follows redirects by default without re-checking. Re-validate
+            // every hop and refuse redirects to internal/metadata targets.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("too many redirects");
+                }
+                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("blocked: redirect targets a private/internal network address")
+                }
+            }))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to build optimized HTTP client, using default");

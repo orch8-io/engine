@@ -151,11 +151,17 @@ pub(super) async fn get_completed_ids(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockId>, StorageError> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT DISTINCT block_id FROM block_outputs WHERE instance_id = $1")
-            .bind(instance_id.into_uuid())
-            .fetch_all(&store.pool)
-            .await?;
+    // Exclude `__retry__` markers: a retry marker advances the attempt counter
+    // but the block has NOT completed and must stay eligible for re-execution.
+    // The `__in_progress__` sentinel is intentionally kept (crash recovery
+    // skips a mid-flight block to avoid duplicate side effects).
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT block_id FROM block_outputs \
+         WHERE instance_id = $1 AND (output_ref IS NULL OR output_ref <> '__retry__')",
+    )
+    .bind(instance_id.into_uuid())
+    .fetch_all(&store.pool)
+    .await?;
     Ok(rows.into_iter().map(|(id,)| BlockId::new(id)).collect())
 }
 
@@ -167,8 +173,10 @@ pub(super) async fn get_completed_ids_batch(
         return Ok(std::collections::HashMap::new());
     }
     let uuids: Vec<Uuid> = instance_ids.iter().map(|id| id.into_uuid()).collect();
+    // See `get_completed_ids`: retry markers don't count as completed.
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT DISTINCT instance_id, block_id FROM block_outputs WHERE instance_id = ANY($1)",
+        "SELECT DISTINCT instance_id, block_id FROM block_outputs \
+         WHERE instance_id = ANY($1) AND (output_ref IS NULL OR output_ref <> '__retry__')",
     )
     .bind(&uuids)
     .fetch_all(&store.pool)

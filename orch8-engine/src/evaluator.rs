@@ -357,7 +357,7 @@ pub async fn evaluate(
 
         // SLA deadline check: fail any step nodes that have breached their deadline.
         let deadlines_breached =
-            check_sla_deadlines(storage, handlers, &ctx.instance, &blocks, &ctx.tree).await?;
+            check_sla_deadlines(storage, handlers, &ctx.instance, &block_map, &ctx.tree).await?;
         if deadlines_breached {
             ctx.tree_stale = true;
             ctx.refresh_tree(storage.as_ref(), instance_id).await?;

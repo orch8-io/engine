@@ -42,6 +42,44 @@ fn url_safety_cache() -> &'static Cache<String, bool> {
     })
 }
 
+/// Whether outbound SSRF guards are intentionally disabled.
+///
+/// Requires an explicit truthy value (`1` / `true`, case-insensitive). A
+/// bare, empty, `0`, or `false` value — e.g. a leftover `ORCH8_ALLOW_INTERNAL_URLS=`
+/// in a Dockerfile, CI image, or shell profile — must NOT silently disable
+/// the protection (the old `is_ok()` check was fail-open on any value).
+pub(crate) fn internal_urls_allowed() -> bool {
+    flag_is_truthy(std::env::var("ORCH8_ALLOW_INTERNAL_URLS").ok().as_deref())
+}
+
+/// Parse a boolean-ish env flag value. Only an explicit `1`/`true`
+/// (case-insensitive, surrounding whitespace ignored) counts as enabled;
+/// `None`, empty, `0`, and `false` are all disabled. Pure helper so the
+/// fail-closed semantics are unit-testable without mutating process env.
+fn flag_is_truthy(v: Option<&str>) -> bool {
+    matches!(v.map(str::trim), Some(s) if s == "1" || s.eq_ignore_ascii_case("true"))
+}
+
+/// `true` if an IPv4 literal is a private/internal/metadata target that
+/// outbound requests must never reach.
+fn ipv4_is_blocked(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()          // 127.0.0.0/8
+        || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        || v4.is_link_local()     // 169.254.0.0/16 (includes 169.254.169.254 metadata)
+        || v4.is_unspecified()
+        || v4.is_documentation()  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+        || v4.is_multicast() // 224.0.0.0/4
+}
+
+/// `true` if an IPv6 literal is a private/internal target.
+fn ipv6_is_blocked(v6: std::net::Ipv6Addr) -> bool {
+    v6.is_loopback()              // ::1
+        || v6.is_unspecified()
+        || v6.is_unicast_link_local() // fe80::/10
+        || v6.is_multicast()          // ff00::/8
+        || v6.is_unique_local() // fc00::/7
+}
+
 /// Check whether a resolved `host:port` address is safe to contact
 /// (not a private/internal/metadata target).
 ///
@@ -50,8 +88,8 @@ fn url_safety_cache() -> &'static Cache<String, bool> {
 /// loopback, private, link-local (incl. 169.254.169.254 cloud metadata),
 /// unspecified, or IPv6 ULA (`fc00::/7`) range.
 pub(crate) async fn is_address_safe(addr: &str) -> bool {
-    // Allow internal addresses in test environments.
-    if std::env::var("ORCH8_ALLOW_INTERNAL_URLS").is_ok() {
+    // Allow internal addresses only when explicitly opted in.
+    if internal_urls_allowed() {
         return true;
     }
 
@@ -61,31 +99,79 @@ pub(crate) async fn is_address_safe(addr: &str) -> bool {
     for socket_addr in addrs {
         match socket_addr.ip() {
             std::net::IpAddr::V4(v4) => {
-                if v4.is_loopback()          // 127.0.0.0/8
-                    || v4.is_private()        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                    || v4.is_link_local()     // 169.254.0.0/16 (includes 169.254.169.254)
-                    || v4.is_unspecified()
-                    || v4.is_documentation()  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-                    || v4.is_multicast()
-                // 224.0.0.0/4
-                {
+                if ipv4_is_blocked(v4) {
                     return false;
                 }
             }
             std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback()              // ::1
-                    || v6.is_unspecified()
-                    || v6.is_unicast_link_local() // fe80::/10
-                    || v6.is_multicast()          // ff00::/8
-                    || v6.is_unique_local()
-                // fc00::/7
-                {
+                if ipv6_is_blocked(v6) {
                     return false;
                 }
             }
         }
     }
     true
+}
+
+/// Synchronous redirect-hop guard for outbound HTTP clients.
+///
+/// reqwest follows redirects by default (up to 10) without re-running the
+/// async [`is_url_safe`] check, so an attacker-controlled public URL could
+/// `302 -> http://169.254.169.254/...` and reach internal/metadata targets.
+/// This guard runs inside the (synchronous) redirect policy and rejects any
+/// hop to a non-http(s) scheme or to a private/loopback/link-local IP literal.
+///
+/// DNS resolution can't run in this sync context, so hostname redirect targets
+/// that *resolve* to private IPs are not caught here — they remain bounded by
+/// the hop cap and the initial [`is_url_safe`] check. The common metadata /
+/// direct-internal-IP redirect vector is closed.
+pub(crate) fn redirect_target_allowed(next: &url::Url) -> bool {
+    if internal_urls_allowed() {
+        return true;
+    }
+    match next.scheme() {
+        "http" | "https" => {}
+        _ => return false,
+    }
+    match next.host() {
+        Some(url::Host::Ipv4(v4)) => !ipv4_is_blocked(v4),
+        Some(url::Host::Ipv6(v6)) => !ipv6_is_blocked(v6),
+        Some(url::Host::Domain(_)) | None => true,
+    }
+}
+
+/// Failure modes for [`read_body_capped`].
+#[derive(Debug)]
+pub(crate) enum BodyReadError {
+    /// Body exceeded the cap (carries the cap, in bytes).
+    TooLarge(usize),
+    /// Transport error while streaming the body.
+    Io(String),
+}
+
+/// Read a response body, aborting as soon as it exceeds `max_bytes`.
+///
+/// `reqwest::Response::bytes()` buffers the *entire* body into memory before
+/// returning, so a response with no `Content-Length` (chunked) can OOM the
+/// worker before any post-read size check fires. This streams chunk-by-chunk
+/// and bails the moment the running total would exceed the cap, bounding peak
+/// memory to `max_bytes + one chunk`.
+pub(crate) async fn read_body_capped(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, BodyReadError> {
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| BodyReadError::Io(e.to_string()))?
+    {
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(BodyReadError::TooLarge(max_bytes));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 /// Check whether a URL is safe to request (not targeting private/internal networks).
@@ -564,26 +650,20 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
 
     let status = resp.status().as_u16();
 
-    let content_length = resp.content_length().unwrap_or(0);
-    if content_length > MAX_RESPONSE_BYTES as u64 {
-        return Err(StepError::Permanent {
-            message: format!("response too large: {content_length} bytes exceeds 10MB limit"),
-            details: None,
-        });
-    }
-    let bytes = resp.bytes().await.map_err(|e| StepError::Retryable {
-        message: format!("HTTP request failed reading body from {url}: {e}"),
-        details: None,
-    })?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(StepError::Permanent {
-            message: format!(
-                "response too large: {} bytes exceeds 10MB limit",
-                bytes.len()
-            ),
-            details: None,
-        });
-    }
+    // Stream the body with a hard cap so a chunked (no Content-Length)
+    // response can't OOM the worker before a post-read size check.
+    let bytes = read_body_capped(resp, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|e| match e {
+            BodyReadError::TooLarge(max) => StepError::Permanent {
+                message: format!("response too large: exceeds {max} byte limit"),
+                details: None,
+            },
+            BodyReadError::Io(m) => StepError::Retryable {
+                message: format!("HTTP request failed reading body from {url}: {m}"),
+                details: None,
+            },
+        })?;
     let response_body = String::from_utf8_lossy(&bytes).into_owned();
 
     if status >= 500 {
@@ -785,6 +865,55 @@ mod tests {
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;
+
+    #[test]
+    fn flag_is_truthy_is_fail_closed() {
+        // Only an explicit 1/true enables; everything else is disabled — a
+        // leftover empty/0/false var must NOT open the SSRF guard.
+        assert!(flag_is_truthy(Some("1")));
+        assert!(flag_is_truthy(Some("true")));
+        assert!(flag_is_truthy(Some("TRUE")));
+        assert!(flag_is_truthy(Some(" 1 ")));
+        assert!(!flag_is_truthy(None));
+        assert!(!flag_is_truthy(Some("")));
+        assert!(!flag_is_truthy(Some("0")));
+        assert!(!flag_is_truthy(Some("false")));
+        assert!(!flag_is_truthy(Some("yes")));
+    }
+
+    #[test]
+    fn redirect_target_allowed_blocks_internal_and_bad_schemes() {
+        let allow = |u: &str| redirect_target_allowed(&url::Url::parse(u).unwrap());
+        // Public hosts (domain or public IP) are allowed.
+        assert!(allow("https://api.example.com/x"));
+        assert!(allow("http://93.184.216.34/x")); // example.com public IP
+                                                  // Internal / metadata / loopback IP literals are blocked.
+        assert!(!allow("http://169.254.169.254/latest/meta-data/")); // cloud metadata
+        assert!(!allow("http://127.0.0.1/")); // loopback
+        assert!(!allow("http://10.0.0.5/")); // private
+        assert!(!allow("http://192.168.1.1/")); // private
+        assert!(!allow("http://[::1]/")); // ipv6 loopback
+        assert!(!allow("http://[fc00::1]/")); // ipv6 ULA
+                                              // Non-http(s) schemes are blocked (file://, gopher://, etc.).
+        assert!(!allow("file:///etc/passwd"));
+        assert!(!allow("gopher://10.0.0.1/"));
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_rejects_oversized_body() {
+        // A body over the cap is rejected without returning the bytes — the
+        // streaming guard that prevents OOM on a Content-Length-less response.
+        let resp = reqwest::Response::from(http::Response::new(vec![0u8; 100]));
+        let err = read_body_capped(resp, 50).await;
+        assert!(matches!(err, Err(BodyReadError::TooLarge(50))));
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_returns_body_under_cap() {
+        let resp = reqwest::Response::from(http::Response::new(b"hello".to_vec()));
+        let body = read_body_capped(resp, 1024).await.expect("under cap");
+        assert_eq!(body, b"hello");
+    }
 
     async fn mk_test_storage() -> Arc<dyn StorageBackend> {
         Arc::new(
