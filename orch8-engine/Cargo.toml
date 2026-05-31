@@ -49,6 +49,9 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 # it explicitly here lets the tests use it without enabling extra features.
 wat = "1"
 tempfile = "3"
+# Construct a `reqwest::Response` from a known body in `read_body_capped`
+# tests. reqwest 0.12 uses http 1.x, so this unifies with reqwest's http.
+http = "1"
 
 [[bench]]
 name = "engine_bench"

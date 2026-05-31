@@ -2685,6 +2685,7 @@ dependencies = [
  "cron",
  "dashmap",
  "hmac",
+ "http",
  "metrics",
  "moka",
  "notify",

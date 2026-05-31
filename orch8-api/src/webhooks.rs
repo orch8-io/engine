@@ -35,6 +35,22 @@ use crate::AppState;
 /// that a captured payload can't be replayed the next day.
 const REPLAY_WINDOW_SECS: i64 = 300;
 
+/// Maximum a caller's timestamp may be in the *future* relative to the server
+/// clock. Future-dated timestamps only need to tolerate modest clock skew;
+/// allowing the full [`REPLAY_WINDOW_SECS`] into the future would let an
+/// attacker pre-date a captured payload to extend its validity well past the
+/// nonce cache's reach. The past window stays at [`REPLAY_WINDOW_SECS`] for
+/// NTP drift + network delay.
+const MAX_FUTURE_SKEW_SECS: i64 = 60;
+
+/// `true` if a caller's unix `ts` falls within the accepted window around the
+/// server clock `now`: up to [`REPLAY_WINDOW_SECS`] in the past and
+/// [`MAX_FUTURE_SKEW_SECS`] in the future.
+fn timestamp_within_window(now: i64, ts: i64) -> bool {
+    let age = now - ts; // positive = past, negative = future
+    (-MAX_FUTURE_SKEW_SECS..=REPLAY_WINDOW_SECS).contains(&age)
+}
+
 /// Global nonce cache with composite key `slug:nonce`. Using a single cache
 /// instead of a per-slug `DashMap` prevents unbounded growth when many unique
 /// slugs are encountered (e.g., scanning probes or UUID-based slugs).
@@ -140,7 +156,7 @@ pub(crate) async fn public_webhook(
         return Err(ApiError::Unauthorized);
     };
     let now = chrono::Utc::now().timestamp();
-    if now.abs_diff(ts) > REPLAY_WINDOW_SECS as u64 {
+    if !timestamp_within_window(now, ts) {
         tracing::warn!(
             slug = %slug,
             skew = now - ts,
@@ -184,4 +200,32 @@ pub(crate) async fn public_webhook(
             "trigger": slug,
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{timestamp_within_window, MAX_FUTURE_SKEW_SECS, REPLAY_WINDOW_SECS};
+
+    #[test]
+    fn timestamp_window_accepts_recent_past_and_small_future() {
+        let now = 1_000_000;
+        assert!(timestamp_within_window(now, now), "exact now");
+        assert!(timestamp_within_window(now, now - REPLAY_WINDOW_SECS)); // edge of past window
+        assert!(timestamp_within_window(now, now - REPLAY_WINDOW_SECS / 2));
+        assert!(timestamp_within_window(now, now + MAX_FUTURE_SKEW_SECS)); // edge of future skew
+    }
+
+    #[test]
+    fn timestamp_window_rejects_stale_and_far_future() {
+        let now = 1_000_000;
+        // Too far in the past (beyond replay window).
+        assert!(!timestamp_within_window(now, now - REPLAY_WINDOW_SECS - 1));
+        // Far-future-dated payload — previously accepted up to +300s, now
+        // rejected beyond the tight skew allowance.
+        assert!(!timestamp_within_window(
+            now,
+            now + MAX_FUTURE_SKEW_SECS + 1
+        ));
+        assert!(!timestamp_within_window(now, now + REPLAY_WINDOW_SECS));
+    }
 }

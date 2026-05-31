@@ -255,6 +255,97 @@ async fn scheduler_execute_step_block_template_failure_fails_instance() {
 }
 
 #[tokio::test]
+async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
+    // Regression: the fast path previously deleted ALL block outputs on a
+    // retryable failure without persisting a retry marker, so
+    // `compute_attempt` reset to 0 every tick and `attempt >= max_attempts`
+    // was never true — the step retried forever and never reached the DLQ.
+    // After the fix it writes a `__retry__` marker (mirroring the tree path)
+    // so the counter advances and the instance fails after `max_attempts`.
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+    let instance_id = InstanceId::new();
+    seed_instance_with_context(storage.as_ref(), instance_id, ExecutionContext::default()).await;
+
+    let mut step_def = mk_step_def("flaky", "always_retryable", serde_json::json!({}));
+    step_def.retry = Some(orch8_types::sequence::RetryPolicy {
+        max_attempts: 2,
+        initial_backoff: std::time::Duration::from_millis(0),
+        max_backoff: std::time::Duration::from_millis(0),
+        backoff_multiplier: 1.0,
+    });
+
+    let mut registry = HandlerRegistry::new();
+    registry.register("always_retryable", move |_ctx| async move {
+        Err(orch8_types::error::StepError::Retryable {
+            message: "transient".into(),
+            details: None,
+        })
+    });
+
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+
+    let mut attempts = 0;
+    let mut final_state = None;
+    for _ in 0..10 {
+        // Simulate the scheduler claim: a rescheduled instance sits in
+        // `Scheduled`; move it back to `Running` before the next execution.
+        let inst = storage.get_instance(instance_id).await.unwrap().unwrap();
+        let inst = if inst.state == InstanceState::Scheduled {
+            crate::lifecycle::transition_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&inst.tenant_id),
+                InstanceState::Scheduled,
+                InstanceState::Running,
+                None,
+            )
+            .await
+            .unwrap();
+            storage.get_instance(instance_id).await.unwrap().unwrap()
+        } else {
+            inst
+        };
+        if inst.state != InstanceState::Running {
+            final_state = Some(inst.state);
+            break;
+        }
+
+        execute_step_block(
+            &storage,
+            &registry,
+            &webhook_config,
+            0,
+            &inst,
+            &step_def,
+            &cancel,
+        )
+        .await
+        .expect("execute_step_block errored");
+        attempts += 1;
+
+        let after = storage.get_instance(instance_id).await.unwrap().unwrap();
+        if after.state.is_terminal() {
+            final_state = Some(after.state);
+            break;
+        }
+    }
+
+    // max_attempts = 2 → executes at attempt 0, 1, 2 then fails on the third
+    // (2 >= 2). Crucially it must terminate, not loop the full 10 iterations.
+    assert_eq!(
+        final_state,
+        Some(InstanceState::Failed),
+        "instance must reach Failed, not retry forever"
+    );
+    assert_eq!(
+        attempts, 3,
+        "should fail on the third execution (attempt index 2)"
+    );
+}
+
+#[tokio::test]
 async fn scheduler_execute_step_block_resolves_params_for_external_worker() {
     // When the handler is not registered in-process, the scheduler
     // dispatches to the external-worker queue. The queued task must

@@ -1,32 +1,38 @@
 //! SLA deadline check: fail step nodes whose per-step deadline has been breached,
 //! invoking an escalation handler if configured.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::warn;
 
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::ids::BlockId;
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::BlockDefinition;
 
-use super::{fail_node, flatten_blocks};
+use super::fail_node;
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 
 /// Check all Running/Waiting step nodes for SLA deadline breaches.
 /// On breach: invoke escalation handler (if configured), then fail the node.
 /// Returns `true` if any deadline was breached (tree state was modified).
+///
+/// Takes the flattened `block_map` the caller already built once per
+/// evaluation rather than re-flattening the whole block tree on every
+/// iteration of the evaluate loop (the loop runs up to 200 times, and a
+/// fresh `flatten_blocks` allocates + hashes the entire tree each pass).
 pub(super) async fn check_sla_deadlines(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     instance: &TaskInstance,
-    blocks: &[BlockDefinition],
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
     tree: &[ExecutionNode],
 ) -> Result<bool, EngineError> {
     let now = chrono::Utc::now();
     let mut breached = false;
-    let block_map = flatten_blocks(blocks);
     for node in tree {
         if !matches!(node.state, NodeState::Running | NodeState::Waiting) {
             continue;
