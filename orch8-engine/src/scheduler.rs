@@ -1082,15 +1082,15 @@ async fn process_instance(
     }
 
     // Fast path: all blocks are Steps. Execute multi-block per claim cycle.
-    let mut completed_blocks: std::collections::HashSet<BlockId> =
-        prefetched.completed_block_ids.into_iter().collect();
+    let mut completed_blocks = prefetched.completed_block_ids;
+    completed_blocks.sort_unstable();
 
     for block in blocks.iter() {
         let orch8_types::sequence::BlockDefinition::Step(step_def) = block else {
             unreachable!("checked above: all blocks are steps");
         };
 
-        if completed_blocks.contains(&step_def.id) {
+        if completed_blocks.binary_search(&step_def.id).is_ok() {
             continue;
         }
 
@@ -1129,7 +1129,12 @@ async fn process_instance(
 
         match outcome {
             StepOutcome::Completed => {
-                completed_blocks.insert(step_def.id.clone());
+                // Insert in sorted position (keeps the Vec sorted for
+                // binary_search without an O(N log N) re-sort per completion;
+                // dedups too).
+                if let Err(pos) = completed_blocks.binary_search(&step_def.id) {
+                    completed_blocks.insert(pos, step_def.id.clone());
+                }
 
                 // Re-read instance from storage so we don't clobber context
                 // mutations made during step execution (e.g. check_human_input's
