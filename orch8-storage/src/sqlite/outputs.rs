@@ -119,10 +119,18 @@ pub(super) async fn get_completed_ids(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockId>, StorageError> {
-    let rows = sqlx::query("SELECT DISTINCT block_id FROM block_outputs WHERE instance_id=?1")
-        .bind(instance_id.into_uuid().to_string())
-        .fetch_all(&storage.pool)
-        .await?;
+    // Exclude `__retry__` markers: a retry marker advances the attempt
+    // counter (via `get_block_output`) but does NOT mean the block completed —
+    // it must stay eligible for re-execution. The `__in_progress__` sentinel
+    // is intentionally NOT excluded (it makes a mid-flight block skip on crash
+    // recovery, preventing duplicate side effects).
+    let rows = sqlx::query(
+        "SELECT DISTINCT block_id FROM block_outputs \
+         WHERE instance_id=?1 AND (output_ref IS NULL OR output_ref <> '__retry__')",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .fetch_all(&storage.pool)
+    .await?;
     Ok(rows
         .iter()
         .map(|r| BlockId::new(r.get::<String, _>("block_id")))
@@ -143,7 +151,8 @@ pub(super) async fn get_completed_ids_batch(
     for id in instance_ids {
         separated.push_bind(id.to_string());
     }
-    separated.push_unseparated(")");
+    // See `get_completed_ids`: retry markers don't count as completed.
+    separated.push_unseparated(") AND (output_ref IS NULL OR output_ref <> '__retry__')");
     let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<BlockId>> =

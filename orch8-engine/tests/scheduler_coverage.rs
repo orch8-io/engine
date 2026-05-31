@@ -644,10 +644,19 @@ async fn tick_retry_reschedules_with_backoff() {
     assert!(fire_at >= before);
 }
 
-/// 32. Retryable failure with retry policy keeps rescheduling on repeated ticks.
+/// 32. Retryable failure advances the attempt counter across ticks and fails
+/// the instance once `max_attempts` is exhausted.
+///
+/// Regression: the fast path previously deleted all block outputs on a
+/// retryable failure without a retry marker, so `compute_attempt` reset to 0
+/// every tick and the instance retried forever (never reaching the DLQ). Now
+/// it writes a `__retry__` marker (excluded from the completed-block set, so
+/// the block still re-executes) that advances the counter.
 #[tokio::test]
-async fn tick_retry_keeps_rescheduling_on_repeated_ticks() {
+async fn tick_retry_advances_and_eventually_fails_at_max_attempts() {
     let s = storage().await;
+    // max_attempts = 3 → executes at attempt 0, 1, 2 (reschedules) then fails
+    // on the tick where attempt reaches 3.
     let seq = mk_sequence(vec![mk_step_with_retry("s1", "retryable_fail", 3)]);
     s.create_sequence(&seq).await.unwrap();
     let inst = mk_instance(seq.id);
@@ -655,35 +664,40 @@ async fn tick_retry_keeps_rescheduling_on_repeated_ticks() {
 
     let h = Arc::new(registry_with_retryable_fail());
 
-    // First tick: should reschedule.
-    tick(&s, &h).await;
-    let r = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(r.state, InstanceState::Scheduled);
+    let mut reschedules = 0;
+    let mut final_state = None;
+    for _ in 0..10 {
+        tick(&s, &h).await;
+        let r = s.get_instance(inst.id).await.unwrap().unwrap();
+        match r.state {
+            InstanceState::Scheduled => {
+                reschedules += 1;
+                // Re-arm fire_at into the past so the next tick re-claims it.
+                s.update_instance_state(
+                    inst.id,
+                    InstanceState::Scheduled,
+                    Some(Utc::now() - chrono::Duration::seconds(1)),
+                )
+                .await
+                .unwrap();
+            }
+            other => {
+                final_state = Some(other);
+                break;
+            }
+        }
+    }
 
-    // Move fire_at to past and tick again: should still reschedule (fast path
-    // clears outputs so attempt stays at 0, never exhausting max_attempts).
-    s.update_instance_state(
-        inst.id,
-        InstanceState::Scheduled,
-        Some(Utc::now() - chrono::Duration::seconds(1)),
-    )
-    .await
-    .unwrap();
-    tick(&s, &h).await;
-    let r = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(r.state, InstanceState::Scheduled);
-
-    // Third tick: still reschedules.
-    s.update_instance_state(
-        inst.id,
-        InstanceState::Scheduled,
-        Some(Utc::now() - chrono::Duration::seconds(1)),
-    )
-    .await
-    .unwrap();
-    tick(&s, &h).await;
-    let r = s.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(r.state, InstanceState::Scheduled);
+    assert_eq!(
+        final_state,
+        Some(InstanceState::Failed),
+        "instance must reach Failed once max_attempts is exhausted, not retry forever"
+    );
+    // attempts 0,1,2 reschedule; the next tick (attempt 3 >= 3) fails.
+    assert_eq!(
+        reschedules, 3,
+        "should reschedule exactly max_attempts times"
+    );
 }
 
 /// 33. Instance `total_steps_executed` is incremented correctly.

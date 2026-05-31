@@ -116,6 +116,19 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
     // Body: either upload an artifact's bytes (raw or multipart) or send the
     // default JSON envelope.
     if let Some(u) = &upload {
+        // IDOR guard: artifact keys are `<instance_id>/<artifact_id>`. A
+        // workflow author / payload must not be able to read another
+        // instance's (potentially another tenant's) artifact by supplying a
+        // sibling key. Require the key to be owned by this instance.
+        if !artifact_key_owned_by(&u.key, ctx.instance_id) {
+            return Err(StepError::Permanent {
+                message: format!(
+                    "body_artifact key '{}' does not belong to this instance",
+                    u.key
+                ),
+                details: None,
+            });
+        }
         let bytes = ctx
             .storage
             .get_artifact(&u.key)
@@ -175,26 +188,21 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let content_length = resp.content_length().unwrap_or(0);
-    if content_length > MAX_RESPONSE_BYTES as u64 {
-        return Err(StepError::Permanent {
-            message: format!("tool response too large: {content_length} bytes exceeds 10MB limit"),
-            details: None,
-        });
-    }
-    let body_bytes = resp.bytes().await.map_err(|e| StepError::Retryable {
-        message: format!("tool_call body read error: {e}"),
-        details: None,
-    })?;
-    if body_bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(StepError::Permanent {
-            message: format!(
-                "tool response too large: {} bytes exceeds 10MB limit",
-                body_bytes.len()
-            ),
-            details: None,
-        });
-    }
+    // Stream the body with a hard cap so a chunked (no Content-Length)
+    // response can't OOM the worker before a post-read size check.
+    let body_bytes = crate::handlers::builtin::read_body_capped(resp, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|e| match e {
+            crate::handlers::builtin::BodyReadError::TooLarge(max) => StepError::Permanent {
+                message: format!("tool response too large: exceeds {max} byte limit"),
+                details: None,
+            },
+            crate::handlers::builtin::BodyReadError::Io(m) => StepError::Retryable {
+                message: format!("tool_call body read error: {m}"),
+                details: None,
+            },
+        })?;
+    let body_bytes = bytes::Bytes::from(body_bytes);
 
     // Store a successful binary response as a durable artifact and return its
     // ref. Error statuses fall through to the normal error mapping.
@@ -238,6 +246,14 @@ struct UploadBody {
     content_type: String,
     /// `Some((field, filename))` → multipart/form-data; `None` → raw body.
     multipart: Option<(String, String)>,
+}
+
+/// `true` if `key` (an artifact object key `<instance_id>/<artifact_id>`) is
+/// owned by `instance_id`. Used as an IDOR guard so a workflow can only read
+/// back its own artifacts, never a sibling instance's.
+fn artifact_key_owned_by(key: &str, instance_id: orch8_types::ids::InstanceId) -> bool {
+    let prefix = format!("{}/", instance_id.into_uuid());
+    key.starts_with(&prefix)
 }
 
 /// Parse the `body_artifact` param (a raw [`orch8_types::artifact::ArtifactRef`]
@@ -474,6 +490,23 @@ mod tests {
         assert_eq!(u.key, "i1/a1");
         assert_eq!(u.content_type, "image/png");
         assert!(u.multipart.is_none());
+    }
+
+    #[test]
+    fn artifact_key_owned_by_rejects_sibling_instance_keys() {
+        let me = InstanceId::new();
+        let other = InstanceId::new();
+        // My own artifact: allowed.
+        let mine = format!("{}/abc-123", me.into_uuid());
+        assert!(artifact_key_owned_by(&mine, me));
+        // Another instance's artifact (IDOR attempt): rejected.
+        let theirs = format!("{}/abc-123", other.into_uuid());
+        assert!(!artifact_key_owned_by(&theirs, me));
+        // A bare/foreign key with no owning prefix: rejected.
+        assert!(!artifact_key_owned_by("just-an-id", me));
+        // A key that merely *contains* my id but isn't prefixed by it: rejected.
+        let sneaky = format!("evil/{}/x", me.into_uuid());
+        assert!(!artifact_key_owned_by(&sneaky, me));
     }
 
     #[test]

@@ -32,6 +32,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`StorageError` taxonomy**: split the catch-all `Unsupported` into permanent `Unsupported` (not configured / not supported → maps to a non-retryable step error and HTTP 500) vs transient `Backend` (object-store network/throttle failure → retryable, HTTP 503). Fixes artifact misconfiguration retrying forever.
 - `tool_call` `response_as:"artifact"` with a non-idempotent method requires an idempotent endpoint: if the artifact store fails *after* a successful request, the step retries and re-sends.
 
+### Fixed
+
+- **Infinite retry on the fast path (never reached the DLQ)**: a retryable step failure in the flat-sequence scheduler deleted *all* of the block's outputs without persisting a retry marker, so `compute_attempt` reset to `0` every tick and `attempt >= max_attempts` was never true — the step retried forever and never failed the instance. The fast path now writes a `__retry__` marker (mirroring the tree evaluator) so the attempt counter advances and the instance fails after `max_attempts`. Retry markers are excluded from the completed-block set (SQLite + Postgres) so the block still re-executes, while the `__in_progress__` crash-recovery sentinel still counts as completed.
+- **Response-body OOM**: `http_request` and `tool_call` checked `Content-Length` (trivially omitted by a chunked response) and then buffered the *entire* body before the post-read size check, so an endpoint streaming gigabytes could OOM the worker. Both now stream with a hard 10 MB cap that aborts mid-stream, bounding peak memory.
+
+### Performance
+
+- **SLA deadline check**: `check_sla_deadlines` re-flattened the whole block tree (`flatten_blocks`) on every iteration of the evaluate loop (up to 200×). It now reuses the `block_map` the evaluator already builds once per evaluation — removing an O(blocks) allocation + hash per iteration on composite instances.
+
+### Security
+
+- **SSRF via HTTP redirects**: the shared outbound HTTP client (`http_request`, `tool_call`, `agent`, `mcp_call`) followed redirects with reqwest's default policy, re-validating nothing — a public URL could `302 → http://169.254.169.254/…` and reach cloud-metadata/internal hosts. The client now re-checks every redirect hop and refuses redirects to non-`http(s)` schemes or private/loopback/link-local IP literals (hop count also capped).
+- **`ORCH8_ALLOW_INTERNAL_URLS` fail-open**: the SSRF-bypass flag was enabled by `is_ok()` — true for any value, including an empty / `0` / `false` leftover var. It now requires an explicit truthy value (`1`/`true`).
+- **Artifact IDOR in `tool_call`**: a `body_artifact.key` was fetched verbatim, so a workflow could read another instance's (potentially another tenant's) artifact via a sibling key. The key must now be prefixed by the current instance's id.
+- **Webhook future-timestamp window**: inbound webhook replay protection accepted timestamps up to 5 minutes in the *future* (symmetric `abs_diff`). Future skew is now capped at 60 s while the 5-minute past window is retained, shrinking the window for pre-dated captured payloads.
+
 ## [0.5.0] — 2026-05-20
 
 ### Added
