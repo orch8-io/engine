@@ -1129,8 +1129,12 @@ async fn process_instance(
 
         match outcome {
             StepOutcome::Completed => {
-                completed_blocks.push(step_def.id.clone());
-                completed_blocks.sort_unstable(); // Keep it sorted for binary_search
+                // Insert in sorted position (keeps the Vec sorted for
+                // binary_search without an O(N log N) re-sort per completion;
+                // dedups too).
+                if let Err(pos) = completed_blocks.binary_search(&step_def.id) {
+                    completed_blocks.insert(pos, step_def.id.clone());
+                }
 
                 // Re-read instance from storage so we don't clobber context
                 // mutations made during step execution (e.g. check_human_input's
