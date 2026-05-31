@@ -13,8 +13,9 @@ use crate::error::EngineError;
 use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
 
-/// Build a spawned child's [`ExecutionContext`] from its parent, seeded with the
-/// child's `input` and inheriting execution-mode invariants from the parent.
+/// Build a spawned child's [`ExecutionContext`](orch8_types::context::ExecutionContext)
+/// from its parent, seeded with the child's `input` and inheriting execution-mode
+/// invariants from the parent.
 ///
 /// Invariant: **a dry-run parent must only spawn dry-run children** — otherwise
 /// a simulation would launch a real sub-sequence. Extracted into a named,
