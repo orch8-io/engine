@@ -118,6 +118,10 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_MAX_INSTANCES_PER_TENANT` | `0` | Per-tenant claim limit (0 = unlimited) |
 | `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest |
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
+| `ORCH8_WORKER_REAPER_TICK_SECS` | `30` | How often the stale worker-task reaper runs (seconds) |
+| `ORCH8_WORKER_REAPER_STALE_SECS` | `60` | Claimed task is reclaimed after this long without a heartbeat (seconds) |
+| `ORCH8_NODE_REAPER_TICK_SECS` | `60` | How often the stale cluster-node reaper runs (seconds) |
+| `ORCH8_NODE_REAPER_STALE_SECS` | `120` | Cluster node is reaped after this long without a heartbeat (seconds) |
 | `ORCH8_EXTERNALIZE_THRESHOLD` | `0` | Externalize outputs larger than N bytes (0 = disabled) |
 | `ORCH8_WEBHOOK_URLS` | — | Comma-separated webhook endpoint URLs |
 

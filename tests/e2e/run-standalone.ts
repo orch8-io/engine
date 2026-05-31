@@ -25,6 +25,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SELF_MANAGED_SUITES, basenameOf } from "./self-managed.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,19 +35,23 @@ interface Suite {
   dbName: string;
 }
 
-// Keep the port range well away from the shared-runner default (18080) and
-// common app defaults. `run-e2e.ts` defaults to 18080; we start at 19001.
-const SUITES: Suite[] = [
-  { file: "resilience/persistence_recovery.test.ts", port: 19001, dbName: "orch8_std_persist" },
-  { file: "features/triggers.test.ts",               port: 19002, dbName: "orch8_std_triggers" },
-  { file: "signals/wait-signal.test.ts",             port: 19003, dbName: "orch8_std_waitsig" },
-  { file: "features/worker-dashboard.test.ts",       port: 19004, dbName: "orch8_std_dash" },
-  { file: "features/workers.test.ts",                port: 19005, dbName: "orch8_std_workers" },
-  // Boots its own server with ORCH8_ARTIFACT_BACKEND=local — the shared
-  // attach-mode server has no artifact backend (see run-e2e.ts
-  // SELF_MANAGED_SUITES), so `response_as: artifact` steps hang there.
-  { file: "handlers/artifacts.test.ts",              port: 19006, dbName: "orch8_std_artifacts" },
-];
+// Derive the suite list from the single source of truth (self-managed.ts),
+// auto-assigning a unique port and Postgres database to each. Ports start at
+// 19001 — well clear of the shared-runner default (18080) and common app
+// defaults. DB names are derived from the basename so two suites can't
+// collide. This replaces a hand-maintained list that drifted out of sync
+// with run-e2e.ts and silently dropped 17 suites from CI.
+const SUITES: Suite[] = SELF_MANAGED_SUITES.map((s, i) => ({
+  file: s.file,
+  port: 19001 + i,
+  dbName: `orch8_std_${basenameOf(s.file).replace(/\.test\.ts$/, "").replace(/[^a-z0-9]/gi, "_")}`,
+}));
+
+// Cap how many suites run at once. Each suite boots its own debug-build
+// server + Postgres DB; 20+ in parallel would exhaust a CI runner's RAM and
+// connection slots. A small pool keeps wall time low (≈ceil(N/limit) waves)
+// without thrashing. Override with ORCH8_E2E_CONCURRENCY (1 = fully serial).
+const CONCURRENCY = Math.max(1, Number(process.env.ORCH8_E2E_CONCURRENCY) || 6);
 
 const BASE_DB_URL =
   process.env.ORCH8_DATABASE_URL ||
@@ -187,22 +192,44 @@ function runSuite(suite: Suite): Promise<SuiteResult> {
 }
 
 console.log(
-  `runner: dispatching ${SUITES.length} self-managed suite(s) in parallel`,
+  `runner: dispatching ${SUITES.length} self-managed suite(s), ${CONCURRENCY} at a time`,
 );
 for (const s of SUITES) {
   console.log(`  [${suiteLabel(s).padEnd(LABEL_WIDTH)}] ${s.file}`);
 }
 ensureDatabases(SUITES);
 
+/**
+ * Run all suites through a fixed-size worker pool. Each of the `limit`
+ * workers pulls the next un-started suite until the queue drains, so at
+ * most `limit` servers are live at once. Results preserve completion order
+ * (the summary re-sorts for readability anyway).
+ */
+async function runPool(suites: Suite[], limit: number): Promise<SuiteResult[]> {
+  const results: SuiteResult[] = [];
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < suites.length) {
+      const suite = suites[next++]!;
+      results.push(await runSuite(suite));
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, suites.length) }, worker),
+  );
+  return results;
+}
+
 const start = Date.now();
-const results = await Promise.all(SUITES.map(runSuite));
+const results = await runPool(SUITES, CONCURRENCY);
 const wallMs = Date.now() - start;
 
 // Concise summary at the bottom so CI reviewers can see status at a glance
 // without scrolling through the prefixed output above.
 console.log("");
 console.log("runner: ───────────── summary ─────────────");
-for (const r of results) {
+const sorted = [...results].sort((a, b) => a.suite.file.localeCompare(b.suite.file));
+for (const r of sorted) {
   const status = r.code === 0 ? "PASS" : `FAIL(${r.code})`;
   console.log(`  ${status.padEnd(8)} ${suiteLabel(r.suite).padEnd(LABEL_WIDTH)}  ${r.suite.file}`);
 }

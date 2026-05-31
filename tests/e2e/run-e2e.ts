@@ -35,6 +35,7 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer, stopServer } from "./harness.ts";
 import type { ServerHandle } from "./harness.ts";
+import { SELF_MANAGED_BASENAMES } from "./self-managed.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.ORCH8_E2E_PORT) || 18080;
@@ -58,67 +59,11 @@ function fmtDuration(ms: number): string {
   return `${m}m${rem}s`;
 }
 
-// Suites that need their own server.
-//
-// Three reasons a suite lands here:
-//
-// 1. Server-lifecycle tests (persistence_recovery): the suite itself does
-//    stop/start mid-test, which is incompatible with attach-mode.
-//
-// 2. Suites exercising **globally-scoped** state — worker task queue,
-//    trigger definitions, signal inbox, worker dashboard. These tables
-//    aren't keyed by tenant_id, so accumulated rows from earlier suites
-//    in a shared server leak in and break assertions like
-//    `assert.equal(tasks.length, 1)`. A tenant prefix doesn't help; only
-//    a fresh server does.
-//
-// 3. Suites that **self-terminate the server**. The cluster drain test
-//    calls `POST /cluster/nodes/{id}/drain` on the shared server's own
-//    node_id; the engine's 10s heartbeat loop reads `should_drain=true`
-//    and cancels the shutdown token (orch8-engine/src/lib.rs:165-172),
-//    killing the shared server cleanly (code=0) mid-run. Only a sacrificial
-//    own-server can be drained safely.
-const SELF_MANAGED_SUITES = new Set<string>([
-  "persistence_recovery.test.ts",
-  "triggers.test.ts",
-  "wait-signal.test.ts",
-  "worker-dashboard.test.ts",
-  "workers.test.ts",
-  // Worker task queue — not keyed by tenant_id (see rule #2).
-  "worker_task_timeout.test.ts",
-  "worker_heartbeat_timeout.test.ts",
-  "retryable_false_open_circuit.test.ts",
-  "circuit_breaker_trip.test.ts",
-  "complex_patterns.test.ts",
-  // Signal inbox — not keyed by tenant_id.
-  "signal_ordering.test.ts",
-  "signal_during_finally.test.ts",
-  // Trigger definitions — globally scoped, leak across suites.
-  "emit_event_deep_chains.test.ts",
-  "emit_event_invalid_target.test.ts",
-  "emit_event_dedupe_scope.test.ts",
-  // Server-lifecycle tests (rule #1): require mid-test restart or env swap.
-  "encryption_key_rotation.test.ts",
-  "ab_split_determinism_restart.test.ts",
-  // Needs its own server started with ORCH8_ENCRYPTION_KEY set — the shared
-  // attach-mode server was launched without a key.
-  "encryption_at_rest.test.ts",
-  "credential_encryption_at_rest.test.ts",
-  // Spawns its own server with ORCH8_API_KEY and
-  // ORCH8_REQUIRE_TENANT_HEADER set — shared attach-mode server has
-  // neither, so auth enforcement can't be observed there.
-  "api_key_auth_enforcement.test.ts",
-  // Spawns its own server with ORCH8_ACTIVEPIECES_URL pointed at a
-  // local mock sidecar — the env override is ignored in attach mode.
-  "activepieces_scenarios.test.ts",
-  // Spawns its own server with ORCH8_ARTIFACT_BACKEND=local + a temp
-  // ORCH8_ARTIFACT_PATH — the shared attach-mode server has no artifact
-  // backend, so `response_as: artifact` steps hang and the instance never
-  // completes (20s waitForState timeout).
-  "artifacts.test.ts",
-  // Self-terminates the shared server (rule #3): drains its own node_id.
-  "cluster.test.ts",
-]);
+// Suites that need their own server are excluded from the shared run and
+// dispatched by `run-standalone.ts` instead. The list lives in
+// `self-managed.ts` (single source of truth) so the two runners can't
+// drift — see that file for why each suite qualifies.
+const SELF_MANAGED_SUITES = SELF_MANAGED_BASENAMES;
 
 // Directories whose tests are organizational scaffolding, not runnable yet.
 // Skip them so empty scaffolds don't fail the runner. Remove once they have
