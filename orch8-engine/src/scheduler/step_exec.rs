@@ -159,6 +159,42 @@ pub(super) async fn check_step_rate_limit(
 /// Visibility: `pub` so integration tests under `tests/human_input_coverage.rs`
 /// can drive the signal-validation path directly without stringing up the full
 /// tick loop. Still called exclusively from `process_step_block` in-crate.
+/// Accept a human-input `value` for a gated step: persist the canonical
+/// `{ "value": <choice> }` block output and merge it into
+/// `context.data[store_key]`. Shared by the real signal path and the dry-run
+/// auto-approve path so both produce identical post-approval state.
+async fn accept_human_input(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    value: String,
+) -> Result<(), EngineError> {
+    let store_key = human_def
+        .store_as
+        .clone()
+        .unwrap_or_else(|| step_def.id.as_str().to_owned());
+    let output_json = serde_json::json!({ "value": value.clone() });
+
+    let output = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: step_def.id.clone(),
+        output: output_json.clone(),
+        output_ref: None,
+        output_size: u32::try_from(output_json.to_string().len()).unwrap_or(u32::MAX),
+        attempt: 0,
+        created_at: chrono::Utc::now(),
+    };
+    storage.save_block_output(&output).await?;
+
+    // Per-key JSONB merge — the rest of `context.data` is preserved.
+    storage
+        .merge_context_data(instance.id, &store_key, &serde_json::Value::String(value))
+        .await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn check_human_input(
     storage: &dyn StorageBackend,
@@ -166,6 +202,29 @@ pub async fn check_human_input(
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
 ) -> Result<bool, EngineError> {
+    // Dry-run auto-approve: resolve the gate with the default (first) choice so
+    // the simulation flows past human gates instead of pausing. Behaviorally
+    // identical to a received valid signal carrying that choice. Only when both
+    // dry_run and dry_run_auto_approve are set on the instance.
+    //
+    // Note: always picks the first effective choice, so a dry-run only exercises
+    // the default branch of any post-gate routing — not the alternatives.
+    if instance.context.runtime.dry_run && instance.context.runtime.dry_run_auto_approve {
+        let value = human_def
+            .effective_choices()
+            .into_iter()
+            .next()
+            .map_or_else(|| "approved".to_string(), |c| c.value);
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            choice = %value,
+            "dry-run: auto-approving human gate with default choice"
+        );
+        accept_human_input(storage, instance, step_def, human_def, value).await?;
+        return Ok(false); // Continue execution
+    }
+
     let mut signal_name = String::with_capacity(12 + step_def.id.as_str().len());
     signal_name.push_str("human_input:");
     signal_name.push_str(step_def.id.as_str());
@@ -196,38 +255,12 @@ pub async fn check_human_input(
                 };
 
                 // Valid input — canonical output shape and context merge.
-                let value = value.to_string();
-                let store_key = human_def
-                    .store_as
-                    .clone()
-                    .unwrap_or_else(|| step_def.id.as_str().to_owned());
-                let output_json = serde_json::json!({"value": value.clone()});
-
-                let output = orch8_types::output::BlockOutput {
-                    id: uuid::Uuid::now_v7(),
-                    instance_id: instance.id,
-                    block_id: step_def.id.clone(),
-                    output: output_json.clone(),
-                    output_ref: None,
-                    output_size: u32::try_from(output_json.to_string().len()).unwrap_or(u32::MAX),
-                    attempt: 0,
-                    created_at: chrono::Utc::now(),
-                };
-                storage.save_block_output(&output).await?;
-
-                // Merge into `context.data[store_key]`. `merge_context_data` is a
-                // per-key JSONB merge — the rest of `context.data` is preserved.
-                // (Compare `StorageBackend::update_instance_context`, which is a
-                // full replacement; see `storage_integration.rs` §5.2.)
-                storage
-                    .merge_context_data(instance.id, &store_key, &serde_json::Value::String(value))
+                accept_human_input(storage, instance, step_def, human_def, value.to_string())
                     .await?;
-
                 storage.mark_signal_delivered(signal.id).await?;
                 debug!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
-                    store_key = %store_key,
                     "human input accepted"
                 );
                 return Ok(false); // Continue execution

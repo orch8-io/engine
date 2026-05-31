@@ -13,6 +13,25 @@ use crate::error::EngineError;
 use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
 
+/// Build a spawned child's [`ExecutionContext`] from its parent, seeded with the
+/// child's `input` and inheriting execution-mode invariants from the parent.
+///
+/// Invariant: **a dry-run parent must only spawn dry-run children** — otherwise
+/// a simulation would launch a real sub-sequence. Extracted into a named,
+/// unit-tested function so this guarantee can't be silently dropped by a future
+/// `..Default::default()` cleanup.
+fn child_context_from(
+    parent: &orch8_types::context::ExecutionContext,
+    input: serde_json::Value,
+) -> orch8_types::context::ExecutionContext {
+    let mut ctx = orch8_types::context::ExecutionContext {
+        data: input,
+        ..Default::default()
+    };
+    ctx.runtime.dry_run = parent.runtime.dry_run;
+    ctx
+}
+
 /// Dispatch a single execution node to the appropriate block handler.
 /// Returns `true` if the instance has more work to do.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -228,10 +247,7 @@ pub(super) async fn dispatch_block(
                     })?;
 
                 let now = chrono::Utc::now();
-                let child_context = orch8_types::context::ExecutionContext {
-                    data: ss_def.input.clone(),
-                    ..Default::default()
-                };
+                let child_context = child_context_from(&instance.context, ss_def.input.clone());
 
                 let child = orch8_types::instance::TaskInstance {
                     id: orch8_types::ids::InstanceId::new(),
@@ -259,5 +275,26 @@ pub(super) async fn dispatch_block(
             }
             Ok(true) // Re-schedule to check child status later
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::child_context_from;
+    use orch8_types::context::ExecutionContext;
+    use serde_json::json;
+
+    #[test]
+    fn child_inherits_dry_run_from_parent() {
+        // A dry-run parent must spawn dry-run children (and vice-versa).
+        let mut dry_parent = ExecutionContext::default();
+        dry_parent.runtime.dry_run = true;
+        let child = child_context_from(&dry_parent, json!({ "x": 1 }));
+        assert!(child.runtime.dry_run, "dry-run must propagate to children");
+        assert_eq!(child.data, json!({ "x": 1 }));
+
+        let real_parent = ExecutionContext::default();
+        let child = child_context_from(&real_parent, json!({}));
+        assert!(!child.runtime.dry_run, "a real parent spawns real children");
     }
 }

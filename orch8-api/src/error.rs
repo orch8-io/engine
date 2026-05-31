@@ -47,7 +47,9 @@ impl ApiError {
             StorageError::TerminalTarget { entity: e, id } => {
                 Self::AlreadyExists(format!("{e} {id} is in a terminal state"))
             }
-            StorageError::Connection(msg) => Self::Unavailable(msg),
+            // Connection drops and transient external-backend (object store)
+            // failures are both 503 — retryable, not a server bug.
+            StorageError::Connection(msg) | StorageError::Backend(msg) => Self::Unavailable(msg),
             StorageError::PoolExhausted => Self::Unavailable("pool exhausted".into()),
             other => Self::Internal(format!("{entity}: {other}")),
         }

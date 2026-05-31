@@ -97,6 +97,15 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
 
     let (scheme, addr, method) = parse_endpoint(endpoint)?;
 
+    // Dry-run: endpoint parsed/validated; skip the gRPC call.
+    if ctx.is_dry_run() {
+        return Ok(crate::handlers::util::dry_run_stub(
+            "grpc_plugin",
+            json!({ "endpoint": endpoint, "method": method }),
+            json!({ "result": Value::Null }),
+        ));
+    }
+
     // SSRF guard: the gRPC endpoint is ultimately POSTed to via reqwest, so
     // it shares the HTTP handler's threat model. `is_url_safe` only accepts
     // http/https schemes, so the `grpc://` prefix silently bypassed the

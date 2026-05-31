@@ -111,6 +111,15 @@ pub fn parse_handler(handler: &str) -> Result<(&str, &str), StepError> {
 pub async fn handle_ap(ctx: StepContext, handler_name: &str) -> Result<Value, StepError> {
     let (piece, action) = parse_handler(handler_name)?;
 
+    // Dry-run: piece/action parsed and validated; skip the sidecar dispatch.
+    if ctx.is_dry_run() {
+        return Ok(super::util::dry_run_stub(
+            "activepieces",
+            json!({ "piece": piece, "action": action }),
+            json!({ "result": Value::Null }),
+        ));
+    }
+
     // `auth` and `props` travel verbatim from the step's params. Everything
     // else in `ctx.params` is dropped — the sidecar doesn't need orch8's
     // internal `_grpc_endpoint`/`_wasm_*` metadata fields.

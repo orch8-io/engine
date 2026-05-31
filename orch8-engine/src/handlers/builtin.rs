@@ -123,6 +123,14 @@ pub(crate) async fn is_url_safe(url: &str) -> bool {
     safe
 }
 
+/// Test-only: mark a URL as safe by seeding the SSRF cache, so handler unit
+/// tests can point at a loopback mock without mutating `ORCH8_ALLOW_INTERNAL_URLS`
+/// (env mutation is a data race across the parallel test threads).
+#[cfg(test)]
+pub(crate) async fn mark_url_safe_for_test(url: &str) {
+    url_safety_cache().insert(url.to_string(), true).await;
+}
+
 /// Register all built-in handlers on the given registry.
 ///
 /// Handlers that need access to storage (`emit_event`, `send_signal`,
@@ -136,6 +144,11 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("http_request", handle_http_request);
     registry.register("llm_call", super::llm::handle_llm_call);
     registry.register("tool_call", super::tool_call::handle_tool_call);
+    registry.register("mcp_call", super::mcp::handle_mcp_call);
+    registry.register("agent", super::agent::handle_agent);
+    registry.register("embed", super::memory::handle_embed);
+    registry.register("memory_store", super::memory::handle_memory_store);
+    registry.register("memory_search", super::memory::handle_memory_search);
     registry.register("human_review", super::human_review::handle_human_review);
     registry.register("self_modify", super::self_modify::handle_self_modify);
     registry.register("emit_event", super::emit_event::handle_emit_event);
@@ -150,6 +163,8 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("transform", handle_transform);
     registry.register("assert", handle_assert);
     registry.register("merge_state", handle_merge_state);
+    registry.register("blob_put", super::blob::handle_blob_put);
+    registry.register("blob_get", super::blob::handle_blob_get);
 }
 
 /// No-op handler. Always succeeds with an empty result.

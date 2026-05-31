@@ -291,13 +291,27 @@ fn lint_handler_params(
     warnings: &mut Vec<LintWarning>,
 ) {
     match handler {
-        "http_request" | "tool_call" => {
+        "http_request" | "tool_call" | "mcp_call" => {
             check_required_str(block_id, handler, params, "url", warnings);
         }
         "llm_call" if params.get("messages").is_none() && params.get("system").is_none() => {
             warnings.push(LintWarning {
                 block_id: block_id.into(),
                 message: "llm_call: requires at least `messages` or `system` param".into(),
+            });
+        }
+        "agent" if params.get("goal").is_none() && params.get("messages").is_none() => {
+            warnings.push(LintWarning {
+                block_id: block_id.into(),
+                message: "agent: requires at least `goal` or `messages` param".into(),
+            });
+        }
+        "agent" if params.get("tools").is_some() && params.get("tool_dispatch").is_none() => {
+            warnings.push(LintWarning {
+                block_id: block_id.into(),
+                message: "agent: `tools` is set but `tool_dispatch` is missing — the model \
+                          cannot execute any tool it requests"
+                    .into(),
             });
         }
         "send_signal" => {
@@ -316,6 +330,24 @@ fn lint_handler_params(
         }
         "get_state" | "delete_state" => {
             check_required_str(block_id, handler, params, "key", warnings);
+        }
+        "embed" => {
+            check_required(block_id, handler, params, "input", warnings);
+        }
+        "memory_store" if params.get("text").is_none() && params.get("embedding").is_none() => {
+            warnings.push(LintWarning {
+                block_id: block_id.into(),
+                message: "memory_store: requires `text` or a precomputed `embedding`".into(),
+            });
+        }
+        "memory_search"
+            if params.get("query").is_none() && params.get("query_embedding").is_none() =>
+        {
+            warnings.push(LintWarning {
+                block_id: block_id.into(),
+                message: "memory_search: requires `query` or a precomputed `query_embedding`"
+                    .into(),
+            });
         }
         "assert" => {
             check_required_str(block_id, handler, params, "condition", warnings);
@@ -947,6 +979,107 @@ mod tests {
         let w = lint_sequence(&seq);
         assert_eq!(w.len(), 1);
         assert!(w[0].message.contains("`trigger_slug`"));
+    }
+
+    #[test]
+    fn query_instance_missing_instance_id() {
+        let seq = sample_seq(vec![make_step("s1", "query_instance", json!({}))]);
+        let w = lint_sequence(&seq);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("`instance_id`"));
+    }
+
+    #[test]
+    fn query_instance_empty_instance_id_warned() {
+        let seq = sample_seq(vec![make_step(
+            "s1",
+            "query_instance",
+            json!({ "instance_id": "   " }),
+        )]);
+        let w = lint_sequence(&seq);
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].message.contains("empty"),
+            "blank instance_id should warn as empty, got: {}",
+            w[0].message
+        );
+    }
+
+    #[test]
+    fn send_signal_empty_instance_id_warned() {
+        // signal_type present so only the empty instance_id warning fires.
+        let seq = sample_seq(vec![make_step(
+            "s1",
+            "send_signal",
+            json!({ "instance_id": "", "signal_type": "cancel" }),
+        )]);
+        let w = lint_sequence(&seq);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].message.contains("empty"));
+    }
+
+    #[test]
+    fn handler_params_valid_produce_no_warnings() {
+        // The three storage-backed builtins with required params: when those
+        // params are present and non-empty, the linter must stay silent.
+        let seq = sample_seq(vec![
+            make_step(
+                "s1",
+                "send_signal",
+                json!({ "instance_id": "abc", "signal_type": "cancel" }),
+            ),
+            make_step("s2", "emit_event", json!({ "trigger_slug": "on-order" })),
+            make_step("s3", "query_instance", json!({ "instance_id": "abc" })),
+        ]);
+        let w = lint_sequence(&seq);
+        assert!(w.is_empty(), "expected no warnings, got: {w:?}");
+    }
+
+    #[test]
+    fn handler_params_template_values_skip_required_lint() {
+        // A `{{...}}` template stands in for a value resolved at runtime —
+        // required-param lint must not fire on it (the value isn't knowable
+        // statically). Covers the `is_template_value` short-circuit for all
+        // three handlers.
+        let seq = sample_seq(vec![
+            make_step(
+                "s1",
+                "send_signal",
+                json!({
+                    "instance_id": "{{context.data.target}}",
+                    "signal_type": "{{context.data.sig}}",
+                }),
+            ),
+            make_step(
+                "s2",
+                "emit_event",
+                json!({ "trigger_slug": "{{context.data.slug}}" }),
+            ),
+            make_step(
+                "s3",
+                "query_instance",
+                json!({ "instance_id": "{{context.data.id}}" }),
+            ),
+        ]);
+        let w = lint_sequence(&seq);
+        assert!(
+            w.is_empty(),
+            "template values must skip required-param lint, got: {w:?}"
+        );
+    }
+
+    #[test]
+    fn self_modify_has_no_param_lint() {
+        // self_modify validates its `blocks` param at runtime in the handler
+        // (parsing each into a BlockDefinition), not via the static linter.
+        // This test documents that contract: an empty-param self_modify step
+        // produces no lint warnings.
+        let seq = sample_seq(vec![make_step("s1", "self_modify", json!({}))]);
+        let w = lint_sequence(&seq);
+        assert!(
+            w.is_empty(),
+            "self_modify is not statically linted, got: {w:?}"
+        );
     }
 
     #[test]

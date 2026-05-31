@@ -596,6 +596,11 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "http_request",
     "llm_call",
     "tool_call",
+    "mcp_call",
+    "agent",
+    "embed",
+    "memory_store",
+    "memory_search",
     "human_review",
     "self_modify",
     "emit_event",
@@ -607,6 +612,8 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "transform",
     "assert",
     "merge_state",
+    "blob_put",
+    "blob_get",
 ];
 
 impl SequenceDefinition {

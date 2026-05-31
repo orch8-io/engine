@@ -23,6 +23,7 @@ use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::Engine;
 use orch8_grpc::service::Orch8GrpcService;
 use orch8_grpc::Orch8ServiceServer;
+use orch8_storage::artifacts::{ObjectArtifactStore, S3Config};
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::StorageBackend;
@@ -245,10 +246,61 @@ fn validate_auth_config(api_key: &str, insecure: bool, cors_origins: &str) -> an
     Ok(())
 }
 
+/// Build the durable artifact backend from config, if enabled.
+/// In-memory is intentionally not selectable here — only durable backends.
+fn build_artifact_store(config: &EngineConfig) -> anyhow::Result<Option<Arc<ObjectArtifactStore>>> {
+    use orch8_types::config::ArtifactBackend;
+    let a = &config.artifacts;
+    // Typed parse — a typo in `backend` fails fast here with a clear message.
+    let kind = a.backend_kind().map_err(|e| anyhow::anyhow!(e))?;
+    match kind {
+        ArtifactBackend::None => Ok(None),
+        ArtifactBackend::Local => {
+            // Require an absolute path: a relative path resolves against the
+            // process CWD, which under systemd/containers is rarely what the
+            // operator intends and compounds the ephemeral-FS hazard below.
+            let path = std::path::Path::new(&a.path);
+            if !path.is_absolute() {
+                anyhow::bail!(
+                    "artifacts.path must be absolute for the local backend (got {:?}); \
+                     a relative path resolves against the process working directory",
+                    a.path
+                );
+            }
+            let store = ObjectArtifactStore::local(&a.path)
+                .map_err(|e| anyhow::anyhow!("artifact backend (local): {e}"))?;
+            // Durability of the local backend depends on the filesystem being
+            // persistent. Warn loudly so cloud/ephemeral deployments don't
+            // silently lose artifacts on restart — use S3/R2 there.
+            tracing::warn!(
+                path = %a.path,
+                "Artifacts: local filesystem backend — durable ONLY on a persistent volume. \
+                 On ephemeral container filesystems (Cloud Run, k8s without a PVC) artifacts \
+                 are lost on restart; use the S3 backend for cloud deployments."
+            );
+            Ok(Some(Arc::new(store)))
+        }
+        ArtifactBackend::S3 => {
+            let store = ObjectArtifactStore::s3(&S3Config {
+                bucket: a.s3_bucket.clone(),
+                region: a.s3_region.clone(),
+                endpoint: a.s3_endpoint.clone(),
+                access_key_id: a.s3_access_key_id.expose().to_string(),
+                secret_access_key: a.s3_secret_access_key.expose().to_string(),
+                allow_http: a.s3_allow_http,
+            })
+            .map_err(|e| anyhow::anyhow!("artifact backend (s3): {e}"))?;
+            tracing::info!(bucket = %a.s3_bucket, "Artifacts: S3-compatible backend");
+            Ok(Some(Arc::new(store)))
+        }
+    }
+}
+
 async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBackend>> {
+    let artifacts = build_artifact_store(config)?;
     if config.database.backend == "sqlite" {
         let url = config.database.url.expose();
-        let sqlite = if url == "sqlite::memory:" || url.is_empty() {
+        let mut sqlite = if url == "sqlite::memory:" || url.is_empty() {
             SqliteStorage::in_memory()
                 .await
                 .context("Failed to create in-memory SQLite storage")?
@@ -257,6 +309,9 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
                 .await
                 .context("Failed to open SQLite database")?
         };
+        if let Some(store) = artifacts {
+            sqlite = sqlite.with_artifact_store(store);
+        }
         tracing::info!("Connected to SQLite");
         Ok(Arc::new(sqlite))
     } else {
@@ -266,7 +321,7 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
                  file) to a PostgreSQL connection string, or set backend=\"sqlite\" for local use."
             );
         }
-        let pg = PostgresStorage::new(
+        let mut pg = PostgresStorage::new(
             config.database.url.expose(),
             config.database.max_connections,
             config.database.search_path.as_deref(),
@@ -281,6 +336,9 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
                 .await
                 .context("Failed to run migrations")?;
             tracing::info!("Migrations applied");
+        }
+        if let Some(store) = artifacts {
+            pg = pg.with_artifact_store(store);
         }
         Ok(Arc::new(pg))
     }
@@ -454,7 +512,37 @@ fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
     Ok(config)
 }
 
+#[allow(clippy::too_many_lines)]
 fn apply_env_overrides(config: &mut EngineConfig) {
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
+        config.artifacts.backend = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_PATH") {
+        config.artifacts.path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_BUCKET") {
+        config.artifacts.s3_bucket = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_REGION") {
+        config.artifacts.s3_region = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_ENDPOINT") {
+        config.artifacts.s3_endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_ACCESS_KEY_ID") {
+        config.artifacts.s3_access_key_id = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_SECRET_ACCESS_KEY") {
+        config.artifacts.s3_secret_access_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_ALLOW_HTTP") {
+        config.artifacts.s3_allow_http = val == "true" || val == "1";
+    }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_RETENTION_SECS") {
+        if let Ok(secs) = val.parse::<u64>() {
+            config.engine.artifact_retention_secs = secs;
+        }
+    }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
         config.database.backend = val;
     }
@@ -513,6 +601,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
         config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
+    }
+    if let Ok(val) = std::env::var("ORCH8_WEBHOOK_SECRET") {
+        config.engine.webhooks.secret = (!val.is_empty()).then(|| val.into());
     }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();

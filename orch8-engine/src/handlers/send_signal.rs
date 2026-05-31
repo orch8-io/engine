@@ -58,6 +58,16 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
         _ => return Err(permanent("target instance not found")),
     }
 
+    // Dry-run: signal_type and the cross-aggregate target (exists + same tenant)
+    // are now validated; skip only the enqueue.
+    if ctx.is_dry_run() {
+        return Ok(crate::handlers::util::dry_run_stub(
+            "send_signal",
+            json!({ "instance_id": target_id.to_string() }),
+            json!({ "signal_id": Value::Null }),
+        ));
+    }
+
     let signal = Signal {
         id: Uuid::now_v7(),
         instance_id: target_id,
@@ -193,6 +203,54 @@ mod tests {
             matches!(err, StepError::Permanent { .. }),
             "expected Permanent, got: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_validates_target_but_enqueues_nothing() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        let target = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        storage.create_instance(&target).await.unwrap();
+
+        // validate-then-skip: target existence + tenant are validated; no signal
+        // is enqueued.
+        let mut ctx = mk_ctx(
+            &caller,
+            storage_dyn.clone(),
+            json!({ "instance_id": target.id.to_string(), "signal_type": "cancel" }),
+        );
+        ctx.context.runtime.dry_run = true;
+        let out = handle_send_signal(ctx).await.unwrap();
+        assert_eq!(out["dry_run"], true);
+        assert_eq!(out["handler"], "send_signal");
+        assert!(out["signal_id"].is_null());
+        // No signal was actually enqueued on the target.
+        assert!(storage_dyn
+            .get_pending_signals(target.id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn dry_run_surfaces_missing_target() {
+        // validate-then-skip: a dry-run must still reject a bad target.
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        let mut ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "instance_id": InstanceId::new().to_string(), "signal_type": "cancel" }),
+        );
+        ctx.context.runtime.dry_run = true;
+        assert!(matches!(
+            handle_send_signal(ctx).await.unwrap_err(),
+            StepError::Permanent { .. }
+        ));
     }
 
     #[tokio::test]

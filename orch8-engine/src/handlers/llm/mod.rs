@@ -103,7 +103,17 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 /// in order, attempting the call. On failure, tries the next provider.
 /// The output includes a `tried` array listing providers attempted in order.
 pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
+    let dry = ctx.is_dry_run();
+
     if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
+        if dry {
+            // Validate before skipping: an empty providers array is a config
+            // error a dry-run should surface.
+            if providers.is_empty() {
+                return Err(permanent("providers array is empty".to_string()));
+            }
+            return Ok(llm_dry_run_stub(&ctx.params));
+        }
         return handle_llm_call_failover(&ctx.params, providers).await;
     }
 
@@ -113,6 +123,8 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or("openai");
 
+    // Resolve + validate (api key present, base URL allowed) BEFORE the
+    // dry-run skip, so a dry-run still catches missing keys / blocked URLs.
     let api_key = resolve_api_key(&ctx.params, provider)?;
     let base = resolve_base_url(&ctx.params, provider);
 
@@ -120,11 +132,32 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
         return Err(permanent(format!("base_url is not allowed: {base}")));
     }
 
+    // Dry-run: validation passed; skip only the model call. Mirror the output
+    // shape (empty assistant message) so downstream templates resolve.
+    if dry {
+        return Ok(llm_dry_run_stub(&ctx.params));
+    }
+
     if provider == "anthropic" {
         anthropic::call_anthropic(&ctx.params, &api_key, &base).await
     } else {
         openai::call_openai_compat(&ctx.params, &api_key, &base, provider).await
     }
+}
+
+/// Canonical dry-run stub for `llm_call`, echoing the requested model.
+fn llm_dry_run_stub(params: &Value) -> Value {
+    let model = params.get("model").cloned().unwrap_or(Value::Null);
+    super::util::dry_run_stub(
+        "llm_call",
+        Value::Null,
+        json!({
+            "message": { "role": "assistant", "content": "" },
+            "model": model,
+            "finish_reason": "dry_run",
+            "usage": {},
+        }),
+    )
 }
 
 /// Default per-provider timeout in failover mode.
@@ -272,6 +305,38 @@ mod tests {
             .unwrap()
             .block_on(handle_llm_call_failover(&json!({}), &[]));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dry_run_skips_model_call() {
+        use std::sync::Arc;
+        // validate-then-skip resolves api_key + checks base_url safety BEFORE
+        // skipping, so the dry-run must supply a valid (safe) config. Seed the
+        // SSRF allowlist for the loopback base so no real DNS/call happens.
+        let base = "http://127.0.0.1:1";
+        super::super::builtin::mark_url_safe_for_test(base).await;
+        let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let mut ctx = StepContext {
+            instance_id: orch8_types::ids::InstanceId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            block_id: orch8_types::ids::BlockId::new("b"),
+            params: json!({ "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base }),
+            context: orch8_types::context::ExecutionContext::default(),
+            attempt: 0,
+            storage,
+            wait_for_input: None,
+        };
+        ctx.context.runtime.dry_run = true;
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["dry_run"], true);
+        assert_eq!(out["handler"], "llm_call");
+        assert_eq!(out["model"], "gpt-4o");
+        assert_eq!(out["finish_reason"], "dry_run");
+        assert_eq!(out["message"]["content"], "");
     }
 
     #[test]

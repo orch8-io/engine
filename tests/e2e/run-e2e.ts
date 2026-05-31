@@ -96,6 +96,7 @@ const SELF_MANAGED_SUITES = new Set<string>([
   // Trigger definitions — globally scoped, leak across suites.
   "emit_event_deep_chains.test.ts",
   "emit_event_invalid_target.test.ts",
+  "emit_event_dedupe_scope.test.ts",
   // Server-lifecycle tests (rule #1): require mid-test restart or env swap.
   "encryption_key_rotation.test.ts",
   "ab_split_determinism_restart.test.ts",

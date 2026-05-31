@@ -69,8 +69,13 @@ aes-gcm = "0.10"
 base64 = "0.22"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "multipart"] }
 url = "2"
+
+# Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
+object_store = { version = "0.11", features = ["aws"] }
+futures = "0.3"
+bytes = "1"
 
 # Streaming
 tokio-stream = "0.1"
@@ -81,6 +86,7 @@ cron = "0.15"
 moka = { version = "0.12", features = ["future", "sync"] }
 subtle = "2"
 sha2 = "0.10"
+hmac = "0.12"
 tikv-jemallocator = "0.6"
 async-nats = "0.47"
 notify = { version = "8", features = ["serde"] }

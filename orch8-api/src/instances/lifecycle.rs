@@ -18,6 +18,25 @@ use super::types::{
 use crate::error::ApiError;
 use crate::AppState;
 
+/// Scope an idempotency key by execution mode. Non-empty keys for dry-runs are
+/// prefixed so a real run reusing the same key isn't deduplicated to a prior
+/// simulation (see E1). Empty / absent keys are preserved verbatim so the
+/// existing empty-key unique-constraint semantics are unchanged.
+///
+/// Edge case (accepted): a *real* run whose key is literally `dryrun:<x>` shares
+/// the dedup namespace of a dry-run with key `<x>`. Harmless in practice — caller
+/// keys are opaque and this collision only affects at-most-once dedup, never
+/// correctness of execution.
+fn mode_scoped_idempotency_key(key: Option<&str>, dry_run: bool) -> Option<String> {
+    key.map(|k| {
+        if !k.is_empty() && dry_run {
+            format!("dryrun:{k}")
+        } else {
+            k.to_string()
+        }
+    })
+}
+
 #[utoipa::path(post, path = "/instances", tag = "instances",
     request_body = CreateInstanceRequest,
     responses(
@@ -64,8 +83,24 @@ pub async fn create_instance(
     // Reject oversized contexts before they hit the DB.
     req.context.check_size(state.max_context_bytes)?;
 
-    // Idempotency check: if key exists, return existing instance id.
-    if let Some(ref idem_key) = req.idempotency_key {
+    // Dry-run is requested per run; stamp it onto the instance's runtime
+    // context so every handler sees it (and it survives checkpoint/replay).
+    let mut context = req.context;
+    context.runtime.dry_run = req.dry_run || context.runtime.dry_run;
+    context.runtime.dry_run_auto_approve =
+        req.dry_run_auto_approve || context.runtime.dry_run_auto_approve;
+    let dry_run = context.runtime.dry_run;
+
+    // Idempotency identity must include the execution mode: otherwise a real
+    // run reusing a dry-run's key would be silently deduplicated to the
+    // simulation (the real workflow never executes). Namespace non-empty keys
+    // by mode; an empty key is preserved verbatim so the existing empty-key
+    // unique-constraint behavior is unchanged.
+    let effective_idem = mode_scoped_idempotency_key(req.idempotency_key.as_deref(), dry_run);
+
+    // Idempotency check: only for non-empty keys (empty keys are not a dedup
+    // lookup — they rely on the DB unique constraint).
+    if let Some(ref idem_key) = effective_idem {
         if !idem_key.is_empty() {
             if let Some(existing) = state
                 .storage
@@ -91,10 +126,10 @@ pub async fn create_instance(
         priority: req.priority,
         timezone: req.timezone,
         metadata: req.metadata,
-        context: req.context,
+        context,
         concurrency_key: req.concurrency_key,
         max_concurrency: req.max_concurrency,
-        idempotency_key: req.idempotency_key,
+        idempotency_key: effective_idem,
         session_id: None,
         parent_instance_id: None,
         created_at: now,
@@ -106,6 +141,13 @@ pub async fn create_instance(
         .create_instance(&instance)
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+    // Surface dry-run mode in telemetry so simulated runs are distinguishable
+    // from real ones (the flag is also queryable on the instance's
+    // `context.runtime.dry_run`).
+    if instance.context.runtime.dry_run {
+        tracing::info!(instance_id = %instance.id, dry_run = true, "instance created (dry-run)");
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -176,24 +218,33 @@ pub async fn create_instances_batch(
     let instances: Vec<TaskInstance> = req
         .instances
         .into_iter()
-        .map(|r| TaskInstance {
-            id: InstanceId::new(),
-            sequence_id: r.sequence_id,
-            tenant_id: r.tenant_id,
-            namespace: r.namespace,
-            state: InstanceState::Scheduled,
-            next_fire_at: Some(r.next_fire_at.unwrap_or(now)),
-            priority: r.priority,
-            timezone: r.timezone,
-            metadata: r.metadata,
-            context: r.context,
-            concurrency_key: r.concurrency_key,
-            max_concurrency: r.max_concurrency,
-            idempotency_key: r.idempotency_key,
-            session_id: None,
-            parent_instance_id: None,
-            created_at: now,
-            updated_at: now,
+        .map(|r| {
+            let mut context = r.context;
+            context.runtime.dry_run = r.dry_run || context.runtime.dry_run;
+            context.runtime.dry_run_auto_approve =
+                r.dry_run_auto_approve || context.runtime.dry_run_auto_approve;
+            // Same mode-namespacing as the single-create path (see E1).
+            let idempotency_key =
+                mode_scoped_idempotency_key(r.idempotency_key.as_deref(), context.runtime.dry_run);
+            TaskInstance {
+                id: InstanceId::new(),
+                sequence_id: r.sequence_id,
+                tenant_id: r.tenant_id,
+                namespace: r.namespace,
+                state: InstanceState::Scheduled,
+                next_fire_at: Some(r.next_fire_at.unwrap_or(now)),
+                priority: r.priority,
+                timezone: r.timezone,
+                metadata: r.metadata,
+                context,
+                concurrency_key: r.concurrency_key,
+                max_concurrency: r.max_concurrency,
+                idempotency_key,
+                session_id: None,
+                parent_instance_id: None,
+                created_at: now,
+                updated_at: now,
+            }
         })
         .collect();
 

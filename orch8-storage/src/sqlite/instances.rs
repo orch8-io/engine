@@ -731,3 +731,51 @@ pub(super) async fn bulk_reschedule(
     let result = qb.build().execute(&storage.pool).await?;
     Ok(result.rows_affected())
 }
+
+/// Terminal instances older than `cutoff` not yet artifact-swept. See
+/// [`crate::ResourceStore::list_artifact_gc_candidates`].
+pub(super) async fn list_artifact_gc_candidates(
+    storage: &SqliteStorage,
+    cutoff: DateTime<Utc>,
+    limit: u32,
+) -> Result<Vec<InstanceId>, StorageError> {
+    // The terminal-state set MUST match `InstanceState::is_terminal()`
+    // (Completed / Failed / Cancelled, stored snake_case). Keep in sync if a
+    // new terminal state is added — the Postgres twin carries the same list.
+    let rows = sqlx::query(
+        "SELECT id FROM task_instances \
+         WHERE state IN ('completed','failed','cancelled') \
+           AND updated_at < ?1 \
+           AND json_extract(metadata, '$._artifacts_gced') IS NULL \
+         ORDER BY updated_at ASC LIMIT ?2",
+    )
+    .bind(ts(cutoff))
+    .bind(i64::from(limit))
+    .fetch_all(&storage.pool)
+    .await?;
+    let mut ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id_str: String = row.get("id");
+        if let Ok(uuid) = uuid::Uuid::parse_str(&id_str) {
+            ids.push(InstanceId::from_uuid(uuid));
+        }
+    }
+    Ok(ids)
+}
+
+/// Mark an instance artifact-swept (idempotent). See
+/// [`crate::ResourceStore::mark_artifacts_gced`].
+pub(super) async fn mark_artifacts_gced(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances \
+         SET metadata = json_set(coalesce(metadata, '{}'), '$._artifacts_gced', 1) \
+         WHERE id = ?1",
+    )
+    .bind(instance_id.to_string())
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}

@@ -47,9 +47,22 @@ use orch8_types::worker::WorkerTask;
 
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
+    /// Optional durable artifact backend (local FS / S3). `None` → artifact
+    /// methods return `Unsupported`.
+    artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
 }
 
 impl PostgresStorage {
+    /// Attach a durable artifact backend (builder-style).
+    #[must_use]
+    pub fn with_artifact_store(
+        mut self,
+        store: std::sync::Arc<crate::artifacts::ObjectArtifactStore>,
+    ) -> Self {
+        self.artifact_store = Some(store);
+        self
+    }
+
     pub async fn new(
         database_url: &str,
         max_connections: u32,
@@ -98,7 +111,10 @@ impl PostgresStorage {
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            artifact_store: None,
+        })
     }
 
     pub const fn pool(&self) -> &PgPool {
@@ -1636,6 +1652,54 @@ impl crate::TelemetryStore for PostgresStorage {
 
 #[async_trait]
 impl crate::ResourceStore for PostgresStorage {
+    fn artifacts_enabled(&self) -> bool {
+        self.artifact_store.is_some()
+    }
+
+    async fn put_artifact(
+        &self,
+        instance_id: InstanceId,
+        content_type: &str,
+        bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .put(&instance_id.to_string(), content_type, bytes)
+            .await
+    }
+
+    async fn get_artifact(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .get(key)
+            .await
+    }
+
+    async fn delete_artifact(&self, key: &str) -> Result<(), StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .delete(key)
+            .await
+    }
+
+    async fn list_artifacts(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .list(&instance_id.to_string())
+            .await
+    }
+
+    async fn list_artifact_gc_candidates(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        instances::list_artifact_gc_candidates(self, cutoff, limit).await
+    }
+
+    async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError> {
+        instances::mark_artifacts_gced(self, instance_id).await
+    }
+
     async fn set_instance_kv(
         &self,
         instance_id: InstanceId,

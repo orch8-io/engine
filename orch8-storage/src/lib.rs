@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod compression;
 pub mod encrypting;
 pub mod externalizing;
@@ -1424,6 +1425,97 @@ pub trait ResourceStore: Send + Sync + 'static {
         _instance_id: InstanceId,
         _key: &str,
     ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    // === Artifacts (durable binary blobs) ===
+    //
+    // Backed by an object-store backend (local FS / S3-compatible) wired into
+    // the concrete storage impl. Defaults return `Unsupported` so a backend
+    // with no artifact store configured fails loudly rather than silently
+    // dropping bytes — losing artifacts would break the durability contract.
+
+    /// True when a durable artifact backend is wired into this storage. Lets
+    /// callers (e.g. the retention sweeper) skip artifact work entirely when
+    /// artifacts are disabled, rather than no-op'ing per instance. Default
+    /// `false` — backends opt in by overriding.
+    fn artifacts_enabled(&self) -> bool {
+        false
+    }
+
+    async fn put_artifact(
+        &self,
+        _instance_id: InstanceId,
+        _content_type: &str,
+        _bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
+    async fn get_artifact(&self, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
+    async fn delete_artifact(&self, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
+    async fn list_artifacts(
+        &self,
+        _instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
+    /// Delete every artifact belonging to an instance and return the count
+    /// removed. Best-effort lifecycle cleanup for retention / instance deletion.
+    ///
+    /// Returns `Ok(0)` when no artifact backend is configured (so callers can
+    /// invoke it unconditionally). For S3/R2, also configure a bucket lifecycle
+    /// (TTL) policy as defense-in-depth against orphaned blobs.
+    ///
+    /// Provided method: lists then deletes; concrete backends inherit it.
+    async fn delete_instance_artifacts(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<u64, StorageError> {
+        let metas = match self.list_artifacts(instance_id).await {
+            Ok(m) => m,
+            // No backend configured → nothing to clean.
+            Err(StorageError::Unsupported(_)) => return Ok(0),
+            Err(e) => return Err(e),
+        };
+        let mut removed = 0u64;
+        for m in metas {
+            self.delete_artifact(&m.key).await?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// Return up to `limit` instances in a **terminal** state whose `updated_at`
+    /// is older than `cutoff` and that have not yet had their artifacts swept
+    /// (no `_artifacts_gced` marker). Drives the background artifact-retention
+    /// sweeper. Default: `Ok(vec![])` (backends without instance storage opt out).
+    async fn list_artifact_gc_candidates(
+        &self,
+        _cutoff: DateTime<Utc>,
+        _limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Mark an instance's artifacts as swept (idempotent) so the retention
+    /// sweeper does not re-scan it. Default: `Ok(())`.
+    async fn mark_artifacts_gced(&self, _instance_id: InstanceId) -> Result<(), StorageError> {
         Ok(())
     }
 

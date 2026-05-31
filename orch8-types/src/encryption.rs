@@ -151,6 +151,46 @@ impl FieldEncryptor {
     pub fn is_encrypted(value: &serde_json::Value) -> bool {
         matches!(value, serde_json::Value::String(s) if s.starts_with(ENC_PREFIX))
     }
+
+    /// Encrypt a raw byte buffer, returning `nonce(12) || ciphertext` (no
+    /// base64/JSON framing — used for binary artifact blobs, not JSON fields).
+    ///
+    /// # Errors
+    /// Returns [`EncryptionError::EncryptFailed`] if the AEAD seal fails.
+    pub fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = self
+            .cipher
+            .encrypt(&nonce, plaintext)
+            .map_err(|_| EncryptionError::EncryptFailed)?;
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt a buffer produced by [`Self::encrypt_bytes`]. Tries the primary
+    /// key, then the old key (if configured) for key rotation.
+    ///
+    /// # Errors
+    /// Returns [`EncryptionError::InvalidCiphertext`] if too short, or
+    /// [`EncryptionError::DecryptFailed`] if no key can open it.
+    pub fn decrypt_bytes(&self, sealed: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        if sealed.len() < 12 {
+            return Err(EncryptionError::InvalidCiphertext);
+        }
+        let (nonce_bytes, ciphertext) = sealed.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        if let Ok(plain) = self.cipher.decrypt(nonce, ciphertext) {
+            return Ok(plain);
+        }
+        if let Some(ref old) = self.old_cipher {
+            return old
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| EncryptionError::DecryptFailed);
+        }
+        Err(EncryptionError::DecryptFailed)
+    }
 }
 
 /// Decode a hex string into bytes.
@@ -207,6 +247,33 @@ mod tests {
 
         let decrypted = enc.decrypt_value(&encrypted).unwrap();
         assert_eq!(original, decrypted);
+    }
+
+    #[test]
+    fn roundtrip_encrypt_decrypt_bytes() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let plain = b"\x89PNG\r\n\x1a\nbinary artifact bytes \x00\xff";
+        let sealed = enc.encrypt_bytes(plain).unwrap();
+        // Ciphertext differs from plaintext and carries the 12-byte nonce.
+        assert_ne!(&sealed[..], &plain[..]);
+        assert!(sealed.len() > plain.len());
+        assert_eq!(enc.decrypt_bytes(&sealed).unwrap(), plain);
+    }
+
+    #[test]
+    fn decrypt_bytes_rejects_truncated() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        assert!(enc.decrypt_bytes(b"short").is_err());
+    }
+
+    #[test]
+    fn decrypt_bytes_wrong_key_fails() {
+        let enc1 = FieldEncryptor::from_bytes(&test_key());
+        let mut other = test_key();
+        other[0] ^= 0xff;
+        let enc2 = FieldEncryptor::from_bytes(&other);
+        let sealed = enc1.encrypt_bytes(b"secret").unwrap();
+        assert!(enc2.decrypt_bytes(&sealed).is_err());
     }
 
     #[test]

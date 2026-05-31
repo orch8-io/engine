@@ -314,6 +314,7 @@ fn cfg_33_webhook_config_serde_round_trip() {
         urls: vec!["https://hook.io/x".into()],
         timeout_secs: 15,
         max_retries: 7,
+        secret: None,
     };
     let json = serde_json::to_string(&wh).unwrap();
     let back: WebhookConfig = serde_json::from_str(&json).unwrap();
@@ -359,6 +360,7 @@ fn cfg_36_config_serde_with_all_sections() {
             level: "debug".into(),
             json: true,
         },
+        artifacts: orch8_types::config::ArtifactConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     let back: EngineConfig = serde_json::from_str(&json).unwrap();
@@ -465,6 +467,7 @@ fn cfg_44_secret_string_not_leaked_in_serialized_config() {
             ..ApiConfig::default()
         },
         logging: LoggingConfig::default(),
+        artifacts: orch8_types::config::ArtifactConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
     assert!(!json.contains("pass@host"));

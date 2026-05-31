@@ -43,6 +43,8 @@ const fn error_kind(err: &StorageError) -> &'static str {
         StorageError::Migration(_) => "migration",
         StorageError::Serialization(_) => "serialization",
         StorageError::PoolExhausted => "pool_exhausted",
+        StorageError::Unsupported(_) => "unsupported",
+        StorageError::Backend(_) => "backend",
     }
 }
 
@@ -80,9 +82,17 @@ pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
 pub async fn run_gc_loop(
     storage: Arc<dyn StorageBackend>,
     interval: Duration,
+    artifact_retention: Option<Duration>,
     cancel: CancellationToken,
 ) {
-    run_gc_loop_with_ttl(storage, interval, EMIT_DEDUPE_DEFAULT_TTL, cancel).await;
+    run_gc_loop_with_ttl(
+        storage,
+        interval,
+        EMIT_DEDUPE_DEFAULT_TTL,
+        artifact_retention,
+        cancel,
+    )
+    .await;
 }
 
 /// Same as [`run_gc_loop`] but with an explicit dedupe TTL — used by tests to
@@ -91,6 +101,7 @@ pub async fn run_gc_loop_with_ttl(
     storage: Arc<dyn StorageBackend>,
     interval: Duration,
     dedupe_ttl: Duration,
+    artifact_retention: Option<Duration>,
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -104,6 +115,7 @@ pub async fn run_gc_loop_with_ttl(
                 tokio::join!(
                     sweep_externalized(storage.as_ref()),
                     sweep_emit_dedupe(storage.as_ref(), dedupe_ttl),
+                    sweep_artifacts_opt(storage.as_ref(), artifact_retention),
                 );
             }
         }
@@ -149,6 +161,63 @@ async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
             tracing::error!(error = %e, kind, "emit_event_dedupe gc sweep failed");
             metrics::inc_with(metrics::GC_EMIT_DEDUPE_ERRORS, &[("kind", kind)]);
         }
+    }
+}
+
+/// No-op wrapper so the artifact sweep can sit in the same `tokio::join!` as the
+/// other sweeps regardless of whether retention is enabled.
+async fn sweep_artifacts_opt(storage: &dyn StorageBackend, retention: Option<Duration>) {
+    if let Some(retention) = retention {
+        sweep_artifacts(storage, retention).await;
+    }
+}
+
+/// Delete the durable artifacts of instances that have been terminal for longer
+/// than `retention`. Bounded per tick by [`GC_BATCH_LIMIT`]; idempotent via the
+/// `_artifacts_gced` marker so swept instances aren't re-scanned. Best-effort —
+/// errors are logged, the marker is only set after a successful delete so a
+/// failed instance retries next tick.
+async fn sweep_artifacts(storage: &dyn StorageBackend, retention: Duration) {
+    let chrono_ret =
+        chrono::Duration::from_std(retention).unwrap_or_else(|_| chrono::Duration::zero());
+    let cutoff = chrono::Utc::now() - chrono_ret;
+
+    let candidates = match storage
+        .list_artifact_gc_candidates(cutoff, GC_BATCH_LIMIT)
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "artifact gc: candidate query failed");
+            metrics::inc_with(metrics::GC_ARTIFACTS_ERRORS, &[("kind", kind)]);
+            return;
+        }
+    };
+
+    let mut deleted = 0u64;
+    for id in candidates {
+        match storage.delete_instance_artifacts(id).await {
+            Ok(n) => {
+                deleted += n;
+                // Mark only after a successful delete so a transient failure
+                // retries on the next tick rather than being silently skipped.
+                if let Err(e) = storage.mark_artifacts_gced(id).await {
+                    let kind = error_kind(&e);
+                    tracing::error!(instance_id = %id, error = %e, kind, "artifact gc: mark failed");
+                    metrics::inc_with(metrics::GC_ARTIFACTS_ERRORS, &[("kind", kind)]);
+                }
+            }
+            Err(e) => {
+                let kind = error_kind(&e);
+                tracing::error!(instance_id = %id, error = %e, kind, "artifact gc: delete failed");
+                metrics::inc_with(metrics::GC_ARTIFACTS_ERRORS, &[("kind", kind)]);
+            }
+        }
+    }
+    if deleted > 0 {
+        tracing::info!(count = deleted, "artifact gc: deleted blobs");
+        metrics::inc_by(metrics::GC_ARTIFACTS_DELETED, deleted);
     }
 }
 
@@ -225,7 +294,7 @@ mod tests {
         let handle = tokio::spawn({
             let storage = Arc::clone(&storage);
             let cancel = cancel.clone();
-            async move { run_gc_loop(storage, Duration::from_millis(10), cancel).await }
+            async move { run_gc_loop(storage, Duration::from_millis(10), None, cancel).await }
         });
         // Let the loop enter its select!, then cancel.
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -276,6 +345,7 @@ mod tests {
                     storage,
                     Duration::from_millis(10),
                     Duration::from_secs(1),
+                    None,
                     cancel,
                 )
                 .await;
@@ -363,7 +433,7 @@ mod tests {
         let handle = tokio::spawn({
             let storage = Arc::clone(&storage);
             let cancel = cancel.clone();
-            async move { run_gc_loop(storage, Duration::from_millis(5), cancel).await }
+            async move { run_gc_loop(storage, Duration::from_millis(5), None, cancel).await }
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
         cancel.cancel();

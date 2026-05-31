@@ -1,5 +1,7 @@
 pub mod ab_split;
 pub mod activepieces;
+pub mod agent;
+pub mod blob;
 pub mod builtin;
 pub mod cancellation_scope;
 pub mod emit_event;
@@ -8,6 +10,8 @@ pub mod grpc_plugin;
 pub mod human_review;
 pub mod llm;
 pub mod loop_block;
+pub mod mcp;
+pub mod memory;
 pub mod parallel;
 pub mod param_resolve;
 pub mod query_instance;
@@ -65,6 +69,20 @@ pub struct StepContext {
     /// `human_review` so the notification payload can expose the resolved
     /// choice list to the UI. All other handlers ignore it.
     pub wait_for_input: Option<HumanInputDef>,
+}
+
+impl StepContext {
+    /// True when this instance is running in dry-run mode. Side-effecting
+    /// handlers consult this and, when set, skip their real effect (HTTP/LLM
+    /// call, signal, child-instance spawn, memory write, block injection, …)
+    /// and return a stub output tagged `"dry_run": true`. Control-flow and
+    /// templating run unchanged. The flag lives in the per-instance
+    /// `RuntimeContext`, so it survives checkpoint/replay and is uniform across
+    /// every dispatch path.
+    #[must_use]
+    pub const fn is_dry_run(&self) -> bool {
+        self.context.runtime.dry_run
+    }
 }
 
 /// Registry of named step handlers.
@@ -249,6 +267,14 @@ mod tests {
     fn missing_handler_returns_none() {
         let registry = HandlerRegistry::new();
         assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn is_dry_run_reflects_runtime_flag() {
+        let mut ctx = mk_ctx(mk_test_storage().await);
+        assert!(!ctx.is_dry_run(), "defaults to false");
+        ctx.context.runtime.dry_run = true;
+        assert!(ctx.is_dry_run());
     }
 
     #[tokio::test]

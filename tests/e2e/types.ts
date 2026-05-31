@@ -71,6 +71,10 @@ export interface CreateInstanceRequest {
   concurrency_key?: string;
   max_concurrency?: number;
   idempotency_key?: string;
+  /** Run this instance in dry-run mode (side-effecting steps return stubs). */
+  dry_run?: boolean;
+  /** In dry-run, auto-approve human_review gates with the default choice. */
+  dry_run_auto_approve?: boolean;
   [k: string]: unknown;
 }
 

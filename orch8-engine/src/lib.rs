@@ -292,10 +292,24 @@ impl Engine {
         Self::spawn_credentials_refresh(&mut set, Arc::clone(&self.storage), self.cancel.clone());
 
         // Externalized-state GC sweeper (TTL-based cleanup, every 5 minutes).
+        // Also sweeps terminal-instance artifacts when retention is configured
+        // (`artifact_retention_secs > 0`); otherwise artifacts are kept.
         let gc_storage = Arc::clone(&self.storage);
         let gc_cancel = self.cancel.clone();
+        // Only sweep when retention is configured AND an artifact backend is
+        // actually wired in — otherwise the sweep would pointlessly mark every
+        // terminal instance with no blobs to delete.
+        let artifact_retention = (self.config.artifact_retention_secs > 0
+            && self.storage.artifacts_enabled())
+        .then(|| Duration::from_secs(self.config.artifact_retention_secs));
         set.spawn(async move {
-            gc::run_gc_loop(gc_storage, gc::GC_DEFAULT_INTERVAL, gc_cancel).await;
+            gc::run_gc_loop(
+                gc_storage,
+                gc::GC_DEFAULT_INTERVAL,
+                artifact_retention,
+                gc_cancel,
+            )
+            .await;
             tracing::info!("externalized gc loop exited");
         });
 

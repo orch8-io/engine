@@ -29,6 +29,8 @@ pub const GC_EXTERNALIZED_DELETED: &str = "orch8_gc_externalized_deleted_total";
 pub const GC_EXTERNALIZED_ERRORS: &str = "orch8_gc_externalized_errors_total";
 pub const GC_EMIT_DEDUPE_DELETED: &str = "orch8_gc_emit_dedupe_deleted_total";
 pub const GC_EMIT_DEDUPE_ERRORS: &str = "orch8_gc_emit_dedupe_errors_total";
+pub const GC_ARTIFACTS_DELETED: &str = "orch8_gc_artifacts_deleted_total";
+pub const GC_ARTIFACTS_ERRORS: &str = "orch8_gc_artifacts_errors_total";
 
 // === Histogram names ===
 pub const TICK_DURATION: &str = "orch8_tick_duration_seconds";
@@ -213,6 +215,8 @@ mod tests {
             GC_EXTERNALIZED_ERRORS,
             GC_EMIT_DEDUPE_DELETED,
             GC_EMIT_DEDUPE_ERRORS,
+            GC_ARTIFACTS_DELETED,
+            GC_ARTIFACTS_ERRORS,
         ];
         for name in counters {
             assert!(

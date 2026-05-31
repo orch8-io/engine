@@ -24,6 +24,18 @@ pub struct CreateInstanceRequest {
     pub(crate) metadata: serde_json::Value,
     #[serde(default)]
     pub(crate) context: ExecutionContext,
+    /// Run this instance in dry-run mode: side-effecting steps (HTTP/LLM/MCP
+    /// calls, agent loops, event/signal emission, memory writes, block
+    /// injection, external plugins) skip their real effect and return a stub;
+    /// control flow and templating run normally. Any sequence can be run dry.
+    /// Default false.
+    #[serde(default)]
+    pub(crate) dry_run: bool,
+    /// When dry-run is on, auto-approve `human_review` gates with the default
+    /// choice so the simulation flows past them instead of pausing. Ignored
+    /// unless `dry_run` is true. Default false.
+    #[serde(default)]
+    pub(crate) dry_run_auto_approve: bool,
     pub(crate) next_fire_at: Option<DateTime<Utc>>,
     pub(crate) concurrency_key: Option<String>,
     pub(crate) max_concurrency: Option<u32>,

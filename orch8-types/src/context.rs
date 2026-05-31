@@ -160,6 +160,21 @@ pub struct RuntimeContext {
     /// Used by mobile SDK to enforce `max_steps_per_instance`.
     #[serde(default)]
     pub total_steps_executed: u32,
+    /// Dry-run mode. When `true`, side-effecting step handlers (`tool_call`,
+    /// `llm`, `mcp`, `agent`, `emit_event`, `send_signal`, `memory`,
+    /// `self_modify`, external plugins) skip their real effect and return a
+    /// stub output tagged `"dry_run": true`; control flow, templating and
+    /// branching still execute normally. Set once at instance creation and
+    /// propagated to child instances (e.g. sub-sequences). Engine-managed and
+    /// read-only to handlers — read it via `StepContext::is_dry_run`.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// When dry-run is active, auto-resolve `human_review` / `wait_for_input`
+    /// gates with the default (first) choice instead of pausing, so the
+    /// simulation flows through human gates and exercises post-gate steps.
+    /// Ignored outside dry-run. Engine-managed.
+    #[serde(default)]
+    pub dry_run_auto_approve: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -191,6 +206,8 @@ mod tests {
                 resource_key: None,
                 instance_id: None,
                 total_steps_executed: 0,
+                dry_run: false,
+                dry_run_auto_approve: false,
             },
         }
     }
@@ -209,6 +226,22 @@ mod tests {
         assert_eq!(f.config, ctx.config);
         assert_eq!(f.audit.len(), 1);
         assert_eq!(f.runtime.attempt, 2);
+    }
+
+    #[test]
+    fn dry_run_defaults_false_and_round_trips() {
+        // Pre-existing payloads have no `dry_run` field — it must default false.
+        let rt: RuntimeContext = serde_json::from_str("{}").unwrap();
+        assert!(!rt.dry_run);
+
+        let on = RuntimeContext {
+            dry_run: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&on).unwrap();
+        assert_eq!(json["dry_run"], true);
+        let back: RuntimeContext = serde_json::from_value(json).unwrap();
+        assert!(back.dry_run);
     }
 
     #[test]

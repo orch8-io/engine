@@ -21,6 +21,29 @@ pub(crate) fn permanent(message: impl Into<String>) -> StepError {
     }
 }
 
+/// The canonical dry-run output envelope, returned by every side-effecting
+/// handler when the instance runs in dry-run mode.
+///
+/// One stable shape so consumers (UI/SDK/audit) can rely on it:
+/// `{ "dry_run": true, "handler": <name>, "would": <skipped effect>, …shape }`
+/// where `shape` mirrors the handler's real success keys with empty/placeholder
+/// values so downstream `{{steps.x.…}}` templates still resolve. This is the
+/// documented dry-run contract — do not diverge per handler.
+pub(crate) fn dry_run_stub(handler: &str, would: Value, shape: Value) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("dry_run".into(), Value::Bool(true));
+    obj.insert("handler".into(), Value::String(handler.to_string()));
+    if !would.is_null() {
+        obj.insert("would".into(), would);
+    }
+    if let Value::Object(shape_map) = shape {
+        for (k, v) in shape_map {
+            obj.insert(k, v);
+        }
+    }
+    Value::Object(obj)
+}
+
 /// Parse an `InstanceId` from a params object field.
 ///
 /// Returns `StepError::Permanent` if the field is missing, not a string, or

@@ -88,8 +88,15 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
         "human_review: pending"
     );
 
-    // Send notification if configured.
-    if let Some(notify_url) = ctx.params.get("notify_url").and_then(Value::as_str) {
+    // Send notification if configured. Skipped in dry-run — it is this
+    // handler's only external side effect. The pending/pause itself is control
+    // flow and is intentionally preserved so a dry-run still surfaces the gate.
+    if let Some(notify_url) = ctx
+        .params
+        .get("notify_url")
+        .and_then(Value::as_str)
+        .filter(|_| !ctx.is_dry_run())
+    {
         if !super::builtin::is_url_safe(notify_url).await {
             return Err(StepError::Permanent {
                 message: "blocked: URL targets a private/internal network address".into(),

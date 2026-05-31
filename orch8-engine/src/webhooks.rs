@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
@@ -53,10 +55,21 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
         let event = event.clone();
         let timeout = Duration::from_secs(config.timeout_secs);
         let max_retries = config.max_retries;
+        // Expose the secret into an owned String for the spawned task; the
+        // signing path takes `Option<&str>`.
+        let secret = config.secret.as_ref().map(|s| s.expose().to_string());
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
-            send_with_retry(&url, &event, timeout, max_retries, &cancel).await;
+            send_with_retry(
+                &url,
+                &event,
+                timeout,
+                max_retries,
+                secret.as_deref(),
+                &cancel,
+            )
+            .await;
         });
     }
 }
@@ -66,6 +79,7 @@ async fn send_with_retry(
     event: &WebhookEvent,
     timeout: Duration,
     max_retries: u32,
+    secret: Option<&str>,
     cancel: &CancellationToken,
 ) {
     let body = match serde_json::to_vec(event) {
@@ -77,7 +91,7 @@ async fn send_with_retry(
     };
 
     for attempt in 0..=max_retries {
-        match send_request(url, &body, timeout).await {
+        match send_request(url, &body, timeout, secret).await {
             Ok(status) if status < 400 => {
                 metrics::inc(metrics::WEBHOOKS_SENT);
                 debug!(url = %url, event_type = %event.event_type, "webhook delivered");
@@ -121,17 +135,61 @@ async fn send_with_retry(
 }
 
 /// Send an HTTP POST request via reqwest (TLS, connection pooling, proper HTTP).
-async fn send_request(url: &str, body: &[u8], timeout: Duration) -> Result<u16, String> {
-    let resp = http_client()
+///
+/// When `secret` is set, the request is signed (Stripe/GitHub-style) so the
+/// receiver can verify authenticity and reject replays:
+/// - `X-Orch8-Timestamp: <unix secs>`
+/// - `X-Orch8-Signature: sha256=<hex HMAC-SHA256(secret, "{ts}.{body}")>`
+async fn send_request(
+    url: &str,
+    body: &[u8],
+    timeout: Duration,
+    secret: Option<&str>,
+) -> Result<u16, String> {
+    let mut req = http_client()
         .post(url)
         .header("Content-Type", "application/json")
-        .timeout(timeout)
+        .timeout(timeout);
+
+    if let Some(secret) = secret {
+        let ts = Utc::now().timestamp();
+        let sig = sign(secret, ts, body);
+        req = req
+            .header("X-Orch8-Timestamp", ts.to_string())
+            .header("X-Orch8-Signature", format!("sha256={sig}"));
+    }
+
+    let resp = req
         .body(body.to_vec())
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
     Ok(resp.status().as_u16())
+}
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Lowercase hex-encode bytes without pulling in the `hex` crate.
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Compute the outbound signature: HMAC-SHA256 over `"{timestamp}.{body}"`,
+/// hex-encoded. Binding the timestamp into the signed string means a captured
+/// body can't be replayed under a different time.
+pub(crate) fn sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    to_hex(&mac.finalize().into_bytes())
 }
 
 /// Compute exponential backoff delay for a given attempt.
@@ -193,6 +251,7 @@ mod tests {
             urls: vec![],
             timeout_secs: 5,
             max_retries: 0,
+            secret: None,
         };
         let event = WebhookEvent {
             event_type: "test".into(),
@@ -392,7 +451,7 @@ mod tests {
             timestamp: "2024-01-01T00:00:00Z".into(),
             data: serde_json::json!({"k": "v"}),
         };
-        send_with_retry(&url, &event, Duration::from_secs(2), 0, &cancel).await;
+        send_with_retry(&url, &event, Duration::from_secs(2), 0, None, &cancel).await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1, "exactly one request");
         {
@@ -422,7 +481,7 @@ mod tests {
         // Override attempt pacing by using max_retries=5 — backoff is 500ms for
         // attempt=0, acceptable for a single retry in a test.
         let start = std::time::Instant::now();
-        send_with_retry(&url, &event, Duration::from_secs(2), 5, &cancel).await;
+        send_with_retry(&url, &event, Duration::from_secs(2), 5, None, &cancel).await;
         let elapsed = start.elapsed();
 
         assert_eq!(counter.load(Ordering::SeqCst), 2, "one retry expected");
@@ -452,7 +511,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(800)).await;
             cancel_for_task.cancel();
         });
-        send_with_retry(&url, &event, Duration::from_secs(2), 2, &cancel).await;
+        send_with_retry(&url, &event, Duration::from_secs(2), 2, None, &cancel).await;
 
         let attempts = counter.load(Ordering::SeqCst);
         assert!(
@@ -492,7 +551,7 @@ mod tests {
         let start = std::time::Instant::now();
         // max_retries=0 so we only make one attempt and the timeout is the
         // exclusive stopping condition. Timeout is short.
-        send_with_retry(&url, &event, Duration::from_millis(300), 0, &cancel).await;
+        send_with_retry(&url, &event, Duration::from_millis(300), 0, None, &cancel).await;
         let elapsed = start.elapsed();
 
         assert!(
@@ -512,10 +571,137 @@ mod tests {
             urls: vec![],
             timeout_secs: 1,
             max_retries: 0,
+            secret: None,
         };
         let event = instance_event("test", InstanceId::new(), serde_json::json!({}));
         let cancel = CancellationToken::new();
         cancel.cancel();
         emit(&config, &event, &cancel);
+    }
+
+    // --- Outbound signing -------------------------------------------------
+
+    /// Extract a header value from a raw HTTP/1.1 request (case-insensitive).
+    fn header_value(raw: &str, name: &str) -> Option<String> {
+        let head = raw.split("\r\n\r\n").next().unwrap_or("");
+        let needle = format!("{}:", name.to_ascii_lowercase());
+        head.lines().find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix(&needle)
+                .map(|_| line[name.len() + 1..].trim().to_string())
+        })
+    }
+
+    /// Return the body (everything after the header terminator).
+    fn body_of(raw: &str) -> &str {
+        raw.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+    }
+
+    #[test]
+    fn sign_is_deterministic_and_sensitive() {
+        let a = sign("secret", 1000, b"body");
+        assert_eq!(a.len(), 64, "hex SHA-256 is 64 chars");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only: {a}"
+        );
+        // Deterministic for identical inputs.
+        assert_eq!(a, sign("secret", 1000, b"body"));
+        // Sensitive to every input: key, timestamp, body.
+        assert_ne!(a, sign("secret2", 1000, b"body"));
+        assert_ne!(a, sign("secret", 1001, b"body"));
+        assert_ne!(a, sign("secret", 1000, b"body2"));
+    }
+
+    #[tokio::test]
+    async fn signed_delivery_sends_verifiable_signature_headers() {
+        let (url, counter, bodies) = start_mock_server(|_| 200).await;
+        let cancel = CancellationToken::new();
+        let event = WebhookEvent {
+            event_type: "instance.completed".into(),
+            instance_id: None,
+            timestamp: "2024-01-01T00:00:00Z".into(),
+            data: serde_json::json!({ "k": "v" }),
+        };
+        let secret = "whsec_test_123";
+        send_with_retry(
+            &url,
+            &event,
+            Duration::from_secs(2),
+            0,
+            Some(secret),
+            &cancel,
+        )
+        .await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let bodies = bodies.lock().await;
+        let raw = std::str::from_utf8(&bodies[0]).unwrap();
+
+        let ts: i64 = header_value(raw, "X-Orch8-Timestamp")
+            .expect("timestamp header present")
+            .parse()
+            .expect("timestamp is an integer");
+        let sig = header_value(raw, "X-Orch8-Signature").expect("signature header present");
+        let hex = sig.strip_prefix("sha256=").expect("sha256= prefix");
+        assert_eq!(hex.len(), 64);
+
+        // A receiver recomputing over the exact body it received must match —
+        // this is the property that makes the webhook verifiable.
+        let body = body_of(raw);
+        assert_eq!(hex, sign(secret, ts, body.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn unsigned_delivery_omits_signature_headers() {
+        let (url, _counter, bodies) = start_mock_server(|_| 200).await;
+        let cancel = CancellationToken::new();
+        let event = WebhookEvent {
+            event_type: "t".into(),
+            instance_id: None,
+            timestamp: "t".into(),
+            data: serde_json::json!({}),
+        };
+        send_with_retry(&url, &event, Duration::from_secs(2), 0, None, &cancel).await;
+        let bodies = bodies.lock().await;
+        let raw = std::str::from_utf8(&bodies[0]).unwrap();
+        assert!(
+            header_value(raw, "X-Orch8-Signature").is_none(),
+            "no signature without a secret"
+        );
+        assert!(header_value(raw, "X-Orch8-Timestamp").is_none());
+    }
+
+    #[tokio::test]
+    async fn emit_delivers_signed_request_to_configured_url() {
+        let (url, counter, bodies) = start_mock_server(|_| 200).await;
+        let config = WebhookConfig {
+            urls: vec![url],
+            timeout_secs: 2,
+            max_retries: 0,
+            secret: Some("whsec_emit".into()),
+        };
+        let event = instance_event(
+            "instance.completed",
+            InstanceId::new(),
+            serde_json::json!({ "n": 1 }),
+        );
+        emit(&config, &event, &CancellationToken::new());
+
+        // emit spawns a background task — poll until it lands.
+        for _ in 0..50 {
+            if counter.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "emit delivered once");
+        let bodies = bodies.lock().await;
+        let raw = std::str::from_utf8(&bodies[0]).unwrap();
+        assert!(
+            header_value(raw, "X-Orch8-Signature").is_some(),
+            "emit threaded the secret through to a signature"
+        );
     }
 }

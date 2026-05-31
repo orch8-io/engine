@@ -105,6 +105,22 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     // tenant is now a TenantId newtype — compare directly.
     check_same_tenant(&ctx.tenant_id, &trigger.tenant_id, "emit_event")?;
 
+    // Dry-run: the policy wiring is now validated (trigger exists, is enabled,
+    // same tenant, resolves to a child sequence) — skip only the child-instance
+    // creation. Reporting the resolved sequence makes dry-run a real check of
+    // the trigger graph, not a blind stub.
+    if ctx.is_dry_run() {
+        return Ok(crate::handlers::util::dry_run_stub(
+            "emit_event",
+            json!({ "trigger_slug": trigger_slug, "sequence_name": trigger.sequence_name }),
+            json!({
+                "instance_id": Value::Null,
+                "sequence_name": trigger.sequence_name,
+                "deduped": false,
+            }),
+        ));
+    }
+
     // Build meta: start from user-provided meta, then overwrite system-set
     // fields so callers can't spoof `source` / `parent_instance_id`.
     let mut meta_obj: Map<String, Value> = match user_meta {
@@ -349,6 +365,47 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    #[tokio::test]
+    async fn dry_run_validates_trigger_but_spawns_no_child() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        seed_sequence(&storage, "T1", "child_seq").await;
+        let trigger = mk_trigger("on-order", "T1", "child_seq");
+        storage.create_trigger(&trigger).await.unwrap();
+
+        // validate-then-skip: the trigger is resolved (exists/enabled/tenant →
+        // child sequence) and reported, but no child instance is created.
+        let mut ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({ "trigger_slug": "on-order", "data": { "x": 1 } }),
+        );
+        ctx.context.runtime.dry_run = true;
+        let out = handle_emit_event(ctx).await.unwrap();
+        assert_eq!(out["dry_run"], true);
+        assert_eq!(out["handler"], "emit_event");
+        assert!(out["instance_id"].is_null());
+        assert_eq!(out["sequence_name"], "child_seq");
+        assert_eq!(out["would"]["sequence_name"], "child_seq");
+    }
+
+    #[tokio::test]
+    async fn dry_run_surfaces_missing_trigger() {
+        // validate-then-skip: a dry-run must still fail on a bad trigger config.
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        let mut ctx = mk_ctx(&caller, storage_dyn, json!({ "trigger_slug": "nope" }));
+        ctx.context.runtime.dry_run = true;
+        assert!(matches!(
+            handle_emit_event(ctx).await.unwrap_err(),
+            StepError::Permanent { .. }
+        ));
     }
 
     #[tokio::test]
@@ -768,6 +825,101 @@ mod tests {
         assert_eq!(rp.get("deduped"), Some(&json!(false)));
         assert_eq!(rt.get("deduped"), Some(&json!(false)));
         assert_ne!(rp.get("instance_id"), rt.get("instance_id"));
+    }
+
+    /// An empty `dedupe_key` would create a scope-wide global lock (every
+    /// caller colliding on `""`), which is almost certainly a config bug —
+    /// the handler rejects it as Permanent before touching storage.
+    #[tokio::test]
+    async fn emit_event_rejects_empty_dedupe_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        // A trigger isn't even required — the empty-key guard runs first.
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": "",
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("dedupe_key") && message.contains("empty"),
+                    "expected empty-key message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
+    /// A non-string `dedupe_key` (here a number) is a type error → Permanent.
+    #[tokio::test]
+    async fn emit_event_rejects_non_string_dedupe_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_key": 42,
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("dedupe_key") && message.contains("string"),
+                    "expected non-string-key message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
+    }
+
+    /// A bare `dedupe_scope` without a `dedupe_key` must still surface a config
+    /// error if the scope is invalid — the scope string is parsed even when no
+    /// key is present, so a typo fails loudly rather than silently ignored.
+    #[tokio::test]
+    async fn emit_event_rejects_invalid_scope_even_without_key() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "dedupe_scope": "galaxy",
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("invalid dedupe_scope"),
+                    "expected invalid-scope message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
     }
 
     #[tokio::test]

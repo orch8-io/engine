@@ -30,6 +30,20 @@ pub enum StorageError {
 
     #[error("pool exhausted")]
     PoolExhausted,
+
+    /// An operation this backend does not support, or a capability that is not
+    /// configured (e.g. artifact storage with no artifact backend wired in).
+    /// **Permanent** — retrying will not help; callers must map this to a
+    /// non-retryable error.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
+    /// A transient failure in an external storage backend (object store /
+    /// artifact backend): network error, throttling, temporary unavailability.
+    /// **Retryable** — distinct from [`Self::Unsupported`] so handlers don't
+    /// retry forever on a permanent misconfiguration, nor fail fast on a blip.
+    #[error("backend error: {0}")]
+    Backend(String),
 }
 
 impl From<sqlx::Error> for StorageError {

@@ -189,6 +189,43 @@ async fn valid_value_completes_block_and_writes_context_data() {
 }
 
 #[tokio::test]
+async fn dry_run_auto_approve_resolves_gate_with_default_choice() {
+    let (storage, mut instance, step) = setup(mk_step("review", default_yes_no_def())).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+    // Enable dry-run auto-approve on the instance handed to the gate check.
+    instance.context.runtime.dry_run = true;
+    instance.context.runtime.dry_run_auto_approve = true;
+
+    // No signal enqueued — auto-approve must resolve without deferring.
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("check_human_input ok");
+    assert!(!deferred, "auto-approve should not defer");
+
+    // Resolved with the first (default) effective choice ("yes").
+    let out = storage
+        .get_block_output(instance.id, &step.id)
+        .await
+        .unwrap()
+        .expect("block output written");
+    assert_eq!(out.output, json!({"value": "yes"}));
+    let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.context.data.get("review"), Some(&json!("yes")));
+}
+
+#[tokio::test]
+async fn dry_run_without_auto_approve_still_pauses_at_gate() {
+    let (storage, mut instance, step) = setup(mk_step("review", default_yes_no_def())).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+    // dry-run on, but auto-approve OFF → the gate still pauses.
+    instance.context.runtime.dry_run = true;
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("check_human_input ok");
+    assert!(deferred, "dry-run alone must keep the human gate (defer)");
+}
+
+#[tokio::test]
 async fn invalid_value_keeps_block_waiting_and_marks_signal_delivered() {
     let (storage, instance, step) = setup(mk_step("review", advanced_def())).await;
     let human_def = step.wait_for_input.clone().unwrap();

@@ -18,6 +18,13 @@ use orch8_types::instance::TaskInstance;
 
 use crate::StorageBackend;
 
+/// Magic header prepended to encrypted artifact blobs (`"O8ENC" || 0x01`).
+/// Lets reads distinguish an encrypted blob from one written before encryption
+/// was enabled, so toggling the key on doesn't render pre-existing plaintext
+/// blobs unreadable. Distinctive enough that a plaintext blob is extremely
+/// unlikely to start with it.
+const ARTIFACT_ENC_MAGIC: &[u8] = b"O8ENC\x01";
+
 /// Wraps an inner `StorageBackend` and encrypts/decrypts `context.data` transparently.
 pub struct EncryptingStorage {
     inner: Arc<dyn StorageBackend>,
@@ -1413,6 +1420,80 @@ impl crate::TelemetryStore for EncryptingStorage {
 
 #[async_trait]
 impl crate::ResourceStore for EncryptingStorage {
+    // --- Artifacts ---
+    // Artifact bytes are encrypted at rest (AES-256-GCM) in this wrapper before
+    // they reach the object store, so blobs get the same protection as context
+    // and credentials — independent of bucket-level SSE (which may be off, or
+    // absent entirely on the local-filesystem backend).
+    //
+    // Encrypted blobs are framed with [`ARTIFACT_ENC_MAGIC`] so reads are
+    // self-describing: a blob written *before* encryption was enabled (no magic)
+    // is returned as-is rather than failing to decrypt. This makes turning the
+    // encryption key on non-destructive for any pre-existing plaintext blobs.
+    fn artifacts_enabled(&self) -> bool {
+        self.inner.artifacts_enabled()
+    }
+
+    async fn put_artifact(
+        &self,
+        instance_id: InstanceId,
+        content_type: &str,
+        bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        let plaintext_len = bytes.len() as u64;
+        let ciphertext = self
+            .encryptor
+            .encrypt_bytes(&bytes)
+            .map_err(|e| StorageError::Backend(format!("artifact encrypt: {e}")))?;
+        let mut framed = Vec::with_capacity(ARTIFACT_ENC_MAGIC.len() + ciphertext.len());
+        framed.extend_from_slice(ARTIFACT_ENC_MAGIC);
+        framed.extend_from_slice(&ciphertext);
+        let mut aref = self
+            .inner
+            .put_artifact(instance_id, content_type, bytes::Bytes::from(framed))
+            .await?;
+        // Report the *plaintext* size, not the on-disk ciphertext size, so the
+        // ref the caller sees matches the bytes they put in.
+        aref.size = plaintext_len;
+        Ok(aref)
+    }
+    async fn get_artifact(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.inner.get_artifact(key).await? {
+            Some(blob) => match blob.strip_prefix(ARTIFACT_ENC_MAGIC) {
+                // Encrypted by this wrapper → decrypt.
+                Some(ciphertext) => {
+                    let plain = self
+                        .encryptor
+                        .decrypt_bytes(ciphertext)
+                        .map_err(|e| StorageError::Backend(format!("artifact decrypt: {e}")))?;
+                    Ok(Some(plain))
+                }
+                // No magic → stored before encryption was enabled; return as-is.
+                None => Ok(Some(blob)),
+            },
+            None => Ok(None),
+        }
+    }
+    async fn delete_artifact(&self, key: &str) -> Result<(), StorageError> {
+        self.inner.delete_artifact(key).await
+    }
+    async fn list_artifacts(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError> {
+        self.inner.list_artifacts(instance_id).await
+    }
+    async fn list_artifact_gc_candidates(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        self.inner.list_artifact_gc_candidates(cutoff, limit).await
+    }
+    async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError> {
+        self.inner.mark_artifacts_gced(instance_id).await
+    }
+
     // --- Instance KV State ---
     async fn set_instance_kv(
         &self,
@@ -1705,5 +1786,94 @@ mod tests {
         let a = enc.encrypt_value(&v).unwrap();
         let b = enc.encrypt_value(&v).unwrap();
         assert_ne!(a, b, "nonce randomness should produce distinct ciphertexts");
+    }
+
+    #[tokio::test]
+    async fn artifact_bytes_are_encrypted_at_rest() {
+        use crate::artifacts::ObjectArtifactStore;
+        use crate::ResourceStore;
+        use std::sync::Arc;
+
+        let plain = b"\x89PNG sensitive user document".to_vec();
+        let inner: Arc<dyn crate::StorageBackend> = Arc::new(
+            crate::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap()
+                .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
+        );
+        let enc = EncryptingStorage::new(Arc::clone(&inner), test_encryptor());
+
+        let aref = enc
+            .put_artifact(
+                InstanceId::new(),
+                "image/png",
+                bytes::Bytes::from(plain.clone()),
+            )
+            .await
+            .unwrap();
+
+        // The wrapper decrypts on read → caller sees plaintext.
+        assert_eq!(enc.get_artifact(&aref.key).await.unwrap().unwrap(), plain);
+        // The ref reports the PLAINTEXT size, not the ciphertext size (B2).
+        assert_eq!(aref.size, plain.len() as u64);
+        // The underlying store holds magic-framed ciphertext, NOT plaintext.
+        let at_rest = inner.get_artifact(&aref.key).await.unwrap().unwrap();
+        assert_ne!(at_rest, plain, "artifact must not be stored in plaintext");
+        assert!(
+            at_rest.starts_with(ARTIFACT_ENC_MAGIC),
+            "encrypted blobs are framed with the magic header"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_encryption_plaintext_artifact_reads_back_unchanged() {
+        // B1: a blob written before encryption was enabled (no magic header)
+        // must read back as-is through the encrypting wrapper, not error.
+        use crate::artifacts::ObjectArtifactStore;
+        use crate::ResourceStore;
+        use std::sync::Arc;
+
+        let plain = b"legacy plaintext blob".to_vec();
+        let inner: Arc<dyn crate::StorageBackend> = Arc::new(
+            crate::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap()
+                .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
+        );
+        // Write WITHOUT the encrypting wrapper (simulates a pre-encryption blob).
+        let aref = inner
+            .put_artifact(
+                InstanceId::new(),
+                "text/plain",
+                bytes::Bytes::from(plain.clone()),
+            )
+            .await
+            .unwrap();
+
+        let enc = EncryptingStorage::new(Arc::clone(&inner), test_encryptor());
+        // Reading through the wrapper returns the plaintext as-is (no decrypt error).
+        assert_eq!(enc.get_artifact(&aref.key).await.unwrap().unwrap(), plain);
+    }
+
+    #[tokio::test]
+    async fn artifacts_enabled_reflects_backend_and_delegates() {
+        // B3: artifacts_enabled() must be false without a backend, true with one,
+        // and the encrypting wrapper delegates to inner.
+        use crate::artifacts::ObjectArtifactStore;
+        use crate::ResourceStore;
+        use std::sync::Arc;
+
+        let no_backend = crate::sqlite::SqliteStorage::in_memory().await.unwrap();
+        assert!(!no_backend.artifacts_enabled());
+
+        let with_backend: Arc<dyn crate::StorageBackend> = Arc::new(
+            crate::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap()
+                .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
+        );
+        assert!(with_backend.artifacts_enabled());
+        let enc = EncryptingStorage::new(with_backend, test_encryptor());
+        assert!(enc.artifacts_enabled(), "wrapper must delegate to inner");
     }
 }
