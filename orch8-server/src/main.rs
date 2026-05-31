@@ -602,6 +602,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
         config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
     }
+    if let Ok(val) = std::env::var("ORCH8_WEBHOOK_SECRET") {
+        config.engine.webhooks.secret = (!val.is_empty()).then(|| val.into());
+    }
     if let Ok(val) = std::env::var("ORCH8_API_KEY") {
         config.api.api_key = val.into();
     }

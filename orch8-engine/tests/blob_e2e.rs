@@ -95,7 +95,9 @@ async fn put_base64_then_get_base64_roundtrip() {
         .await
         .unwrap()
         .expect("blob_get produced output");
-    let decoded = STANDARD.decode(out.output["data"].as_str().unwrap()).unwrap();
+    let decoded = STANDARD
+        .decode(out.output["data"].as_str().unwrap())
+        .unwrap();
     assert_eq!(decoded, raw);
 }
 

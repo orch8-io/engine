@@ -55,7 +55,9 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
         let event = event.clone();
         let timeout = Duration::from_secs(config.timeout_secs);
         let max_retries = config.max_retries;
-        let secret = config.secret.clone();
+        // Expose the secret into an owned String for the spawned task; the
+        // signing path takes `Option<&str>`.
+        let secret = config.secret.as_ref().map(|s| s.expose().to_string());
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
@@ -592,7 +594,7 @@ mod tests {
 
     /// Return the body (everything after the header terminator).
     fn body_of(raw: &str) -> &str {
-        raw.splitn(2, "\r\n\r\n").nth(1).unwrap_or("")
+        raw.split_once("\r\n\r\n").map_or("", |(_, body)| body)
     }
 
     #[test]
@@ -600,7 +602,8 @@ mod tests {
         let a = sign("secret", 1000, b"body");
         assert_eq!(a.len(), 64, "hex SHA-256 is 64 chars");
         assert!(
-            a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "lowercase hex only: {a}"
         );
         // Deterministic for identical inputs.
@@ -622,7 +625,15 @@ mod tests {
             data: serde_json::json!({ "k": "v" }),
         };
         let secret = "whsec_test_123";
-        send_with_retry(&url, &event, Duration::from_secs(2), 0, Some(secret), &cancel).await;
+        send_with_retry(
+            &url,
+            &event,
+            Duration::from_secs(2),
+            0,
+            Some(secret),
+            &cancel,
+        )
+        .await;
 
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         let bodies = bodies.lock().await;

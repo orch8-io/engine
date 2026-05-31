@@ -70,10 +70,7 @@ fn extract_key(refval: &Value) -> Option<String> {
         Value::String(s) => Some(s.clone()),
         Value::Object(_) => {
             let inner = refval.get("artifact").unwrap_or(refval);
-            inner
-                .get("key")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            inner.get("key").and_then(Value::as_str).map(str::to_string)
         }
         _ => None,
     }
@@ -89,23 +86,23 @@ pub async fn handle_blob_put(ctx: StepContext) -> Result<Value, StepError> {
 
     // Resolve bytes + a sensible default content type from whichever input
     // is present. `text` is checked first so a UTF-8 default is applied.
-    let (bytes, default_ct): (Vec<u8>, &str) =
-        if let Some(text) = ctx.params.get("text").and_then(Value::as_str) {
-            (text.as_bytes().to_vec(), "text/plain; charset=utf-8")
-        } else if let Some(data) = ctx.params.get("data").and_then(Value::as_str) {
-            let decoded = STANDARD.decode(data).map_err(|e| StepError::Permanent {
-                message: format!("blob_put: `data` is not valid base64: {e}"),
-                details: None,
-            })?;
-            (decoded, "application/octet-stream")
-        } else {
-            return Err(StepError::Permanent {
-                message:
-                    "blob_put: one of `text` (utf-8 string) or `data` (base64 string) is required"
-                        .into(),
-                details: None,
-            });
-        };
+    let (bytes, default_ct): (Vec<u8>, &str) = if let Some(text) =
+        ctx.params.get("text").and_then(Value::as_str)
+    {
+        (text.as_bytes().to_vec(), "text/plain; charset=utf-8")
+    } else if let Some(data) = ctx.params.get("data").and_then(Value::as_str) {
+        let decoded = STANDARD.decode(data).map_err(|e| StepError::Permanent {
+            message: format!("blob_put: `data` is not valid base64: {e}"),
+            details: None,
+        })?;
+        (decoded, "application/octet-stream")
+    } else {
+        return Err(StepError::Permanent {
+            message: "blob_put: one of `text` (utf-8 string) or `data` (base64 string) is required"
+                .into(),
+            details: None,
+        });
+    };
 
     if bytes.len() as u64 > max_size {
         return Err(StepError::Permanent {
@@ -240,7 +237,11 @@ mod tests {
         Arc::new(SqliteStorage::in_memory().await.unwrap())
     }
 
-    fn ctx(storage: &Arc<dyn StorageBackend>, instance_id: InstanceId, params: Value) -> StepContext {
+    fn ctx(
+        storage: &Arc<dyn StorageBackend>,
+        instance_id: InstanceId,
+        params: Value,
+    ) -> StepContext {
         StepContext {
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -306,7 +307,10 @@ mod tests {
         let text = handle_blob_put(ctx(&storage, id, json!({ "text": "hi" })))
             .await
             .unwrap();
-        assert_eq!(text["artifact"]["content_type"], "text/plain; charset=utf-8");
+        assert_eq!(
+            text["artifact"]["content_type"],
+            "text/plain; charset=utf-8"
+        );
 
         let data = handle_blob_put(ctx(&storage, id, json!({ "data": STANDARD.encode(b"x") })))
             .await
@@ -343,9 +347,13 @@ mod tests {
     #[tokio::test]
     async fn put_rejects_invalid_base64() {
         let storage = storage_with_artifacts().await;
-        let err = handle_blob_put(ctx(&storage, InstanceId::new(), json!({ "data": "!!!not b64" })))
-            .await
-            .unwrap_err();
+        let err = handle_blob_put(ctx(
+            &storage,
+            InstanceId::new(),
+            json!({ "data": "!!!not b64" }),
+        ))
+        .await
+        .unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
     }
 

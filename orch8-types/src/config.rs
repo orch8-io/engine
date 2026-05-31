@@ -434,8 +434,11 @@ pub struct WebhookConfig {
     /// `X-Orch8-Signature: sha256=<hex>` alongside `X-Orch8-Timestamp`, so the
     /// receiver can verify authenticity and reject replays. Mirrors the
     /// inbound trigger-secret model, in the outbound direction.
+    /// `SecretString` so the signing key is redacted in `Debug`/serialized
+    /// output (consistent with the other secrets in this config) — leaking the
+    /// signing secret would defeat the purpose of signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret: Option<String>,
+    pub secret: Option<SecretString>,
 }
 
 impl Default for WebhookConfig {
