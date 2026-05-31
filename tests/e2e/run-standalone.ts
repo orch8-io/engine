@@ -42,6 +42,10 @@ const SUITES: Suite[] = [
   { file: "signals/wait-signal.test.ts",             port: 19003, dbName: "orch8_std_waitsig" },
   { file: "features/worker-dashboard.test.ts",       port: 19004, dbName: "orch8_std_dash" },
   { file: "features/workers.test.ts",                port: 19005, dbName: "orch8_std_workers" },
+  // Boots its own server with ORCH8_ARTIFACT_BACKEND=local — the shared
+  // attach-mode server has no artifact backend (see run-e2e.ts
+  // SELF_MANAGED_SUITES), so `response_as: artifact` steps hang there.
+  { file: "handlers/artifacts.test.ts",              port: 19006, dbName: "orch8_std_artifacts" },
 ];
 
 const BASE_DB_URL =

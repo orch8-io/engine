@@ -111,6 +111,11 @@ const SELF_MANAGED_SUITES = new Set<string>([
   // Spawns its own server with ORCH8_ACTIVEPIECES_URL pointed at a
   // local mock sidecar — the env override is ignored in attach mode.
   "activepieces_scenarios.test.ts",
+  // Spawns its own server with ORCH8_ARTIFACT_BACKEND=local + a temp
+  // ORCH8_ARTIFACT_PATH — the shared attach-mode server has no artifact
+  // backend, so `response_as: artifact` steps hang and the instance never
+  // completes (20s waitForState timeout).
+  "artifacts.test.ts",
   // Self-terminates the shared server (rule #3): drains its own node_id.
   "cluster.test.ts",
 ]);
