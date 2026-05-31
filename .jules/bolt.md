@@ -21,3 +21,7 @@
 ## 2025-10-24 - [Avoid Deep Cloning Large Structs in Filter Pipelines]
 **Learning:** In the `claim_due` hot path across all database backends, an earlier implementation built an index of elements to exclude and then filtered the candidate slice by allocating a new `Vec` and calling `.clone()` on every retained `TaskInstance`. Since `TaskInstance` holds deep `serde_json::Value` trees (like `context`), this created massive, unnecessary memory allocation and deep-copy overhead simply to trim a few excluded elements.
 **Action:** When filtering temporary vectors containing deep structs on a hot path, pass ownership of the `Vec` into the filtering function and use `into_iter` to selectively retain elements, avoiding any `clone()` calls.
+
+## 2025-10-25 - [HashSet Allocation Overhead in Tree Traversals]
+**Learning:** During recursive evaluation logic (like `cancel_subtree` or `process_instance`), allocating `HashSet` structures repeatedly to perform `contains` checks on small sets of IDs introduces significant unnecessary memory allocation and hashing overhead on execution hot paths.
+**Action:** When filtering or intersecting slices of items in hot paths, sort the `Vec` using `.sort_unstable()` and perform lookups using `.binary_search()`. To enable this on internal domain types, ensure types like `ExecutionNodeId` and `BlockId` implement `PartialOrd` and `Ord`.
