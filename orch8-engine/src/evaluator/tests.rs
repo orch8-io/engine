@@ -428,7 +428,7 @@ fn count_ancestors_measures_depth() {
         None,
     );
     let tree = vec![root, mid, leaf];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert_eq!(count_ancestors(&pm, root_id), 0);
     assert_eq!(count_ancestors(&pm, mid_id), 1);
     assert_eq!(count_ancestors(&pm, leaf_id), 2);
@@ -548,11 +548,11 @@ fn find_running_step_prefers_step_over_composite() {
         ),
     ];
     let handlers = crate::handlers::HandlerRegistry::new();
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     let block_map = flatten_blocks(&blocks);
-    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
-    let (found_node, found_block) = find_running_step(&tree, &block_map, &handlers, &pm, &node_map)
-        .expect("should find the running step");
+
+    let (found_node, found_block) =
+        find_running_step(&tree, &block_map, &handlers, &pm).expect("should find the running step");
     assert_eq!(found_node.block_id.as_str(), "s");
     assert!(matches!(found_block, BlockDefinition::Step(_)));
 }
@@ -893,12 +893,10 @@ fn is_inside_decided_race_no_winner() {
         ),
     ];
     let leaf = tree.iter().find(|n| n.id == leaf_id).unwrap();
-    let pm = build_parent_map(&tree);
-    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
+    let pm = build_node_index(&tree);
+
     let block_map = flatten_blocks(&blocks);
-    assert!(!is_inside_decided_race(
-        &tree, &block_map, leaf, &pm, &node_map
-    ));
+    assert!(!is_inside_decided_race(&tree, &block_map, leaf, &pm));
 }
 
 // EV11: is_inside_decided_race returns true when sibling branch completed.
@@ -942,12 +940,10 @@ fn is_inside_decided_race_with_winner() {
         ),
     ];
     let loser = tree.iter().find(|n| n.id == br0_id).unwrap();
-    let pm = build_parent_map(&tree);
-    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
+    let pm = build_node_index(&tree);
+
     let block_map = flatten_blocks(&blocks);
-    assert!(is_inside_decided_race(
-        &tree, &block_map, loser, &pm, &node_map
-    ));
+    assert!(is_inside_decided_race(&tree, &block_map, loser, &pm));
 }
 
 // ------------------------------------------------------------------
@@ -1028,14 +1024,14 @@ fn flatten_blocks_router_with_default() {
 }
 
 #[test]
-fn build_parent_map_empty_tree() {
+fn build_node_index_empty_tree() {
     let tree: Vec<ExecutionNode> = vec![];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert!(pm.is_empty());
 }
 
 #[test]
-fn build_parent_map_flat_nodes_no_parents() {
+fn build_node_index_flat_nodes_no_parents() {
     let a = mk_node(
         ExecutionNodeId::new(),
         None,
@@ -1053,15 +1049,16 @@ fn build_parent_map_flat_nodes_no_parents() {
         None,
     );
     let tree = vec![a, b];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert_eq!(pm.len(), 2);
-    for (_, parent) in pm {
+    for node in pm {
+        let parent = node.parent_id;
         assert!(parent.is_none());
     }
 }
 
 #[test]
-fn build_parent_map_deep_nesting() {
+fn build_node_index_deep_nesting() {
     let root_id = ExecutionNodeId::new();
     let mid_id = ExecutionNodeId::new();
     let leaf_id = ExecutionNodeId::new();
@@ -1090,10 +1087,10 @@ fn build_parent_map_deep_nesting() {
         None,
     );
     let tree = vec![root, mid, leaf];
-    let pm = build_parent_map(&tree);
-    assert_eq!(pm.get(&root_id), Some(&None));
-    assert_eq!(pm.get(&mid_id), Some(&Some(root_id)));
-    assert_eq!(pm.get(&leaf_id), Some(&Some(mid_id)));
+    let pm = build_node_index(&tree);
+    assert_eq!(get_node(&pm, root_id).unwrap().parent_id, None);
+    assert_eq!(get_node(&pm, mid_id).unwrap().parent_id, Some(root_id));
+    assert_eq!(get_node(&pm, leaf_id).unwrap().parent_id, Some(mid_id));
 }
 
 #[test]
@@ -1117,7 +1114,7 @@ fn count_ancestors_single_level() {
         None,
     );
     let tree = vec![parent, child];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert_eq!(count_ancestors(&pm, parent_id), 0);
     assert_eq!(count_ancestors(&pm, child_id), 1);
 }
@@ -1161,7 +1158,7 @@ fn count_ancestors_deep_three_levels() {
         None,
     );
     let tree = vec![n1, n2, n3, n4];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert_eq!(count_ancestors(&pm, l1), 0);
     assert_eq!(count_ancestors(&pm, l2), 1);
     assert_eq!(count_ancestors(&pm, l3), 2);
@@ -1171,7 +1168,7 @@ fn count_ancestors_deep_three_levels() {
 #[test]
 fn count_ancestors_disconnected_node() {
     let tree: Vec<ExecutionNode> = vec![];
-    let pm = build_parent_map(&tree);
+    let pm = build_node_index(&tree);
     assert_eq!(count_ancestors(&pm, ExecutionNodeId::new()), 0);
 }
 

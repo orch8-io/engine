@@ -21,10 +21,19 @@ use sla::check_sla_deadlines;
 /// Pre-built index mapping each node to its parent. Built once per evaluate
 /// iteration and shared across helper functions to avoid repeated O(n)
 /// allocations.
-type ParentMap = HashMap<ExecutionNodeId, Option<ExecutionNodeId>>;
+type NodeIndex<'a> = Vec<&'a ExecutionNode>;
 
-fn build_parent_map(tree: &[ExecutionNode]) -> ParentMap {
-    tree.iter().map(|n| (n.id, n.parent_id)).collect()
+fn build_node_index<'a>(tree: &'a [ExecutionNode]) -> NodeIndex<'a> {
+    let mut index: Vec<&'a ExecutionNode> = tree.iter().collect();
+    index.sort_unstable_by_key(|n| n.id);
+    index
+}
+
+fn get_node<'a>(index: &NodeIndex<'a>, id: ExecutionNodeId) -> Option<&'a ExecutionNode> {
+    index
+        .binary_search_by_key(&id, |n| n.id)
+        .ok()
+        .map(|i| index[i])
 }
 
 use crate::error::EngineError;
@@ -610,12 +619,11 @@ async fn phase_running_steps(
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
-    let parent_map = build_parent_map(&ctx.tree);
-    let node_map: HashMap<_, _> = ctx.tree.iter().map(|n| (n.id, n)).collect();
+    let node_index = build_node_index(&ctx.tree);
 
     // Find the running step; extract the index so we can drop the borrows
     // into ctx.tree before dispatching.
-    let found_idx = find_running_step_index(&ctx.tree, block_map, handlers, &parent_map, &node_map);
+    let found_idx = find_running_step_index(&ctx.tree, block_map, handlers, &node_index);
     let Some(idx) = found_idx else {
         return Ok(IterAction::FallThrough);
     };
@@ -659,10 +667,10 @@ async fn phase_composite_reevaluation(
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
-    let parent_map = build_parent_map(&ctx.tree);
+    let node_index = build_node_index(&ctx.tree);
 
     // Collect composite indices (into ctx.tree) so we can drop the borrows.
-    let composite_indices = find_all_running_composite_indices(&ctx.tree, block_map, &parent_map);
+    let composite_indices = find_all_running_composite_indices(&ctx.tree, block_map, &node_index);
     if composite_indices.is_empty() {
         return Ok(IterAction::FallThrough);
     }
@@ -735,7 +743,7 @@ fn may_mutate_instance(block: &BlockDefinition) -> bool {
 fn find_all_running_composite_indices(
     tree: &[ExecutionNode],
     block_map: &HashMap<&BlockId, &BlockDefinition>,
-    parent_map: &ParentMap,
+    node_index: &NodeIndex<'_>,
 ) -> Vec<usize> {
     let mut composites: Vec<(usize, usize)> = tree
         .iter()
@@ -751,7 +759,7 @@ fn find_all_running_composite_indices(
                 .copied()
                 .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
         })
-        .map(|(i, n)| (i, count_ancestors(parent_map, n.id)))
+        .map(|(i, n)| (i, count_ancestors(node_index, n.id)))
         .collect();
     // Sort deepest first (most ancestors first).
     composites.sort_by_key(|(_, depth)| std::cmp::Reverse(*depth));
@@ -765,19 +773,18 @@ fn find_running_step_index(
     tree: &[ExecutionNode],
     block_map: &HashMap<&BlockId, &BlockDefinition>,
     handlers: &HandlerRegistry,
-    parent_map: &ParentMap,
-    node_map: &HashMap<ExecutionNodeId, &ExecutionNode>,
+    node_index: &NodeIndex<'_>,
 ) -> Option<usize> {
     for (i, node) in tree.iter().enumerate() {
         if node.state != NodeState::Running {
             continue;
         }
         if let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() {
-            if is_inside_decided_race(tree, block_map, node, parent_map, node_map) {
+            if is_inside_decided_race(tree, block_map, node, node_index) {
                 continue;
             }
             if handlers.contains(&step_def.handler)
-                && has_racing_composite_sibling(tree, block_map, node, parent_map, node_map)
+                && has_racing_composite_sibling(tree, block_map, node, node_index)
             {
                 continue;
             }
@@ -796,8 +803,7 @@ fn find_running_step<'a>(
     tree: &'a [ExecutionNode],
     block_map: &HashMap<&BlockId, &'a BlockDefinition>,
     handlers: &HandlerRegistry,
-    parent_map: &ParentMap,
-    node_map: &HashMap<ExecutionNodeId, &'a ExecutionNode>,
+    node_index: &NodeIndex<'_>,
 ) -> Option<(&'a ExecutionNode, &'a BlockDefinition)> {
     for node in tree {
         if node.state != NodeState::Running {
@@ -806,13 +812,13 @@ fn find_running_step<'a>(
         if let Some(block) = block_map.get(&node.block_id).copied() {
             if let BlockDefinition::Step(step_def) = block {
                 // Skip steps inside a race where another branch already won.
-                if is_inside_decided_race(tree, block_map, node, parent_map, node_map) {
+                if is_inside_decided_race(tree, block_map, node, node_index) {
                     continue;
                 }
                 // Defer *in-process* steps that race against a composite sibling
                 // branch that hasn't finished yet.
                 if handlers.contains(&step_def.handler)
-                    && has_racing_composite_sibling(tree, block_map, node, parent_map, node_map)
+                    && has_racing_composite_sibling(tree, block_map, node, node_index)
                 {
                     continue;
                 }
@@ -830,30 +836,31 @@ fn is_inside_decided_race(
     tree: &[ExecutionNode],
     block_map: &HashMap<&BlockId, &BlockDefinition>,
     node: &ExecutionNode,
-    parent_map: &ParentMap,
-    node_map: &HashMap<ExecutionNodeId, &ExecutionNode>,
+    node_index: &NodeIndex<'_>,
 ) -> bool {
     // Walk up tracking which direct-child-of-race we came through.
-    let mut current_id = node.id;
-    while let Some(Some(parent_id)) = parent_map.get(&current_id) {
-        if let Some(parent_node) = node_map.get(parent_id).copied() {
-            if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
-                if matches!(parent_block, BlockDefinition::Race(_)) {
-                    let my_branch = node_map
-                        .get(&current_id)
-                        .copied()
-                        .and_then(|n| n.branch_index);
-                    let sibling_completed =
-                        children_of(tree, *parent_id, None).into_iter().any(|c| {
-                            c.branch_index != my_branch && matches!(c.state, NodeState::Completed)
-                        });
-                    if sibling_completed {
-                        return true;
+    let mut current_node = Some(node);
+    while let Some(curr) = current_node {
+        if let Some(parent_id) = curr.parent_id {
+            if let Some(parent_node) = get_node(node_index, parent_id) {
+                if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
+                    if matches!(parent_block, BlockDefinition::Race(_)) {
+                        let my_branch = curr.branch_index;
+                        let sibling_completed =
+                            children_of(tree, parent_id, None).into_iter().any(|c| {
+                                c.branch_index != my_branch
+                                    && matches!(c.state, NodeState::Completed)
+                            });
+                        if sibling_completed {
+                            return true;
+                        }
                     }
                 }
             }
+            current_node = get_node(node_index, parent_id);
+        } else {
+            current_node = None;
         }
-        current_id = *parent_id;
     }
     false
 }
@@ -867,46 +874,50 @@ fn has_racing_composite_sibling(
     tree: &[ExecutionNode],
     block_map: &HashMap<&BlockId, &BlockDefinition>,
     node: &ExecutionNode,
-    parent_map: &ParentMap,
-    node_map: &HashMap<ExecutionNodeId, &ExecutionNode>,
+    node_index: &NodeIndex<'_>,
 ) -> bool {
-    let mut current_id = node.id;
-    while let Some(Some(parent_id)) = parent_map.get(&current_id) {
-        if let Some(parent_node) = node_map.get(parent_id).copied() {
-            if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
-                if matches!(parent_block, BlockDefinition::Race(_)) {
-                    let my_branch = node_map
-                        .get(&current_id)
-                        .copied()
-                        .and_then(|n| n.branch_index);
-                    let sibling_composite_running =
-                        children_of(tree, *parent_id, None).into_iter().any(|c| {
-                            c.branch_index != my_branch
-                                && c.state == NodeState::Running
-                                && block_map
-                                    .get(&c.block_id)
-                                    .copied()
-                                    .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
-                        });
-                    if sibling_composite_running {
-                        return true;
+    let mut current_node = Some(node);
+    while let Some(curr) = current_node {
+        if let Some(parent_id) = curr.parent_id {
+            if let Some(parent_node) = get_node(node_index, parent_id) {
+                if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
+                    if matches!(parent_block, BlockDefinition::Race(_)) {
+                        let my_branch = curr.branch_index;
+                        let sibling_composite_running =
+                            children_of(tree, parent_id, None).into_iter().any(|c| {
+                                c.branch_index != my_branch
+                                    && c.state == NodeState::Running
+                                    && block_map
+                                        .get(&c.block_id)
+                                        .copied()
+                                        .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+                            });
+                        if sibling_composite_running {
+                            return true;
+                        }
                     }
                 }
             }
+            current_node = get_node(node_index, parent_id);
+        } else {
+            current_node = None;
         }
-        current_id = *parent_id;
     }
     false
 }
 
 /// Count ancestors to determine tree depth.
-fn count_ancestors(parent_map: &ParentMap, mut node_id: ExecutionNodeId) -> usize {
-    let mut depth = 0;
-    while let Some(Some(parent_id)) = parent_map.get(&node_id) {
-        depth += 1;
-        node_id = *parent_id;
+fn count_ancestors(node_index: &NodeIndex<'_>, mut node_id: ExecutionNodeId) -> usize {
+    let mut count = 0;
+    while let Some(node) = get_node(node_index, node_id) {
+        if let Some(parent_id) = node.parent_id {
+            count += 1;
+            node_id = parent_id;
+        } else {
+            break;
+        }
     }
-    depth
+    count
 }
 
 /// Flatten a nested block tree into a `HashMap` for O(1) lookups.

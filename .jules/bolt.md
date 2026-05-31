@@ -25,3 +25,7 @@
 ## 2025-10-25 - [HashSet Allocation Overhead in Tree Traversals]
 **Learning:** During recursive evaluation logic (like `cancel_subtree` or `process_instance`), allocating `HashSet` structures repeatedly to perform `contains` checks on small sets of IDs introduces significant unnecessary memory allocation and hashing overhead on execution hot paths.
 **Action:** When filtering or intersecting slices of items in hot paths, sort the `Vec` using `.sort_unstable()` and perform lookups using `.binary_search()`. To enable this on internal domain types, ensure types like `ExecutionNodeId` and `BlockId` implement `PartialOrd` and `Ord`.
+
+## 2025-10-26 - [HashMap Allocation Overhead in Execution Node Maps]
+**Learning:** In the `evaluate` function within `orch8-engine`, allocating `HashMap` structures (`parent_map` and `node_map`) on every single iteration to facilitate tree traversal introduces massive hashing and memory allocation overhead. Since the tree size is typically small and node IDs are unique, building a sorted `Vec` of references and querying via `binary_search_by_key` is dramatically faster (O(log N) lookup without hashing) and has almost zero heap allocation cost.
+**Action:** Replace dynamic map structures built inside evaluation hot paths with a zero-allocation `Vec` using `.sort_unstable_by_key()` and `.binary_search_by_key()` to track hierarchy and state.
