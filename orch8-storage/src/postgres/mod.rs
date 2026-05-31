@@ -1485,6 +1485,59 @@ impl crate::TelemetryStore for PostgresStorage {
         Ok(())
     }
 
+    async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
+        sqlx::query(
+            r"INSERT INTO usage_events
+               (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(&event.tenant_id)
+        .bind(event.instance_id.map(orch8_types::ids::InstanceId::into_uuid))
+        .bind(&event.block_id)
+        .bind(&event.kind)
+        .bind(&event.model)
+        .bind(event.input_tokens)
+        .bind(event.output_tokens)
+        .bind(event.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn query_usage(
+        &self,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
+        use sqlx::Row;
+        // SUM(bigint) is NUMERIC in Postgres — cast back to BIGINT for i64 decode.
+        let rows = sqlx::query(
+            r"SELECT kind, model,
+                     COUNT(*)::BIGINT AS events,
+                     COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+                     COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
+              FROM usage_events
+              WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3
+              GROUP BY kind, model ORDER BY kind, model",
+        )
+        .bind(tenant_id)
+        .bind(start)
+        .bind(end)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::UsageAggregate {
+                kind: r.get("kind"),
+                model: r.get("model"),
+                events: r.get("events"),
+                input_tokens: r.get("input_tokens"),
+                output_tokens: r.get("output_tokens"),
+            })
+            .collect())
+    }
+
     async fn ingest_telemetry_events_batch(
         &self,
         events: &[crate::TelemetryEvent],

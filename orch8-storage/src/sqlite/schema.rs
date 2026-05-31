@@ -323,6 +323,19 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry_events(created_at);
 
+CREATE TABLE IF NOT EXISTS usage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT,
+    block_id TEXT,
+    kind TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_usage_tenant_created ON usage_events(tenant_id, created_at);
+
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,

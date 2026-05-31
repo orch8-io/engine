@@ -36,6 +36,8 @@ use utoipa::OpenApi;
         crate::instances::update_context,
         crate::instances::send_signal,
         crate::instances::get_outputs,
+        crate::instances::list_instance_artifacts,
+        crate::instances::get_artifact_bytes,
         crate::instances::get_execution_tree,
         crate::instances::retry_instance,
         crate::instances::bulk_update_state,
@@ -69,6 +71,8 @@ use utoipa::OpenApi;
         crate::triggers::fire_trigger,
         // Webhooks
         crate::webhooks::public_webhook,
+        // Usage
+        crate::usage::get_usage,
         // Streaming
         crate::streaming::stream_instance,
         // Cluster

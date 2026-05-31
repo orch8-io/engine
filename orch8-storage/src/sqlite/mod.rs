@@ -1665,6 +1665,57 @@ impl crate::TelemetryStore for SqliteStorage {
         Ok(())
     }
 
+    async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO usage_events \
+             (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(&event.tenant_id)
+        .bind(event.instance_id.map(|i| i.to_string()))
+        .bind(&event.block_id)
+        .bind(&event.kind)
+        .bind(&event.model)
+        .bind(event.input_tokens)
+        .bind(event.output_tokens)
+        .bind(event.created_at.to_rfc3339())
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn query_usage(
+        &self,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
+        use sqlx::Row;
+        let rows = sqlx::query(
+            "SELECT kind, model, COUNT(*) AS events, \
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens, \
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens \
+             FROM usage_events \
+             WHERE tenant_id = ?1 AND created_at >= ?2 AND created_at < ?3 \
+             GROUP BY kind, model ORDER BY kind, model",
+        )
+        .bind(tenant_id)
+        .bind(start.to_rfc3339())
+        .bind(end.to_rfc3339())
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::UsageAggregate {
+                kind: r.get("kind"),
+                model: r.get("model"),
+                events: r.get("events"),
+                input_tokens: r.get("input_tokens"),
+                output_tokens: r.get("output_tokens"),
+            })
+            .collect())
+    }
+
     async fn ingest_telemetry_events_batch(
         &self,
         events: &[crate::TelemetryEvent],
@@ -2575,6 +2626,68 @@ mod tests {
     use orch8_types::context::ExecutionContext;
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
     use orch8_types::sequence::{BlockDefinition, SequenceStatus, StepDef};
+
+    #[tokio::test]
+    async fn usage_events_record_and_aggregate() {
+        use chrono::{Duration, Utc};
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mk = |tenant: &str, model: &str, inp: i64, out: i64| crate::UsageEvent {
+            tenant_id: tenant.into(),
+            instance_id: None,
+            block_id: Some("b".into()),
+            kind: "llm_tokens".into(),
+            model: model.into(),
+            input_tokens: inp,
+            output_tokens: out,
+            created_at: Utc::now(),
+        };
+        storage
+            .record_usage_event(&mk("t1", "gpt-4o", 100, 50))
+            .await
+            .unwrap();
+        storage
+            .record_usage_event(&mk("t1", "gpt-4o", 30, 20))
+            .await
+            .unwrap();
+        storage
+            .record_usage_event(&mk("t1", "claude", 10, 5))
+            .await
+            .unwrap();
+        // Different tenant — must be excluded from t1's aggregation.
+        storage
+            .record_usage_event(&mk("t2", "gpt-4o", 999, 999))
+            .await
+            .unwrap();
+
+        let agg = storage
+            .query_usage(
+                "t1",
+                Utc::now() - Duration::hours(1),
+                Utc::now() + Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agg.len(), 2, "grouped by (kind, model)");
+        let gpt = agg.iter().find(|a| a.model == "gpt-4o").unwrap();
+        assert_eq!(
+            (gpt.events, gpt.input_tokens, gpt.output_tokens),
+            (2, 130, 70)
+        );
+        let claude = agg.iter().find(|a| a.model == "claude").unwrap();
+        assert_eq!(
+            (claude.events, claude.input_tokens, claude.output_tokens),
+            (1, 10, 5)
+        );
+        assert!(agg.iter().all(|a| a.input_tokens < 999), "t2 excluded");
+
+        // Window outside the events → empty.
+        let future = Utc::now() + Duration::days(2);
+        assert!(storage
+            .query_usage("t1", future, future + Duration::hours(1))
+            .await
+            .unwrap()
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn sqlite_roundtrip_sequence() {

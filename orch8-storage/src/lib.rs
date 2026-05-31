@@ -45,6 +45,33 @@ pub struct TelemetryEvent {
     pub created_at: DateTime<Utc>,
 }
 
+/// A single usage/billing event — e.g. LLM token consumption emitted by
+/// `llm_call`/`agent`. Captured in a structured form so a control plane can
+/// aggregate cost without scanning every block output.
+#[derive(Debug, Clone)]
+pub struct UsageEvent {
+    pub tenant_id: String,
+    pub instance_id: Option<InstanceId>,
+    pub block_id: Option<String>,
+    /// Usage category, e.g. `"llm_tokens"`.
+    pub kind: String,
+    /// Model identifier the usage is attributed to (empty if unknown).
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Usage totals for a tenant over a window, grouped by `(kind, model)`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UsageAggregate {
+    pub kind: String,
+    pub model: String,
+    pub events: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
 /// Outcome of a dedupe insert attempt for `emit_event`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmitDedupeOutcome {
@@ -1381,6 +1408,23 @@ pub trait TelemetryStore: Send + Sync + 'static {
         _limit: u32,
     ) -> Result<u64, StorageError> {
         Ok(0)
+    }
+
+    /// Record a usage event (e.g. LLM token consumption). Best-effort, called
+    /// from the hot path — callers log and continue on error. Default no-op.
+    async fn record_usage_event(&self, _event: &UsageEvent) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Aggregate a tenant's usage over `[start, end)`, grouped by `(kind, model)`.
+    /// Default: empty.
+    async fn query_usage(
+        &self,
+        _tenant_id: &str,
+        _start: DateTime<Utc>,
+        _end: DateTime<Utc>,
+    ) -> Result<Vec<UsageAggregate>, StorageError> {
+        Ok(Vec::new())
     }
 }
 

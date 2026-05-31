@@ -21,6 +21,7 @@ pub mod streaming;
 pub mod telemetry;
 pub mod test_harness;
 pub mod triggers;
+pub mod usage;
 pub mod webhooks;
 pub mod workers;
 
@@ -89,6 +90,7 @@ fn api_routes() -> Router<AppState> {
         .merge(credentials::routes())
         .merge(telemetry::routes())
         .merge(rollback::routes())
+        .merge(usage::routes())
 }
 
 /// Build the axum router with all routes.

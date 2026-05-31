@@ -6,6 +6,7 @@ use axum::Router;
 
 use crate::AppState;
 
+mod artifacts;
 mod audit;
 mod bulk;
 mod checkpoints;
@@ -19,6 +20,10 @@ mod types;
 // handlers and public request types by this path). utoipa's derive macro
 // also looks for `__path_<fn>` structs next to each handler, so those must
 // be re-exported alongside the function.
+pub(crate) use artifacts::{
+    __path_get_artifact_bytes, __path_list_instance_artifacts, get_artifact_bytes,
+    list_instance_artifacts,
+};
 pub(crate) use audit::{__path_list_audit_log, list_audit_log};
 pub(crate) use bulk::{
     __path_bulk_reschedule, __path_bulk_update_state, __path_list_dlq, bulk_reschedule,
@@ -52,6 +57,8 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/context", patch(update_context))
         .route("/instances/{id}/signals", post(send_signal))
         .route("/instances/{id}/outputs", get(get_outputs))
+        .route("/instances/{id}/artifacts", get(list_instance_artifacts))
+        .route("/artifacts/{*key}", get(get_artifact_bytes))
         .route("/instances/{id}/tree", get(get_execution_tree))
         .route("/instances/{id}/retry", post(retry_instance))
         .route(

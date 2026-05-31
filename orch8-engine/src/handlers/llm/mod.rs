@@ -138,10 +138,52 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(llm_dry_run_stub(&ctx.params));
     }
 
-    if provider == "anthropic" {
-        anthropic::call_anthropic(&ctx.params, &api_key, &base).await
+    let out = if provider == "anthropic" {
+        anthropic::call_anthropic(&ctx.params, &api_key, &base).await?
     } else {
-        openai::call_openai_compat(&ctx.params, &api_key, &base, provider).await
+        openai::call_openai_compat(&ctx.params, &api_key, &base, provider).await?
+    };
+    // Capture token usage for cost aggregation (best-effort — never fails the call).
+    record_llm_usage(&ctx, &out).await;
+    Ok(out)
+}
+
+/// Record LLM token usage as a `usage_event`. Normalizes the two provider usage
+/// shapes (`OpenAI` `prompt_tokens`/`completion_tokens`, `Anthropic`
+/// `input_tokens`/`output_tokens`).
+/// Best-effort: a recording failure is logged, never propagated.
+async fn record_llm_usage(ctx: &StepContext, out: &Value) {
+    let Some(usage) = out.get("usage") else {
+        return;
+    };
+    let pick = |a: &str, b: &str| {
+        usage
+            .get(a)
+            .or_else(|| usage.get(b))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    };
+    let input = pick("input_tokens", "prompt_tokens");
+    let output = pick("output_tokens", "completion_tokens");
+    if input == 0 && output == 0 {
+        return; // provider returned no usage — nothing to attribute.
+    }
+    let event = orch8_storage::UsageEvent {
+        tenant_id: ctx.tenant_id.as_str().to_string(),
+        instance_id: Some(ctx.instance_id),
+        block_id: Some(ctx.block_id.as_str().to_string()),
+        kind: "llm_tokens".to_string(),
+        model: out
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        input_tokens: input,
+        output_tokens: output,
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(e) = ctx.storage.record_usage_event(&event).await {
+        warn!(error = %e, "llm_call: failed to record token usage");
     }
 }
 
@@ -337,6 +379,54 @@ mod tests {
         assert_eq!(out["model"], "gpt-4o");
         assert_eq!(out["finish_reason"], "dry_run");
         assert_eq!(out["message"]["content"], "");
+    }
+
+    #[tokio::test]
+    async fn record_llm_usage_normalizes_both_provider_shapes() {
+        use std::sync::Arc;
+        let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let ctx = StepContext {
+            instance_id: orch8_types::ids::InstanceId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("t1"),
+            block_id: orch8_types::ids::BlockId::new("b"),
+            params: json!({}),
+            context: orch8_types::context::ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        // OpenAI shape (prompt_/completion_tokens) and Anthropic shape
+        // (input_/output_tokens) both normalize; a response with no usage records nothing.
+        record_llm_usage(
+            &ctx,
+            &json!({ "model": "gpt-4o", "usage": { "prompt_tokens": 12, "completion_tokens": 7 } }),
+        )
+        .await;
+        record_llm_usage(
+            &ctx,
+            &json!({ "model": "claude", "usage": { "input_tokens": 3, "output_tokens": 4 } }),
+        )
+        .await;
+        record_llm_usage(&ctx, &json!({ "model": "x" })).await; // no usage → skipped
+
+        let now = chrono::Utc::now();
+        let agg = storage
+            .query_usage(
+                "t1",
+                now - chrono::Duration::hours(1),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agg.len(), 2, "two models, no-usage call skipped");
+        let gpt = agg.iter().find(|a| a.model == "gpt-4o").unwrap();
+        assert_eq!((gpt.input_tokens, gpt.output_tokens), (12, 7));
+        let claude = agg.iter().find(|a| a.model == "claude").unwrap();
+        assert_eq!((claude.input_tokens, claude.output_tokens), (3, 4));
     }
 
     #[test]

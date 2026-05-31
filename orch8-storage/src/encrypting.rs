@@ -1412,6 +1412,17 @@ impl crate::TelemetryStore for EncryptingStorage {
             .delete_old_telemetry_events(older_than, limit)
             .await
     }
+    async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
+        self.inner.record_usage_event(event).await
+    }
+    async fn query_usage(
+        &self,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
+        self.inner.query_usage(tenant_id, start, end).await
+    }
 }
 
 // ============================================================================

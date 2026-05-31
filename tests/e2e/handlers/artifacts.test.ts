@@ -160,4 +160,42 @@ describe("Artifacts — durable binary I/O (local backend)", () => {
       "uploaded bytes must equal the downloaded artifact bytes",
     );
   });
+
+  it("HTTP endpoints list an instance's artifacts and serve their bytes (tenant-scoped)", async () => {
+    const tenantId = `art-http-${uuid().slice(0, 8)}`;
+    const seq = testSequence(
+      "art-http",
+      [step("dl", "tool_call", { url: `${mock!.baseUrl}/image`, method: "GET", response_as: "artifact" })],
+      { tenantId },
+    );
+    await client.createSequence(seq);
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(id, "completed", { timeoutMs: 20_000 });
+
+    const h = { "X-Tenant-Id": tenantId };
+
+    // GET /instances/{id}/artifacts → one artifact with key + size.
+    const listResp = await fetch(`${client.baseUrl}/instances/${id}/artifacts`, { headers: h });
+    assert.equal(listResp.status, 200);
+    const listed = (await listResp.json()) as { items: { key: string; size: number }[] };
+    assert.equal(listed.items.length, 1);
+    const { key, size } = listed.items[0]!;
+    assert.equal(size, IMAGE_BYTES.length);
+
+    // GET /artifacts/{key} → the raw bytes.
+    const bytesResp = await fetch(`${client.baseUrl}/artifacts/${key}`, { headers: h });
+    assert.equal(bytesResp.status, 200);
+    const got = Buffer.from(await bytesResp.arrayBuffer());
+    assert.deepEqual(Uint8Array.from(got), Uint8Array.from(IMAGE_BYTES));
+
+    // A different tenant cannot read it — 404 (no cross-tenant probing).
+    const cross = await fetch(`${client.baseUrl}/artifacts/${key}`, {
+      headers: { "X-Tenant-Id": "someone-else" },
+    });
+    assert.equal(cross.status, 404);
+  });
 });
