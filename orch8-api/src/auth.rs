@@ -178,14 +178,12 @@ pub async fn tenant_middleware(
     // A per-tenant API key (resolved in `api_key_middleware`) already bound the
     // tenant identity from the key record. Honour it and skip header handling —
     // the header was already cross-checked against the key, and `require_tenant`
-    // is satisfied because we have an authenticated tenant.
+    // is satisfied because we have an authenticated tenant. This is the only
+    // exemption: the root key is *not* exempt, so `require_tenant` applies to it
+    // uniformly (it must still present an `X-Tenant-Id`, scoping the operation).
     if request.extensions().get::<TenantContext>().is_some() {
         return Ok(next.run(request).await);
     }
-
-    // The unscoped root/admin key may omit the tenant header (it is not bound to
-    // a tenant); when it supplies one, that scopes the operation as before.
-    let is_admin = request.extensions().get::<AdminContext>().is_some();
 
     if let Some(tenant_id) = request
         .headers()
@@ -193,7 +191,7 @@ pub async fn tenant_middleware(
         .and_then(|v| v.to_str().ok())
         .map(String::from)
     {
-        if tenant_id.is_empty() && require_tenant && !is_admin {
+        if tenant_id.is_empty() && require_tenant {
             return Err(StatusCode::BAD_REQUEST);
         }
         if !tenant_id.is_empty() {
@@ -201,7 +199,7 @@ pub async fn tenant_middleware(
                 tenant_id: TenantId::unchecked(tenant_id),
             });
         }
-    } else if require_tenant && !is_admin {
+    } else if require_tenant {
         return Err(StatusCode::BAD_REQUEST);
     }
 

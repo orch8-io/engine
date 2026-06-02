@@ -72,8 +72,10 @@ async fn storage() -> Arc<dyn StorageBackend> {
 }
 
 #[tokio::test]
-async fn root_key_is_admin_without_tenant() {
-    let srv = spawn(storage().await, true).await;
+async fn root_key_is_admin_when_tenant_optional() {
+    // With tenant enforcement off, the root key authenticates as the unscoped
+    // admin and needs no tenant header.
+    let srv = spawn(storage().await, false).await;
     let body = reqwest::Client::new()
         .get(format!("{}/whoami", srv.base))
         .header("x-api-key", ROOT_KEY)
@@ -84,6 +86,35 @@ async fn root_key_is_admin_without_tenant() {
         .await
         .unwrap();
     assert_eq!(body, "admin");
+}
+
+#[tokio::test]
+async fn root_key_without_tenant_header_rejected_when_required() {
+    // `require_tenant` applies uniformly: the root key is NOT exempt — it must
+    // present an X-Tenant-Id. (Only a per-tenant key, which binds its own
+    // tenant, is exempt.)
+    let srv = spawn(storage().await, true).await;
+    let status = reqwest::Client::new()
+        .get(format!("{}/whoami", srv.base))
+        .header("x-api-key", ROOT_KEY)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+
+    // Supplying a header lets the admin through, scoped to that tenant.
+    let body = reqwest::Client::new()
+        .get(format!("{}/whoami", srv.base))
+        .header("x-api-key", ROOT_KEY)
+        .header("x-tenant-id", "acme")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(body, "tenant:acme");
 }
 
 #[tokio::test]
