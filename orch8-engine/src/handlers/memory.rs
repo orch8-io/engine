@@ -267,6 +267,15 @@ fn resolve_api_key(params: &Value) -> Result<String, StepError> {
         return Ok(key.to_string());
     }
     if let Some(env_name) = params.get("api_key_env").and_then(Value::as_str) {
+        // Same guard as the llm handler: a workflow-controlled env var name must
+        // not be allowed to read the engine's own secrets or infrastructure
+        // credentials and ship them to a workflow-controlled `base_url`.
+        if !crate::handlers::llm::common::is_allowed_api_key_env(env_name) {
+            return Err(permanent(format!(
+                "embed: api_key_env '{env_name}' is not permitted: reading engine \
+                 or infrastructure secrets via api_key_env is blocked"
+            )));
+        }
         return std::env::var(env_name)
             .map_err(|_| permanent(format!("embed: env var {env_name} not set")));
     }

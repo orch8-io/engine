@@ -22,12 +22,15 @@
 //!      mirrors the HTTP-side `enforce_tenant_access` (returns `NotFound`
 //!      on cross-tenant reads so existence doesn't leak).
 //!
-//! The interceptor is typed on `Request<()>` because tonic's `AsyncInterceptor`
+//! The interceptor is typed on `Request<()>` because tonic's interceptor
 //! contract only gives it access to metadata + extensions — the typed body
 //! is threaded through untouched.
 
+use std::sync::Arc;
+
 use tonic::{Request, Status};
 
+use orch8_storage::StorageBackend;
 use orch8_types::ids::TenantId;
 
 /// Caller's tenant identity, as parsed from `x-tenant-id` metadata and
@@ -39,67 +42,108 @@ use orch8_types::ids::TenantId;
 #[derive(Clone, Debug)]
 pub struct CallerTenant(pub TenantId);
 
+/// Extract tenant from metadata and stamp it into request extensions.
+fn stamp_tenant(req: &mut Request<()>, require_tenant: bool) -> Result<(), Status> {
+    let tenant_raw: Option<String> = req
+        .metadata()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    match tenant_raw {
+        Some(tid) => {
+            req.extensions_mut()
+                .insert(CallerTenant(TenantId::unchecked(tid)));
+            Ok(())
+        }
+        None if require_tenant => Err(Status::invalid_argument("missing x-tenant-id metadata")),
+        None => Ok(()),
+    }
+}
+
 /// Build a tonic interceptor that enforces API-key auth and extracts
 /// tenant identity from metadata.
 ///
 /// # Arguments
+/// * `storage` — `Some(backend)` enables per-tenant API key lookup by hash.
+///   `None` disables per-tenant key resolution (tests / legacy path).
 /// * `expected_api_key` — `Some(key)` → every RPC must carry a matching
-///   `x-api-key` metadata entry. `None` → auth is disabled (insecure mode);
-///   use only when the server is bound to a trusted interface.
+///   `x-api-key` metadata entry (root key). `None` → auth is disabled
+///   (insecure mode); use only when the server is bound to a trusted interface.
 /// * `require_tenant` — when `true`, missing or empty `x-tenant-id`
-///   metadata results in `InvalidArgument`. When `false`, the absence of
-///   a tenant header is accepted and downstream handlers see no
-///   `CallerTenant` extension (matches the HTTP "permissive" mode).
+///   metadata results in `InvalidArgument` for root-key callers. Per-tenant
+///   key callers are exempt because their tenant is bound to the key.
 pub fn auth_interceptor(
+    storage: Option<Arc<dyn StorageBackend>>,
     expected_api_key: Option<&str>,
     require_tenant: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
     let expected_digest: Option<[u8; 32]> =
         expected_api_key.map(orch8_types::auth::precompute_secret_digest);
     move |mut req: Request<()>| {
-        // 1. API key: hash both provided and expected to a fixed-size
-        //    digest, then compare constant-time. Earlier versions gated on
-        //    `key.len() == expected.len()` before ct_eq, which short-
-        //    circuited on different lengths and leaked the expected key
-        //    length via response timing. SHA-256 here is purely a
-        //    length-normaliser — collision resistance is not load-bearing.
-        if let Some(expected_digest) = expected_digest {
-            let provided = req
-                .metadata()
-                .get("x-api-key")
-                .and_then(|v| v.to_str().ok());
-            let ok = provided.is_some()
-                && orch8_types::auth::verify_secret_against_digest(
-                    provided.unwrap_or(""),
-                    &expected_digest,
-                );
-            if !ok {
-                return Err(Status::unauthenticated("invalid or missing x-api-key"));
-            }
+        // Insecure mode: no key check, just tenant extraction.
+        if expected_digest.is_none() {
+            stamp_tenant(&mut req, require_tenant)?;
+            return Ok(req);
         }
 
-        // 2. Tenant extraction. An empty value counts as missing so an
-        //    attacker can't bypass `require_tenant` by sending the header
-        //    with an empty string.
-        let tenant_raw: Option<String> = req
+        let provided = req
             .metadata()
-            .get("x-tenant-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok());
 
-        match tenant_raw {
-            Some(tid) => {
-                req.extensions_mut()
-                    .insert(CallerTenant(TenantId::unchecked(tid)));
-            }
-            None if require_tenant => {
-                return Err(Status::invalid_argument("missing x-tenant-id metadata"));
-            }
-            None => {}
+        // 1. Root key check (sync, constant-time).
+        let root_ok = provided.is_some()
+            && orch8_types::auth::verify_secret_against_digest(
+                provided.unwrap_or(""),
+                expected_digest.as_ref().unwrap(),
+            );
+
+        if root_ok {
+            stamp_tenant(&mut req, require_tenant)?;
+            return Ok(req);
         }
 
-        Ok(req)
+        // 2. Per-tenant key lookup. Tonic interceptors are sync, so we
+        //    block_in_place to await the async storage call. This is safe
+        //    because the server runs on a multi-threaded tokio runtime.
+        if let (Some(storage), Some(provided)) = (storage.as_ref(), provided) {
+            let hash = orch8_types::api_key::hash_api_key(provided);
+            let lookup = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(storage.lookup_api_key_by_hash(&hash))
+            });
+
+            match lookup {
+                Ok(Some(record)) if record.is_active(chrono::Utc::now()) => {
+                    let tenant_raw: Option<String> = req
+                        .metadata()
+                        .get("x-tenant-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    if let Some(ref tid) = tenant_raw {
+                        if tid != &record.tenant_id {
+                            return Err(Status::permission_denied(
+                                "x-tenant-id does not match key tenant",
+                            ));
+                        }
+                    }
+
+                    req.extensions_mut()
+                        .insert(CallerTenant(TenantId::unchecked(record.tenant_id)));
+                    return Ok(req);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, "grpc api key lookup failed");
+                    return Err(Status::internal("authentication failed"));
+                }
+            }
+        }
+
+        Err(Status::unauthenticated("invalid or missing x-api-key"))
     }
 }
 
@@ -184,47 +228,47 @@ mod tests {
 
     #[test]
     fn interceptor_rejects_missing_api_key() {
-        let ic = auth_interceptor(Some("s3cret"), false);
+        let ic = auth_interceptor(None, Some("s3cret"), false);
         let err = ic(make_req(&[])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn interceptor_rejects_wrong_api_key() {
-        let ic = auth_interceptor(Some("s3cret"), false);
+        let ic = auth_interceptor(None, Some("s3cret"), false);
         let err = ic(make_req(&[("x-api-key", "nope123")])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn interceptor_accepts_matching_api_key() {
-        let ic = auth_interceptor(Some("s3cret"), false);
+        let ic = auth_interceptor(None, Some("s3cret"), false);
         assert!(ic(make_req(&[("x-api-key", "s3cret")])).is_ok());
     }
 
     #[test]
     fn interceptor_open_when_no_key_configured() {
-        let ic = auth_interceptor(None, false);
+        let ic = auth_interceptor(None, None, false);
         assert!(ic(make_req(&[])).is_ok());
     }
 
     #[test]
     fn interceptor_requires_tenant_when_configured() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let err = ic(make_req(&[])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
     fn interceptor_rejects_empty_tenant_with_required() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let err = ic(make_req(&[("x-tenant-id", "   ")])).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
     fn interceptor_stamps_tenant_into_extensions() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         assert_eq!(
             caller_tenant(&req).map(orch8_types::TenantId::as_str),
@@ -234,7 +278,7 @@ mod tests {
 
     #[test]
     fn enforce_returns_not_found_on_mismatch() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let err =
             enforce_tenant_match(&req, &TenantId::unchecked("tenant-b"), "instance").unwrap_err();
@@ -243,7 +287,7 @@ mod tests {
 
     #[test]
     fn enforce_allows_same_tenant() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         assert!(enforce_tenant_match(&req, &TenantId::unchecked("tenant-a"), "instance").is_ok());
     }
@@ -251,14 +295,14 @@ mod tests {
     #[test]
     fn enforce_is_permissive_without_caller_tenant() {
         // Insecure mode: no caller tenant, no enforcement.
-        let ic = auth_interceptor(None, false);
+        let ic = auth_interceptor(None, None, false);
         let req = ic(make_req(&[])).unwrap();
         assert!(enforce_tenant_match(&req, &TenantId::unchecked("tenant-b"), "instance").is_ok());
     }
 
     #[test]
     fn enforce_create_returns_caller_when_body_matches() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let t = enforce_tenant_create(&req, &TenantId::unchecked("tenant-a")).unwrap();
         assert_eq!(t.as_str(), "tenant-a");
@@ -267,7 +311,7 @@ mod tests {
     #[test]
     fn enforce_create_accepts_empty_body_tenant() {
         // Client omits tenant_id in body — caller header wins.
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let t = enforce_tenant_create(&req, &TenantId::unchecked("")).unwrap();
         assert_eq!(t.as_str(), "tenant-a");
@@ -275,7 +319,7 @@ mod tests {
 
     #[test]
     fn enforce_create_rejects_cross_tenant_body() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let err = enforce_tenant_create(&req, &TenantId::unchecked("tenant-b")).unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
@@ -283,7 +327,7 @@ mod tests {
 
     #[test]
     fn enforce_create_passthrough_in_permissive_mode() {
-        let ic = auth_interceptor(None, false);
+        let ic = auth_interceptor(None, None, false);
         let req = ic(make_req(&[])).unwrap();
         let t = enforce_tenant_create(&req, &TenantId::unchecked("whatever")).unwrap();
         assert_eq!(t.as_str(), "whatever");
@@ -291,7 +335,7 @@ mod tests {
 
     #[test]
     fn scoped_tenant_prefers_caller() {
-        let ic = auth_interceptor(None, true);
+        let ic = auth_interceptor(None, None, true);
         let req = ic(make_req(&[("x-tenant-id", "tenant-a")])).unwrap();
         let t = scoped_tenant_id(&req, Some(&TenantId::unchecked("tenant-b")));
         assert_eq!(
@@ -302,12 +346,71 @@ mod tests {
 
     #[test]
     fn scoped_tenant_falls_back_to_body_in_permissive_mode() {
-        let ic = auth_interceptor(None, false);
+        let ic = auth_interceptor(None, None, false);
         let req = ic(make_req(&[])).unwrap();
         let t = scoped_tenant_id(&req, Some(&TenantId::unchecked("tenant-b")));
         assert_eq!(
             t.as_ref().map(orch8_types::TenantId::as_str),
             Some("tenant-b")
         );
+    }
+
+    // --- per-tenant API key parity tests ---
+    // These need a multi-threaded runtime because the interceptor uses
+    // `tokio::task::block_in_place` to perform async storage lookups.
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interceptor_accepts_per_tenant_key_and_stamps_tenant() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let minted = orch8_types::api_key::mint("acme", "ci", None);
+        storage.create_api_key(&minted.record).await.unwrap();
+
+        let ic = auth_interceptor(Some(storage.clone()), Some("root-key"), true);
+        let req = make_req(&[("x-api-key", &minted.secret)]);
+        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
+        let req = result.expect("per-tenant key must authenticate");
+        assert_eq!(
+            caller_tenant(&req).map(orch8_types::TenantId::as_str),
+            Some("acme")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interceptor_rejects_per_tenant_key_with_wrong_tenant_header() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let minted = orch8_types::api_key::mint("acme", "ci", None);
+        storage.create_api_key(&minted.record).await.unwrap();
+
+        let ic = auth_interceptor(Some(storage.clone()), Some("root-key"), true);
+        let req = make_req(&[("x-api-key", &minted.secret), ("x-tenant-id", "evil")]);
+        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
+        let err = result.expect_err("mismatched tenant header must fail");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interceptor_rejects_revoked_per_tenant_key() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let minted = orch8_types::api_key::mint("acme", "ci", None);
+        storage.create_api_key(&minted.record).await.unwrap();
+        storage.revoke_api_key(&minted.record.id).await.unwrap();
+
+        let ic = auth_interceptor(Some(storage.clone()), Some("root-key"), true);
+        let req = make_req(&[("x-api-key", &minted.secret)]);
+        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
+        let err = result.expect_err("revoked key must fail");
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

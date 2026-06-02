@@ -26,6 +26,7 @@
     clippy::option_if_let_else
 )]
 
+mod api_keys;
 mod audit;
 mod checkpoints;
 mod circuit_breakers;
@@ -1233,6 +1234,41 @@ impl crate::AdminStore for SqliteStorage {
         threshold: std::time::Duration,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError> {
         credentials::list_due_for_refresh(self, threshold).await
+    }
+
+    // === API keys ===
+
+    async fn create_api_key(
+        &self,
+        key: &orch8_types::api_key::ApiKeyRecord,
+    ) -> Result<(), StorageError> {
+        api_keys::create(self, key).await
+    }
+
+    async fn lookup_api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<orch8_types::api_key::ApiKeyRecord>, StorageError> {
+        api_keys::lookup_by_hash(self, key_hash).await
+    }
+
+    async fn list_api_keys(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::api_key::ApiKeyRecord>, StorageError> {
+        api_keys::list(self, tenant_id).await
+    }
+
+    async fn revoke_api_key(&self, id: &str) -> Result<bool, StorageError> {
+        api_keys::revoke(self, id).await
+    }
+
+    async fn touch_api_key(
+        &self,
+        id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        api_keys::touch(self, id, at).await
     }
 
     // === Cluster ===

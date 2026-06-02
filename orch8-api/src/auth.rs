@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 
+use orch8_storage::StorageBackend;
 use orch8_types::ids::TenantId;
 
 use crate::error::ApiError;
@@ -16,6 +19,15 @@ pub struct TenantContext {
 
 /// Extract the tenant context from request extensions (if present).
 pub type OptionalTenant = Option<axum::Extension<TenantContext>>;
+
+/// Marker injected when a request authenticated with the unscoped **root** API
+/// key (or in `--insecure` mode). Key-management endpoints require it, so only
+/// the root key can mint or revoke per-tenant keys.
+#[derive(Clone, Debug)]
+pub struct AdminContext;
+
+/// Extract the admin marker from request extensions (if present).
+pub type OptionalAdmin = Option<axum::Extension<AdminContext>>;
 
 /// For create/write endpoints: if a tenant header is present, enforce it matches
 /// the body's `tenant_id`. Returns the authoritative `tenant_id` to use.
@@ -67,27 +79,89 @@ pub fn scoped_tenant_id(
 }
 
 /// API key authentication middleware.
+///
+/// Accepts two kinds of `x-api-key` secret:
+///
+///   - the **root** key (`root_key`) — unscoped/admin. It authenticates the
+///     request but binds no tenant; the [`tenant_middleware`] then derives the
+///     tenant from the `X-Tenant-Id` header (the legacy / bootstrap / admin
+///     path). Only the root key may manage other keys.
+///   - a **per-tenant** key stored in the database. Identity is taken from the
+///     key record and stamped into request extensions as a [`TenantContext`],
+///     so a caller can only act within the tenant the key was minted for —
+///     the `X-Tenant-Id` header can no longer be used to cross tenants. If the
+///     header is present it must match the key's tenant, else `403`.
+///
+/// When `root_key` is empty the server is in `--insecure` mode (it warns at
+/// startup) and all requests pass through unauthenticated, matching the prior
+/// behaviour.
 pub async fn api_key_middleware(
-    expected_key: String,
-    request: Request,
+    storage: Arc<dyn StorageBackend>,
+    root_key: String,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if expected_key.is_empty() {
-        tracing::warn!("API key is empty — authentication disabled");
+    if root_key.is_empty() {
+        // --insecure mode: authentication disabled (server warns at startup).
+        // Treat everyone as admin so management endpoints remain usable in dev.
+        request.extensions_mut().insert(AdminContext);
         return Ok(next.run(request).await);
     }
 
-    let provided = request
+    let Some(provided) = request
         .headers()
         .get("x-api-key")
-        .and_then(|v| v.to_str().ok());
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+    else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
-    if provided.is_some()
-        && orch8_types::auth::verify_secret_constant_time(provided.unwrap_or(""), &expected_key)
-    {
-        Ok(next.run(request).await)
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    // Root/admin key: unscoped. Tenant (if any) comes from the header, handled
+    // downstream by `tenant_middleware`. Mark the request as admin so it can
+    // manage per-tenant keys.
+    if orch8_types::auth::verify_secret_constant_time(&provided, &root_key) {
+        request.extensions_mut().insert(AdminContext);
+        return Ok(next.run(request).await);
+    }
+
+    // Otherwise it must be a per-tenant key. Look it up by hash; identity is
+    // bound to the record, never to the (unauthenticated) header.
+    let hash = orch8_types::api_key::hash_api_key(&provided);
+    match storage.lookup_api_key_by_hash(&hash).await {
+        Ok(Some(record)) if record.is_active(chrono::Utc::now()) => {
+            // A supplied X-Tenant-Id must agree with the key's tenant — never
+            // let a keyed caller act as a different tenant.
+            if let Some(hdr) = request
+                .headers()
+                .get("x-tenant-id")
+                .and_then(|v| v.to_str().ok())
+            {
+                if !hdr.is_empty() && hdr != record.tenant_id {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+            request.extensions_mut().insert(TenantContext {
+                tenant_id: TenantId::unchecked(record.tenant_id.clone()),
+            });
+            // Best-effort audit hygiene: touch last_used_at without blocking
+            // the request on a write.
+            let touch_id = record.id.clone();
+            let touch_storage = Arc::clone(&storage);
+            tokio::spawn(async move {
+                let now = chrono::Utc::now();
+                if let Err(e) = touch_storage.touch_api_key(&touch_id, now).await {
+                    tracing::warn!(error = %e, "failed to touch api_key last_used_at");
+                }
+            });
+            Ok(next.run(request).await)
+        }
+        // No match, revoked, or expired.
+        Ok(_) => Err(StatusCode::UNAUTHORIZED),
+        Err(e) => {
+            tracing::error!(error = %e, "api key lookup failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -101,13 +175,25 @@ pub async fn tenant_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // A per-tenant API key (resolved in `api_key_middleware`) already bound the
+    // tenant identity from the key record. Honour it and skip header handling —
+    // the header was already cross-checked against the key, and `require_tenant`
+    // is satisfied because we have an authenticated tenant.
+    if request.extensions().get::<TenantContext>().is_some() {
+        return Ok(next.run(request).await);
+    }
+
+    // The unscoped root/admin key may omit the tenant header (it is not bound to
+    // a tenant); when it supplies one, that scopes the operation as before.
+    let is_admin = request.extensions().get::<AdminContext>().is_some();
+
     if let Some(tenant_id) = request
         .headers()
         .get("x-tenant-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from)
     {
-        if tenant_id.is_empty() && require_tenant {
+        if tenant_id.is_empty() && require_tenant && !is_admin {
             return Err(StatusCode::BAD_REQUEST);
         }
         if !tenant_id.is_empty() {
@@ -115,7 +201,7 @@ pub async fn tenant_middleware(
                 tenant_id: TenantId::unchecked(tenant_id),
             });
         }
-    } else if require_tenant {
+    } else if require_tenant && !is_admin {
         return Err(StatusCode::BAD_REQUEST);
     }
 

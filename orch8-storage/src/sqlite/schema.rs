@@ -448,9 +448,24 @@ CREATE INDEX IF NOT EXISTS idx_rollback_history_tenant ON rollback_history(tenan
 CREATE INDEX IF NOT EXISTS idx_rollback_history_triggered ON rollback_history(triggered_at);
 
 -- End mobile-specific tables ─────────────────────────────────────────────────
+
+-- Per-tenant API keys. The secret is never stored — only its SHA-256 hash,
+-- which is also the lookup key. Tenant identity is bound to the key here so
+-- it can't be spoofed via the X-Tenant-Id header.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    key_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    expires_at TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;

@@ -1238,6 +1238,40 @@ impl crate::AdminStore for EncryptingStorage {
         Ok(creds)
     }
 
+    // --- API keys (pass-through: records hold only a SHA-256 hash, no secret) ---
+    async fn create_api_key(
+        &self,
+        key: &orch8_types::api_key::ApiKeyRecord,
+    ) -> Result<(), StorageError> {
+        self.inner.create_api_key(key).await
+    }
+
+    async fn lookup_api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<orch8_types::api_key::ApiKeyRecord>, StorageError> {
+        self.inner.lookup_api_key_by_hash(key_hash).await
+    }
+
+    async fn list_api_keys(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+    ) -> Result<Vec<orch8_types::api_key::ApiKeyRecord>, StorageError> {
+        self.inner.list_api_keys(tenant_id).await
+    }
+
+    async fn revoke_api_key(&self, id: &str) -> Result<bool, StorageError> {
+        self.inner.revoke_api_key(id).await
+    }
+
+    async fn touch_api_key(
+        &self,
+        id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        self.inner.touch_api_key(id, at).await
+    }
+
     // --- Cluster (pass-through) ---
     async fn register_node(
         &self,

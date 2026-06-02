@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Connect to storage backend.
     let storage = init_storage(&config).await?;
-    let storage = wrap_encryption(storage, &config)?;
+    let storage = wrap_encryption(storage, &config, cli.insecure)?;
 
     // Install Prometheus metrics recorder.
     let metrics_state = init_prometheus();
@@ -94,23 +94,36 @@ async fn main() -> anyhow::Result<()> {
     );
     let cors = build_cors_layer(&config.api.cors_origins);
     let api_key = config.api.api_key.expose().to_string();
-    validate_auth_config(&api_key, cli.insecure, &config.api.cors_origins)?;
-
     let require_tenant = config.api.require_tenant_header;
-    // gRPC shares the same API-key / tenant-header contract as HTTP. Capture
-    // the values here (before `api_key` is moved into the HTTP middleware
-    // closure) so the tonic interceptor below can enforce parity.
-    let grpc_api_key = if api_key.is_empty() {
-        None
-    } else {
-        Some(api_key.clone())
-    };
-    let grpc_require_tenant = require_tenant;
+    validate_auth_config(
+        &api_key,
+        require_tenant,
+        cli.insecure,
+        &config.api.cors_origins,
+    )?;
+
+    // Spawn gRPC + signal handler before `api_key` is moved into the HTTP
+    // middleware closure so we can borrow it for the tonic interceptor.
+    let grpc_handle = spawn_grpc_server(
+        storage.clone(),
+        &config,
+        shutdown_token.clone(),
+        if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key.as_str())
+        },
+        require_tenant,
+    );
+    spawn_signal_handler(shutdown_token.clone());
 
     // Circuit-breaker routes are merged separately (they need AppState with
     // the registry). Nest under /api/v1 and also keep at root for backward
     // compatibility, mirroring what `build_router` does for the other routes.
     let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());
+    // Storage handle for the auth middleware: per-tenant API keys are resolved
+    // by hash against the database.
+    let auth_storage = storage.clone();
     let mut app = build_router(app_state.clone())
         .nest(API_V1_PREFIX, cb_routes.clone())
         .merge(cb_routes)
@@ -118,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             orch8_api::auth::tenant_middleware(require_tenant, req, next)
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
-            orch8_api::auth::api_key_middleware(api_key.clone(), req, next)
+            orch8_api::auth::api_key_middleware(auth_storage.clone(), api_key.clone(), req, next)
         }))
         // Metrics and Swagger UI are mounted *after* auth so they are not
         // publicly reachable. Internal scraping / docs access should carry
@@ -161,18 +174,6 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         "Health endpoints: http://{}/health/live, /health/ready",
         http_addr
-    );
-
-    // Graceful shutdown — `shutdown_token` is the single cancellation source
-    // shared across HTTP, gRPC, engine, and long-lived handlers.
-    spawn_signal_handler(shutdown_token.clone());
-
-    let grpc_handle = spawn_grpc_server(
-        storage.clone(),
-        &config,
-        shutdown_token.clone(),
-        grpc_api_key.as_deref(),
-        grpc_require_tenant,
     );
 
     let engine_handle = spawn_engine(
@@ -228,7 +229,12 @@ fn build_app_state(
     }
 }
 
-fn validate_auth_config(api_key: &str, insecure: bool, cors_origins: &str) -> anyhow::Result<()> {
+fn validate_auth_config(
+    api_key: &str,
+    require_tenant: bool,
+    insecure: bool,
+    cors_origins: &str,
+) -> anyhow::Result<()> {
     if api_key.is_empty() {
         if !insecure {
             anyhow::bail!(
@@ -242,6 +248,18 @@ fn validate_auth_config(api_key: &str, insecure: bool, cors_origins: &str) -> an
         );
     } else if cors_origins.trim() == "*" {
         tracing::warn!("CORS allows all origins ('*') while API key auth is enabled. Consider restricting ORCH8_CORS_ORIGINS to trusted origins.");
+    }
+
+    // Tenant isolation is secure-by-default; disabling it makes per-resource
+    // tenant checks fall open so every API-key holder shares one global scope.
+    // Surface that loudly so it is never a silent state when auth is enabled.
+    if !api_key.is_empty() && !require_tenant {
+        tracing::warn!(
+            "Tenant isolation is DISABLED (require_tenant_header=false): the X-Tenant-Id \
+             header is not required and cross-tenant access checks fall open — every caller \
+             holding the API key can read and modify all tenants' data. Set \
+             ORCH8_REQUIRE_TENANT_HEADER=true (the default) for multi-tenant isolation."
+        );
     }
     Ok(())
 }
@@ -347,6 +365,7 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
 fn wrap_encryption(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
+    insecure: bool,
 ) -> anyhow::Result<Arc<dyn StorageBackend>> {
     let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
     let key = if config.engine.encryption_key.is_empty() {
@@ -355,6 +374,22 @@ fn wrap_encryption(
         config.engine.encryption_key.expose()
     };
     if key.is_empty() {
+        // Fail closed: without a key, credentials (API keys, OAuth tokens) and
+        // context.data are persisted in PLAINTEXT. A DB dump or replica leak
+        // would then expose every secret. Mirror the API-key contract — refuse
+        // to start unless the operator explicitly accepts the risk.
+        if !insecure {
+            anyhow::bail!(
+                "No encryption key configured: credentials and context.data would be stored \
+                 in PLAINTEXT. Set ORCH8_ENCRYPTION_KEY (or engine.encryption_key in the config \
+                 file) to a 64-hex-character AES-256-GCM key, or pass --insecure to explicitly \
+                 run without encryption at rest (local development only)."
+            );
+        }
+        tracing::warn!(
+            "Running with --insecure: encryption at rest is DISABLED — credentials and \
+             context.data are stored in plaintext. Never use this in production."
+        );
         return Ok(storage);
     }
 
@@ -427,8 +462,9 @@ fn spawn_grpc_server(
         .parse()
         .expect("Invalid gRPC listen address");
 
-    let grpc_service = Orch8GrpcService::new(storage);
-    let grpc_interceptor = orch8_grpc::auth::auth_interceptor(api_key, require_tenant);
+    let grpc_service = Orch8GrpcService::new(storage.clone());
+    let grpc_interceptor =
+        orch8_grpc::auth::auth_interceptor(Some(storage), api_key, require_tenant);
     tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()
@@ -691,10 +727,12 @@ fn print_startup_banner(config: &EngineConfig, insecure: bool) {
     } else {
         "api-key"
     };
-    let encryption = if config.engine.encryption_key.is_empty() {
-        "off"
-    } else {
+    let encryption_key_set = !config.engine.encryption_key.is_empty()
+        || std::env::var("ORCH8_ENCRYPTION_KEY").is_ok_and(|k| !k.is_empty());
+    let encryption = if encryption_key_set {
         "AES-256-GCM"
+    } else {
+        "off"
     };
     let tenant = if config.api.require_tenant_header {
         "required"

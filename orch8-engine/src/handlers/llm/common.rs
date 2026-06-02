@@ -70,6 +70,48 @@ pub(super) fn extract_system_message(messages: &Value) -> (Option<String>, Value
     (system, serde_json::json!(filtered))
 }
 
+/// Well-known infrastructure / cloud / CI secrets that must never leave the
+/// process as a Bearer token, regardless of vendor naming conventions.
+const DENIED_API_KEY_ENV: &[&str] = &[
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GCP_SERVICE_ACCOUNT_KEY",
+    "AZURE_CLIENT_SECRET",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "NPM_TOKEN",
+    "SSH_PRIVATE_KEY",
+    "PRIVATE_KEY",
+];
+
+/// `true` if `name` is a process env var that a *workflow author* is allowed to
+/// dereference via `api_key_env`.
+///
+/// `api_key_env` is workflow-controlled and the resolved value is injected into
+/// the `Authorization` header of a request to a (also workflow-controlled)
+/// `base_url`. Without this gate a workflow could name the engine's own secrets
+/// — `ORCH8_ENCRYPTION_KEY` (the master AES key for the entire credential
+/// store), `ORCH8_API_KEY`, `ORCH8_DATABASE_URL`, `ORCH8_ARTIFACT_S3_SECRET_*`
+/// — or common cloud/CI secrets, and exfiltrate them to an attacker host. We
+/// deny the engine's whole `ORCH8_` namespace plus a list of well-known
+/// infrastructure secret names; legitimate provider keys (`OPENAI_API_KEY`,
+/// `MY_OPENAI_KEY`, …) are unaffected.
+pub(crate) fn is_allowed_api_key_env(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+
+    // The engine reads all of its own configuration/secrets from this prefix.
+    // None of them are ever a legitimate LLM provider key.
+    if upper.starts_with("ORCH8_") {
+        return false;
+    }
+
+    !DENIED_API_KEY_ENV.contains(&upper.as_str())
+}
+
 /// Resolve API key: direct param → env var param → provider default env var.
 pub(super) fn resolve_api_key(params: &Value, provider: &str) -> Result<String, StepError> {
     if let Some(key) = params.get("api_key").and_then(Value::as_str) {
@@ -77,6 +119,12 @@ pub(super) fn resolve_api_key(params: &Value, provider: &str) -> Result<String, 
     }
 
     if let Some(env_var) = params.get("api_key_env").and_then(Value::as_str) {
+        if !is_allowed_api_key_env(env_var) {
+            return Err(permanent(format!(
+                "api_key_env '{env_var}' is not permitted: reading engine or \
+                 infrastructure secrets via api_key_env is blocked"
+            )));
+        }
         return std::env::var(env_var)
             .map_err(|_| permanent(format!("env var '{env_var}' not set")));
     }
@@ -349,7 +397,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_from_explicit_env_var_param() {
-        let var = "ORCH8_TEST_LLM_KEY_EXPLICIT";
+        // A legitimate (non-engine) provider key var name passes the guard.
+        let var = "MY_TEST_LLM_API_KEY_EXPLICIT";
         std::env::set_var(var, "from-explicit-env");
         let params = json!({"api_key_env": var});
         let key = resolve_api_key(&params, "openai").unwrap();
@@ -359,14 +408,10 @@ mod tests {
 
     #[test]
     fn resolve_api_key_returns_permanent_error_when_nothing_set() {
-        let prev = std::env::var("ORCH8_TEST_LLM_KEY_NONE").ok();
-        std::env::set_var("OPENAI_API_KEY_UNSET_MARKER", "ignored");
-        let params = json!({"api_key_env": "ORCH8_TEST_LLM_KEY_NONE_UNSET_VAR"});
+        // An allowed-but-unset var name exercises the missing-env-var path.
+        let params = json!({"api_key_env": "MY_TEST_LLM_KEY_NONE_UNSET_VAR"});
         let err = resolve_api_key(&params, "openai").expect_err("missing env var must error out");
         assert!(matches!(err, StepError::Permanent { .. }));
-        if let Some(v) = prev {
-            std::env::set_var("ORCH8_TEST_LLM_KEY_NONE", v);
-        }
     }
 
     #[test]
@@ -438,5 +483,64 @@ mod tests {
         let mut output = json!({"provider": "perplexity"});
         merge_json_response_fields(content_str, &mut output);
         assert!(output.get("probability").is_none());
+    }
+
+    #[test]
+    fn api_key_env_allows_legitimate_provider_keys() {
+        for name in [
+            "OPENAI_API_KEY",
+            "MY_OPENAI_KEY",
+            "ANTHROPIC_API_KEY",
+            "AZURE_OPENAI_KEY",
+            "CUSTOM_LLM_TOKEN",
+            "PATH",
+        ] {
+            assert!(is_allowed_api_key_env(name), "{name} should be allowed");
+        }
+    }
+
+    #[test]
+    fn api_key_env_blocks_engine_secret_namespace() {
+        // The whole ORCH8_ namespace — most critically the master encryption key
+        // and the engine's own API key — must never be exfiltratable.
+        for name in [
+            "ORCH8_ENCRYPTION_KEY",
+            "ORCH8_OLD_ENCRYPTION_KEY",
+            "ORCH8_API_KEY",
+            "ORCH8_DATABASE_URL",
+            "ORCH8_ARTIFACT_S3_SECRET_ACCESS_KEY",
+            "orch8_encryption_key", // case-insensitive
+        ] {
+            assert!(!is_allowed_api_key_env(name), "{name} must be blocked");
+        }
+    }
+
+    #[test]
+    fn api_key_env_blocks_known_infrastructure_secrets() {
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "DATABASE_URL",
+            "GITHUB_TOKEN",
+            "SSH_PRIVATE_KEY",
+            "private_key", // case-insensitive
+        ] {
+            assert!(!is_allowed_api_key_env(name), "{name} must be blocked");
+        }
+    }
+
+    #[test]
+    fn resolve_api_key_rejects_blocked_env_var() {
+        let params = json!({ "api_key_env": "ORCH8_ENCRYPTION_KEY" });
+        let err = resolve_api_key(&params, "openai")
+            .expect_err("reading the engine encryption key must be refused");
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(message.contains("not permitted"), "got: {message}");
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got {other:?}")
+            }
+        }
     }
 }

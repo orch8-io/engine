@@ -1173,6 +1173,39 @@ pub trait AdminStore: Send + Sync + 'static {
         threshold: std::time::Duration,
     ) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
 
+    // === API keys (per-tenant authentication) ===
+
+    /// Persist a freshly minted API key. Only the SHA-256 hash is stored.
+    async fn create_api_key(
+        &self,
+        key: &orch8_types::api_key::ApiKeyRecord,
+    ) -> Result<(), StorageError>;
+
+    /// Look up an API key by the SHA-256 hash of the presented secret. Returns
+    /// the record (including revoked/expired ones — the caller decides) or
+    /// `None` when no key matches.
+    async fn lookup_api_key_by_hash(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<orch8_types::api_key::ApiKeyRecord>, StorageError>;
+
+    /// List API keys for a tenant (metadata only — never the secret).
+    async fn list_api_keys(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<Vec<orch8_types::api_key::ApiKeyRecord>, StorageError>;
+
+    /// Revoke a key by id. Returns `true` if a key was revoked, `false` if no
+    /// key with that id exists.
+    async fn revoke_api_key(&self, id: &str) -> Result<bool, StorageError>;
+
+    /// Update `last_used_at` for a key. Fire-and-forget audit hygiene.
+    async fn touch_api_key(
+        &self,
+        id: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError>;
+
     // === Cluster ===
 
     /// Register a new cluster node.

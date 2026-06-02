@@ -1,3 +1,4 @@
+pub mod api_keys;
 pub mod approvals;
 pub mod auth;
 pub mod circuit_breakers;
@@ -88,6 +89,7 @@ fn api_routes() -> Router<AppState> {
         .merge(triggers::routes())
         .merge(plugins::routes())
         .merge(credentials::routes())
+        .merge(api_keys::routes())
         .merge(telemetry::routes())
         .merge(rollback::routes())
         .merge(usage::routes())

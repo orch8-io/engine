@@ -251,7 +251,7 @@ struct UploadBody {
 /// `true` if `key` (an artifact object key `<instance_id>/<artifact_id>`) is
 /// owned by `instance_id`. Used as an IDOR guard so a workflow can only read
 /// back its own artifacts, never a sibling instance's.
-fn artifact_key_owned_by(key: &str, instance_id: orch8_types::ids::InstanceId) -> bool {
+pub(crate) fn artifact_key_owned_by(key: &str, instance_id: orch8_types::ids::InstanceId) -> bool {
     let prefix = format!("{}/", instance_id.into_uuid());
     key.starts_with(&prefix)
 }

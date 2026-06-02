@@ -158,6 +158,18 @@ pub async fn handle_blob_get(ctx: StepContext) -> Result<Value, StepError> {
             details: None,
         })?;
 
+    // IDOR guard: artifact object keys are `<instance_id>/<artifact_id>`. A
+    // workflow may only read back artifacts produced by *its own* instance,
+    // never a sibling/other-tenant instance's — otherwise a crafted `ref` like
+    // `<victim-instance-uuid>/<artifact-id>` would exfiltrate cross-tenant data.
+    // Mirrors the same check `tool_call` applies to fetched artifacts.
+    if !super::tool_call::artifact_key_owned_by(&key, ctx.instance_id) {
+        return Err(StepError::Permanent {
+            message: format!("blob_get: ref '{key}' does not belong to this instance"),
+            details: None,
+        });
+    }
+
     let encoding = ctx
         .params
         .get("encoding")
@@ -277,6 +289,31 @@ mod tests {
         assert_eq!(got["text"], "hello world");
         assert_eq!(got["encoding"], "utf8");
         assert_eq!(got["size"], 11);
+    }
+
+    #[tokio::test]
+    async fn get_rejects_cross_instance_key_idor() {
+        // A victim instance stores an artifact.
+        let storage = storage_with_artifacts().await;
+        let victim = InstanceId::new();
+        let put = handle_blob_put(ctx(&storage, victim, json!({ "text": "victim secret" })))
+            .await
+            .unwrap();
+        let victim_key = key_of(&put);
+
+        // An attacker instance tries to read it back by supplying the victim's
+        // object key directly. This must be refused before touching storage.
+        let attacker = InstanceId::new();
+        let err = handle_blob_get(ctx(&storage, attacker, json!({ "ref": victim_key })))
+            .await
+            .expect_err("cross-instance artifact read must be rejected");
+        let StepError::Permanent { message, .. } = err else {
+            panic!("expected Permanent");
+        };
+        assert!(
+            message.contains("does not belong to this instance"),
+            "got: {message}"
+        );
     }
 
     #[tokio::test]
@@ -421,13 +458,12 @@ mod tests {
     #[tokio::test]
     async fn get_missing_artifact_is_permanent() {
         let storage = storage_with_artifacts().await;
-        let err = handle_blob_get(ctx(
-            &storage,
-            InstanceId::new(),
-            json!({ "ref": "nonexistent/key" }),
-        ))
-        .await
-        .unwrap_err();
+        let id = InstanceId::new();
+        // Key is owned by this instance (passes the IDOR guard) but doesn't exist.
+        let owned_missing = format!("{}/nonexistent", id.into_uuid());
+        let err = handle_blob_get(ctx(&storage, id, json!({ "ref": owned_missing })))
+            .await
+            .unwrap_err();
         let StepError::Permanent { message, .. } = err else {
             panic!("expected Permanent");
         };

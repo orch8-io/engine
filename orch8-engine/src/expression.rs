@@ -657,9 +657,19 @@ impl<'a> Parser<'a> {
                 if max <= min {
                     return serde_json::json!(min);
                 }
-                let range = (max - min) as u64;
-                #[allow(clippy::cast_possible_wrap)]
-                let n = (rand::random::<u64>() % range) as i64 + min;
+                // i128 throughout: `i64::MAX - i64::MIN` overflows i64 (a debug
+                // panic / release garbage when an attacker passes extreme bounds
+                // via context data), and the final value — always in [min, max)
+                // — is reconstructed without wrapping. `range > 0` since max > min,
+                // so the modulus can never divide by zero.
+                let range = (i128::from(max) - i128::from(min)) as u128;
+                // `% range` is in [0, range) ⊆ [0, u64::MAX], so both casts are
+                // lossless here despite the general lint.
+                #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+                let n = {
+                    let offset = (u128::from(rand::random::<u64>()) % range) as i128;
+                    (i128::from(min) + offset) as i64
+                };
                 serde_json::json!(n)
             }
             "format_date" => {
@@ -759,7 +769,11 @@ impl<'a> Parser<'a> {
                 match arg {
                     serde_json::Value::Array(a) => {
                         let end_idx = end.map_or(a.len(), |e| (e as usize).min(a.len()));
-                        let start_idx = start.min(a.len());
+                        // Clamp start to end_idx (not just a.len()): otherwise
+                        // `slice(arr, 5, 2)` yields start_idx > end_idx and the
+                        // `a[start..end]` range panics. start > end now yields an
+                        // empty slice.
+                        let start_idx = start.min(end_idx);
                         serde_json::Value::Array(a[start_idx..end_idx].to_vec())
                     }
                     _ => serde_json::Value::Null,
@@ -1831,6 +1845,22 @@ mod tests {
         assert!((1..10).contains(&n), "expected 1..10, got {n}");
     }
 
+    #[test]
+    fn eval_random_extreme_bounds_does_not_panic() {
+        // `i64::MAX - i64::MIN` overflows i64; the evaluator must not crash the
+        // worker when an attacker supplies extreme bounds via context data.
+        let result = evaluate(
+            "random(-9000000000000000000, 9000000000000000000)",
+            &ctx(),
+            &outputs(),
+        );
+        let n = result.as_i64().expect("random must return an integer");
+        assert!(
+            (-9_000_000_000_000_000_000..9_000_000_000_000_000_000).contains(&n),
+            "result {n} out of requested range"
+        );
+    }
+
     // --- format_date() ---
 
     #[test]
@@ -2065,6 +2095,23 @@ mod tests {
         assert_eq!(
             evaluate("slice(items, 1)", &ctx, &json!({})),
             json!([20, 30])
+        );
+    }
+
+    #[test]
+    fn eval_slice_start_after_end_is_empty_not_panic() {
+        // start > end previously produced `a[start..end]` with start > end,
+        // which panics. It must now yield an empty array.
+        let ctx = ExecutionContext {
+            data: json!({"items": [10, 20, 30]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("slice(items, 5, 2)", &ctx, &json!({})), json!([]));
+        // start beyond the array is also empty, never a panic.
+        assert_eq!(
+            evaluate("slice(items, 99, 100)", &ctx, &json!({})),
+            json!([])
         );
     }
 

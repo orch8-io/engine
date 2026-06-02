@@ -248,6 +248,11 @@ export async function startServer(
       ORCH8_CRON_TICK_SECS: "1",
       ORCH8_ALLOW_INTERNAL_URLS: "1",
       ORCH8_RUN_MIGRATIONS: "true",
+      // Tenant isolation is secure-by-default in the server now. The general
+      // E2E suites don't send X-Tenant-Id, so disable enforcement here (matching
+      // the unit-test harness). Security suites that exercise isolation set
+      // ORCH8_REQUIRE_TENANT_HEADER=true via their own `env` override.
+      ORCH8_REQUIRE_TENANT_HEADER: "false",
       // Surface a full backtrace if the server panics — the CI cascade
       // we chased in April 2026 died silently because this was unset.
       RUST_BACKTRACE: process.env.RUST_BACKTRACE ?? "full",

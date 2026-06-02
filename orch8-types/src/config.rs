@@ -494,7 +494,12 @@ pub struct ApiConfig {
     pub api_key: SecretString,
     /// If true, require `X-Tenant-Id` header on all requests and enforce
     /// tenant isolation. Requests without the header get `400 Bad Request`.
-    #[serde(default)]
+    ///
+    /// Defaults to `true` (secure by default): without the header, the
+    /// per-resource tenant checks fall open and any API-key holder can read
+    /// across tenants. Single-tenant deployments may explicitly set this to
+    /// `false` (an informed opt-out, surfaced loudly at startup).
+    #[serde(default = "default_require_tenant_header")]
     pub require_tenant_header: bool,
     /// Maximum in-flight HTTP requests (global concurrency cap). 0 disables the cap.
     ///
@@ -513,7 +518,7 @@ impl Default for ApiConfig {
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
             api_key: SecretString::default(),
-            require_tenant_header: false,
+            require_tenant_header: default_require_tenant_header(),
             max_concurrent_requests: 0,
         }
     }
@@ -521,6 +526,11 @@ impl Default for ApiConfig {
 
 const fn default_cors_origins() -> String {
     String::new()
+}
+
+/// Secure by default: tenant isolation is enforced unless explicitly disabled.
+const fn default_require_tenant_header() -> bool {
+    true
 }
 
 fn default_grpc_addr() -> String {
@@ -707,8 +717,9 @@ mod tests {
         assert!(cfg.database.url.is_empty());
         assert!(cfg.api.api_key.is_empty());
         assert!(cfg.engine.encryption_key.is_empty());
-        // No tenant enforcement by default — opt-in.
-        assert!(!cfg.api.require_tenant_header);
+        // Tenant enforcement is ON by default (secure by default); single-tenant
+        // deployments must opt out explicitly.
+        assert!(cfg.api.require_tenant_header);
     }
 
     #[test]
@@ -961,7 +972,7 @@ mod tests {
         assert_eq!(cfg.http_addr, "127.0.0.1:8080");
         assert_eq!(cfg.cors_origins, "");
         assert!(cfg.api_key.is_empty());
-        assert!(!cfg.require_tenant_header);
+        assert!(cfg.require_tenant_header);
         assert_eq!(cfg.max_concurrent_requests, 0);
     }
 

@@ -49,7 +49,7 @@
 //! | `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC` | `Anthropic` | `claude-sonnet-4-6` |
 
 mod anthropic;
-mod common;
+pub(crate) mod common;
 mod openai;
 
 use std::sync::OnceLock;
