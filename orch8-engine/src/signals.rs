@@ -260,12 +260,16 @@ async fn cancel_scoped(
     let mut has_non_cancellable_active = false;
     let mut cancellable_node_ids: Vec<ExecutionNodeId> = Vec::new();
 
+    let mut node_index: Vec<&orch8_types::execution::ExecutionNode> = tree.iter().collect();
+    node_index.sort_unstable_by_key(|n| n.id);
+
     // Collect IDs of CancellationScope nodes so we can check ancestry.
-    let scope_node_ids: std::collections::HashSet<_> = tree
+    let mut scope_node_ids: Vec<_> = tree
         .iter()
         .filter(|n| n.block_type == BlockType::CancellationScope)
         .map(|n| n.id)
         .collect();
+    scope_node_ids.sort_unstable();
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 
@@ -282,13 +286,13 @@ async fn cancel_scoped(
         // node itself is also non-cancellable — cancelling it would
         // terminate the scope (and its children) before they had a chance
         // to drain, defeating the purpose of the scope in the first place.
-        let inside_scope = is_descendant_of_any(&tree, node, &scope_node_ids);
+        let inside_scope = is_descendant_of_any(&node_index, node, &scope_node_ids);
         let is_scope_node = node.block_type == BlockType::CancellationScope;
 
         // Nodes inside a try-catch `finally` branch (branch_index == 2) are
         // non-cancellable: the finally block must run to completion regardless
         // of external signals. This mirrors Java/Python try-finally semantics.
-        let inside_finally = is_inside_finally_branch(&tree, node);
+        let inside_finally = is_inside_finally_branch(&node_index, node);
 
         // Check per-step cancellable flag.
         let step_cancellable = block_map
@@ -324,7 +328,7 @@ async fn cancel_scoped(
 /// In either case the node must not be cancelled so the finally block can
 /// run to completion.
 fn is_inside_finally_branch(
-    tree: &[orch8_types::execution::ExecutionNode],
+    node_index: &[&orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
 ) -> bool {
     use orch8_types::execution::BlockType;
@@ -332,22 +336,25 @@ fn is_inside_finally_branch(
     // Case 1: The node itself is a TryCatch with active finally children.
     // Cancelling it would orphan the finally branch.
     if node.block_type == BlockType::TryCatch {
-        let finally_children: Vec<_> = tree
+        let finally_children = node_index
             .iter()
-            .filter(|c| c.parent_id == Some(node.id) && c.branch_index == Some(2))
-            .collect();
-        let has_active_finally = finally_children.iter().any(|c| {
-            matches!(
+            .filter(|c| c.parent_id == Some(node.id) && c.branch_index == Some(2));
+
+        let mut has_active = false;
+        let mut has_any = false;
+        let mut all_pending = true;
+
+        for c in finally_children {
+            has_any = true;
+            let is_active = matches!(
                 c.state,
                 NodeState::Pending | NodeState::Running | NodeState::Waiting
-            )
-        });
-        if has_active_finally
-            || (!finally_children.is_empty()
-                && finally_children
-                    .iter()
-                    .all(|c| c.state == NodeState::Pending))
-        {
+            );
+            if is_active { has_active = true; }
+            if c.state != NodeState::Pending { all_pending = false; }
+        }
+
+        if has_active || (has_any && all_pending) {
             return true;
         }
     }
@@ -359,9 +366,10 @@ fn is_inside_finally_branch(
         let Some(parent_id) = current.parent_id else {
             return false;
         };
-        let Some(parent) = tree.iter().find(|n| n.id == parent_id) else {
+        let Ok(idx) = node_index.binary_search_by_key(&parent_id, |n| n.id) else {
             return false;
         };
+        let parent = node_index[idx];
         if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
             return true;
         }
@@ -371,17 +379,19 @@ fn is_inside_finally_branch(
 
 /// Check if `node` is a descendant of any node whose ID is in `ancestor_ids`.
 fn is_descendant_of_any(
-    tree: &[orch8_types::execution::ExecutionNode],
+    node_index: &[&orch8_types::execution::ExecutionNode],
     node: &orch8_types::execution::ExecutionNode,
-    ancestor_ids: &std::collections::HashSet<orch8_types::ids::ExecutionNodeId>,
+    ancestor_ids: &[orch8_types::ids::ExecutionNodeId],
 ) -> bool {
-    let node_map: std::collections::HashMap<_, _> = tree.iter().map(|n| (n.id, n)).collect();
     let mut current_parent = node.parent_id;
     while let Some(pid) = current_parent {
-        if ancestor_ids.contains(&pid) {
+        if ancestor_ids.binary_search(&pid).is_ok() {
             return true;
         }
-        current_parent = node_map.get(&pid).copied().and_then(|n| n.parent_id);
+        current_parent = node_index
+            .binary_search_by_key(&pid, |n| n.id)
+            .ok()
+            .and_then(|idx| node_index[idx].parent_id);
     }
     false
 }
@@ -1181,16 +1191,22 @@ mod tests {
             completed_at: None,
         };
         let tree = vec![root.clone(), child.clone(), grandchild.clone()];
-        let ancestors = std::collections::HashSet::from([root.id]);
-        assert!(is_descendant_of_any(&tree, &grandchild, &ancestors));
-        assert!(is_descendant_of_any(&tree, &child, &ancestors));
+        let mut node_index: Vec<_> = tree.iter().collect();
+        node_index.sort_unstable_by_key(|n| n.id);
+
+        let mut ancestors = vec![root.id];
+        ancestors.sort_unstable();
+
+        assert!(is_descendant_of_any(&node_index, &grandchild, &ancestors));
+        assert!(is_descendant_of_any(&node_index, &child, &ancestors));
         // Root is not a descendant of itself.
-        assert!(!is_descendant_of_any(&tree, &root, &ancestors));
+        assert!(!is_descendant_of_any(&node_index, &root, &ancestors));
         // Unknown ancestor — returns false.
+        let missing = vec![ExecutionNodeId::new()];
         assert!(!is_descendant_of_any(
-            &tree,
+            &node_index,
             &grandchild,
-            &std::collections::HashSet::from([ExecutionNodeId::new()])
+            &missing
         ));
     }
 

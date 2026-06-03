@@ -29,3 +29,7 @@
 ## 2025-10-26 - [HashMap Allocation Overhead in Execution Node Maps]
 **Learning:** In the `evaluate` function within `orch8-engine`, allocating `HashMap` structures (`parent_map` and `node_map`) on every single iteration to facilitate tree traversal introduces massive hashing and memory allocation overhead. Since the tree size is typically small and node IDs are unique, building a sorted `Vec` of references and querying via `binary_search_by_key` is dramatically faster (O(log N) lookup without hashing) and has almost zero heap allocation cost.
 **Action:** Replace dynamic map structures built inside evaluation hot paths with a zero-allocation `Vec` using `.sort_unstable_by_key()` and `.binary_search_by_key()` to track hierarchy and state.
+
+## 2025-10-27 - [HashSet Allocation Overhead in Scope Traversal]
+**Learning:** In the `cancel_scoped` flow, `is_descendant_of_any` was repeatedly called for every active node in the tree. Because it accepted a `&[ExecutionNode]` slice, it dynamically constructed a `HashMap` of all nodes to traverse parents, resulting in severe O(N^2) allocation overhead. Furthermore, `cancel_scoped` itself built a `HashSet` to perform intersection checks.
+**Action:** Replace dynamic map allocations in O(N) loops with a pre-built `Vec` sorted by ID, allowing `binary_search_by_key` to achieve O(log N) lookups without any hashing or allocation penalties inside the loop. Pass this `node_index` directly to internal functions like `is_inside_finally_branch` to reuse the sorted view.
