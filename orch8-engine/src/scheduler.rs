@@ -351,10 +351,19 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 instance_id = %instance.id,
                 "no semaphore permit available, deferring instance"
             );
-            let _ = ctx
+            if let Err(e) = ctx
                 .storage
                 .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
-                .await;
+                .await
+            {
+                // If this write fails the row stays `Running` and is never
+                // re-claimed — surface it rather than silently stranding it.
+                warn!(
+                    instance_id = %instance.id,
+                    error = %e,
+                    "failed to defer instance back to Scheduled; it may be stuck Running"
+                );
+            }
             continue;
         };
 
@@ -600,9 +609,16 @@ async fn process_signalled_instances(
                 instance_id = %instance_id,
                 "waking scheduled instance with pending signal"
             );
-            let _ = storage
+            if let Err(e) = storage
                 .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
-                .await;
+                .await
+            {
+                warn!(
+                    instance_id = %instance_id,
+                    error = %e,
+                    "failed to re-arm signalled scheduled instance"
+                );
+            }
             continue;
         }
 
@@ -1136,27 +1152,19 @@ async fn process_instance(
                     completed_blocks.insert(pos, step_def.id.clone());
                 }
 
-                // Re-read instance from storage so we don't clobber context
-                // mutations made during step execution (e.g. check_human_input's
-                // merge_context_data). Then bump the counter and write back.
-                let mut fresh_context = storage
-                    .get_instance(instance_id)
-                    .await?
-                    .map_or_else(|| instance.context.clone(), |i| i.context);
-                fresh_context.runtime.total_steps_executed += 1;
+                // Atomically bump the step counter. Touches only the counter
+                // path, so context mutations made during step execution (e.g.
+                // check_human_input's merge_context_data) are preserved without
+                // a read + full-context rewrite per step.
+                let total = storage.increment_total_steps(instance_id).await?;
 
-                if max_steps_per_instance > 0
-                    && fresh_context.runtime.total_steps_executed > max_steps_per_instance
-                {
+                if max_steps_per_instance > 0 && total > max_steps_per_instance {
                     warn!(
                         instance_id = %instance_id,
-                        total = fresh_context.runtime.total_steps_executed,
+                        total = total,
                         max = max_steps_per_instance,
                         "instance exceeded max_steps_per_instance, failing"
                     );
-                    storage
-                        .update_instance_context(instance_id, &fresh_context)
-                        .await?;
                     crate::lifecycle::transition_instance(
                         storage.as_ref(),
                         instance_id,
@@ -1168,9 +1176,6 @@ async fn process_instance(
                     .await?;
                     return Ok(());
                 }
-                storage
-                    .update_instance_context(instance_id, &fresh_context)
-                    .await?;
             }
             StepOutcome::Failed => {
                 // Interceptor: on_failure

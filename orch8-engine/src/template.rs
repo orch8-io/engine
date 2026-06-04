@@ -12,6 +12,24 @@ pub fn contains_template(value: &serde_json::Value) -> bool {
     }
 }
 
+/// `true` if any template in `value` could reference the `state` root
+/// (`{{ state.* }}`).
+///
+/// Conservative by design: a string merely *containing* `state` inside a
+/// template triggers a hit, so the instance KV map is never skipped when it is
+/// actually needed (no false negatives — at worst an unrelated `state`
+/// substring causes a fetch that would have happened anyway). This lets callers
+/// avoid an instance-KV round-trip for the common outputs-/context-only case.
+#[must_use]
+pub fn references_state(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains("{{") && s.contains("state"),
+        serde_json::Value::Object(map) => map.values().any(references_state),
+        serde_json::Value::Array(arr) => arr.iter().any(references_state),
+        _ => false,
+    }
+}
+
 /// Resolve `{{path}}` placeholders in a JSON value.
 ///
 /// Supported path prefixes:
@@ -566,8 +584,32 @@ fn try_resolve_single(
         Some("config") => navigate_json(&context.config, parts),
         Some("data") => navigate_json(&context.data, parts),
         Some("runtime") => {
-            let rt_json = serde_json::to_value(&context.runtime).unwrap_or(serde_json::Value::Null);
+            let rt = &context.runtime;
             let remaining: Vec<&str> = parts.collect();
+            // Fast-path single scalar fields straight from the typed struct,
+            // avoiding a full `serde_json::to_value(RuntimeContext)` on every
+            // `{{ runtime.* }}` access. Anything else falls back to the
+            // serialize-then-navigate path so semantics stay identical —
+            // including `instance_id`, which is `skip_serializing_if None`, so
+            // its absent case must resolve to "not found" (None), not Null.
+            if remaining.len() == 1 {
+                let fast = match remaining[0] {
+                    "attempt" => Some(serde_json::Value::from(rt.attempt)),
+                    "total_steps_executed" => {
+                        Some(serde_json::Value::from(rt.total_steps_executed))
+                    }
+                    "dry_run" => Some(serde_json::Value::from(rt.dry_run)),
+                    "dry_run_auto_approve" => {
+                        Some(serde_json::Value::from(rt.dry_run_auto_approve))
+                    }
+                    "instance_id" => rt.instance_id.as_deref().map(serde_json::Value::from),
+                    _ => None,
+                };
+                if let Some(v) = fast {
+                    return Ok(Some(v));
+                }
+            }
+            let rt_json = serde_json::to_value(rt).unwrap_or(serde_json::Value::Null);
             if remaining.is_empty() {
                 return Ok(Some(rt_json));
             }
@@ -951,6 +993,25 @@ mod tests {
         assert!(!contains_template(&json!(true)));
         assert!(!contains_template(&json!(null)));
         assert!(!contains_template(&json!(2.72)));
+    }
+
+    #[test]
+    fn references_state_detects_state_templates_no_false_negatives() {
+        // Must fire whenever `{{ state.* }}` appears anywhere (nested too).
+        assert!(references_state(&json!("{{ state.cursor }}")));
+        assert!(references_state(&json!("{{state.x}}")));
+        assert!(references_state(&json!({"a": {"b": "{{ state.k }}"}})));
+        assert!(references_state(&json!(["x", "{{state.y}}"])));
+    }
+
+    #[test]
+    fn references_state_false_for_non_state_templates() {
+        assert!(!references_state(&json!("{{ outputs.step.result }}")));
+        assert!(!references_state(&json!("{{ context.data.user }}")));
+        assert!(!references_state(&json!("plain string, no template")));
+        // `state` outside a template is not a reference.
+        assert!(!references_state(&json!("state of the art")));
+        assert!(!references_state(&json!(42)));
     }
 
     #[test]
@@ -1835,6 +1896,34 @@ mod tests {
         };
         let result = resolve(&json!("{{ runtime.instance_id }}"), &ctx, &json!({})).unwrap();
         assert_eq!(result, json!("inst-42"));
+    }
+
+    #[test]
+    fn resolve_runtime_fast_path_scalar_fields() {
+        let ctx = ExecutionContext {
+            runtime: orch8_types::context::RuntimeContext {
+                attempt: 7,
+                total_steps_executed: 13,
+                dry_run: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = json!({});
+        assert_eq!(
+            resolve(&json!("{{ runtime.total_steps_executed }}"), &ctx, &out).unwrap(),
+            json!(13)
+        );
+        assert_eq!(
+            resolve(&json!("{{ runtime.dry_run }}"), &ctx, &out).unwrap(),
+            json!(true)
+        );
+        // Unknown field still routes through the fallback (no panic, no field).
+        assert!(resolve(&json!("{{ runtime.attempt }}"), &ctx, &out).is_ok());
+        assert_eq!(
+            resolve(&json!("{{ runtime.attempt }}"), &ctx, &out).unwrap(),
+            json!(7)
+        );
     }
 
     // --- static template validation ---

@@ -231,6 +231,9 @@ pub async fn check_human_input(
 
     // Check if the response signal has already been delivered.
     let signals = storage.get_pending_signals(instance.id).await?;
+    // Compute the allowed choices once, not per matching signal (each call
+    // allocates a fresh Vec).
+    let effective_choices = human_def.effective_choices();
     for signal in &signals {
         if let orch8_types::signal::SignalType::Custom(name) = &signal.signal_type {
             if *name == signal_name {
@@ -240,8 +243,8 @@ pub async fn check_human_input(
                 // poison message can't replay forever) but keep the block waiting
                 // by falling through to the reschedule branch.
                 let candidate = signal.payload.get("value").and_then(|v| v.as_str());
-                let Some(value) = candidate
-                    .filter(|v| human_def.effective_choices().iter().any(|c| c.value == **v))
+                let Some(value) =
+                    candidate.filter(|v| effective_choices.iter().any(|c| c.value == **v))
                 else {
                     warn!(
                         instance_id = %instance.id,
@@ -429,170 +432,63 @@ pub(super) async fn execute_step_block(
     )
     .await?;
 
-    // Build the step's context snapshot once and reuse for both template
-    // resolution and handler dispatch. Mirrors the tree-evaluator path in
-    // `handlers::step_block::execute_step_node` so both dispatch sites apply
-    // the same `context_access` filtering and externalization-marker
-    // inflation before running user templates.
-    let step_context =
-        crate::handlers::step_block::context_for_step(storage.as_ref(), instance, step_def).await?;
-
-    // Resolve `{{path}}` templates first, then `credentials://` refs. Both
-    // dispatch branches below (external worker + in-process handler) must
-    // see fully materialised params — external workers have no access to
-    // the credential registry and raw `{{…}}` would leak to user handlers.
-    // Template errors (unknown root/section) fail the instance the same way
-    // credential errors do.
-    // Fast path executes at most one step per instance per call, so a fresh
-    // snapshot is all we need — the OnceCell is populated on first `get`
-    // inside `resolve_templates_in_params` and dropped when this scope ends.
+    // Resolve context snapshot + templates + credentials + cache key (shared
+    // with the tree path via `step_block::prepare_step`). The fast path runs at
+    // most one step per call, so a fresh outputs snapshot is all we need.
+    // Template/credential failures fail the *instance*; infra errors propagate.
     let outputs = crate::handlers::param_resolve::OutputsSnapshot::new();
-    let mut resolved_params = match crate::handlers::param_resolve::resolve_templates_in_params(
+    let crate::handlers::step_block::PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+    } = match crate::handlers::step_block::prepare_step(
         storage.as_ref(),
         instance,
-        &step_context,
-        &step_def.params,
+        step_def,
         &outputs,
     )
     .await
     {
-        Ok(p) => p,
-        Err(tpl_err) => {
-            tracing::error!(
-                instance_id = %instance_id,
-                block_id = %step_def.id,
-                error = %tpl_err,
-                "failed to resolve templates for step"
-            );
+        Ok(prepared) => prepared,
+        Err(crate::handlers::step_block::PrepareError::Infra(e)) => return Err(e),
+        Err(other) => {
             return fail_instance_with_error(
                 storage.as_ref(),
                 instance,
                 webhook_config,
                 cancel,
-                &tpl_err.to_string(),
+                &other.fail_message(),
             )
             .await;
         }
     };
 
-    if let Err(step_err) = crate::credentials::resolve_in_value(
-        storage.as_ref(),
-        instance.tenant_id.as_str(),
-        &mut resolved_params,
-    )
-    .await
-    {
-        tracing::warn!(
-            instance_id = %instance_id,
-            block_id = %step_def.id,
-            error = ?step_err,
-            "failed to resolve credentials for step"
-        );
-        return fail_instance_with_error(
-            storage.as_ref(),
-            instance,
-            webhook_config,
-            cancel,
-            &step_err.to_string(),
-        )
-        .await;
-    }
-
-    // Resolve cache_key template if present.
-    let resolved_cache_key = if let Some(ref ck) = step_def.cache_key {
-        if crate::template::contains_template(&serde_json::Value::String(ck.clone())) {
-            let wrapped = serde_json::Value::String(ck.clone());
-            match crate::template::resolve(&wrapped, &step_context, &serde_json::json!({})) {
-                Ok(serde_json::Value::String(s)) => Some(s),
-                _ => Some(ck.clone()),
+    // Circuit breaker pre-flight (shared with the tree path via
+    // `step_block::breaker_preflight`). Runs BEFORE the in-process vs
+    // external-worker fork so it applies uniformly: an Open breaker either swaps
+    // dispatch to `fallback_handler` or defers the instance for the cooldown
+    // window.
+    let cb_step_def: Cow<'_, orch8_types::sequence::StepDef> =
+        match crate::handlers::step_block::breaker_preflight(
+            handlers,
+            instance_id,
+            &instance.tenant_id,
+            step_def,
+        ) {
+            crate::handlers::step_block::BreakerDecision::Proceed(cow) => cow,
+            crate::handlers::step_block::BreakerDecision::Defer { fire_at } => {
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    InstanceState::Running,
+                    InstanceState::Scheduled,
+                    Some(fire_at),
+                )
+                .await?;
+                return Ok(StepOutcome::Deferred);
             }
-        } else {
-            Some(ck.clone())
-        }
-    } else {
-        None
-    };
-
-    // Circuit breaker pre-flight. Runs BEFORE the in-process vs external-worker
-    // fork so it applies uniformly: an Open breaker on the primary handler
-    // either (a) swaps dispatch to `fallback_handler` when one is configured,
-    // or (b) defers the instance for the cooldown window. Skipped for pure
-    // control-flow built-ins (see `circuit_breaker::is_breaker_tracked`) and
-    // when no registry is wired (keeps pure-in-memory test configs unaffected).
-    let cb_step_def: Cow<'_, orch8_types::sequence::StepDef> = {
-        let primary_tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
-        if let (true, Some(cb)) = (primary_tracked, handlers.circuit_breakers()) {
-            match cb.check(&instance.tenant_id, &step_def.handler) {
-                Ok(()) => Cow::Borrowed(step_def),
-                Err(remaining_secs) => {
-                    // Primary is Open. Prefer `fallback_handler`; fall back to
-                    // deferral only when no fallback is configured or the
-                    // fallback's own breaker is also Open.
-                    if let Some(fb) = step_def.fallback_handler.as_deref() {
-                        // Re-check fallback's breaker. Skip-listed fallbacks
-                        // (e.g. a `fail`-style sentinel) bypass the check.
-                        let fb_remaining_open = if crate::circuit_breaker::is_breaker_tracked(fb) {
-                            cb.check(&instance.tenant_id, fb).err()
-                        } else {
-                            None
-                        };
-                        if let Some(fb_rem) = fb_remaining_open {
-                            let defer_secs = remaining_secs.max(fb_rem);
-                            #[allow(clippy::cast_possible_wrap)]
-                            let fire_at = Utc::now() + chrono::Duration::seconds(defer_secs as i64);
-                            debug!(
-                                instance_id = %instance_id,
-                                primary = %step_def.handler,
-                                fallback = %fb,
-                                remaining_secs = defer_secs,
-                                "both primary and fallback circuit breakers open, deferring instance"
-                            );
-                            crate::lifecycle::transition_instance(
-                                storage.as_ref(),
-                                instance_id,
-                                Some(&instance.tenant_id),
-                                InstanceState::Running,
-                                InstanceState::Scheduled,
-                                Some(fire_at),
-                            )
-                            .await?;
-                            return Ok(StepOutcome::Deferred);
-                        }
-                        debug!(
-                            instance_id = %instance_id,
-                            primary = %step_def.handler,
-                            fallback = %fb,
-                            "primary circuit breaker open, dispatching fallback"
-                        );
-                        let mut cloned = step_def.clone();
-                        cloned.handler = fb.to_string();
-                        Cow::Owned(cloned)
-                    } else {
-                        #[allow(clippy::cast_possible_wrap)]
-                        let fire_at = Utc::now() + chrono::Duration::seconds(remaining_secs as i64);
-                        debug!(
-                            instance_id = %instance_id,
-                            handler = %step_def.handler,
-                            remaining_secs = remaining_secs,
-                            "circuit breaker open, deferring instance"
-                        );
-                        crate::lifecycle::transition_instance(
-                            storage.as_ref(),
-                            instance_id,
-                            Some(&instance.tenant_id),
-                            InstanceState::Running,
-                            InstanceState::Scheduled,
-                            Some(fire_at),
-                        )
-                        .await?;
-                        return Ok(StepOutcome::Deferred);
-                    }
-                }
-            }
-        } else {
-            Cow::Borrowed(step_def)
-        }
-    };
+        };
     // Shadow `step_def` so the rest of dispatch transparently sees the
     // fallback-swapped version (if any). `cb_step_def` owns the borrow.
     let step_def = cb_step_def.as_ref();

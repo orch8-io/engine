@@ -25,7 +25,7 @@ use serde_json::{json, Map, Value};
 use orch8_storage::{DedupeScope, EmitDedupeOutcome};
 use orch8_types::{error::StepError, ids::InstanceId};
 
-use super::util::{check_same_tenant, map_storage_err, permanent};
+use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 use super::StepContext;
 
 /// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
@@ -39,12 +39,7 @@ enum DedupeScopeKind {
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepError> {
-    let trigger_slug = ctx
-        .params
-        .get("trigger_slug")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| permanent("missing 'trigger_slug' string param"))?
-        .to_string();
+    let trigger_slug = require_str(&ctx.params, "trigger_slug")?.to_string();
 
     let data = ctx.params.get("data").cloned().unwrap_or_else(|| json!({}));
 

@@ -1,3 +1,4 @@
+pub mod api_key_cache;
 pub mod artifacts;
 pub mod compression;
 pub mod encrypting;
@@ -321,6 +322,27 @@ pub trait InstanceStore: Send + Sync + 'static {
             .ok_or_else(|| StorageError::Query(format!("instance not found: {id}")))?;
         inst.context.runtime.current_step_started_at = Some(ts);
         self.update_instance_context(id, &inst.context).await
+    }
+
+    /// Atomically increment `context.runtime.total_steps_executed` and return
+    /// the new value.
+    ///
+    /// Avoids the read + full-context rewrite the scheduler otherwise performs
+    /// per completed step, and — critically — touches only the counter path, so
+    /// concurrent `context.data` mutations made *during* step execution (e.g.
+    /// `merge_context_data`) are not clobbered. Returns `0` when the instance no
+    /// longer exists. The default is a read-modify-write fallback for in-memory
+    /// / test backends; SQL backends override it with a single targeted
+    /// `json_set` / `jsonb_set` UPDATE.
+    async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError> {
+        let Some(mut inst) = self.get_instance(id).await? else {
+            return Ok(0);
+        };
+        inst.context.runtime.total_steps_executed =
+            inst.context.runtime.total_steps_executed.saturating_add(1);
+        let new_total = inst.context.runtime.total_steps_executed;
+        self.update_instance_context(id, &inst.context).await?;
+        Ok(new_total)
     }
 
     /// Persist `context` with top-level `data` fields >= `threshold_bytes`

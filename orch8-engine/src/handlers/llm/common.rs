@@ -88,6 +88,25 @@ const DENIED_API_KEY_ENV: &[&str] = &[
     "PRIVATE_KEY",
 ];
 
+/// Substrings that mark an env var as a non-LLM secret. A workflow author has
+/// no legitimate reason to dereference a database password, signing key, or
+/// session token as an `api_key_env`, so any var whose name *contains* one of
+/// these is refused. This catches the long tail of third-party secrets a host
+/// may carry (`STRIPE_SECRET_KEY`, `TWILIO_AUTH_TOKEN`, `DB_PASSWORD`, …) that
+/// an exact-match denylist can never fully enumerate.
+///
+/// LLM provider keys conventionally end in `_API_KEY` / `_KEY` / `_TOKEN`, none
+/// of which appear here, so legitimate names (`OPENAI_API_KEY`, `MY_OPENAI_KEY`,
+/// `CUSTOM_LLM_TOKEN`) are unaffected.
+const DENIED_API_KEY_ENV_SUBSTRINGS: &[&str] = &[
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "SESSION_TOKEN",
+];
+
 /// `true` if `name` is a process env var that a *workflow author* is allowed to
 /// dereference via `api_key_env`.
 ///
@@ -96,10 +115,18 @@ const DENIED_API_KEY_ENV: &[&str] = &[
 /// `base_url`. Without this gate a workflow could name the engine's own secrets
 /// — `ORCH8_ENCRYPTION_KEY` (the master AES key for the entire credential
 /// store), `ORCH8_API_KEY`, `ORCH8_DATABASE_URL`, `ORCH8_ARTIFACT_S3_SECRET_*`
-/// — or common cloud/CI secrets, and exfiltrate them to an attacker host. We
-/// deny the engine's whole `ORCH8_` namespace plus a list of well-known
-/// infrastructure secret names; legitimate provider keys (`OPENAI_API_KEY`,
-/// `MY_OPENAI_KEY`, …) are unaffected.
+/// — or common cloud/CI secrets, and exfiltrate them to an attacker host.
+///
+/// Defence is layered: deny the engine's whole `ORCH8_` namespace, an exact
+/// list of well-known infrastructure names ([`DENIED_API_KEY_ENV`]), and any
+/// name *containing* a secret-shaped substring ([`DENIED_API_KEY_ENV_SUBSTRINGS`]).
+/// The substring rule is the important one — it covers third-party secrets a
+/// host may hold that no fixed list can anticipate. Legitimate provider keys
+/// (`OPENAI_API_KEY`, `MY_OPENAI_KEY`, …) are unaffected.
+///
+/// This remains a *denylist*: it cannot prove an arbitrary var is safe. Operators
+/// running untrusted workflows should still avoid placing unrelated secrets in
+/// the engine's process environment, or move to an explicit allowlist.
 pub(crate) fn is_allowed_api_key_env(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
 
@@ -109,7 +136,13 @@ pub(crate) fn is_allowed_api_key_env(name: &str) -> bool {
         return false;
     }
 
-    !DENIED_API_KEY_ENV.contains(&upper.as_str())
+    if DENIED_API_KEY_ENV.contains(&upper.as_str()) {
+        return false;
+    }
+
+    !DENIED_API_KEY_ENV_SUBSTRINGS
+        .iter()
+        .any(|needle| upper.contains(needle))
 }
 
 /// Resolve API key: direct param → env var param → provider default env var.
@@ -526,6 +559,31 @@ mod tests {
             "private_key", // case-insensitive
         ] {
             assert!(!is_allowed_api_key_env(name), "{name} must be blocked");
+        }
+    }
+
+    #[test]
+    fn api_key_env_blocks_secret_shaped_third_party_names() {
+        // The long tail an exact denylist can't enumerate — caught by substring.
+        for name in [
+            "STRIPE_SECRET_KEY",
+            "TWILIO_AUTH_TOKEN_SESSION_TOKEN", // contains SESSION_TOKEN
+            "DB_PASSWORD",
+            "MY_PASSWD",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "DEPLOY_PRIVATE_KEY",
+            "AWS_SESSION_TOKEN",
+            "stripe_secret_key", // case-insensitive
+        ] {
+            assert!(!is_allowed_api_key_env(name), "{name} must be blocked");
+        }
+    }
+
+    #[test]
+    fn api_key_env_still_allows_token_and_key_suffixed_provider_names() {
+        // Provider keys end in _KEY / _TOKEN / _API_KEY — none are secret-shaped.
+        for name in ["OPENAI_API_KEY", "CUSTOM_LLM_TOKEN", "MY_GROQ_KEY"] {
+            assert!(is_allowed_api_key_env(name), "{name} should stay allowed");
         }
     }
 

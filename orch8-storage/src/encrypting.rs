@@ -498,6 +498,12 @@ impl crate::InstanceStore for EncryptingStorage {
     ) -> Result<(), StorageError> {
         self.inner.update_instance_started_at(id, started_at).await
     }
+    async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError> {
+        // Pass-through: the counter lives in `context.runtime`, which is never
+        // encrypted (only `context.data` is), so the inner backend's atomic
+        // increment is correct as-is.
+        self.inner.increment_total_steps(id).await
+    }
     async fn update_instance_current_step_started_at(
         &self,
         id: InstanceId,

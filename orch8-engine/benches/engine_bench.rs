@@ -176,6 +176,27 @@ fn bench_expression_processing(c: &mut Criterion) {
         });
     });
 
+    c.bench_function("expr_runtime_field", |b| {
+        b.iter(|| orch8_engine::expression::evaluate(black_box("runtime.attempt"), &ctx, &outputs));
+    });
+
+    // Path resolving to a LARGE object/array — measures the terminal `clone()`
+    // in `navigate_json`. `big.items` is a 200-element array of objects.
+    let big_outputs = json!({
+        "big": {
+            "items": (0..200).map(|i| json!({"id": i, "name": format!("item-{i}"), "tags": ["a","b","c"]})).collect::<Vec<_>>()
+        }
+    });
+    c.bench_function("expr_len_of_large_array", |b| {
+        b.iter(|| {
+            orch8_engine::expression::evaluate(
+                black_box("len(outputs.big.items) > 0"),
+                &ctx,
+                &big_outputs,
+            )
+        });
+    });
+
     c.bench_function("expr_is_truthy", |b| {
         let val = json!(42);
         b.iter(|| orch8_engine::expression::is_truthy(black_box(&val)));

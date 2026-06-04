@@ -46,6 +46,10 @@ struct Cli {
     insecure: bool,
 }
 
+// INVARIANT: bare `#[tokio::main]` = multi-thread runtime. The gRPC auth
+// interceptor (`orch8_grpc::auth`) relies on this: it uses `block_in_place`,
+// which panics on a current-thread runtime. Do not switch to
+// `flavor = "current_thread"` without removing that dependency.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -108,11 +112,7 @@ async fn main() -> anyhow::Result<()> {
         storage.clone(),
         &config,
         shutdown_token.clone(),
-        if api_key.is_empty() {
-            None
-        } else {
-            Some(api_key.as_str())
-        },
+        (!api_key.is_empty()).then_some(api_key.as_str()),
         require_tenant,
     );
     spawn_signal_handler(shutdown_token.clone());
@@ -124,6 +124,10 @@ async fn main() -> anyhow::Result<()> {
     // Storage handle for the auth middleware: per-tenant API keys are resolved
     // by hash against the database.
     let auth_storage = storage.clone();
+    // Hash the root key once here rather than on every request. `None` is the
+    // insecure-mode sentinel (empty key → auth disabled).
+    let root_key_digest =
+        (!api_key.is_empty()).then(|| orch8_types::auth::precompute_secret_digest(&api_key));
     let mut app = build_router(app_state.clone())
         .nest(API_V1_PREFIX, cb_routes.clone())
         .merge(cb_routes)
@@ -131,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             orch8_api::auth::tenant_middleware(require_tenant, req, next)
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
-            orch8_api::auth::api_key_middleware(auth_storage.clone(), api_key.clone(), req, next)
+            orch8_api::auth::api_key_middleware(auth_storage.clone(), root_key_digest, req, next)
         }))
         // Metrics and Swagger UI are mounted *after* auth so they are not
         // publicly reachable. Internal scraping / docs access should carry

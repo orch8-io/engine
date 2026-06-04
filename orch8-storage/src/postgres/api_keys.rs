@@ -68,11 +68,18 @@ pub(super) async fn touch(
 }
 
 pub(super) async fn revoke(store: &PostgresStorage, id: &str) -> Result<bool, StorageError> {
-    let res = sqlx::query("UPDATE api_keys SET revoked = TRUE WHERE id = $1")
-        .bind(id)
-        .execute(&store.pool)
-        .await?;
-    Ok(res.rows_affected() > 0)
+    // `RETURNING` hands back the hash so we can evict the auth cache atomically
+    // with the write — a revoked key then stops authenticating immediately
+    // rather than lingering for the cache TTL.
+    let key_hash: Option<String> =
+        sqlx::query_scalar("UPDATE api_keys SET revoked = TRUE WHERE id = $1 RETURNING key_hash")
+            .bind(id)
+            .fetch_optional(&store.pool)
+            .await?;
+    if let Some(ref hash) = key_hash {
+        crate::api_key_cache::invalidate(hash).await;
+    }
+    Ok(key_hash.is_some())
 }
 
 #[derive(sqlx::FromRow)]

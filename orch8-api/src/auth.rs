@@ -92,21 +92,22 @@ pub fn scoped_tenant_id(
 ///     the `X-Tenant-Id` header can no longer be used to cross tenants. If the
 ///     header is present it must match the key's tenant, else `403`.
 ///
-/// When `root_key` is empty the server is in `--insecure` mode (it warns at
-/// startup) and all requests pass through unauthenticated, matching the prior
-/// behaviour.
+/// When `root_key_digest` is `None` the server is in `--insecure` mode (it
+/// warns at startup) and all requests pass through unauthenticated, matching
+/// the prior behaviour. Otherwise it is the precomputed SHA-256 digest of the
+/// root key — hashed once when the layer is built rather than on every request.
 pub async fn api_key_middleware(
     storage: Arc<dyn StorageBackend>,
-    root_key: String,
+    root_key_digest: Option<[u8; 32]>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if root_key.is_empty() {
+    let Some(expected_digest) = root_key_digest else {
         // --insecure mode: authentication disabled (server warns at startup).
         // Treat everyone as admin so management endpoints remain usable in dev.
         request.extensions_mut().insert(AdminContext);
         return Ok(next.run(request).await);
-    }
+    };
 
     let Some(provided) = request
         .headers()
@@ -120,15 +121,15 @@ pub async fn api_key_middleware(
     // Root/admin key: unscoped. Tenant (if any) comes from the header, handled
     // downstream by `tenant_middleware`. Mark the request as admin so it can
     // manage per-tenant keys.
-    if orch8_types::auth::verify_secret_constant_time(&provided, &root_key) {
+    if orch8_types::auth::verify_secret_against_digest(&provided, &expected_digest) {
         request.extensions_mut().insert(AdminContext);
         return Ok(next.run(request).await);
     }
 
-    // Otherwise it must be a per-tenant key. Look it up by hash; identity is
-    // bound to the record, never to the (unauthenticated) header.
+    // Otherwise it must be a per-tenant key. Resolve it by hash (cached);
+    // identity is bound to the record, never to the (unauthenticated) header.
     let hash = orch8_types::api_key::hash_api_key(&provided);
-    match storage.lookup_api_key_by_hash(&hash).await {
+    match orch8_storage::api_key_cache::authenticate(&storage, &hash).await {
         Ok(Some(record)) if record.is_active(chrono::Utc::now()) => {
             // A supplied X-Tenant-Id must agree with the key's tenant — never
             // let a keyed caller act as a different tenant.
@@ -143,16 +144,6 @@ pub async fn api_key_middleware(
             }
             request.extensions_mut().insert(TenantContext {
                 tenant_id: TenantId::unchecked(record.tenant_id.clone()),
-            });
-            // Best-effort audit hygiene: touch last_used_at without blocking
-            // the request on a write.
-            let touch_id = record.id.clone();
-            let touch_storage = Arc::clone(&storage);
-            tokio::spawn(async move {
-                let now = chrono::Utc::now();
-                if let Err(e) = touch_storage.touch_api_key(&touch_id, now).await {
-                    tracing::warn!(error = %e, "failed to touch api_key last_used_at");
-                }
             });
             Ok(next.run(request).await)
         }

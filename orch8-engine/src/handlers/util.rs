@@ -58,6 +58,18 @@ pub(crate) fn parse_instance_id(params: &Value, field: &str) -> Result<InstanceI
     Ok(InstanceId::from_uuid(uuid))
 }
 
+/// Extract a required string param. Returns `StepError::Permanent` (with a
+/// uniform message) when the field is missing or is not a string.
+///
+/// Mirrors the wording of [`parse_instance_id`] so the "missing field" error
+/// class reads identically across every handler.
+pub(crate) fn require_str<'a>(params: &'a Value, field: &str) -> Result<&'a str, StepError> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| permanent(format!("missing '{field}' string param")))
+}
+
 /// Map a `StorageError` to the appropriate `StepError` retryability.
 ///
 /// Connection/pool/query errors are treated as retryable (transient infra
@@ -184,6 +196,35 @@ mod tests {
         let params = json!({"target_id": id.to_string()});
         let result = parse_instance_id(&params, "target_id").unwrap();
         assert_eq!(result.into_uuid(), id);
+    }
+
+    // --- require_str() / optional_str() ---
+
+    #[test]
+    fn require_str_returns_borrowed_value() {
+        let params = json!({"name": "acme"});
+        assert_eq!(require_str(&params, "name").unwrap(), "acme");
+    }
+
+    #[test]
+    fn require_str_missing_is_permanent_with_uniform_message() {
+        let params = json!({"other": 1});
+        let err = require_str(&params, "name").unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(message.contains("missing 'name' string param"));
+            }
+            StepError::Retryable { .. } => panic!("expected Permanent"),
+        }
+    }
+
+    #[test]
+    fn require_str_wrong_type_is_permanent() {
+        let params = json!({"name": 42});
+        assert!(matches!(
+            require_str(&params, "name"),
+            Err(StepError::Permanent { .. })
+        ));
     }
 
     // --- map_storage_err() ---

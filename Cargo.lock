@@ -2831,6 +2831,7 @@ dependencies = [
  "chrono",
  "criterion",
  "futures",
+ "moka",
  "object_store",
  "orch8-types",
  "serde",

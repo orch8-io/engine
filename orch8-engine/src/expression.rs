@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::{Arc, LazyLock};
 
 use orch8_types::context::ExecutionContext;
@@ -67,7 +68,7 @@ pub fn try_evaluate(
             expr: expr.to_string(),
         });
     }
-    Ok(result)
+    Ok(result.into_owned())
 }
 
 /// Evaluate a simple expression against context and outputs.
@@ -92,7 +93,7 @@ pub fn evaluate(
 ) -> serde_json::Value {
     let tokens = tokenize_cached(strip_template_braces(expr.trim()));
     let mut parser = Parser::new(&tokens, context, outputs);
-    parser.parse_ternary()
+    parser.parse_ternary().into_owned()
 }
 
 /// Strip `{{ }}` template wrappers if present so callers can pass either
@@ -376,9 +377,14 @@ impl<'a> Parser<'a> {
     }
 
     // ternary: or (? or : or)?
-    fn parse_ternary(&mut self) -> serde_json::Value {
+    //
+    // The whole `parse_*` chain returns `Cow<Value>`: path resolution yields a
+    // `Borrowed` view into context/outputs, so a value that is only inspected
+    // (comparison, `len`/`count`, truthiness) is never cloned. Operators that
+    // synthesize a new value (booleans, arithmetic, functions) return `Owned`.
+    fn parse_ternary(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let cond = self.parse_or();
         if self.peek() == Some(&Token::Question) {
@@ -396,88 +402,92 @@ impl<'a> Parser<'a> {
     }
 
     // or: and (|| and)*
-    fn parse_or(&mut self) -> serde_json::Value {
+    fn parse_or(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let mut left = self.parse_and();
         while self.peek() == Some(&Token::Or) {
             self.advance();
             let right = self.parse_and();
-            left = serde_json::Value::Bool(is_truthy(&left) || is_truthy(&right));
+            left = Cow::Owned(serde_json::Value::Bool(
+                is_truthy(&left) || is_truthy(&right),
+            ));
         }
         self.leave();
         left
     }
 
     // and: comparison (&& comparison)*
-    fn parse_and(&mut self) -> serde_json::Value {
+    fn parse_and(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let mut left = self.parse_comparison();
         while self.peek() == Some(&Token::And) {
             self.advance();
             let right = self.parse_comparison();
-            left = serde_json::Value::Bool(is_truthy(&left) && is_truthy(&right));
+            left = Cow::Owned(serde_json::Value::Bool(
+                is_truthy(&left) && is_truthy(&right),
+            ));
         }
         self.leave();
         left
     }
 
     // comparison: additive (== | != | > | >= | < | <= additive | in array)?
-    fn parse_comparison(&mut self) -> serde_json::Value {
+    fn parse_comparison(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let left = self.parse_additive();
         let result = match self.peek() {
             Some(Token::Eq) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(json_eq(&left, &right))
+                Cow::Owned(serde_json::Value::Bool(json_eq(&left, &right)))
             }
             Some(Token::Ne) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(!json_eq(&left, &right))
+                Cow::Owned(serde_json::Value::Bool(!json_eq(&left, &right)))
             }
             Some(Token::Gt) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(
+                Cow::Owned(serde_json::Value::Bool(
                     json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Greater),
-                )
+                ))
             }
             Some(Token::Ge) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(
+                Cow::Owned(serde_json::Value::Bool(
                     json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Less),
-                )
+                ))
             }
             Some(Token::Lt) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(
+                Cow::Owned(serde_json::Value::Bool(
                     json_cmp(&left, &right).is_some_and(|o| o == std::cmp::Ordering::Less),
-                )
+                ))
             }
             Some(Token::Le) => {
                 self.advance();
                 let right = self.parse_additive();
-                serde_json::Value::Bool(
+                Cow::Owned(serde_json::Value::Bool(
                     json_cmp(&left, &right).is_some_and(|o| o != std::cmp::Ordering::Greater),
-                )
+                ))
             }
             Some(Token::In) => {
                 self.advance();
                 let right = self.parse_primary();
-                let found = match &right {
+                let found = match right.as_ref() {
                     serde_json::Value::Array(arr) => arr.iter().any(|v| json_eq(&left, v)),
                     _ => false,
                 };
-                serde_json::Value::Bool(found)
+                Cow::Owned(serde_json::Value::Bool(found))
             }
             _ => left,
         };
@@ -486,9 +496,9 @@ impl<'a> Parser<'a> {
     }
 
     // additive: multiplicative ((+ | -) multiplicative)*
-    fn parse_additive(&mut self) -> serde_json::Value {
+    fn parse_additive(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let mut left = self.parse_multiplicative();
         loop {
@@ -496,12 +506,12 @@ impl<'a> Parser<'a> {
                 Some(Token::Plus) => {
                     self.advance();
                     let right = self.parse_multiplicative();
-                    left = json_add(&left, &right);
+                    left = Cow::Owned(json_add(&left, &right));
                 }
                 Some(Token::Minus) => {
                     self.advance();
                     let right = self.parse_multiplicative();
-                    left = json_sub(&left, &right);
+                    left = Cow::Owned(json_sub(&left, &right));
                 }
                 _ => break,
             }
@@ -511,9 +521,9 @@ impl<'a> Parser<'a> {
     }
 
     // multiplicative: unary ((* | /) unary)*
-    fn parse_multiplicative(&mut self) -> serde_json::Value {
+    fn parse_multiplicative(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         let mut left = self.parse_unary();
         loop {
@@ -521,12 +531,12 @@ impl<'a> Parser<'a> {
                 Some(Token::Star) => {
                     self.advance();
                     let right = self.parse_unary();
-                    left = json_mul(&left, &right);
+                    left = Cow::Owned(json_mul(&left, &right));
                 }
                 Some(Token::Slash) => {
                     self.advance();
                     let right = self.parse_unary();
-                    left = json_div(&left, &right);
+                    left = Cow::Owned(json_div(&left, &right));
                 }
                 _ => break,
             }
@@ -536,28 +546,28 @@ impl<'a> Parser<'a> {
     }
 
     // unary: !unary | -unary | primary
-    fn parse_unary(&mut self) -> serde_json::Value {
+    fn parse_unary(&mut self) -> Cow<'a, serde_json::Value> {
         if !self.enter() {
-            return serde_json::Value::Null;
+            return Cow::Owned(serde_json::Value::Null);
         }
         if self.peek() == Some(&Token::Not) {
             self.advance();
             let val = self.parse_unary();
             self.leave();
-            return serde_json::Value::Bool(!is_truthy(&val));
+            return Cow::Owned(serde_json::Value::Bool(!is_truthy(&val)));
         }
         if self.peek() == Some(&Token::Minus) {
             self.advance();
             let val = self.parse_unary();
             self.leave();
             return if let Some(n) = to_f64(&val) {
-                serde_json::json!(-n)
+                Cow::Owned(serde_json::json!(-n))
             } else {
                 warn!(
-                    value = %val,
+                    value = %val.as_ref(),
                     "expression arithmetic: non-numeric operand in negation"
                 );
-                serde_json::Value::Null
+                Cow::Owned(serde_json::Value::Null)
             };
         }
         let result = self.parse_primary();
@@ -566,15 +576,15 @@ impl<'a> Parser<'a> {
     }
 
     // primary: literal | path | function(expr) | (expr) | [expr, ...]
-    fn parse_primary(&mut self) -> serde_json::Value {
+    fn parse_primary(&mut self) -> Cow<'a, serde_json::Value> {
         match self.advance().cloned() {
-            Some(Token::String(s)) => serde_json::Value::String(s),
-            Some(Token::Number(n)) => serde_json::json!(n),
-            Some(Token::Bool(b)) => serde_json::Value::Bool(b),
+            Some(Token::String(s)) => Cow::Owned(serde_json::Value::String(s)),
+            Some(Token::Number(n)) => Cow::Owned(serde_json::json!(n)),
+            Some(Token::Bool(b)) => Cow::Owned(serde_json::Value::Bool(b)),
             Some(Token::Path(path)) => {
                 if self.peek() == Some(&Token::LParen) {
                     self.advance(); // consume (
-                    let mut args = Vec::new();
+                    let mut args: Vec<Cow<'a, serde_json::Value>> = Vec::new();
                     if self.peek() != Some(&Token::RParen) {
                         args.push(self.parse_ternary());
                         while self.peek() == Some(&Token::Comma) {
@@ -588,7 +598,10 @@ impl<'a> Parser<'a> {
                     if self.peek() == Some(&Token::RParen) {
                         self.advance(); // consume )
                     }
-                    return Self::apply_function(&path, &args);
+                    // Pass arguments by reference so a large container argument
+                    // (e.g. `len(outputs.big_array)`) is inspected, not cloned.
+                    let arg_refs: Vec<&serde_json::Value> = args.iter().map(Cow::as_ref).collect();
+                    return Cow::Owned(Self::apply_function(&path, &arg_refs));
                 }
                 self.resolve_path(&path)
             }
@@ -600,28 +613,28 @@ impl<'a> Parser<'a> {
                 val
             }
             Some(Token::LBracket) => {
-                // Array literal: [expr, expr, ...]
+                // Array literal: [expr, expr, ...] — elements must be owned.
                 let mut items = Vec::new();
                 if self.peek() != Some(&Token::RBracket) {
-                    items.push(self.parse_ternary());
+                    items.push(self.parse_ternary().into_owned());
                     while self.peek() == Some(&Token::Comma) {
                         self.advance();
                         if self.peek() == Some(&Token::RBracket) {
                             break; // trailing comma
                         }
-                        items.push(self.parse_ternary());
+                        items.push(self.parse_ternary().into_owned());
                     }
                 }
                 if self.peek() == Some(&Token::RBracket) {
                     self.advance();
                 }
-                serde_json::Value::Array(items)
+                Cow::Owned(serde_json::Value::Array(items))
             }
             Some(Token::Error(msg)) => {
                 warn!(error = %msg, "tokenizer error in expression");
-                serde_json::Value::Null
+                Cow::Owned(serde_json::Value::Null)
             }
-            _ => serde_json::Value::Null,
+            _ => Cow::Owned(serde_json::Value::Null),
         }
     }
 
@@ -631,8 +644,8 @@ impl<'a> Parser<'a> {
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
-    fn apply_function(name: &str, args: &[serde_json::Value]) -> serde_json::Value {
-        let arg = args.first().unwrap_or(&serde_json::Value::Null);
+    fn apply_function(name: &str, args: &[&serde_json::Value]) -> serde_json::Value {
+        let arg: &serde_json::Value = args.first().copied().unwrap_or(&serde_json::Value::Null);
         match name {
             "abs" => match to_f64(arg) {
                 Some(n) => serde_json::json!(n.abs()),
@@ -652,8 +665,8 @@ impl<'a> Parser<'a> {
             "now" => serde_json::json!(chrono::Utc::now().to_rfc3339()),
             "uuid" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
             "random" => {
-                let min = args.first().and_then(to_f64).unwrap_or(0.0) as i64;
-                let max = args.get(1).and_then(to_f64).unwrap_or(100.0) as i64;
+                let min = args.first().copied().and_then(to_f64).unwrap_or(0.0) as i64;
+                let max = args.get(1).copied().and_then(to_f64).unwrap_or(100.0) as i64;
                 if max <= min {
                     return serde_json::json!(min);
                 }
@@ -674,7 +687,11 @@ impl<'a> Parser<'a> {
             }
             "format_date" => {
                 let iso = arg.as_str().unwrap_or("");
-                let fmt = args.get(1).and_then(|v| v.as_str()).unwrap_or("%Y-%m-%d");
+                let fmt = args
+                    .get(1)
+                    .copied()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("%Y-%m-%d");
                 chrono::DateTime::parse_from_rfc3339(iso).map_or(serde_json::Value::Null, |dt| {
                     serde_json::json!(dt.format(fmt).to_string())
                 })
@@ -699,7 +716,7 @@ impl<'a> Parser<'a> {
                 _ => serde_json::json!([]),
             },
             "contains" => {
-                let needle = args.get(1).unwrap_or(&serde_json::Value::Null);
+                let needle = args.get(1).copied().unwrap_or(&serde_json::Value::Null);
                 let found = match arg {
                     serde_json::Value::Array(a) => a.iter().any(|v| json_eq(v, needle)),
                     serde_json::Value::String(s) => needle.as_str().is_some_and(|n| s.contains(n)),
@@ -708,12 +725,12 @@ impl<'a> Parser<'a> {
                 serde_json::Value::Bool(found)
             }
             "starts_with" => {
-                let prefix = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let prefix = args.get(1).copied().and_then(|v| v.as_str()).unwrap_or("");
                 let s = arg.as_str().unwrap_or("");
                 serde_json::Value::Bool(s.starts_with(prefix))
             }
             "ends_with" => {
-                let suffix = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+                let suffix = args.get(1).copied().and_then(|v| v.as_str()).unwrap_or("");
                 let s = arg.as_str().unwrap_or("");
                 serde_json::Value::Bool(s.ends_with(suffix))
             }
@@ -764,8 +781,8 @@ impl<'a> Parser<'a> {
                 _ => serde_json::Value::Null,
             },
             "slice" => {
-                let start = args.get(1).and_then(to_f64).unwrap_or(0.0) as usize;
-                let end = args.get(2).and_then(to_f64);
+                let start = args.get(1).copied().and_then(to_f64).unwrap_or(0.0) as usize;
+                let end = args.get(2).copied().and_then(to_f64);
                 match arg {
                     serde_json::Value::Array(a) => {
                         let end_idx = end.map_or(a.len(), |e| (e as usize).min(a.len()));
@@ -780,7 +797,11 @@ impl<'a> Parser<'a> {
                 }
             }
             "sort" => {
-                let order = args.get(1).and_then(|v| v.as_str()).unwrap_or("asc");
+                let order = args
+                    .get(1)
+                    .copied()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("asc");
                 match arg {
                     serde_json::Value::Array(a) => {
                         let mut sorted = a.clone();
@@ -810,7 +831,7 @@ impl<'a> Parser<'a> {
                 _ => serde_json::Value::Null,
             },
             "count" => {
-                let needle = args.get(1).unwrap_or(&serde_json::Value::Null);
+                let needle = args.get(1).copied().unwrap_or(&serde_json::Value::Null);
                 match arg {
                     serde_json::Value::Array(a) => {
                         let n = a.iter().filter(|v| json_eq(v, needle)).count();
@@ -821,7 +842,7 @@ impl<'a> Parser<'a> {
             }
             "change_pct" => {
                 let old = to_f64(arg);
-                let new = args.get(1).and_then(to_f64);
+                let new = args.get(1).copied().and_then(to_f64);
                 match (old, new) {
                     (Some(o), Some(n)) if o != 0.0 => serde_json::json!((n - o) / o * 100.0),
                     _ => serde_json::Value::Null,
@@ -829,8 +850,8 @@ impl<'a> Parser<'a> {
             }
             "clamp" => {
                 let val = to_f64(arg);
-                let min = args.get(1).and_then(to_f64);
-                let max = args.get(2).and_then(to_f64);
+                let min = args.get(1).copied().and_then(to_f64);
+                let max = args.get(2).copied().and_then(to_f64);
                 match (val, min, max) {
                     (Some(v), Some(lo), Some(hi)) => serde_json::json!(v.clamp(lo, hi)),
                     _ => arg.clone(),
@@ -840,62 +861,97 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn resolve_path(&self, path: &str) -> serde_json::Value {
+    fn resolve_path(&self, path: &str) -> Cow<'a, serde_json::Value> {
+        // Copy the `'a` borrows out of `&self` so the returned `Cow` borrows
+        // from context/outputs (lifetime `'a`), not from the `&self` borrow.
+        let context = self.context;
+        let outputs = self.outputs;
         let parts: Vec<&str> = path.split('.').collect();
         match parts.first().copied() {
             Some("context") => {
                 let section = parts.get(1).copied().unwrap_or("");
                 let source = match section {
-                    "data" => &self.context.data,
-                    "config" => &self.context.config,
-                    _ => return serde_json::Value::Null,
+                    "data" => &context.data,
+                    "config" => &context.config,
+                    _ => return Cow::Owned(serde_json::Value::Null),
                 };
                 navigate_json(source, &parts[2..])
             }
-            Some("outputs" | "steps") => navigate_json(self.outputs, &parts[1..]),
+            Some("outputs" | "steps") => navigate_json(outputs, &parts[1..]),
             Some("input") => {
                 let mut full = vec!["input"];
                 full.extend_from_slice(&parts[1..]);
-                navigate_json(&self.context.data, &full)
+                navigate_json(&context.data, &full)
             }
             Some("instance_id") => {
-                let id = self.context.runtime.instance_id.as_deref().unwrap_or("");
-                serde_json::Value::String(id.to_string())
+                let id = context.runtime.instance_id.as_deref().unwrap_or("");
+                Cow::Owned(serde_json::Value::String(id.to_string()))
             }
-            Some("config") => navigate_json(&self.context.config, &parts[1..]),
-            Some("data") => navigate_json(&self.context.data, &parts[1..]),
+            Some("config") => navigate_json(&context.config, &parts[1..]),
+            Some("data") => navigate_json(&context.data, &parts[1..]),
             Some("runtime") => {
-                let rt_json =
-                    serde_json::to_value(&self.context.runtime).unwrap_or(serde_json::Value::Null);
-                navigate_json(&rt_json, &parts[1..])
+                // Fast-path the common scalar fields straight from the typed
+                // struct. The fallback serializes the *entire* RuntimeContext to
+                // JSON on every access (~2.5x the cost of a normal path), which
+                // is wasteful for `runtime.attempt` / `runtime.dry_run` etc. in a
+                // per-iteration loop condition. Only single-segment scalar
+                // accesses are fast-pathed; anything else (dates, resource_key,
+                // nested/unknown paths) falls back so semantics are identical.
+                let rt = &context.runtime;
+                let owned = match parts.get(1).copied() {
+                    Some("attempt") if parts.len() == 2 => serde_json::Value::from(rt.attempt),
+                    Some("total_steps_executed") if parts.len() == 2 => {
+                        serde_json::Value::from(rt.total_steps_executed)
+                    }
+                    Some("dry_run") if parts.len() == 2 => serde_json::Value::from(rt.dry_run),
+                    Some("dry_run_auto_approve") if parts.len() == 2 => {
+                        serde_json::Value::from(rt.dry_run_auto_approve)
+                    }
+                    Some("instance_id") if parts.len() == 2 => rt
+                        .instance_id
+                        .as_deref()
+                        .map_or(serde_json::Value::Null, serde_json::Value::from),
+                    _ => {
+                        // Serialized RuntimeContext is a temporary, so the
+                        // navigated value must be owned.
+                        let rt_json = serde_json::to_value(rt).unwrap_or(serde_json::Value::Null);
+                        navigate_json(&rt_json, &parts[1..]).into_owned()
+                    }
+                };
+                Cow::Owned(owned)
             }
             _ => {
                 // Bare path — resolve from context.data for backwards compatibility.
-                navigate_json(&self.context.data, &parts)
+                navigate_json(&context.data, &parts)
             }
         }
     }
 }
 
-fn navigate_json(value: &serde_json::Value, path: &[&str]) -> serde_json::Value {
+/// Walk a JSON value by path segments, returning a *borrow* of the terminal
+/// node. Returning `Cow::Borrowed` (rather than an owned clone) keeps the hot
+/// path allocation-free: a value that is only inspected downstream
+/// (`len`/`count`, comparison, truthiness) is never cloned. A dead-end yields
+/// `Cow::Owned(Null)`.
+fn navigate_json<'v>(value: &'v serde_json::Value, path: &[&str]) -> Cow<'v, serde_json::Value> {
     let mut current = value;
     for &segment in path {
         match current {
             serde_json::Value::Object(map) => match map.get(segment) {
                 Some(v) => current = v,
-                None => return serde_json::Value::Null,
+                None => return Cow::Owned(serde_json::Value::Null),
             },
             serde_json::Value::Array(arr) => match segment.parse::<usize>() {
                 Ok(idx) => match arr.get(idx) {
                     Some(v) => current = v,
-                    None => return serde_json::Value::Null,
+                    None => return Cow::Owned(serde_json::Value::Null),
                 },
-                Err(_) => return serde_json::Value::Null,
+                Err(_) => return Cow::Owned(serde_json::Value::Null),
             },
-            _ => return serde_json::Value::Null,
+            _ => return Cow::Owned(serde_json::Value::Null),
         }
     }
-    current.clone()
+    Cow::Borrowed(current)
 }
 
 // === JSON value operations ===
@@ -2228,6 +2284,47 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(evaluate("runtime.attempt", &ctx, &json!({})), json!(3));
+    }
+
+    #[test]
+    fn eval_runtime_fast_path_matches_scalar_fields() {
+        // The typed fast-path must agree with the serialize-then-navigate
+        // fallback for every scalar field, including the present/absent
+        // instance_id case.
+        let ctx = ExecutionContext {
+            runtime: orch8_types::context::RuntimeContext {
+                attempt: 5,
+                total_steps_executed: 42,
+                dry_run: true,
+                instance_id: Some("inst-1".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = json!({});
+        assert_eq!(evaluate("runtime.attempt", &ctx, &out), json!(5));
+        assert_eq!(
+            evaluate("runtime.total_steps_executed", &ctx, &out),
+            json!(42)
+        );
+        assert_eq!(evaluate("runtime.dry_run", &ctx, &out), json!(true));
+        assert_eq!(
+            evaluate("runtime.dry_run_auto_approve", &ctx, &out),
+            json!(false)
+        );
+        assert_eq!(evaluate("runtime.instance_id", &ctx, &out), json!("inst-1"));
+
+        // Absent instance_id → Null (matches navigate_json's not-found).
+        let ctx_none = ExecutionContext::default();
+        assert_eq!(
+            evaluate("runtime.instance_id", &ctx_none, &out),
+            serde_json::Value::Null
+        );
+        // A field not in the fast-path list still resolves via the fallback.
+        assert_eq!(
+            evaluate("runtime.started_at", &ctx_none, &out),
+            serde_json::Value::Null
+        );
     }
 
     // -----------------------------------------------------------------------

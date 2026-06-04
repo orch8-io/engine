@@ -3546,3 +3546,30 @@ async fn update_instance_context_cas_fails_on_stale_timestamp() {
     let after = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(after.context.data, json!({"first": true}));
 }
+
+#[tokio::test]
+async fn increment_total_steps_bumps_counter_and_preserves_data() {
+    let s = store().await;
+    let mut inst = make_instance("t1", SequenceId::new());
+    inst.context.data = json!({"keep": "me"});
+    inst.context.runtime.total_steps_executed = 0;
+    s.create_instance(&inst).await.unwrap();
+
+    // Each call returns the new running total.
+    assert_eq!(s.increment_total_steps(inst.id).await.unwrap(), 1);
+    assert_eq!(s.increment_total_steps(inst.id).await.unwrap(), 2);
+    assert_eq!(s.increment_total_steps(inst.id).await.unwrap(), 3);
+
+    // The counter is persisted and context.data is untouched (the increment
+    // must not clobber concurrent data mutations).
+    let after = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(after.context.runtime.total_steps_executed, 3);
+    assert_eq!(after.context.data, json!({"keep": "me"}));
+}
+
+#[tokio::test]
+async fn increment_total_steps_returns_zero_for_missing_instance() {
+    let s = store().await;
+    let missing = InstanceId::new();
+    assert_eq!(s.increment_total_steps(missing).await.unwrap(), 0);
+}

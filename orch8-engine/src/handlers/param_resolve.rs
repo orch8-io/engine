@@ -102,12 +102,19 @@ pub(crate) async fn resolve_templates_in_params(
         return Ok(params.clone());
     }
     let outputs = outputs.get(storage, instance.id).await?;
-    let state_map = storage
-        .get_all_instance_kv(instance.id)
-        .await
-        .unwrap_or_default();
-    let state_value = serde_json::to_value(&state_map).unwrap_or(serde_json::Value::Null);
-    crate::template::resolve_with_state(params, context, outputs, Some(&state_value))
+    // Only pay the instance-KV round-trip + serialization when a template
+    // actually references `{{ state.* }}`. The common case (outputs-/context-
+    // only templates) skips it entirely.
+    let state_value = if crate::template::references_state(params) {
+        let state_map = storage
+            .get_all_instance_kv(instance.id)
+            .await
+            .unwrap_or_default();
+        Some(serde_json::to_value(&state_map).unwrap_or(serde_json::Value::Null))
+    } else {
+        None
+    };
+    crate::template::resolve_with_state(params, context, outputs, state_value.as_ref())
 }
 
 /// Compute the attempt number for a step from the latest prior

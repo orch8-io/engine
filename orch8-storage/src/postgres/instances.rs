@@ -450,6 +450,27 @@ pub(super) async fn update_current_step_started_at(
     Ok(())
 }
 
+/// Atomically increment `context.runtime.total_steps_executed` via `jsonb_set`
+/// and return the new value, without rewriting the whole context blob. Returns
+/// `0` if the instance no longer exists.
+pub(super) async fn increment_total_steps(
+    store: &PostgresStorage,
+    id: InstanceId,
+) -> Result<u32, StorageError> {
+    let new_total: Option<i64> = sqlx::query_scalar(
+        "UPDATE task_instances \
+         SET context = jsonb_set(context, ARRAY['runtime', 'total_steps_executed'], \
+             to_jsonb(COALESCE((context #>> '{runtime,total_steps_executed}')::int, 0) + 1)), \
+             updated_at = NOW() \
+         WHERE id = $1 \
+         RETURNING (context #>> '{runtime,total_steps_executed}')::bigint",
+    )
+    .bind(id.into_uuid())
+    .fetch_optional(&store.pool)
+    .await?;
+    Ok(new_total.map_or(0, |n| u32::try_from(n.max(0)).unwrap_or(u32::MAX)))
+}
+
 /// Update a task instance's context with externalization, atomic:
 /// externalized payloads + marker-swapped context commit or rollback together.
 ///

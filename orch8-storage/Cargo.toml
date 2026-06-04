@@ -16,6 +16,10 @@ tracing.workspace = true
 object_store.workspace = true
 futures.workspace = true
 bytes.workspace = true
+moka.workspace = true
+# Already in the graph via sqlx; needed here for `tokio::spawn` of the
+# fire-and-forget `last_used_at` touch on the auth hot path.
+tokio = { workspace = true }
 zstd = { version = "0.13", optional = true }
 
 [features]

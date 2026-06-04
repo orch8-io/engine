@@ -106,12 +106,22 @@ pub fn auth_interceptor(
         }
 
         // 2. Per-tenant key lookup. Tonic interceptors are sync, so we
-        //    block_in_place to await the async storage call. This is safe
-        //    because the server runs on a multi-threaded tokio runtime.
+        //    block_in_place to await the async (cached) storage call. This is
+        //    only sound on a multi-threaded runtime — `block_in_place` panics
+        //    on a current-thread runtime — which the server guarantees via a
+        //    bare `#[tokio::main]`. Assert it in debug builds so a future
+        //    runtime change (or a single-threaded test harness) fails loudly
+        //    rather than at an arbitrary request.
         if let (Some(storage), Some(provided)) = (storage.as_ref(), provided) {
+            debug_assert_eq!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread,
+                "gRPC auth interceptor requires a multi-thread tokio runtime"
+            );
             let hash = orch8_types::api_key::hash_api_key(provided);
             let lookup = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(storage.lookup_api_key_by_hash(&hash))
+                tokio::runtime::Handle::current()
+                    .block_on(orch8_storage::api_key_cache::authenticate(storage, &hash))
             });
 
             match lookup {

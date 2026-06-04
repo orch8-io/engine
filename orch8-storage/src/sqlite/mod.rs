@@ -384,6 +384,10 @@ impl crate::InstanceStore for SqliteStorage {
         instances::update_started_at(self, id, started_at).await
     }
 
+    async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError> {
+        instances::increment_total_steps(self, id).await
+    }
+
     async fn update_instance_current_step_started_at(
         &self,
         id: InstanceId,

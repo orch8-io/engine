@@ -38,7 +38,7 @@ struct Srv {
 async fn spawn(storage: Arc<dyn StorageBackend>, require_tenant: bool) -> Srv {
     let shutdown = tokio_util::sync::CancellationToken::new();
     let auth_storage = storage.clone();
-    let root = ROOT_KEY.to_string();
+    let root_digest = orch8_types::auth::precompute_secret_digest(ROOT_KEY);
     let app: Router = Router::new()
         .route("/whoami", get(whoami))
         .layer(axum::middleware::from_fn(move |req, next| async move {
@@ -46,8 +46,9 @@ async fn spawn(storage: Arc<dyn StorageBackend>, require_tenant: bool) -> Srv {
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
             let s = auth_storage.clone();
-            let k = root.clone();
-            async move { orch8_api::auth::api_key_middleware(s, k, req, next).await }
+            async move {
+                orch8_api::auth::api_key_middleware(s, Some(root_digest), req, next).await
+            }
         }));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

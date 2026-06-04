@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
+use orch8_types::error::StepError;
 use orch8_types::execution::ExecutionNode;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::TaskInstance;
@@ -55,6 +56,202 @@ pub(crate) async fn context_for_step(
     resolve_markers(storage, instance.id, filtered).await
 }
 
+/// Decision produced by [`breaker_preflight`], shared by the tree-evaluator
+/// (`execute_step_node`) and fast-path (`scheduler::step_exec`) dispatch sites
+/// so the open-breaker behaviour cannot drift between them.
+// `Proceed` carries a `Cow<StepDef>` (large when owned) and `Defer` is tiny —
+// but the value is constructed and matched immediately, never stored in a
+// collection, so the variant-size delta is irrelevant and boxing would only
+// add an allocation to the hot path.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum BreakerDecision<'a> {
+    /// Dispatch using this step def — the original (`Borrowed`) or a
+    /// fallback-handler-swapped copy (`Owned`).
+    Proceed(Cow<'a, StepDef>),
+    /// Primary breaker (and any fallback) is open; defer the instance until
+    /// `fire_at`. The caller applies the state transition appropriate to its
+    /// path (node-aware vs instance-level) — this function performs no writes.
+    Defer {
+        fire_at: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+/// Circuit-breaker pre-flight, run before the dispatch fork so it applies
+/// uniformly across every handler kind. Pure decision logic with no storage
+/// writes: when the primary handler's breaker is Open, prefer the configured
+/// `fallback_handler`, else defer for the cooldown window. Skipped for
+/// untracked (pure control-flow) handlers and when no breaker registry is wired.
+pub(crate) fn breaker_preflight<'a>(
+    handlers: &HandlerRegistry,
+    instance_id: InstanceId,
+    tenant_id: &orch8_types::ids::TenantId,
+    step_def: &'a StepDef,
+) -> BreakerDecision<'a> {
+    let tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
+    let Some(cb) = handlers.circuit_breakers().filter(|_| tracked) else {
+        return BreakerDecision::Proceed(Cow::Borrowed(step_def));
+    };
+    let Err(remaining_secs) = cb.check(tenant_id, &step_def.handler) else {
+        return BreakerDecision::Proceed(Cow::Borrowed(step_def));
+    };
+
+    // Primary is Open. Prefer `fallback_handler`; defer only when no fallback
+    // is configured or the fallback's own breaker is also Open.
+    let Some(fb) = step_def.fallback_handler.as_deref() else {
+        #[allow(clippy::cast_possible_wrap)]
+        let fire_at = chrono::Utc::now() + chrono::Duration::seconds(remaining_secs as i64);
+        tracing::debug!(
+            instance_id = %instance_id,
+            handler = %step_def.handler,
+            remaining_secs,
+            "circuit breaker open, deferring instance"
+        );
+        return BreakerDecision::Defer { fire_at };
+    };
+
+    // Re-check the fallback's breaker. Skip-listed fallbacks bypass the check.
+    let fb_remaining_open = if crate::circuit_breaker::is_breaker_tracked(fb) {
+        cb.check(tenant_id, fb).err()
+    } else {
+        None
+    };
+    if let Some(fb_rem) = fb_remaining_open {
+        let defer_secs = remaining_secs.max(fb_rem);
+        #[allow(clippy::cast_possible_wrap)]
+        let fire_at = chrono::Utc::now() + chrono::Duration::seconds(defer_secs as i64);
+        tracing::debug!(
+            instance_id = %instance_id,
+            primary = %step_def.handler,
+            fallback = %fb,
+            remaining_secs = defer_secs,
+            "both primary and fallback circuit breakers open, deferring instance"
+        );
+        return BreakerDecision::Defer { fire_at };
+    }
+    tracing::debug!(
+        instance_id = %instance_id,
+        primary = %step_def.handler,
+        fallback = %fb,
+        "primary circuit breaker open, dispatching fallback"
+    );
+    let mut cloned = step_def.clone();
+    cloned.handler = fb.to_string();
+    BreakerDecision::Proceed(Cow::Owned(cloned))
+}
+
+/// The fully-resolved inputs a step needs before dispatch, produced once by
+/// [`prepare_step`] and shared by both dispatch sites.
+pub(crate) struct PreparedStep {
+    /// Context snapshot honouring `context_access` + inflated markers.
+    pub step_context: ExecutionContext,
+    /// Params with `{{templates}}` and `credentials://` refs fully expanded.
+    pub resolved_params: serde_json::Value,
+    /// Cache key with its template (if any) resolved.
+    pub resolved_cache_key: Option<String>,
+}
+
+/// Why [`prepare_step`] could not produce a [`PreparedStep`].
+pub(crate) enum PrepareError {
+    /// Infrastructure error building the context snapshot — propagate as a hard
+    /// error (`?`), do not fail the step.
+    Infra(EngineError),
+    /// A user template failed to resolve — fail the step.
+    Template(EngineError),
+    /// A `credentials://` ref failed to resolve — fail the step.
+    Credential(StepError),
+}
+
+impl PrepareError {
+    /// Human-readable message for the `fail_*` paths that record a reason.
+    pub(crate) fn fail_message(&self) -> String {
+        match self {
+            Self::Infra(e) | Self::Template(e) => e.to_string(),
+            Self::Credential(e) => e.to_string(),
+        }
+    }
+}
+
+/// Resolve everything a step needs before dispatch — context snapshot, then
+/// `{{templates}}`, then `credentials://` refs, then the cache key — in the
+/// exact order both dispatch paths require.
+///
+/// Shared by the tree-evaluator (`execute_step_node`) and the fast-path
+/// (`scheduler::step_exec`) so the resolution order and failure logging cannot
+/// drift. The caller maps [`PrepareError`] to its own fail action (node-level
+/// vs instance-level); the diagnostic logging happens here, once.
+pub(crate) async fn prepare_step(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+    outputs: &OutputsSnapshot,
+) -> Result<PreparedStep, PrepareError> {
+    // Context snapshot — reads only `instance.context` + `context_access`, so
+    // it is built before template resolution. An error here is infrastructural.
+    let step_context = context_for_step(storage, instance, step_def)
+        .await
+        .map_err(PrepareError::Infra)?;
+
+    // Templates first: an author can write `{{context.data.cred_id}}` that
+    // resolves to a `credentials://…` ref the next pass then substitutes.
+    let mut resolved_params = match super::param_resolve::resolve_templates_in_params(
+        storage,
+        instance,
+        &step_context,
+        &step_def.params,
+        outputs,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(tpl_err) => {
+            tracing::error!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                error = %tpl_err,
+                "failed to resolve templates for step"
+            );
+            return Err(PrepareError::Template(tpl_err));
+        }
+    };
+
+    // Credentials next: every dispatch target sees expanded params without
+    // needing the credential registry. Missing/disabled/cross-tenant refs fail.
+    if let Err(step_err) = crate::credentials::resolve_in_value(
+        storage,
+        instance.tenant_id.as_str(),
+        &mut resolved_params,
+    )
+    .await
+    {
+        tracing::warn!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            error = ?step_err,
+            "failed to resolve credentials for step"
+        );
+        return Err(PrepareError::Credential(step_err));
+    }
+
+    // Cache key template (never fails — falls back to the literal key).
+    let resolved_cache_key = step_def.cache_key.as_ref().map(|ck| {
+        if crate::template::contains_template(&serde_json::Value::String(ck.clone())) {
+            let wrapped = serde_json::Value::String(ck.clone());
+            match crate::template::resolve(&wrapped, &step_context, &serde_json::json!({})) {
+                Ok(serde_json::Value::String(s)) => s,
+                _ => ck.clone(),
+            }
+        } else {
+            ck.clone()
+        }
+    });
+
+    Ok(PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+    })
+}
+
 /// Execute a step node within the execution tree.
 /// Returns `true` if the instance has more work (should re-schedule).
 #[allow(clippy::too_many_lines)]
@@ -103,76 +300,20 @@ pub async fn execute_step_node(
     let attempt =
         super::param_resolve::compute_attempt(storage.as_ref(), instance.id, &step_def.id).await?;
 
-    // Build the step's context snapshot once and reuse across both template
-    // resolution and every downstream dispatch branch. `context_for_step` only
-    // reads `instance.context` and `step_def.context_access` — it does not
-    // depend on step params, so evaluating it before template resolution is
-    // safe and avoids duplicate work.
-    let step_context = context_for_step(storage.as_ref(), instance, step_def).await?;
-
-    // Resolve `{{path}}` templates first. User templates should be fully
-    // materialised before any further transformation — this lets an author
-    // write `{{context.data.cred_id}}` that evaluates to a `credentials://…`
-    // ref, which the following credential pass then substitutes. Template
-    // errors (unknown context section, unknown root) fail the node the same
-    // way credential errors do.
-    let mut resolved_params = match super::param_resolve::resolve_templates_in_params(
-        storage.as_ref(),
-        instance,
-        &step_context,
-        &step_def.params,
-        outputs,
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(tpl_err) => {
-            tracing::error!(
-                instance_id = %instance.id,
-                block_id = %step_def.id,
-                error = %tpl_err,
-                "failed to resolve templates for step"
-            );
+    // Resolve context snapshot + templates + credentials + cache key (shared
+    // with the fast path). Template/credential failures fail this *node*;
+    // infrastructural errors propagate.
+    let PreparedStep {
+        step_context,
+        resolved_params,
+        resolved_cache_key,
+    } = match prepare_step(storage.as_ref(), instance, step_def, outputs).await {
+        Ok(prepared) => prepared,
+        Err(PrepareError::Infra(e)) => return Err(e),
+        Err(_) => {
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             return Ok(false);
         }
-    };
-
-    // Resolve `credentials://` references in step params before handing off to
-    // any handler. Resolving once up front means every dispatch target (AP,
-    // gRPC, WASM, in-process) sees the same expanded params without having to
-    // know about the credential registry. Missing/disabled/cross-tenant refs
-    // surface as StepError::Permanent which fails the node immediately.
-    if let Err(step_err) = crate::credentials::resolve_in_value(
-        storage.as_ref(),
-        instance.tenant_id.as_str(),
-        &mut resolved_params,
-    )
-    .await
-    {
-        tracing::warn!(
-            instance_id = %instance.id,
-            block_id = %step_def.id,
-            error = ?step_err,
-            "failed to resolve credentials for step"
-        );
-        evaluator::fail_node(storage.as_ref(), node.id).await?;
-        return Ok(false);
-    }
-
-    // Resolve cache_key template if present.
-    let resolved_cache_key = if let Some(ref ck) = step_def.cache_key {
-        if crate::template::contains_template(&serde_json::Value::String(ck.clone())) {
-            let wrapped = serde_json::Value::String(ck.clone());
-            match crate::template::resolve(&wrapped, &step_context, &serde_json::json!({})) {
-                Ok(serde_json::Value::String(s)) => Some(s),
-                _ => Some(ck.clone()),
-            }
-        } else {
-            Some(ck.clone())
-        }
-    } else {
-        None
     };
 
     // Each dispatch branch below ends in `return`, so we can *move*
@@ -180,83 +321,26 @@ pub async fn execute_step_node(
     // later branches are unreachable from that point. The clone calls were
     // defensive but redundant and measurable on the step hot path.
 
-    // Circuit breaker pre-flight for the tree path. Mirrors the fast-path
-    // check in `scheduler::step_exec::execute_step_block`: when the breaker
-    // for this (tenant, handler) is Open, either swap dispatch to the step's
-    // `fallback_handler` or push the instance back to `Scheduled` with a
-    // `fire_at` of now + remaining cooldown so the tick loop stops churning
-    // on it. The node stays `Running`; when the evaluator re-enters after
-    // cooldown, the breaker will be HalfOpen and the next attempt probes
-    // the handler.
-    let cb_step_def: Cow<'_, StepDef> = {
-        let primary_tracked = crate::circuit_breaker::is_breaker_tracked(&step_def.handler);
-        if let (true, Some(cb)) = (primary_tracked, handlers.circuit_breakers()) {
-            match cb.check(&instance.tenant_id, &step_def.handler) {
-                Ok(()) => Cow::Borrowed(step_def),
-                Err(remaining_secs) => {
-                    if let Some(fb) = step_def.fallback_handler.as_deref() {
-                        let fb_remaining_open = if crate::circuit_breaker::is_breaker_tracked(fb) {
-                            cb.check(&instance.tenant_id, fb).err()
-                        } else {
-                            None
-                        };
-                        if let Some(fb_rem) = fb_remaining_open {
-                            let defer_secs = remaining_secs.max(fb_rem);
-                            #[allow(clippy::cast_possible_wrap)]
-                            let fire_at =
-                                chrono::Utc::now() + chrono::Duration::seconds(defer_secs as i64);
-                            tracing::debug!(
-                                instance_id = %instance.id,
-                                primary = %step_def.handler,
-                                fallback = %fb,
-                                remaining_secs = defer_secs,
-                                "both primary and fallback circuit breakers open in tree path, deferring instance"
-                            );
-                            storage
-                                .conditional_update_instance_state(
-                                    instance.id,
-                                    orch8_types::instance::InstanceState::Running,
-                                    orch8_types::instance::InstanceState::Scheduled,
-                                    Some(fire_at),
-                                )
-                                .await?;
-                            return Ok(false);
-                        }
-                        tracing::debug!(
-                            instance_id = %instance.id,
-                            primary = %step_def.handler,
-                            fallback = %fb,
-                            "primary circuit breaker open in tree path, dispatching fallback"
-                        );
-                        let mut cloned = step_def.clone();
-                        cloned.handler = fb.to_string();
-                        Cow::Owned(cloned)
-                    } else {
-                        #[allow(clippy::cast_possible_wrap)]
-                        let fire_at =
-                            chrono::Utc::now() + chrono::Duration::seconds(remaining_secs as i64);
-                        tracing::debug!(
-                            instance_id = %instance.id,
-                            handler = %step_def.handler,
-                            remaining_secs = remaining_secs,
-                            "circuit breaker open in tree path, deferring instance"
-                        );
-                        storage
-                            .conditional_update_instance_state(
-                                instance.id,
-                                orch8_types::instance::InstanceState::Running,
-                                orch8_types::instance::InstanceState::Scheduled,
-                                Some(fire_at),
-                            )
-                            .await?;
-                        return Ok(false);
-                    }
-                }
+    // Circuit breaker pre-flight (shared with the fast path). On an Open
+    // breaker, defer the instance back to `Scheduled` with a `fire_at` of now +
+    // remaining cooldown so the tick loop stops churning on it. The node stays
+    // `Running`; when the evaluator re-enters after cooldown, the breaker is
+    // HalfOpen and the next attempt probes the handler.
+    let cb_step_def: Cow<'_, StepDef> =
+        match breaker_preflight(handlers, instance.id, &instance.tenant_id, step_def) {
+            BreakerDecision::Proceed(cow) => cow,
+            BreakerDecision::Defer { fire_at } => {
+                storage
+                    .conditional_update_instance_state(
+                        instance.id,
+                        orch8_types::instance::InstanceState::Running,
+                        orch8_types::instance::InstanceState::Scheduled,
+                        Some(fire_at),
+                    )
+                    .await?;
+                return Ok(false);
             }
-        } else {
-            Cow::Borrowed(step_def)
-        }
-    };
+        };
     // Shadow `step_def` so the rest of dispatch transparently sees the
     // fallback-swapped version (if any). `cb_step_def` owns the borrow.
     let step_def = cb_step_def.as_ref();
