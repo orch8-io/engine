@@ -5,11 +5,11 @@
 //! *every* request. Without a cache that is one indexed `SELECT` per request
 //! on the hottest path in the system — and, previously, an additional
 //! fire-and-forget `last_used_at` write per request. This module collapses both
-//! into at most one read + one write per key per [`CACHE_TTL`] window.
+//! into at most one read + one write per key per `CACHE_TTL` window.
 //!
 //! ## Staleness & revocation
 //!
-//! Only *active* records are cached, and entries live for [`CACHE_TTL`].
+//! Only *active* records are cached, and entries live for `CACHE_TTL`.
 //! Inactive/absent keys are never cached (no negative caching), so a *failed*
 //! auth always reflects current database state.
 //!
@@ -54,10 +54,10 @@ fn cache() -> &'static Cache<String, ApiKeyRecord> {
 /// Resolve a presented secret's SHA-256 `key_hash` to its [`ApiKeyRecord`],
 /// using the process-wide cache.
 ///
-/// Returns the record exactly as [`StorageBackend::lookup_api_key_by_hash`]
+/// Returns the record exactly as `StorageBackend::lookup_api_key_by_hash`
 /// would (active *or* inactive, or `None`) — callers keep their own
 /// [`ApiKeyRecord::is_active`] check. The only behavioural change is that an
-/// active record is served from memory for up to [`CACHE_TTL`], and its
+/// active record is served from memory for up to `CACHE_TTL`, and its
 /// `last_used_at` is refreshed (best-effort, off the request path) at most once
 /// per window rather than on every request.
 pub async fn authenticate(
@@ -81,7 +81,7 @@ pub async fn authenticate(
 }
 
 /// Drop the cached entry for `key_hash` so a revoked or rotated key stops
-/// authenticating *immediately* rather than after [`CACHE_TTL`].
+/// authenticating *immediately* rather than after `CACHE_TTL`.
 ///
 /// Called by the storage backends from within `revoke_api_key`, so every
 /// revocation path (HTTP, gRPC, the encrypting decorator) invalidates the
@@ -92,7 +92,7 @@ pub async fn invalidate(key_hash: &str) {
 
 /// Best-effort audit hygiene: refresh `last_used_at` without blocking the
 /// request. Only reached on a cache miss, so writes are naturally coalesced to
-/// at most one per key per [`CACHE_TTL`] window.
+/// at most one per key per `CACHE_TTL` window.
 fn touch(storage: &Arc<dyn StorageBackend>, record: &ApiKeyRecord, now: DateTime<Utc>) {
     let storage = Arc::clone(storage);
     let id = record.id.clone();
