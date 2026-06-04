@@ -1,0 +1,17 @@
+<<<<<<< SEARCH
+pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
+pub(crate) use checkpoints::{
+    __path_get_latest_checkpoint, __path_list_checkpoints, __path_prune_checkpoints,
+    __path_save_checkpoint, get_latest_checkpoint, list_checkpoints, prune_checkpoints,
+    save_checkpoint,
+};
+pub use inject::InjectBlocksRequest;
+=======
+pub(crate) use checkpoints::{
+    __path_get_latest_checkpoint, __path_list_checkpoints, __path_prune_checkpoints,
+    __path_save_checkpoint, get_latest_checkpoint, list_checkpoints, prune_checkpoints,
+    save_checkpoint,
+};
+pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
+pub use inject::InjectBlocksRequest;
+>>>>>>> REPLACE
