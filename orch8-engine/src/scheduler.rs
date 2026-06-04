@@ -645,6 +645,7 @@ async fn process_signalled_instances(
 /// Check SLA deadlines for instances stuck in `Waiting` state (dispatched to
 /// external workers that never completed). Runs every tick with a bounded
 /// query to avoid overhead when no deadlines are configured.
+#[allow(clippy::too_many_lines)]
 async fn process_waiting_deadlines(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -696,12 +697,19 @@ async fn process_waiting_deadlines(
         storage.get_block_outputs_batch(&deadline_keys).await?
     };
 
+    let mut deadline_outputs_ref = std::collections::HashMap::with_capacity(deadline_outputs.len());
+    for (k, v) in &deadline_outputs {
+        deadline_outputs_ref.insert((&k.0, &k.1), v);
+    }
+
     for (instance, seq) in instance_sequences {
         let mut handled = false;
         for block in &seq.blocks {
             if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
                 if step_def.deadline.is_some() {
-                    let prev = deadline_outputs.get(&(instance.id, step_def.id.clone()));
+                    let prev = deadline_outputs_ref
+                        .get(&(&instance.id, &step_def.id))
+                        .copied();
                     if check_step_deadline_waiting(
                         storage,
                         handlers,
@@ -1032,12 +1040,20 @@ async fn process_instance(
         storage.get_block_outputs_batch(&deadline_keys).await?
     };
 
+    let mut deadline_outputs_ref = std::collections::HashMap::with_capacity(deadline_outputs.len());
+    for (k, v) in &deadline_outputs {
+        deadline_outputs_ref.insert((&k.0, &k.1), v);
+    }
+
     for block in blocks.iter() {
         if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if !prefetched.completed_block_ids.contains(&step_def.id) {
+            if step_def.deadline.is_some() && !prefetched.completed_block_ids.contains(&step_def.id)
+            {
                 // SLA deadline check: if a previous attempt exists and the deadline has
                 // been breached (wall-clock time since first attempt), fail the instance.
-                let prev = deadline_outputs.get(&(instance.id, step_def.id.clone()));
+                let prev = deadline_outputs_ref
+                    .get(&(&instance.id, &step_def.id))
+                    .copied();
                 if step_exec::check_step_deadline(storage, handlers, &instance, step_def, prev)
                     .await?
                 {
