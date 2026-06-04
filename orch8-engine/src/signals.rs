@@ -1194,7 +1194,7 @@ mod tests {
             started_at: None,
             completed_at: None,
         };
-        let tree = vec![root.clone(), child.clone(), grandchild.clone()];
+        let tree = [root.clone(), child.clone(), grandchild.clone()];
         let mut node_index: Vec<_> = tree.iter().collect();
         node_index.sort_unstable_by_key(|n| n.id);
 
