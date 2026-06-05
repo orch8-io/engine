@@ -681,12 +681,13 @@ async fn process_waiting_deadlines(
     }
 
     // Collect all (instance_id, block_id) pairs that have a deadline.
+    // ⚡ Bolt: Avoid allocating Strings for BlockId by using references inside the deadline_keys Vector.
     let mut deadline_keys = Vec::new();
     for (instance, seq) in &instance_sequences {
         for block in &seq.blocks {
             if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
                 if step_def.deadline.is_some() {
-                    deadline_keys.push((instance.id, step_def.id.clone()));
+                    deadline_keys.push((instance.id, &step_def.id));
                 }
             }
         }
@@ -1025,11 +1026,13 @@ async fn process_instance(
 
     // Fast path SLA deadline check for all steps BEFORE concurrency checks.
     // Batch-fetch any previous block outputs so the loop is N queries -> 1 query.
-    let deadline_keys: Vec<(InstanceId, BlockId)> = blocks
+    // ⚡ Bolt: Avoid allocating Strings for BlockId by passing references into get_block_outputs_batch.
+    // In heavily concurrent workloads, skipping BlockId clones here saves thousands of small heap allocations per minute.
+    let deadline_keys: Vec<(InstanceId, &BlockId)> = blocks
         .iter()
         .filter_map(|b| match b {
             orch8_types::sequence::BlockDefinition::Step(s) if s.deadline.is_some() => {
-                Some((instance.id, s.id.clone()))
+                Some((instance.id, &s.id))
             }
             _ => None,
         })

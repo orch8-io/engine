@@ -666,7 +666,7 @@ pub trait OutputStore: Send + Sync + 'static {
     /// (ordered by `created_at DESC`). Missing pairs are omitted.
     async fn get_block_outputs_batch(
         &self,
-        keys: &[(InstanceId, BlockId)],
+        keys: &[(InstanceId, &BlockId)],
     ) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
 
     async fn get_all_outputs(
