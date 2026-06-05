@@ -481,7 +481,7 @@ async fn sqlite_get_batch_chunking_does_not_drop_keys() {
     seed_instance(&storage, instance).await;
 
     // Seed 450 outputs to exercise the 400-key chunk boundary.
-    let mut keys = Vec::with_capacity(450);
+    let mut key_data = Vec::with_capacity(450);
     for i in 0..450 {
         let block_id = BlockId::new(format!("block_{i:03}"));
         let out = BlockOutput {
@@ -495,16 +495,27 @@ async fn sqlite_get_batch_chunking_does_not_drop_keys() {
             created_at: Utc::now(),
         };
         storage.save_block_output(&out).await.unwrap();
-        keys.push((instance, block_id));
+        key_data.push((instance, block_id));
     }
+
+    let keys: Vec<(InstanceId, &BlockId)> = key_data.iter().map(|(i, b)| (*i, b)).collect();
 
     let batch = storage.get_block_outputs_batch(&keys).await.unwrap();
     assert_eq!(batch.len(), 450, "batch must return all 450 outputs");
 
     // Spot-check a few keys.
-    assert_eq!(batch[&keys[0]].output, json!({"idx": 0}));
-    assert_eq!(batch[&keys[399]].output, json!({"idx": 399}));
-    assert_eq!(batch[&keys[449]].output, json!({"idx": 449}));
+    assert_eq!(
+        batch[&(key_data[0].0, key_data[0].1.clone())].output,
+        json!({"idx": 0})
+    );
+    assert_eq!(
+        batch[&(key_data[399].0, key_data[399].1.clone())].output,
+        json!({"idx": 399})
+    );
+    assert_eq!(
+        batch[&(key_data[449].0, key_data[449].1.clone())].output,
+        json!({"idx": 449})
+    );
 }
 
 // --------------------------------------------------------------------------
