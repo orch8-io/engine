@@ -2617,7 +2617,9 @@ impl crate::MobileSyncStore for SqliteStorage {
         if command_ids.is_empty() {
             return Ok(0);
         }
-        let mut qb = sqlx::QueryBuilder::new("UPDATE mobile_commands SET acked_at = datetime('now') WHERE device_id = ");
+        let mut qb = sqlx::QueryBuilder::new(
+            "UPDATE mobile_commands SET acked_at = datetime('now') WHERE device_id = ",
+        );
         qb.push_bind(device_id);
         qb.push(" AND id IN (");
         let mut separated = qb.separated(", ");
@@ -2626,7 +2628,8 @@ impl crate::MobileSyncStore for SqliteStorage {
         }
         separated.push_unseparated(")");
 
-        let result = qb.build()
+        let result = qb
+            .build()
             .execute(&self.pool)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
