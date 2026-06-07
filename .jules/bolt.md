@@ -36,3 +36,9 @@
 ## 2024-05-14 - Remove hot-path BlockId cloning in scheduler tick
 **Learning:** In the fast path of the scheduler (`process_instance`), `BlockId` was being cloned and looked up in a HashMap for every incomplete step on every tick, regardless of whether a deadline was configured. The fix avoids this allocation using zero-allocation references and an early return.
 **Action:** Always verify if nested loops are lazily evaluating or bypassing unnecessary object clones/lookups on hot execution paths. Utilize Rust's HashMap with custom Borrow implementations or locally constructed reference maps to query without allocating strings.
+## 2025-10-28 - [Zero-Allocation Reference Tuples in Hot Path Iterators]
+**Learning:** In the fast path of the scheduler (), passing  by reference into  avoids allocating and copying s for every step that requires a deadline check. Prior to this,  was cloned on every iteration inside a loop processing active steps, introducing significant memory overhead across the cluster.
+**Action:** Always prefer accepting references within collections () for database batch operations if the caller only holds references, preventing O(N) string clones on execution hot paths.
+## 2025-10-28 - [Zero-Allocation Reference Tuples in Hot Path Iterators]
+**Learning:** In the fast path of the scheduler (scheduler.rs:1026), passing &BlockId by reference into get_block_outputs_batch avoids allocating and copying Strings for every step that requires a deadline check. Prior to this, BlockId was cloned on every iteration inside a loop processing active steps, introducing significant memory overhead across the cluster.
+**Action:** Always prefer accepting references within collections (&[(InstanceId, &BlockId)]) for database batch operations if the caller only holds references, preventing O(N) string clones on execution hot paths.
