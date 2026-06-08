@@ -1,9 +1,0 @@
---- orch8-storage/src/lib.rs
-+++ orch8-storage/src/lib.rs
-@@ -666,6 +666,7 @@
-     /// Returns a map from `(InstanceId, BlockId)` to the latest output
-     /// (ordered by `created_at DESC`). Missing pairs are omitted.
-+    /// Note: `&BlockId` is used over `BlockId` to prevent string allocations in hot paths like the scheduler.
-     async fn get_block_outputs_batch(
-         &self,
-         keys: &[(InstanceId, &BlockId)],

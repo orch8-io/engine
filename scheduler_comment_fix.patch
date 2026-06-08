@@ -1,6 +1,0 @@
---- orch8-engine/src/scheduler.rs
-+++ orch8-engine/src/scheduler.rs
-@@ -688,2 +688,3 @@
-                 if step_def.deadline.is_some() {
-+                    // Pushing zero-allocation references avoids string clones in the fast path.
-                     deadline_keys.push((instance.id, &step_def.id));
