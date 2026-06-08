@@ -686,7 +686,8 @@ async fn process_waiting_deadlines(
         for block in &seq.blocks {
             if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
                 if step_def.deadline.is_some() {
-                    deadline_keys.push((instance.id, step_def.id.clone()));
+                    // Pushing zero-allocation references avoids string clones in the fast path.
+                    deadline_keys.push((instance.id, &step_def.id));
                 }
             }
         }
@@ -1025,11 +1026,11 @@ async fn process_instance(
 
     // Fast path SLA deadline check for all steps BEFORE concurrency checks.
     // Batch-fetch any previous block outputs so the loop is N queries -> 1 query.
-    let deadline_keys: Vec<(InstanceId, BlockId)> = blocks
+    let deadline_keys: Vec<(InstanceId, &BlockId)> = blocks
         .iter()
         .filter_map(|b| match b {
             orch8_types::sequence::BlockDefinition::Step(s) if s.deadline.is_some() => {
-                Some((instance.id, s.id.clone()))
+                Some((instance.id, &s.id))
             }
             _ => None,
         })

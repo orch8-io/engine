@@ -498,7 +498,8 @@ async fn sqlite_get_batch_chunking_does_not_drop_keys() {
         keys.push((instance, block_id));
     }
 
-    let batch = storage.get_block_outputs_batch(&keys).await.unwrap();
+    let ref_keys: Vec<(InstanceId, &BlockId)> = keys.iter().map(|(i, b)| (*i, b)).collect();
+    let batch = storage.get_block_outputs_batch(&ref_keys).await.unwrap();
     assert_eq!(batch.len(), 450, "batch must return all 450 outputs");
 
     // Spot-check a few keys.
