@@ -102,8 +102,10 @@ describe("Send Window Deferral", () => {
       [
         step("s1", "noop", {}, {
           send_window: {
+            // start == end is the engine's 24h window; 0–23 would exclude
+            // the 23:00–24:00 hour and make this test fail late in the UTC day.
             start_hour: 0,
-            end_hour: 23,
+            end_hour: 0,
             days: [0, 1, 2, 3, 4, 5, 6],
           },
         }),
@@ -118,7 +120,7 @@ describe("Send Window Deferral", () => {
       namespace: "default",
     });
 
-    // Should complete promptly because the window covers all days 0:00–23:00.
+    // Should complete promptly because the window covers all hours of all days.
     const instance = await client.waitForState(id, "completed", {
       timeoutMs: 10_000,
     });
