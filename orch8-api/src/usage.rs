@@ -13,7 +13,13 @@ use serde::Deserialize;
 
 use crate::auth::TenantContext;
 use crate::error::ApiError;
+use crate::model_pricing;
 use crate::AppState;
+
+/// Round a USD amount to 6 decimal places for stable API output.
+fn round6(v: f64) -> f64 {
+    (v * 1_000_000.0).round() / 1_000_000.0
+}
 
 /// Query params for [`get_usage`].
 #[derive(Debug, Deserialize)]
@@ -36,7 +42,7 @@ pub struct UsageQuery {
         ("end" = Option<String>, Query, description = "Window end (RFC 3339)"),
     ),
     responses(
-        (status = 200, description = "Usage aggregated by (kind, model)", body = serde_json::Value),
+        (status = 200, description = "Usage aggregated by (kind, model) with estimated USD costs", body = serde_json::Value),
         (status = 400, description = "No tenant resolvable"),
     )
 )]
@@ -66,11 +72,37 @@ pub async fn get_usage(
         .await
         .map_err(|e| ApiError::from_storage(e, "usage"))?;
 
+    // Attach an estimated USD cost to each aggregate (null for unknown
+    // models) plus a window-wide total over the known ones. Costs are list
+    // prices from the static pricing table — hence `cost_is_estimate`.
+    let mut total_cost_usd = 0.0;
+    let usage: Vec<serde_json::Value> = usage
+        .into_iter()
+        .map(|u| {
+            let cost_usd =
+                model_pricing::estimate_cost_usd(&u.model, u.input_tokens, u.output_tokens)
+                    .map(round6);
+            if let Some(c) = cost_usd {
+                total_cost_usd += c;
+            }
+            serde_json::json!({
+                "kind": u.kind,
+                "model": u.model,
+                "events": u.events,
+                "input_tokens": u.input_tokens,
+                "output_tokens": u.output_tokens,
+                "cost_usd": cost_usd,
+            })
+        })
+        .collect();
+
     Ok(Json(serde_json::json!({
         "tenant": tenant,
         "start": start,
         "end": end,
         "usage": usage,
+        "total_cost_usd": round6(total_cost_usd),
+        "cost_is_estimate": true,
     })))
 }
 

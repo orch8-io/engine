@@ -10,6 +10,7 @@ pub mod health;
 pub mod instances;
 pub mod metrics;
 pub mod mobile_sync;
+pub mod model_pricing;
 #[allow(clippy::needless_for_each)]
 pub mod openapi;
 pub mod plugins;
