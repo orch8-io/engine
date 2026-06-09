@@ -36,3 +36,9 @@
 ## 2024-05-14 - Remove hot-path BlockId cloning in scheduler tick
 **Learning:** In the fast path of the scheduler (`process_instance`), `BlockId` was being cloned and looked up in a HashMap for every incomplete step on every tick, regardless of whether a deadline was configured. The fix avoids this allocation using zero-allocation references and an early return.
 **Action:** Always verify if nested loops are lazily evaluating or bypassing unnecessary object clones/lookups on hot execution paths. Utilize Rust's HashMap with custom Borrow implementations or locally constructed reference maps to query without allocating strings.
+## 2025-02-28 - Avoid Cloning Identifiers in Batch Iteration
+**Learning:** Using  on heap-allocated identifier types (like  which wraps a String) when constructing parameter arrays for batch fetch operations creates significant overhead in hot loops. The  trait implementations in  can support borrowed data natively.
+**Action:** When defining or calling batch interface methods, utilize Rust's lifetimes to borrow the inner values (e.g., `&[(InstanceId, &BlockId)]`) instead of taking ownership to prevent needless allocations.
+## 2025-02-28 - Avoid Cloning Identifiers in Batch Iteration
+**Learning:** Using `clone()` on heap-allocated identifier types (like `BlockId` which wraps a String) when constructing parameter arrays for batch fetch operations creates significant overhead in hot loops. The `Storage` trait implementations in `orch8-storage` can support borrowed data natively.
+**Action:** When defining or calling batch interface methods, utilize Rust's lifetimes to borrow the inner values (e.g., `&[(InstanceId, &BlockId)]`) instead of taking ownership to prevent needless allocations.
