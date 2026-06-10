@@ -115,6 +115,25 @@ pub(super) async fn get_after_created_at(
     rows.iter().map(row_to_output).collect()
 }
 
+/// One page of an instance's outputs in execution order. Backs the timeline
+/// endpoint — see `OutputStore::get_outputs_page`.
+pub(super) async fn get_page(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    limit: u32,
+    offset: u64,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = sqlx::query(
+        "SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at, id LIMIT ?2 OFFSET ?3",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .bind(i64::from(limit))
+    .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter().map(row_to_output).collect()
+}
+
 pub(super) async fn get_completed_ids(
     storage: &SqliteStorage,
     instance_id: InstanceId,
@@ -206,6 +225,50 @@ pub(super) async fn delete_for_blocks(
     sep.push_unseparated(")");
     let result = qb.build().execute(&storage.pool).await?;
     Ok(result.rows_affected())
+}
+
+/// Copy inline (`output_ref IS NULL`) output rows for `block_ids` from `src`
+/// to `dst` with fresh primary keys. Mirror of the Postgres impl — see
+/// `OutputStore::copy_block_outputs` for why externalized / sentinel rows
+/// are skipped.
+pub(super) async fn copy_for_blocks(
+    storage: &SqliteStorage,
+    src: InstanceId,
+    dst: InstanceId,
+    block_ids: &[BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM block_outputs WHERE instance_id=");
+    qb.push_bind(src.into_uuid().to_string());
+    qb.push(" AND output_ref IS NULL AND block_id IN (");
+    let mut sep = qb.separated(", ");
+    for bid in block_ids {
+        sep.push_bind(bid.as_str());
+    }
+    sep.push_unseparated(") ORDER BY created_at, id");
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    let outputs: Vec<BlockOutput> = rows.iter().map(row_to_output).collect::<Result<_, _>>()?;
+
+    let mut tx = storage.pool.begin().await?;
+    for out in &outputs {
+        sqlx::query(
+            "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(dst.into_uuid().to_string())
+        .bind(out.block_id.as_str())
+        .bind(serde_json::to_string(&out.output)?)
+        .bind(&out.output_ref)
+        .bind(out.output_size as i64)
+        .bind(out.attempt as i64)
+        .bind(ts(out.created_at))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(outputs.len() as u64)
 }
 
 pub(super) async fn delete_all_for_instance(

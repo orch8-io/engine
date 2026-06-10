@@ -144,6 +144,28 @@ pub(super) async fn get_after_created_at(
     Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
 }
 
+/// One page of an instance's outputs in execution order. Backs the timeline
+/// endpoint — see `OutputStore::get_outputs_page`.
+pub(super) async fn get_page(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    limit: u32,
+    offset: u64,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = sqlx::query_as::<_, BlockOutputRow>(
+        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+           FROM block_outputs WHERE instance_id = $1
+           ORDER BY created_at, id
+           LIMIT $2 OFFSET $3",
+    )
+    .bind(instance_id.into_uuid())
+    .bind(i64::from(limit))
+    .bind(i64::try_from(offset).unwrap_or(i64::MAX))
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows.into_iter().map(BlockOutputRow::into_output).collect())
+}
+
 /// Distinct `block_id`s that have produced at least one output for this
 /// instance. `DISTINCT` is required because under the write-append model a
 /// single block can have multiple rows (loop iterations, retries).
@@ -228,6 +250,36 @@ pub(super) async fn delete_for_blocks(
             .bind(&ids)
             .execute(&store.pool)
             .await?;
+    Ok(result.rows_affected())
+}
+
+/// Copy inline (`output_ref IS NULL`) output rows for `block_ids` from `src`
+/// to `dst` with fresh primary keys (single INSERT ... SELECT round-trip).
+/// See `OutputStore::copy_block_outputs` for why externalized / sentinel
+/// rows are skipped.
+pub(super) async fn copy_for_blocks(
+    store: &PostgresStorage,
+    src: InstanceId,
+    dst: InstanceId,
+    block_ids: &[BlockId],
+) -> Result<u64, StorageError> {
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
+    let ids: Vec<&str> = block_ids.iter().map(orch8_types::BlockId::as_str).collect();
+    let result = sqlx::query(
+        r"
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
+        SELECT gen_random_uuid(), $2, block_id, output, output_ref, output_size, attempt, created_at
+        FROM block_outputs
+        WHERE instance_id = $1 AND block_id = ANY($3) AND output_ref IS NULL
+        ",
+    )
+    .bind(src.into_uuid())
+    .bind(dst.into_uuid())
+    .bind(&ids)
+    .execute(&store.pool)
+    .await?;
     Ok(result.rows_affected())
 }
 
