@@ -14,7 +14,7 @@
 //! | `api_key` | string | — | API key (direct) |
 //! | `api_key_env` | string | — | Env var name containing API key |
 //! | `model` | string | per-provider | Model identifier (see env var overrides below) |
-//! | `messages` | array | `[]` | Chat messages (`{role, content}`) |
+//! | `messages` | array | `[]` | Chat messages (`{role, content}`); `content` is a string or an array of content blocks (see Multimodal content) |
 //! | `system` | string | — | System prompt (Anthropic shorthand) |
 //! | `temperature` | number | — | Sampling temperature |
 //! | `max_tokens` | number | `4096` | Max output tokens |
@@ -24,6 +24,33 @@
 //! | `per_provider_timeout_secs` | number | `60` | Per-provider timeout in failover mode |
 //! | `response_schema` | object | — | JSON Schema the response must satisfy (validated, auto-repaired) |
 //! | `max_repair_attempts` | number | `2` | Schema-repair re-calls per provider attempt (hard cap 5) |
+//! | `max_image_bytes` | number | 20 MiB | Per-image size cap, pre-encoding (can only lower the default) |
+//!
+//! ## Multimodal content
+//!
+//! A message's `content` may be a plain string (unchanged behavior) or an
+//! array of content blocks:
+//!
+//! - `{"type": "text", "text": "…"}`
+//! - `{"type": "image", "artifact": "<key>", "media_type": "image/png"}` —
+//!   image bytes fetched from the artifact store before provider dispatch.
+//!   `artifact` accepts the same shapes as `blob_get`'s `ref` (bare key,
+//!   `{"key"}`, `{"artifact": {"key"}}`). `media_type` defaults to `image/png`.
+//! - `{"type": "image", "data": "<base64>", "media_type": "image/png"}` —
+//!   inline base64 passthrough.
+//!
+//! Images are resolved once (before failover, so every provider attempt
+//! reuses the fetched bytes); each provider adapter converts to its wire
+//! shape — OpenAI-compatible `image_url` data URLs, Anthropic base64
+//! `source` blocks. See the `multimodal` submodule.
+//!
+//! ## Telemetry
+//!
+//! Each successful call emits a `gen_ai.client.inference` `tracing` event
+//! carrying `OTel` `GenAI` semantic-convention fields (`gen_ai.operation.name`,
+//! `gen_ai.system`, `gen_ai.request.model`, `gen_ai.response.model`,
+//! `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`) — structured
+//! telemetry consumable by any subscriber, no OTLP exporter required.
 //!
 //! ## Providers
 //!
@@ -52,6 +79,7 @@
 
 mod anthropic;
 pub(crate) mod common;
+mod multimodal;
 mod openai;
 mod schema;
 
@@ -121,7 +149,7 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 /// If the params contain a `providers` array, iterates through each provider
 /// in order, attempting the call. On failure, tries the next provider.
 /// The output includes a `tried` array listing providers attempted in order.
-pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
+pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
     let dry = ctx.is_dry_run();
 
     // Compile `response_schema` once per step, BEFORE any provider call (and
@@ -138,41 +166,89 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
             }
             return Ok(llm_dry_run_stub(&ctx.params));
         }
-        return handle_llm_call_failover(&ctx.params, providers, response_schema.as_ref()).await;
+        let providers = providers.clone();
+        // Resolve artifact-backed image blocks ONCE, before the failover loop
+        // and schema paths, so every provider attempt reuses the fetched bytes.
+        multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
+        return handle_llm_call_failover(&ctx.params, &providers, response_schema.as_ref()).await;
     }
 
     let provider = ctx
         .params
         .get("provider")
         .and_then(Value::as_str)
-        .unwrap_or("openai");
+        .unwrap_or("openai")
+        .to_string();
 
     // Resolve + validate (api key present, base URL allowed) BEFORE the
     // dry-run skip, so a dry-run still catches missing keys / blocked URLs.
-    let api_key = resolve_api_key(&ctx.params, provider)?;
-    let base = resolve_base_url(&ctx.params, provider);
+    let api_key = resolve_api_key(&ctx.params, &provider)?;
+    let base = resolve_base_url(&ctx.params, &provider);
 
     if !super::builtin::is_url_safe(&base).await {
         return Err(permanent(format!("base_url is not allowed: {base}")));
     }
 
     // Dry-run: validation passed; skip only the model call. Mirror the output
-    // shape (empty assistant message) so downstream templates resolve.
+    // shape (empty assistant message) so downstream templates resolve. Image
+    // resolution stays AFTER this skip — a dry-run never reads artifacts.
     if dry {
         return Ok(llm_dry_run_stub(&ctx.params));
     }
 
+    multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
+
     let out = match response_schema.as_ref() {
         Some(compiled) => {
-            call_provider_with_schema(&ctx.params, &api_key, &base, provider, compiled)
+            call_provider_with_schema(&ctx.params, &api_key, &base, &provider, compiled)
                 .await
                 .map_err(SchemaCallFailure::into_permanent)?
         }
-        None => dispatch_provider(&ctx.params, &api_key, &base, provider).await?,
+        None => dispatch_provider(&ctx.params, &api_key, &base, &provider).await?,
     };
+    emit_gen_ai_telemetry(&ctx.params, &provider, &out);
     // Capture token usage for cost aggregation (best-effort — never fails the call).
     record_llm_usage(&ctx, &out).await;
     Ok(out)
+}
+
+/// Emit `OTel` `GenAI` semantic-convention telemetry for a completed LLM call.
+///
+/// A single structured `tracing::info!` event with the message
+/// `gen_ai.client.inference`, consumable by any subscriber — convention-named
+/// structured telemetry only, no OTLP exporter involved. Fields (greppable):
+///
+/// - `gen_ai.operation.name` — always `"chat"`.
+/// - `gen_ai.system` — provider name (`"openai"`, `"anthropic"`, …).
+/// - `gen_ai.request.model` — model requested in params (or the provider default).
+/// - `gen_ai.response.model` — model reported by the provider response, when present.
+/// - `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` — token usage
+///   as reported by the provider (0 when absent).
+fn emit_gen_ai_telemetry(params: &Value, provider: &str, out: &Value) {
+    let request_model = params
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if provider == "anthropic" {
+                anthropic_default_model()
+            } else {
+                openai_default_model()
+            }
+        });
+    let response_model = out
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty());
+    let (input_tokens, output_tokens) = usage_tokens(out);
+    tracing::info!(
+        gen_ai.operation.name = "chat",
+        gen_ai.system = provider,
+        gen_ai.request.model = request_model,
+        gen_ai.response.model = response_model,
+        gen_ai.usage.input_tokens = input_tokens,
+        gen_ai.usage.output_tokens = output_tokens,
+        "gen_ai.client.inference"
+    );
 }
 
 /// Route a single call to the correct provider API.
@@ -464,6 +540,7 @@ async fn failover_inner(
 
         match result {
             Ok(mut output) => {
+                emit_gen_ai_telemetry(&merged, provider_name, &output);
                 if let Some(obj) = output.as_object_mut() {
                     obj.insert("tried".into(), json!(tried));
                 }
@@ -976,6 +1053,310 @@ mod tests {
         assert!(matches!(err, StepError::Permanent { .. }), "{err}");
         assert!(err.to_string().contains("not a valid JSON Schema"), "{err}");
         assert_eq!(requests.lock().await.len(), 0, "no provider call made");
+    }
+
+    // --- multimodal image content (artifact store → provider wire shape) ---
+
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine as _;
+    use orch8_storage::artifacts::ObjectArtifactStore;
+
+    /// Storage with an in-memory artifact backend, for image-resolution tests.
+    async fn storage_with_artifacts() -> Arc<dyn orch8_storage::StorageBackend> {
+        Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap()
+                .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
+        )
+    }
+
+    fn ctx_with(
+        storage: &Arc<dyn orch8_storage::StorageBackend>,
+        instance_id: orch8_types::ids::InstanceId,
+        params: Value,
+    ) -> StepContext {
+        StepContext {
+            instance_id,
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            block_id: orch8_types::ids::BlockId::new("b"),
+            params,
+            context: orch8_types::context::ExecutionContext::default(),
+            attempt: 0,
+            storage: Arc::clone(storage),
+            wait_for_input: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_artifact_image_sent_as_data_url() {
+        let (base, requests) = start_openai_mock(vec![openai_resp("a red square", 5, 3)]).await;
+        let storage = storage_with_artifacts().await;
+        let id = orch8_types::ids::InstanceId::new();
+        let raw: &[u8] = b"\x89PNG\r\n fake image";
+        let aref = storage
+            .put_artifact(id, "image/png", bytes::Bytes::from_static(raw))
+            .await
+            .unwrap();
+
+        let ctx = ctx_with(
+            &storage,
+            id,
+            json!({
+                "provider": "openai",
+                "model": "gpt-test",
+                "api_key": "k",
+                "base_url": base,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image", "artifact": {"artifact": {"key": aref.key}}},
+                ]}],
+            }),
+        );
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["message"]["content"], "a red square");
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        let blocks = reqs[0]["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], json!({"type": "text", "text": "what is this?"}));
+        assert_eq!(blocks[1]["type"], "image_url");
+        let url = blocks[1]["image_url"]["url"].as_str().unwrap();
+        assert_eq!(
+            url,
+            format!("data:image/png;base64,{}", STANDARD.encode(raw)),
+            "outgoing OpenAI body carries the artifact bytes as a data URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_artifact_image_sent_as_base64_source_block() {
+        // The mock answers any path, so it serves /messages too; queue an
+        // Anthropic-shaped response body.
+        let (base, requests) = start_openai_mock(vec![json!({
+            "content": [{"type": "text", "text": "a cat"}],
+            "model": "claude-test",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 4, "output_tokens": 2},
+        })])
+        .await;
+        let storage = storage_with_artifacts().await;
+        let id = orch8_types::ids::InstanceId::new();
+        let raw: &[u8] = b"\xff\xd8\xff fake jpeg";
+        let aref = storage
+            .put_artifact(id, "image/jpeg", bytes::Bytes::from_static(raw))
+            .await
+            .unwrap();
+
+        let ctx = ctx_with(
+            &storage,
+            id,
+            json!({
+                "provider": "anthropic",
+                "model": "claude-test",
+                "api_key": "k",
+                "base_url": base,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "describe"},
+                    {"type": "image", "artifact": aref.key, "media_type": "image/jpeg"},
+                ]}],
+            }),
+        );
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["message"]["content"], "a cat");
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        let blocks = reqs[0]["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0], json!({"type": "text", "text": "describe"}));
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": STANDARD.encode(raw),
+                },
+            }),
+            "outgoing Anthropic body carries the base64 source block"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_image_artifact_is_permanent_without_provider_call() {
+        let (base, requests) = start_openai_mock(vec![]).await;
+        let storage = storage_with_artifacts().await;
+        let id = orch8_types::ids::InstanceId::new();
+        // Owned by this instance (passes the ownership guard) but nonexistent.
+        let missing = format!("{}/nonexistent", id.into_uuid());
+
+        let ctx = ctx_with(
+            &storage,
+            id,
+            json!({
+                "provider": "openai",
+                "model": "gpt-test",
+                "api_key": "k",
+                "base_url": base,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image", "artifact": missing},
+                ]}],
+            }),
+        );
+        let err = handle_llm_call(ctx)
+            .await
+            .expect_err("missing artifact must fail the step");
+        let StepError::Permanent { message, .. } = err else {
+            panic!("expected Permanent");
+        };
+        assert!(message.contains("not found"), "{message}");
+        assert_eq!(requests.lock().await.len(), 0, "no provider call made");
+    }
+
+    #[tokio::test]
+    async fn failover_resolves_images_once_and_reuses_them() {
+        // Provider A fails key resolution (unset env var), so the loop moves
+        // on; provider B must still receive the already-resolved data URL —
+        // resolution happened once, before the failover loop.
+        let (base_b, requests_b) = start_openai_mock(vec![openai_resp("ok", 1, 1)]).await;
+        let storage = storage_with_artifacts().await;
+        let id = orch8_types::ids::InstanceId::new();
+        let raw: &[u8] = b"png-bytes";
+        let aref = storage
+            .put_artifact(id, "image/png", bytes::Bytes::from_static(raw))
+            .await
+            .unwrap();
+
+        let ctx = ctx_with(
+            &storage,
+            id,
+            json!({
+                "messages": [{"role": "user", "content": [
+                    {"type": "image", "artifact": aref.key},
+                ]}],
+                "providers": [
+                    {"provider": "openai", "api_key_env": "LLM_TEST_UNSET_KEY_VAR", "model": "m", "base_url": base_b},
+                    {"provider": "openai", "api_key": "k", "model": "m", "base_url": base_b},
+                ],
+            }),
+        );
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["tried"], json!(["openai", "openai"]));
+
+        let reqs = requests_b.lock().await;
+        assert_eq!(reqs.len(), 1, "only the second provider was called");
+        let url = reqs[0]["messages"][0]["content"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            url,
+            format!("data:image/png;base64,{}", STANDARD.encode(raw))
+        );
+    }
+
+    // --- gen_ai.* telemetry (OTel GenAI semantic conventions) --------------
+    //
+    // Same Layer-based capture pattern as the warning-capture tests in
+    // expression.rs / template.rs: a subscriber layer collects events whose
+    // message is `gen_ai.client.inference` into a map of field → rendered value.
+
+    #[derive(Default)]
+    struct FieldCollector {
+        fields: std::collections::HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    struct GenAiCapture {
+        events: Arc<std::sync::Mutex<Vec<std::collections::HashMap<String, String>>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GenAiCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut collector = FieldCollector::default();
+            event.record(&mut collector);
+            if collector.fields.get("message").map(String::as_str)
+                == Some("gen_ai.client.inference")
+            {
+                self.events.lock().unwrap().push(collector.fields);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gen_ai_telemetry_event_emitted_on_success() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (base, _requests) = start_openai_mock(vec![openai_resp("hi", 11, 4)]).await;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(GenAiCapture {
+            events: Arc::clone(&events),
+        });
+        // Thread-local default: the #[tokio::test] current-thread runtime runs
+        // the whole call on this thread, so every event is captured.
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "hello"}],
+        }))
+        .await;
+        handle_llm_call(ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one gen_ai.client.inference event");
+        let e = &events[0];
+        assert_eq!(e["gen_ai.operation.name"], "chat");
+        assert_eq!(e["gen_ai.system"], "openai");
+        assert_eq!(e["gen_ai.request.model"], "gpt-test");
+        assert_eq!(e["gen_ai.response.model"], "gpt-test");
+        assert_eq!(e["gen_ai.usage.input_tokens"], "11");
+        assert_eq!(e["gen_ai.usage.output_tokens"], "4");
+    }
+
+    #[tokio::test]
+    async fn gen_ai_telemetry_emitted_from_failover_path() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (base, _requests) = start_openai_mock(vec![openai_resp("hi", 2, 1)]).await;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(GenAiCapture {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let ctx = test_ctx(json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "providers": [
+                {"provider": "openai", "api_key": "k", "model": "m-failover", "base_url": base},
+            ],
+        }))
+        .await;
+        handle_llm_call(ctx).await.unwrap();
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["gen_ai.request.model"], "m-failover");
+        assert_eq!(events[0]["gen_ai.system"], "openai");
     }
 
     #[tokio::test]

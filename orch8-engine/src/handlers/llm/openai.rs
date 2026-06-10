@@ -28,7 +28,9 @@ pub(super) async fn call_openai_compat(
             msgs.push(json!({"role": "system", "content": sys}));
         }
         if let Some(Value::Array(arr)) = params.get("messages") {
-            msgs.extend(arr.iter().cloned());
+            // Plain-string content is cloned unchanged; normalized image
+            // blocks become `image_url` data URLs at request-build time.
+            msgs.extend(arr.iter().map(super::multimodal::to_openai_message));
         }
         Value::Array(msgs)
     };

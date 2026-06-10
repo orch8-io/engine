@@ -23,6 +23,16 @@ pub(super) async fn call_anthropic(
 
     let messages_raw = params.get("messages").cloned().unwrap_or(json!([]));
     let (system_from_msgs, messages) = extract_system_message(&messages_raw);
+    // Plain-string content is cloned unchanged; normalized image blocks
+    // become Anthropic base64 `source` blocks at request-build time.
+    let messages = match messages.as_array() {
+        Some(arr) => Value::Array(
+            arr.iter()
+                .map(super::multimodal::to_anthropic_message)
+                .collect(),
+        ),
+        None => messages,
+    };
 
     let max_tokens = params
         .get("max_tokens")
