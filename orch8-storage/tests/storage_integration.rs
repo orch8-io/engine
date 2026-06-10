@@ -3673,3 +3673,127 @@ async fn increment_total_steps_returns_zero_for_missing_instance() {
     let missing = InstanceId::new();
     assert_eq!(s.increment_total_steps(missing).await.unwrap(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Trigger poll state (activepieces_poll)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn trigger_poll_state_upsert_get_round_trip() {
+    use orch8_types::trigger::TriggerPollState;
+
+    let s = store().await;
+
+    // Unknown slug → None.
+    assert!(s.get_trigger_poll_state("nope").await.unwrap().is_none());
+
+    let now = Utc::now();
+    let state = TriggerPollState {
+        slug: "poller".into(),
+        state: json!({"lastPoll": 123, "ids": ["a", "b"]}),
+        last_poll_at: Some(now),
+        last_error: None,
+        consecutive_failures: 0,
+        updated_at: now,
+    };
+    s.upsert_trigger_poll_state(&state).await.unwrap();
+
+    let got = s
+        .get_trigger_poll_state("poller")
+        .await
+        .unwrap()
+        .expect("state row");
+    assert_eq!(got.slug, "poller");
+    assert_eq!(got.state, json!({"lastPoll": 123, "ids": ["a", "b"]}));
+    assert!(got.last_error.is_none());
+    assert_eq!(got.consecutive_failures, 0);
+    assert!(got.last_poll_at.is_some());
+
+    // Upsert replaces in place (cursor advance + failure bookkeeping).
+    let updated = TriggerPollState {
+        slug: "poller".into(),
+        state: json!({"lastPoll": 456}),
+        last_poll_at: Some(Utc::now()),
+        last_error: Some("upstream 503".into()),
+        consecutive_failures: 2,
+        updated_at: Utc::now(),
+    };
+    s.upsert_trigger_poll_state(&updated).await.unwrap();
+
+    let got = s.get_trigger_poll_state("poller").await.unwrap().unwrap();
+    assert_eq!(got.state, json!({"lastPoll": 456}));
+    assert_eq!(got.last_error.as_deref(), Some("upstream 503"));
+    assert_eq!(got.consecutive_failures, 2);
+}
+
+#[tokio::test]
+async fn delete_trigger_removes_poll_state() {
+    use orch8_types::trigger::{TriggerDef, TriggerPollState, TriggerType};
+
+    let s = store().await;
+    let now = Utc::now();
+
+    s.create_trigger(&TriggerDef {
+        slug: "poll-trig".into(),
+        sequence_name: "seq".into(),
+        version: None,
+        tenant_id: TenantId::unchecked("t1"),
+        namespace: "default".into(),
+        enabled: true,
+        secret: None,
+        trigger_type: TriggerType::ActivepiecesPoll,
+        config: json!({"piece": "stripe", "trigger": "t"}),
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    s.upsert_trigger_poll_state(&TriggerPollState {
+        slug: "poll-trig".into(),
+        state: json!({"cursor": 1}),
+        last_poll_at: None,
+        last_error: None,
+        consecutive_failures: 0,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    s.delete_trigger("poll-trig").await.unwrap();
+    assert!(s.get_trigger("poll-trig").await.unwrap().is_none());
+    assert!(
+        s.get_trigger_poll_state("poll-trig")
+            .await
+            .unwrap()
+            .is_none(),
+        "poll state must be deleted with its trigger"
+    );
+}
+
+#[tokio::test]
+async fn trigger_round_trips_activepieces_poll_type() {
+    use orch8_types::trigger::{TriggerDef, TriggerType};
+
+    let s = store().await;
+    let now = Utc::now();
+    s.create_trigger(&TriggerDef {
+        slug: "ap-type".into(),
+        sequence_name: "seq".into(),
+        version: None,
+        tenant_id: TenantId::unchecked("t1"),
+        namespace: "default".into(),
+        enabled: true,
+        secret: None,
+        trigger_type: TriggerType::ActivepiecesPoll,
+        config: json!({"piece": "typeform", "trigger": "new_submission", "interval_secs": 15}),
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let got = s.get_trigger("ap-type").await.unwrap().unwrap();
+    assert_eq!(got.trigger_type, TriggerType::ActivepiecesPoll);
+    assert_eq!(got.config["piece"], "typeform");
+}

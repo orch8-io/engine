@@ -687,6 +687,24 @@ impl crate::OutputStore for PostgresStorage {
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError> {
         outputs::delete_by_id(self, id).await
     }
+
+    async fn get_outputs_page(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_page(self, instance_id, limit, offset).await
+    }
+
+    async fn copy_block_outputs(
+        &self,
+        src: InstanceId,
+        dst: InstanceId,
+        block_ids: &[BlockId],
+    ) -> Result<u64, StorageError> {
+        outputs::copy_for_blocks(self, src, dst, block_ids).await
+    }
 }
 
 // ============================================================================
@@ -1054,6 +1072,20 @@ impl crate::AdminStore for PostgresStorage {
 
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         triggers::delete(self, slug).await
+    }
+
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
+        triggers::get_poll_state(self, slug).await
+    }
+
+    async fn upsert_trigger_poll_state(
+        &self,
+        state: &orch8_types::trigger::TriggerPollState,
+    ) -> Result<(), StorageError> {
+        triggers::upsert_poll_state(self, state).await
     }
 
     async fn create_credential(

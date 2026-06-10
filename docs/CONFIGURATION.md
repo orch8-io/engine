@@ -94,6 +94,17 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 
 ---
 
+## [telemetry]
+
+OpenTelemetry trace export (OTLP). Disabled unless `otlp_endpoint` is set — when empty there is zero runtime overhead. When enabled, the server exports `orch8.step` spans (one per step-handler execution, with `instance_id`, `block_id`, `handler`, `tenant_id`, `attempt` fields); LLM steps carry the `gen_ai.client.inference` structured event inside them. Pipe to Langfuse, Datadog, Grafana Tempo, or any OTLP collector. The standard `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` env vars are honored (`service.name` defaults to `orch8-server`). Export failures are non-fatal: a down collector logs warnings but never blocks step execution.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `otlp_endpoint` | string | `""` | OTLP collector endpoint, e.g. `"http://localhost:4317"`. Empty = export disabled |
+| `otlp_protocol` | string | `"grpc"` | OTLP transport. Only `"grpc"` is supported |
+
+---
+
 ## Environment Variables
 
 All config fields can be set via `ORCH8_*` environment variables. Environment variables override values in `orch8.toml`.
@@ -150,6 +161,13 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 |----------|---------|-------------|
 | `ORCH8_LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `ORCH8_LOG_JSON` | `false` | Set to `true` or `1` for structured JSON logs; any other value (or unset) uses human-readable pretty logs |
+
+### Telemetry
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_OTLP_ENDPOINT` | — | OTLP collector endpoint (e.g. `http://localhost:4317`). Unset/empty = trace export disabled |
+| `ORCH8_OTLP_PROTOCOL` | `grpc` | OTLP transport protocol. Only `grpc` is supported |
 
 ---
 

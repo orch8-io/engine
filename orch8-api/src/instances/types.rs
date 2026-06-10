@@ -77,6 +77,24 @@ pub struct ResumeFromRequest {
     pub(crate) context: Option<serde_json::Value>,
 }
 
+/// Body for `POST /instances/{id}/fork`. `from_block_id` must be a top-level
+/// block of the source's sequence; `context` (optional) is shallow-merged
+/// into the fork's `context.data` with the same per-key semantics as
+/// resume-from; `dry_run` defaults to **true** so a forked production
+/// workflow does not re-fire side effects unless explicitly asked to.
+#[derive(Deserialize, ToSchema)]
+pub struct ForkRequest {
+    pub(crate) from_block_id: String,
+    #[serde(default)]
+    pub(crate) context: Option<serde_json::Value>,
+    #[serde(default = "default_true")]
+    pub(crate) dry_run: bool,
+}
+
+pub const fn default_true() -> bool {
+    true
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct SendSignalRequest {
     pub(crate) signal_type: SignalType,

@@ -112,6 +112,8 @@ pub struct EngineConfig {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub artifacts: ArtifactConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -571,6 +573,42 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+/// OpenTelemetry trace export (OTLP). Disabled unless `otlp_endpoint` is set —
+/// when it is empty (the default) the server behaves exactly as before: no
+/// OpenTelemetry layer is installed and there is no runtime cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// OTLP collector endpoint, e.g. `"http://localhost:4317"` (Langfuse,
+    /// Datadog Agent, Grafana Alloy, otel-collector…). Empty = export disabled.
+    /// Env override: `ORCH8_OTLP_ENDPOINT`.
+    #[serde(default)]
+    pub otlp_endpoint: String,
+    /// OTLP transport protocol. Only `"grpc"` is currently supported.
+    /// Env override: `ORCH8_OTLP_PROTOCOL`.
+    #[serde(default = "default_otlp_protocol")]
+    pub otlp_protocol: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: String::new(),
+            otlp_protocol: default_otlp_protocol(),
+        }
+    }
+}
+
+impl TelemetryConfig {
+    /// Trace export is enabled iff an endpoint is configured.
+    pub fn otlp_enabled(&self) -> bool {
+        !self.otlp_endpoint.is_empty()
+    }
+}
+
+fn default_otlp_protocol() -> String {
+    "grpc".to_string()
+}
+
 impl EngineConfig {
     /// Validate configuration values, returning all errors found.
     pub fn validate(&self) -> Result<(), Vec<String>> {
@@ -616,6 +654,17 @@ impl EngineConfig {
             other => errors.push(format!(
                 "logging.level: unknown level \"{other}\" (expected trace/debug/info/warn/error)"
             )),
+        }
+
+        // Telemetry — only validated when export is actually enabled, so an
+        // unset endpoint keeps zero-config startup byte-identical to before.
+        if self.telemetry.otlp_enabled() {
+            match self.telemetry.otlp_protocol.as_str() {
+                "grpc" | "" => {}
+                other => errors.push(format!(
+                    "telemetry.otlp_protocol: unsupported protocol \"{other}\" (only \"grpc\" is supported)"
+                )),
+            }
         }
 
         if errors.is_empty() {
@@ -1091,6 +1140,53 @@ mod tests {
         let cfg: LoggingConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.level, "warn");
         assert!(cfg.json);
+    }
+
+    #[test]
+    fn telemetry_config_defaults_to_disabled() {
+        let cfg = TelemetryConfig::default();
+        assert!(cfg.otlp_endpoint.is_empty());
+        assert_eq!(cfg.otlp_protocol, "grpc");
+        assert!(!cfg.otlp_enabled());
+        // EngineConfig embeds the same default — and a default config must
+        // validate cleanly (no telemetry errors when export is off).
+        let engine_cfg = EngineConfig::default();
+        assert!(!engine_cfg.telemetry.otlp_enabled());
+        assert!(engine_cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn telemetry_config_parses_endpoint_from_toml_section() {
+        let toml_src = r#"
+            [telemetry]
+            otlp_endpoint = "http://localhost:4317"
+        "#;
+        let cfg: EngineConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.telemetry.otlp_endpoint, "http://localhost:4317");
+        assert_eq!(cfg.telemetry.otlp_protocol, "grpc"); // default kicks in
+        assert!(cfg.telemetry.otlp_enabled());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn telemetry_config_missing_section_means_disabled() {
+        let cfg: EngineConfig = toml::from_str("[logging]\nlevel = \"info\"\n").unwrap();
+        assert!(!cfg.telemetry.otlp_enabled());
+    }
+
+    #[test]
+    fn telemetry_validation_rejects_unknown_protocol_only_when_enabled() {
+        let mut cfg = EngineConfig::default();
+        // Unknown protocol with NO endpoint: export disabled, must not error.
+        cfg.telemetry.otlp_protocol = "carrier-pigeon".into();
+        assert!(cfg.validate().is_ok());
+        // Same protocol with an endpoint set: now it must be rejected.
+        cfg.telemetry.otlp_endpoint = "http://localhost:4317".into();
+        let errors = cfg.validate().unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("otlp_protocol")),
+            "expected otlp_protocol error, got: {errors:?}"
+        );
     }
 
     #[test]

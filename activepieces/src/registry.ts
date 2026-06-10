@@ -18,10 +18,26 @@ export interface PieceAction {
   run: (ctx: unknown) => Promise<unknown>;
 }
 
+/**
+ * Minimal structural view of a piece trigger. Polling triggers built with
+ * the AP framework's `createTrigger`/`pollingHelper` expose `type` (the
+ * `TriggerStrategy` — `"POLLING"` for the ones we can run headlessly) and a
+ * `run(ctx)` that returns the new items since the cursor stored in
+ * `ctx.store`. Lifecycle hooks (`onEnable`/`onDisable`) are intentionally
+ * not modelled — the orch8 engine owns the poll schedule, so there is no
+ * platform-side registration to perform.
+ */
+export interface PieceTrigger {
+  name: string;
+  displayName?: string;
+  type?: string;
+  run: (ctx: unknown) => Promise<unknown>;
+}
+
 export interface Piece {
   displayName?: string;
   actions: () => Record<string, PieceAction> | PieceAction[];
-  triggers?: () => Record<string, unknown> | unknown[];
+  triggers?: () => Record<string, PieceTrigger> | PieceTrigger[];
 }
 
 export interface PieceLoader {
@@ -147,5 +163,31 @@ export function findAction(piece: Piece, actionName: string): PieceAction {
   throw new PieceExecutionError(
     "permanent",
     `action '${actionName}' not found on piece`,
+  );
+}
+
+/**
+ * Look up a trigger on a loaded piece. Mirrors {@link findAction}: handles
+ * both the record shape (keyed by trigger name) and the array shape (objects
+ * with a `.name` field).
+ */
+export function findTrigger(piece: Piece, triggerName: string): PieceTrigger {
+  const src = piece.triggers;
+  const raw = typeof src === "function" ? src() : src;
+
+  if (Array.isArray(raw)) {
+    const found = raw.find((t) => t && t.name === triggerName);
+    if (found) return found;
+  } else if (raw && typeof raw === "object") {
+    const rec = raw as Record<string, PieceTrigger>;
+    if (rec[triggerName]) return rec[triggerName];
+    for (const t of Object.values(rec)) {
+      if (t && t.name === triggerName) return t;
+    }
+  }
+
+  throw new PieceExecutionError(
+    "permanent",
+    `trigger '${triggerName}' not found on piece`,
   );
 }

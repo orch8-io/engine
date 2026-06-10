@@ -20,6 +20,11 @@ pub enum TriggerType {
     /// Unlike webhooks, event triggers carry no HMAC validation — they're
     /// intended for trusted server-to-server or in-cluster integration.
     Event,
+    /// Polling trigger executed via the `ActivePieces` Node sidecar. The
+    /// engine periodically asks the sidecar to run a piece trigger's poll
+    /// (config holds piece, trigger, auth, props, and a schedule) and
+    /// creates one instance per returned item.
+    ActivepiecesPoll,
 }
 
 impl fmt::Display for TriggerType {
@@ -29,6 +34,7 @@ impl fmt::Display for TriggerType {
             Self::Nats => f.write_str("nats"),
             Self::FileWatch => f.write_str("file_watch"),
             Self::Event => f.write_str("event"),
+            Self::ActivepiecesPoll => f.write_str("activepieces_poll"),
         }
     }
 }
@@ -41,7 +47,49 @@ impl TriggerType {
             "nats" => Some(Self::Nats),
             "file_watch" => Some(Self::FileWatch),
             "event" => Some(Self::Event),
+            "activepieces_poll" => Some(Self::ActivepiecesPoll),
             _ => None,
+        }
+    }
+}
+
+/// Runtime state for a polling trigger (`TriggerType::ActivepiecesPoll`).
+///
+/// Stored separately from [`TriggerDef`] so the poll loop can persist its
+/// cursor and failure bookkeeping without rewriting the user-authored
+/// trigger definition (avoiding lost-update races with API edits).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TriggerPollState {
+    /// Slug of the trigger this state belongs to.
+    pub slug: String,
+    /// Opaque cursor blob returned by the sidecar's last successful poll
+    /// (`ActivePieces` store contents — `lastPoll` epoch, item ids, ...).
+    /// Sent back verbatim on the next poll for deduplication.
+    #[serde(default)]
+    pub state: serde_json::Value,
+    /// When the last poll attempt (success or failure) completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_poll_at: Option<DateTime<Utc>>,
+    /// Error message from the most recent failed poll. Cleared on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// Number of consecutive failed polls. Reset to 0 on success.
+    #[serde(default)]
+    pub consecutive_failures: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TriggerPollState {
+    /// Fresh state for a trigger that has never polled.
+    #[must_use]
+    pub fn empty(slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            state: serde_json::Value::Null,
+            last_poll_at: None,
+            last_error: None,
+            consecutive_failures: 0,
+            updated_at: Utc::now(),
         }
     }
 }
@@ -89,6 +137,40 @@ mod tests {
         assert_eq!(TriggerType::Nats.to_string(), "nats");
         assert_eq!(TriggerType::FileWatch.to_string(), "file_watch");
         assert_eq!(TriggerType::Event.to_string(), "event");
+        assert_eq!(
+            TriggerType::ActivepiecesPoll.to_string(),
+            "activepieces_poll"
+        );
+    }
+
+    #[test]
+    fn activepieces_poll_round_trips_display_and_serde() {
+        // Display ↔ from_str_loose must agree (storage round-trips through text).
+        assert_eq!(
+            TriggerType::from_str_loose("activepieces_poll"),
+            Some(TriggerType::ActivepiecesPoll)
+        );
+        let t: TriggerType = serde_json::from_str(r#""activepieces_poll""#).unwrap();
+        assert_eq!(t, TriggerType::ActivepiecesPoll);
+        assert_eq!(serde_json::to_string(&t).unwrap(), r#""activepieces_poll""#);
+    }
+
+    #[test]
+    fn trigger_poll_state_empty_and_round_trip() {
+        let s = TriggerPollState::empty("my-poll");
+        assert_eq!(s.slug, "my-poll");
+        assert!(s.state.is_null());
+        assert!(s.last_poll_at.is_none());
+        assert!(s.last_error.is_none());
+        assert_eq!(s.consecutive_failures, 0);
+
+        let json = serde_json::to_string(&s).unwrap();
+        let back: TriggerPollState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.slug, "my-poll");
+        assert_eq!(back.consecutive_failures, 0);
+        // Optional fields are skipped when None.
+        assert!(!json.contains("last_error"));
+        assert!(!json.contains("last_poll_at"));
     }
 
     #[test]

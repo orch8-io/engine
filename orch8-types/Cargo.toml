@@ -18,5 +18,9 @@ sha2.workspace = true
 subtle.workspace = true
 strsim = "0.11"
 
+[dev-dependencies]
+# TOML round-trip tests for `EngineConfig` ([telemetry] section parsing).
+toml.workspace = true
+
 [lints]
 workspace = true

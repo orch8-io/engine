@@ -14,6 +14,10 @@ pub const RECOVERY_STALE: &str = "orch8_recovery_stale_instances_total";
 pub const WEBHOOKS_SENT: &str = "orch8_webhooks_sent_total";
 pub const WEBHOOKS_FAILED: &str = "orch8_webhooks_failed_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
+/// Items returned by `ActivePieces` sidecar polls (one instance per item).
+pub const AP_POLL_ITEMS: &str = "orch8_ap_poll_items_total";
+/// Failed `ActivePieces` sidecar polls (recorded on the trigger's state row).
+pub const AP_POLL_ERRORS: &str = "orch8_ap_poll_errors_total";
 pub const CACHE_HITS: &str = "orch8_cache_hits_total";
 pub const CACHE_MISSES: &str = "orch8_cache_misses_total";
 pub const PRELOAD_REFS_SCANNED: &str = "orch8_preload_refs_scanned_total";

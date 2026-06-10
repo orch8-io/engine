@@ -47,6 +47,15 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 
+# OpenTelemetry trace export (OTLP). Pinned to the 0.29 line: opentelemetry-otlp
+# 0.30+ links against tonic 0.13 while the workspace is on tonic 0.12, so 0.29
+# is the newest release whose `grpc-tonic` transport unifies with our tonic.
+# tracing-opentelemetry versions trail opentelemetry by one (0.30 ↔ otel 0.29).
+opentelemetry = "0.29"
+opentelemetry_sdk = "0.29"
+opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.30"
+
 # API
 axum = "0.8"
 tonic = "0.12"

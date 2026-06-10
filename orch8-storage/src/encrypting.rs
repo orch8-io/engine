@@ -817,6 +817,27 @@ impl crate::OutputStore for EncryptingStorage {
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError> {
         self.inner.delete_block_output_by_id(id).await
     }
+    async fn get_outputs_page(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
+        self.inner
+            .get_outputs_page(instance_id, limit, offset)
+            .await
+    }
+    // Pass-through like the other output methods: block outputs are not
+    // field-encrypted, so a row copied verbatim stays consistent with what
+    // `save_block_output` would have written.
+    async fn copy_block_outputs(
+        &self,
+        src: InstanceId,
+        dst: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+    ) -> Result<u64, StorageError> {
+        self.inner.copy_block_outputs(src, dst, block_ids).await
+    }
 }
 
 // ============================================================================
@@ -1193,6 +1214,18 @@ impl crate::AdminStore for EncryptingStorage {
     }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         self.inner.delete_trigger(slug).await
+    }
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
+        self.inner.get_trigger_poll_state(slug).await
+    }
+    async fn upsert_trigger_poll_state(
+        &self,
+        state: &orch8_types::trigger::TriggerPollState,
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_trigger_poll_state(state).await
     }
 
     // --- Credentials (with encryption) ---

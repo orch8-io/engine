@@ -40,5 +40,22 @@ tonic.workspace = true
 http = "1"
 tikv-jemallocator.workspace = true
 
+# OTLP trace export (feature `otlp`, on by default — opt out with
+# `--no-default-features` for lean builds without the OpenTelemetry stack).
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[features]
+default = ["otlp"]
+# OpenTelemetry OTLP trace export (ORCH8_OTLP_ENDPOINT / [telemetry] otlp_endpoint).
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [lints]
 workspace = true

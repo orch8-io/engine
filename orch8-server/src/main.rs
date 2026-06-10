@@ -29,6 +29,8 @@ use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::StorageBackend;
 use orch8_types::config::EngineConfig;
 
+mod telemetry;
+
 #[derive(Parser)]
 #[command(
     name = "orch8",
@@ -63,8 +65,9 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    // Initialize logging.
-    init_logging(&config.logging);
+    // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
+    // [telemetry] otlp_endpoint is set) and logging.
+    let otel = init_observability(&config)?;
 
     print_startup_banner(&config, cli.insecure);
 
@@ -198,6 +201,11 @@ async fn main() -> anyhow::Result<()> {
         .context("HTTP server error")?;
 
     drain_shutdown(engine_handle, grpc_handle, cb_registry).await;
+
+    // Flush any spans still buffered in the OTLP batch exporter. After the
+    // engine has drained so the last step spans make it out. Best-effort: a
+    // dead collector logs a warning, never fails shutdown.
+    otel.shutdown().await;
 
     tracing::info!("Shutdown complete");
     Ok(())
@@ -600,6 +608,12 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_LOG_JSON") {
         config.logging.json = val == "true" || val == "1";
     }
+    if let Ok(val) = std::env::var("ORCH8_OTLP_ENDPOINT") {
+        config.telemetry.otlp_endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_OTLP_PROTOCOL") {
+        config.telemetry.otlp_protocol = val;
+    }
     if let Ok(val) = std::env::var("ORCH8_HTTP_ADDR") {
         config.api.http_addr = val;
     }
@@ -694,7 +708,26 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
 }
 
-fn init_logging(config: &orch8_types::config::LoggingConfig) {
+/// Initialize OTLP trace export, then the tracing subscriber (which needs the
+/// OpenTelemetry layer at construction time). Returns the guard used to flush
+/// buffered spans on shutdown — inert when no OTLP endpoint is configured.
+fn init_observability(config: &EngineConfig) -> anyhow::Result<telemetry::OtelGuard> {
+    let otel = telemetry::init(&config.telemetry)?;
+    init_logging(&config.logging, &otel);
+    if otel.is_enabled() {
+        tracing::info!(
+            endpoint = %config.telemetry.otlp_endpoint,
+            protocol = "grpc",
+            "OTLP trace export enabled"
+        );
+    }
+    Ok(otel)
+}
+
+fn init_logging(config: &orch8_types::config::LoggingConfig, otel: &telemetry::OtelGuard) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.level));
 
@@ -704,18 +737,24 @@ fn init_logging(config: &orch8_types::config::LoggingConfig) {
     // output to stderr prevents the stdout pipe buffer from filling up
     // (~64KB on macOS/Linux) and blocking the scheduler's tick loop on
     // its next log write.
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true)
         .with_thread_ids(false)
         .with_file(false)
         .with_line_number(false);
 
+    // The OTel layer is `None` when no OTLP endpoint is configured (or the
+    // `otlp` feature is off) — `Option<Layer>` composes as a no-op, keeping
+    // the zero-config subscriber identical to the pre-OTLP stack.
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(otel.layer());
+
     if config.json {
-        subscriber.json().init();
+        registry.with(fmt_layer.json()).init();
     } else {
-        subscriber.init();
+        registry.with(fmt_layer).init();
     }
 }
 
@@ -792,5 +831,38 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             .filter_map(|o| o.trim().parse().ok())
             .collect();
         layer.allow_origin(parsed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Endpoint set/unset env parsing in ONE test: `std::env` is process-global
+    /// and tests run in parallel, so splitting these into separate tests would
+    /// race on the same variables.
+    #[test]
+    fn apply_env_overrides_telemetry_endpoint_set_and_unset() {
+        // Unset: defaults survive — export stays disabled.
+        std::env::remove_var("ORCH8_OTLP_ENDPOINT");
+        std::env::remove_var("ORCH8_OTLP_PROTOCOL");
+        let mut config = EngineConfig::default();
+        apply_env_overrides(&mut config);
+        assert!(config.telemetry.otlp_endpoint.is_empty());
+        assert_eq!(config.telemetry.otlp_protocol, "grpc");
+        assert!(!config.telemetry.otlp_enabled());
+
+        // Set: env wins over the (default) config values.
+        std::env::set_var("ORCH8_OTLP_ENDPOINT", "http://collector:4317");
+        std::env::set_var("ORCH8_OTLP_PROTOCOL", "grpc");
+        let mut config = EngineConfig::default();
+        apply_env_overrides(&mut config);
+        assert_eq!(config.telemetry.otlp_endpoint, "http://collector:4317");
+        assert_eq!(config.telemetry.otlp_protocol, "grpc");
+        assert!(config.telemetry.otlp_enabled());
+        assert!(config.validate().is_ok());
+
+        std::env::remove_var("ORCH8_OTLP_ENDPOINT");
+        std::env::remove_var("ORCH8_OTLP_PROTOCOL");
     }
 }

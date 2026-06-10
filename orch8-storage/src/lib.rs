@@ -29,7 +29,7 @@ use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::Session;
 use orch8_types::signal::Signal;
-use orch8_types::trigger::TriggerDef;
+use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::WorkerTask;
 
 /// Represents a single telemetry event for batch ingestion.
@@ -843,6 +843,42 @@ pub trait OutputStore: Send + Sync + 'static {
     /// the real output is persisted the sentinel must be removed so output
     /// counts stay correct.
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError>;
+
+    /// Return one page of `block_outputs` rows for an instance in execution
+    /// order (`created_at ASC`, `id ASC` tiebreak).
+    ///
+    /// Backs `GET /instances/{id}/timeline`: unlike [`Self::get_all_outputs`]
+    /// the result is bounded, so a long-running instance with thousands of
+    /// loop-iteration rows cannot blow up a single response.
+    async fn get_outputs_page(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<BlockOutput>, StorageError>;
+
+    /// Copy `block_outputs` rows for the given block IDs from `src` to `dst`,
+    /// inserting new rows (fresh primary keys, `instance_id = dst`) that
+    /// preserve `block_id`, `output`, `output_size`, `attempt` and
+    /// `created_at`. Returns the number of rows copied.
+    ///
+    /// Only **inline** rows (`output_ref IS NULL`) are copied. Rows with a
+    /// non-null `output_ref` — externalized payload references (which are
+    /// keyed by the *source* instance ID and ownership-checked on read) and
+    /// internal sentinels (`__in_progress__` / `__retry__` / `__error__`) —
+    /// are deliberately skipped: a copied reference would dangle or leak
+    /// across instances. Callers (fork-from) must put blocks whose outputs
+    /// were not copied into the re-run set instead.
+    ///
+    /// Every backend MUST implement this — no default impl so a missing
+    /// implementation fails at compile time rather than silently no-oping
+    /// (same convention as [`Self::delete_block_outputs`]).
+    async fn copy_block_outputs(
+        &self,
+        src: InstanceId,
+        dst: InstanceId,
+        block_ids: &[BlockId],
+    ) -> Result<u64, StorageError>;
 }
 
 // ============================================================================
@@ -1177,7 +1213,21 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
 
+    /// Delete a trigger and its associated poll state (if any).
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
+
+    // === Trigger poll state (activepieces_poll) ===
+
+    /// Fetch the persisted poll cursor/state for a polling trigger.
+    /// Returns `None` if the trigger has never polled.
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<TriggerPollState>, StorageError>;
+
+    /// Insert or replace the poll cursor/state for a polling trigger.
+    async fn upsert_trigger_poll_state(&self, state: &TriggerPollState)
+        -> Result<(), StorageError>;
 
     // === Credentials ===
 

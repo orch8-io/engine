@@ -39,8 +39,10 @@ use utoipa::OpenApi;
         crate::instances::list_instance_artifacts,
         crate::instances::get_artifact_bytes,
         crate::instances::get_execution_tree,
+        crate::instances::get_timeline,
         crate::instances::retry_instance,
         crate::instances::resume_from_block,
+        crate::instances::fork_instance,
         crate::instances::bulk_update_state,
         crate::instances::bulk_reschedule,
         crate::instances::list_dlq,
@@ -173,6 +175,13 @@ use utoipa::OpenApi;
         orch8_types::cluster::ClusterNode,
         orch8_types::cluster::NodeStatus,
         orch8_types::checkpoint::Checkpoint,
+        // Timeline / fork (time-travel operations)
+        crate::instances::TimelineResponse,
+        crate::instances::TimelineInstance,
+        crate::instances::TimelineEntry,
+        crate::instances::TimelineStateTransition,
+        crate::instances::ForkRequest,
+        crate::instances::ForkResponse,
         crate::instances::SaveCheckpointRequest,
         crate::instances::PruneCheckpointsRequest,
         crate::instances::InjectBlocksRequest,
@@ -192,6 +201,7 @@ use utoipa::OpenApi;
         // Triggers
         orch8_types::trigger::TriggerDef,
         orch8_types::trigger::TriggerType,
+        orch8_types::trigger::TriggerPollState,
         crate::triggers::CreateTriggerRequest,
         // Worker stats
         orch8_types::worker_filter::WorkerTaskStats,

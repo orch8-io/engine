@@ -531,8 +531,9 @@ pub async fn retry_instance(
 /// Used by resume-from-block to wipe descendant outputs together with the
 /// composite that owns them — leaving a nested loop's iteration-counter
 /// marker or a nested step's output in place would make the re-run skip or
-/// short-circuit those blocks.
-fn collect_block_ids(block: &BlockDefinition, out: &mut Vec<BlockId>) {
+/// short-circuit those blocks. Fork-from reuses it to gather the copy set
+/// for blocks *before* the fork point.
+pub(super) fn collect_block_ids(block: &BlockDefinition, out: &mut Vec<BlockId>) {
     fn collect_list(blocks: &[BlockDefinition], out: &mut Vec<BlockId>) {
         for b in blocks {
             collect_block_ids(b, out);
@@ -592,7 +593,7 @@ fn collect_block_ids(block: &BlockDefinition, out: &mut Vec<BlockId>) {
 }
 
 /// The ID of a top-level block, regardless of variant.
-fn top_level_block_id(block: &BlockDefinition) -> &BlockId {
+pub(super) fn top_level_block_id(block: &BlockDefinition) -> &BlockId {
     match block {
         BlockDefinition::Step(s) => &s.id,
         BlockDefinition::Parallel(p) => &p.id,
