@@ -65,6 +65,55 @@ ORCH8_ACTIVEPIECES_URL=http://127.0.0.1:50052/execute ./orch8-server
 
 The handler prefix `ap://` is parsed as `ap://<piece>.<action>`. `auth` and `props` are passed through to the piece as `context.auth` and `context.propsValue`.
 
+## Polling triggers (`POST /poll`)
+
+The engine's `activepieces_poll` trigger loop calls `POST /poll` on a schedule
+to run a piece trigger's poll headlessly:
+
+```json
+{
+  "piece":   "stripe",
+  "trigger": "new_failed_payment",
+  "auth":    { "access_token": "sk_live_..." },
+  "props":   { },
+  "state":   { "lastPoll": 1717171717 },
+  "slug":    "stripe-failed-payments"
+}
+```
+
+Response: `{ "ok": true, "items": [ ... ], "state": { ... } }` — `items` are
+the new events since the cursor (the engine creates one durable instance per
+item), `state` is the trigger's `context.store` contents after the run. The
+engine persists `state` verbatim and sends it back on the next poll, which is
+exactly the dedupe contract AP's `pollingHelper` expects (`lastPoll` epoch /
+seen-id cursors live in the store). `state` is `null` on the first poll.
+
+Only `TriggerStrategy.POLLING` triggers are supported — webhook-strategy
+triggers are rejected with a permanent error (`onEnable`/`onDisable`
+platform registration doesn't exist headlessly). Register a poll trigger on
+the orch8 side with:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/triggers -H 'content-type: application/json' -d '{
+  "slug": "stripe-failed-payments",
+  "sequence_name": "payment-recovery",
+  "tenant_id": "t1",
+  "trigger_type": "activepieces_poll",
+  "config": {
+    "piece": "stripe",
+    "trigger": "new_failed_payment",
+    "auth": "credentials://stripe-prod",
+    "interval_secs": 60
+  }
+}'
+```
+
+`config.auth` / `config.props` may contain `credentials://` references —
+the engine resolves them tenant-scoped on every poll. Schedule is either
+`interval_secs` (default 60) or `cron` (UTC), not both. Poll failures are
+recorded on the registration (`GET /triggers/{slug}` returns `poll_state`
+with `last_error` and `consecutive_failures`) and retried on the next tick.
+
 ## Error semantics
 
 | HTTP status | Error type  | Retryable? |
@@ -87,7 +136,7 @@ Classification heuristic inside the sidecar:
 
 **Actions work.** Most community piece actions execute cleanly through the stub `ActionContext`.
 
-**Triggers don't (yet).** Polling and webhook triggers need scaffolding for `onEnable`/`onDisable` lifecycle hooks — use orch8's native webhook / NATS / file-watch triggers for inbound events.
+**Polling triggers work.** `POST /poll` runs `TriggerStrategy.POLLING` triggers with a store seeded from the engine-persisted cursor (see above). Webhook-strategy triggers are not supported — they need platform-side `onEnable`/`onDisable` registration and an inbound URL; use orch8's native webhook triggers for those events.
 
 **OAuth2 refresh is the caller's responsibility.** The adapter does not refresh tokens — pass a fresh `access_token` in `auth`. A forthcoming companion package will integrate with orch8's plugin/credentials registry.
 

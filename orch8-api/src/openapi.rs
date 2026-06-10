@@ -192,6 +192,7 @@ use utoipa::OpenApi;
         // Triggers
         orch8_types::trigger::TriggerDef,
         orch8_types::trigger::TriggerType,
+        orch8_types::trigger::TriggerPollState,
         crate::triggers::CreateTriggerRequest,
         // Worker stats
         orch8_types::worker_filter::WorkerTaskStats,

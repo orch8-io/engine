@@ -1,6 +1,6 @@
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
-use orch8_types::trigger::{TriggerDef, TriggerType};
+use orch8_types::trigger::{TriggerDef, TriggerPollState, TriggerType};
 
 use super::PostgresStorage;
 
@@ -100,11 +100,80 @@ pub(super) async fn update(
 }
 
 pub(super) async fn delete(store: &PostgresStorage, slug: &str) -> Result<(), StorageError> {
+    // `trigger_poll_state.slug` has ON DELETE CASCADE in Postgres, so the
+    // trigger delete also removes any poll cursor.
     sqlx::query("DELETE FROM triggers WHERE slug = $1")
         .bind(slug)
         .execute(&store.pool)
         .await?;
     Ok(())
+}
+
+pub(super) async fn get_poll_state(
+    store: &PostgresStorage,
+    slug: &str,
+) -> Result<Option<TriggerPollState>, StorageError> {
+    let row = sqlx::query_as::<_, PollStateRow>(
+        r"SELECT slug, state, last_poll_at, last_error, consecutive_failures, updated_at
+          FROM trigger_poll_state WHERE slug = $1",
+    )
+    .bind(slug)
+    .fetch_optional(&store.pool)
+    .await?;
+    row.map(PollStateRow::into_state).transpose()
+}
+
+pub(super) async fn upsert_poll_state(
+    store: &PostgresStorage,
+    state: &TriggerPollState,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"INSERT INTO trigger_poll_state (slug, state, last_poll_at, last_error, consecutive_failures, updated_at)
+          VALUES ($1,$2,$3,$4,$5,NOW())
+          ON CONFLICT(slug) DO UPDATE SET
+            state=EXCLUDED.state, last_poll_at=EXCLUDED.last_poll_at,
+            last_error=EXCLUDED.last_error,
+            consecutive_failures=EXCLUDED.consecutive_failures,
+            updated_at=NOW()",
+    )
+    .bind(&state.slug)
+    .bind(state.state.to_string())
+    .bind(state.last_poll_at)
+    .bind(&state.last_error)
+    .bind(state.consecutive_failures)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct PollStateRow {
+    slug: String,
+    // `state` column is TEXT (matching `triggers.config`) — decode as String
+    // then parse.
+    state: String,
+    last_poll_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_error: Option<String>,
+    consecutive_failures: i32,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PollStateRow {
+    fn into_state(self) -> Result<TriggerPollState, StorageError> {
+        let state = if self.state.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(&self.state).map_err(StorageError::Serialization)?
+        };
+        Ok(TriggerPollState {
+            slug: self.slug,
+            state,
+            last_poll_at: self.last_poll_at,
+            last_error: self.last_error,
+            consecutive_failures: self.consecutive_failures,
+            updated_at: self.updated_at,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]

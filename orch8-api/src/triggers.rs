@@ -6,6 +6,12 @@
 //!
 //! Trigger management: CRUD via `/triggers` endpoints.
 //! Trigger invocation: `POST /triggers/{slug}/fire`
+//!
+//! Polling triggers (`trigger_type: "activepieces_poll"`) are fired by the
+//! engine's poll loop instead of inbound HTTP. Their `config` is validated
+//! at creation (see [`orch8_engine::ap_poll::parse_config`]) and
+//! `GET /triggers/{slug}` additionally returns a `poll_state` field with the
+//! cursor, `last_error`, and `consecutive_failures` bookkeeping.
 
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -84,6 +90,13 @@ pub(crate) async fn create_trigger(
             "sequence_name must not exceed 255 characters".into(),
         ));
     }
+    // Polling triggers carry a structured config (piece, trigger, schedule);
+    // reject malformed configs here so the engine's poll loop never sees one.
+    if body.trigger_type == TriggerType::ActivepiecesPoll {
+        orch8_engine::ap_poll::parse_config(&body.config).map_err(|e| {
+            ApiError::InvalidArgument(format!("invalid activepieces_poll config: {e}"))
+        })?;
+    }
 
     let tenant_id = crate::auth::enforce_tenant_create(
         &tenant_ctx,
@@ -135,7 +148,10 @@ pub(crate) async fn list_triggers(
 #[utoipa::path(get, path = "/triggers/{slug}", tag = "triggers",
     params(("slug" = String, Path, description = "Trigger slug")),
     responses(
-        (status = 200, description = "Trigger", body = orch8_types::trigger::TriggerDef),
+        (status = 200, description = "Trigger. For activepieces_poll triggers the \
+            response additionally carries a `poll_state` field (cursor, last_error, \
+            consecutive_failures, last_poll_at).",
+            body = orch8_types::trigger::TriggerDef),
         (status = 404, description = "Not found"),
     )
 )]
@@ -155,7 +171,28 @@ pub(crate) async fn get_trigger(
         &trigger.tenant_id,
         &format!("trigger '{slug}'"),
     )?;
-    Ok(Json(trigger))
+
+    // Polling triggers surface their runtime bookkeeping (dedupe cursor,
+    // last_error, consecutive_failures) alongside the definition.
+    if trigger.trigger_type == TriggerType::ActivepiecesPoll {
+        let poll_state = state
+            .storage
+            .get_trigger_poll_state(&slug)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "trigger_poll_state"))?;
+        let mut body = serde_json::to_value(&trigger)
+            .map_err(|e| ApiError::Internal(format!("trigger serialization failed: {e}")))?;
+        if let serde_json::Value::Object(map) = &mut body {
+            map.insert(
+                "poll_state".into(),
+                poll_state.map_or(serde_json::Value::Null, |s| {
+                    serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+                }),
+            );
+        }
+        return Ok(Json(body).into_response());
+    }
+    Ok(Json(trigger).into_response())
 }
 
 #[utoipa::path(delete, path = "/triggers/{slug}", tag = "triggers",

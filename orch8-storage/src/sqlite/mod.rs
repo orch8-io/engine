@@ -1206,6 +1206,20 @@ impl crate::AdminStore for SqliteStorage {
         triggers::delete(self, slug).await
     }
 
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
+        triggers::get_poll_state(self, slug).await
+    }
+
+    async fn upsert_trigger_poll_state(
+        &self,
+        state: &orch8_types::trigger::TriggerPollState,
+    ) -> Result<(), StorageError> {
+        triggers::upsert_poll_state(self, state).await
+    }
+
     // === Credentials ===
 
     async fn create_credential(

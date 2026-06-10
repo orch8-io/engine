@@ -1,8 +1,8 @@
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
-use orch8_types::trigger::{TriggerDef, TriggerType};
+use orch8_types::trigger::{TriggerDef, TriggerPollState, TriggerType};
 
-use super::helpers::parse_ts;
+use super::helpers::{parse_ts, parse_ts_opt};
 use super::SqliteStorage;
 
 pub(super) async fn create(
@@ -105,11 +105,78 @@ pub(super) async fn update(
 }
 
 pub(super) async fn delete(store: &SqliteStorage, slug: &str) -> Result<(), StorageError> {
+    // Remove poll state first so a polling trigger never leaves an orphaned
+    // cursor behind (SQLite schema declares no FK cascade for this table).
+    sqlx::query("DELETE FROM trigger_poll_state WHERE slug = ?1")
+        .bind(slug)
+        .execute(&store.pool)
+        .await?;
     sqlx::query("DELETE FROM triggers WHERE slug = ?1")
         .bind(slug)
         .execute(&store.pool)
         .await?;
     Ok(())
+}
+
+pub(super) async fn get_poll_state(
+    store: &SqliteStorage,
+    slug: &str,
+) -> Result<Option<TriggerPollState>, StorageError> {
+    let row: Option<PollStateRow> = sqlx::query_as(
+        r"SELECT slug, state, last_poll_at, last_error, consecutive_failures, updated_at
+          FROM trigger_poll_state WHERE slug = ?1",
+    )
+    .bind(slug)
+    .fetch_optional(&store.pool)
+    .await?;
+    row.map(PollStateRow::into_state).transpose()
+}
+
+pub(super) async fn upsert_poll_state(
+    store: &SqliteStorage,
+    state: &TriggerPollState,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"INSERT INTO trigger_poll_state (slug, state, last_poll_at, last_error, consecutive_failures, updated_at)
+          VALUES (?1,?2,?3,?4,?5,?6)
+          ON CONFLICT(slug) DO UPDATE SET
+            state=excluded.state, last_poll_at=excluded.last_poll_at,
+            last_error=excluded.last_error,
+            consecutive_failures=excluded.consecutive_failures,
+            updated_at=excluded.updated_at",
+    )
+    .bind(&state.slug)
+    .bind(state.state.to_string())
+    .bind(state.last_poll_at.map(|t| t.to_rfc3339()))
+    .bind(&state.last_error)
+    .bind(state.consecutive_failures)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct PollStateRow {
+    slug: String,
+    state: String,
+    last_poll_at: Option<String>,
+    last_error: Option<String>,
+    consecutive_failures: i32,
+    updated_at: String,
+}
+
+impl PollStateRow {
+    fn into_state(self) -> Result<TriggerPollState, StorageError> {
+        Ok(TriggerPollState {
+            slug: self.slug,
+            state: serde_json::from_str(&self.state).map_err(StorageError::Serialization)?,
+            last_poll_at: parse_ts_opt(self.last_poll_at)?,
+            last_error: self.last_error,
+            consecutive_failures: self.consecutive_failures,
+            updated_at: parse_ts(&self.updated_at)?,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]

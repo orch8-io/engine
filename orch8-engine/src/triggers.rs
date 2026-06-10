@@ -132,6 +132,14 @@ async fn sync_triggers(
                         }
                     });
                 }
+                TriggerType::ActivepiecesPoll => {
+                    let storage = Arc::clone(storage);
+                    let trigger = (*trigger).clone();
+                    let cancel = child_cancel;
+                    tokio::spawn(async move {
+                        crate::ap_poll::run_ap_poll_listener(storage, trigger, cancel).await;
+                    });
+                }
                 _ => {
                     warn!(
                         slug,

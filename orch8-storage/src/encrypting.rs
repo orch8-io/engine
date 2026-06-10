@@ -1194,6 +1194,18 @@ impl crate::AdminStore for EncryptingStorage {
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         self.inner.delete_trigger(slug).await
     }
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
+        self.inner.get_trigger_poll_state(slug).await
+    }
+    async fn upsert_trigger_poll_state(
+        &self,
+        state: &orch8_types::trigger::TriggerPollState,
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_trigger_poll_state(state).await
+    }
 
     // --- Credentials (with encryption) ---
     async fn create_credential(

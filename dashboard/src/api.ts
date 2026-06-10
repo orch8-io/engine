@@ -426,7 +426,12 @@ export function deleteCronSchedule(id: string, signal?: AbortSignal): Promise<nu
 
 // ─── Triggers ────────────────────────────────────────────────────────────────
 
-export type TriggerType = "webhook" | "nats" | "file_watch" | "event";
+export type TriggerType =
+  | "webhook"
+  | "nats"
+  | "file_watch"
+  | "event"
+  | "activepieces_poll";
 
 export interface TriggerDef {
   slug: string;

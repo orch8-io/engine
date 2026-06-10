@@ -1056,6 +1056,20 @@ impl crate::AdminStore for PostgresStorage {
         triggers::delete(self, slug).await
     }
 
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
+        triggers::get_poll_state(self, slug).await
+    }
+
+    async fn upsert_trigger_poll_state(
+        &self,
+        state: &orch8_types::trigger::TriggerPollState,
+    ) -> Result<(), StorageError> {
+        triggers::upsert_poll_state(self, state).await
+    }
+
     async fn create_credential(
         &self,
         credential: &orch8_types::credential::CredentialDef,
