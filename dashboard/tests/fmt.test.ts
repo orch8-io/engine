@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { fmtCount, fmtRate, fmtPct, fmtDelta } from "../src/lib/fmt.ts";
+import { fmtCount, fmtRate, fmtPct, fmtDelta, fmtUsd } from "../src/lib/fmt.ts";
 
 // ---------------------------------------------------------------------------
 // fmtCount
@@ -243,4 +243,54 @@ test("fmtDelta(-150000) returns '−150.0K'", () => {
 
 test("fmtDelta(1000000) returns '+1.0M'", () => {
   assert.equal(fmtDelta(1_000_000), "+1.0M");
+});
+
+// ---------------------------------------------------------------------------
+// fmtUsd — estimated LLM costs (GET /usage cost_usd / total_cost_usd)
+// ---------------------------------------------------------------------------
+
+test("fmtUsd(null) returns em-dash (unknown model)", () => {
+  assert.equal(fmtUsd(null), "—");
+});
+
+test("fmtUsd(undefined) returns em-dash", () => {
+  assert.equal(fmtUsd(undefined), "—");
+});
+
+test("fmtUsd(NaN) returns em-dash", () => {
+  assert.equal(fmtUsd(NaN), "—");
+});
+
+test("fmtUsd(Infinity) returns em-dash", () => {
+  assert.equal(fmtUsd(Infinity), "—");
+});
+
+test("fmtUsd(0) returns '$0.0000' (4 decimals below $1)", () => {
+  assert.equal(fmtUsd(0), "$0.0000");
+});
+
+test("fmtUsd(0.0123) returns '$0.0123' (4 decimals below $1)", () => {
+  assert.equal(fmtUsd(0.0123), "$0.0123");
+});
+
+test("fmtUsd(0.5) returns '$0.5000' (just below the $1 boundary)", () => {
+  assert.equal(fmtUsd(0.5), "$0.5000");
+});
+
+test("fmtUsd(1) returns '$1.00' (2 decimals at $1)", () => {
+  assert.equal(fmtUsd(1), "$1.00");
+});
+
+test("fmtUsd(12.3456) returns '$12.35' (2 decimals above $1)", () => {
+  assert.equal(fmtUsd(12.3456), "$12.35");
+});
+
+test("fmtUsd(15.5) formats a window total as '$15.50'", () => {
+  // total_cost_usd from GET /usage is a plain number — the headline stat
+  // renders it through the same helper as the per-row costs.
+  assert.equal(fmtUsd(15.5), "$15.50");
+});
+
+test("fmtUsd(1234.5) returns '$1234.50'", () => {
+  assert.equal(fmtUsd(1234.5), "$1234.50");
 });

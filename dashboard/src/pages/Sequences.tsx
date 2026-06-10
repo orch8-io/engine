@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listSequences, type SequenceDefinition } from "../api";
+import { listSequences, createSequence, type SequenceDefinition } from "../api";
 import { usePolling } from "../hooks/usePolling";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -8,11 +8,18 @@ import { PageMeta } from "../components/ui/PageMeta";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
 import { Badge } from "../components/ui/Badge";
-import { Input } from "../components/ui/Input";
+import { Button } from "../components/ui/Button";
+import { Input, FieldLabel } from "../components/ui/Input";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Id } from "../components/ui/Mono";
 import { Relative } from "../components/ui/Relative";
 import { SkeletonTable } from "../components/ui/Skeleton";
+import { IconPlus } from "../components/ui/Icons";
+import {
+  BLANK_TEMPLATE,
+  templateEditorContent,
+  templatePickerOptions,
+} from "../lib/templates";
 
 // A group of versions sharing (tenant, namespace, name). Versions are sorted
 // newest-first so the first row of each group is the "head" version.
@@ -62,6 +69,13 @@ export default function Sequences() {
   const [tenant, setTenant] = useState("");
   const [namespace, setNamespace] = useState("");
   const [nameFilter, setNameFilter] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const flash = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  };
 
   const fetcher = useCallback(
     (signal?: AbortSignal) =>
@@ -124,10 +138,38 @@ export default function Sequences() {
         eyebrow="Operator"
         title="Sequences"
         description="Every workflow definition deployed to the engine. One row per unique (tenant, namespace, name) — click through to see all its versions and the block graph of the head."
-        actions={<PageMeta updatedAt={updatedAt} onRefresh={refresh} />}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => setShowCreate((v) => !v)}
+            >
+              <IconPlus size={13} /> {showCreate ? "Close" : "New sequence"}
+            </Button>
+            <PageMeta updatedAt={updatedAt} onRefresh={refresh} />
+          </div>
+        }
       />
 
       <Glossary items={PAGE_GLOSSARY} />
+
+      {toast && <div className="notice notice-ok">{toast}</div>}
+
+      {showCreate && (
+        <CreateSequenceForm
+          onCreated={(id, warnings) => {
+            flash(
+              warnings.length > 0
+                ? `Sequence created (${id.slice(0, 8)}…) with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}: ${warnings[0]}`
+                : `Sequence created (${id.slice(0, 8)}…)`,
+            );
+            setShowCreate(false);
+            refresh();
+          }}
+          onError={(msg) => flash(msg)}
+        />
+      )}
 
       <Section
         eyebrow="Filter"
@@ -276,5 +318,157 @@ export default function Sequences() {
         </Section>
       )}
     </div>
+  );
+}
+
+function CreateSequenceForm({
+  onCreated,
+  onError,
+}: {
+  onCreated: (id: string, warnings: string[]) => void;
+  onError: (msg: string) => void;
+}) {
+  const [tenantId, setTenantId] = useState("tenant-a");
+  const [namespace, setNamespace] = useState("prod");
+  const [template, setTemplate] = useState(BLANK_TEMPLATE);
+  const [json, setJson] = useState(() =>
+    templateEditorContent(BLANK_TEMPLATE, { tenantId: "tenant-a", namespace: "prod" }),
+  );
+  // Once the operator hand-edits the JSON we stop regenerating it on
+  // tenant/namespace changes — picking a template always overwrites.
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const pickTemplate = (name: string) => {
+    setTemplate(name);
+    setJson(templateEditorContent(name, { tenantId, namespace }));
+    setDirty(false);
+  };
+
+  const changeTenant = (v: string) => {
+    setTenantId(v);
+    if (!dirty) setJson(templateEditorContent(template, { tenantId: v, namespace }));
+  };
+
+  const changeNamespace = (v: string) => {
+    setNamespace(v);
+    if (!dirty) setJson(templateEditorContent(template, { tenantId, namespace: v }));
+  };
+
+  const submit = async () => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      onError("Sequence JSON is not valid JSON");
+      return;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      onError("Sequence JSON must be an object");
+      return;
+    }
+    const body = parsed as Record<string, unknown>;
+    // POST /sequences deserializes the full SequenceDefinition, which carries
+    // server-side identity fields authoring payloads usually omit — fill them
+    // here so the editor only needs the human-authored part.
+    if (!body["id"]) body["id"] = crypto.randomUUID();
+    if (!body["created_at"]) body["created_at"] = new Date().toISOString();
+    setBusy(true);
+    try {
+      const res = await createSequence(body);
+      onCreated(res.id, res.warnings ?? []);
+    } catch (e) {
+      onError(`Failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section
+      eyebrow="New sequence"
+      title="Create from a template"
+      description={
+        <>
+          Pick a starting point — the agent patterns ship with the CLI
+          (<code className="font-mono text-ink">orch8 init --template …</code>)
+          and pre-fill the editor below. <strong className="text-ink">Blank</strong>{" "}
+          starts from an empty skeleton. You can edit the JSON freely before
+          deploying; the engine validates structure on submit.
+        </>
+      }
+    >
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {templatePickerOptions().map((opt) => (
+            <button
+              key={opt.name}
+              type="button"
+              onClick={() => pickTemplate(opt.name)}
+              aria-pressed={template === opt.name}
+              className={`text-left border rounded-sm p-4 transition-colors ${
+                template === opt.name
+                  ? "border-signal bg-signal-weak"
+                  : "border-hairline bg-surface hover:border-hairline-strong"
+              }`}
+            >
+              <div className="font-mono text-[13px] text-ink mb-1">{opt.name}</div>
+              <div className="text-[12px] leading-snug text-muted">
+                {opt.description}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+          <div>
+            <FieldLabel>Tenant</FieldLabel>
+            <Input
+              value={tenantId}
+              onChange={(e) => changeTenant(e.target.value)}
+              className="w-full"
+            />
+            <p className="annotation mt-1">
+              Isolation group. Executions never cross tenants.
+            </p>
+          </div>
+          <div>
+            <FieldLabel>Namespace</FieldLabel>
+            <Input
+              value={namespace}
+              onChange={(e) => changeNamespace(e.target.value)}
+              className="w-full"
+            />
+            <p className="annotation mt-1">
+              Environment label — e.g. prod, staging, dev.
+            </p>
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel>Sequence definition (JSON)</FieldLabel>
+          <p className="annotation mb-1">
+            Exactly what gets POSTed to /sequences — id and created_at are
+            filled in automatically if you leave them out.
+          </p>
+          <textarea
+            value={json}
+            onChange={(e) => {
+              setJson(e.target.value);
+              setDirty(true);
+            }}
+            rows={18}
+            spellCheck={false}
+            className="w-full bg-sunken border border-rule px-2.5 py-2 text-[12px] font-mono text-ink placeholder:text-faint focus:border-signal focus:outline-none"
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <Button variant="primary" size="sm" disabled={busy} onClick={submit}>
+            Deploy sequence
+          </Button>
+        </div>
+      </div>
+    </Section>
   );
 }
