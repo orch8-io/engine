@@ -190,6 +190,7 @@ async fn scheduler_execute_step_block_resolves_templates_for_inprocess_handler()
         &instance,
         &step_def,
         &cancel,
+        &SharedClock::default(),
     )
     .await
     .expect("execute_step_block errored");
@@ -241,6 +242,7 @@ async fn scheduler_execute_step_block_template_failure_fails_instance() {
         &instance,
         &step_def,
         &cancel,
+        &SharedClock::default(),
     )
     .await
     .expect("execute_step_block errored");
@@ -321,6 +323,7 @@ async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
             &inst,
             &step_def,
             &cancel,
+            &SharedClock::default(),
         )
         .await
         .expect("execute_step_block errored");
@@ -383,6 +386,7 @@ async fn scheduler_execute_step_block_resolves_params_for_external_worker() {
         &instance,
         &step_def,
         &cancel,
+        &SharedClock::default(),
     )
     .await
     .expect("execute_step_block errored");
@@ -578,9 +582,14 @@ async fn check_step_delay_defers_instance_with_correct_fire_at() {
         timezone: None,
     });
 
-    let deferred = check_step_delay(storage.as_ref(), &instance, &step_def)
-        .await
-        .expect("check_step_delay errored");
+    let deferred = check_step_delay(
+        storage.as_ref(),
+        &instance,
+        &step_def,
+        &SharedClock::default(),
+    )
+    .await
+    .expect("check_step_delay errored");
     assert!(deferred, "delay present → must defer");
 
     let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
@@ -602,9 +611,14 @@ async fn check_step_delay_is_noop_when_no_delay() {
     let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
 
     let step_def = mk_step_def("s", "noop", serde_json::json!({}));
-    let deferred = check_step_delay(storage.as_ref(), &instance, &step_def)
-        .await
-        .unwrap();
+    let deferred = check_step_delay(
+        storage.as_ref(),
+        &instance,
+        &step_def,
+        &SharedClock::default(),
+    )
+    .await
+    .unwrap();
     assert!(!deferred);
     // State must stay Running since there's nothing to defer.
     let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
@@ -653,9 +667,14 @@ async fn check_step_rate_limit_returns_false_when_no_rate_limit_key() {
 
     let step_def = mk_step_def("s", "noop", serde_json::json!({}));
     // rate_limit_key defaults to None in mk_step_def.
-    let deferred = check_step_rate_limit(storage.as_ref(), &instance, &step_def)
-        .await
-        .unwrap();
+    let deferred = check_step_rate_limit(
+        storage.as_ref(),
+        &instance,
+        &step_def,
+        &SharedClock::default(),
+    )
+    .await
+    .unwrap();
     assert!(!deferred, "no rate_limit_key => must not defer");
 
     // State must remain Running — nothing to defer.
@@ -674,9 +693,14 @@ async fn check_step_rate_limit_allows_under_threshold() {
     let mut step_def = mk_step_def("s", "noop", serde_json::json!({}));
     step_def.rate_limit_key = Some("rk-under".into());
     // No upsert → no bucket row → check_rate_limit returns Allowed.
-    let deferred = check_step_rate_limit(storage.as_ref(), &instance, &step_def)
-        .await
-        .unwrap();
+    let deferred = check_step_rate_limit(
+        storage.as_ref(),
+        &instance,
+        &step_def,
+        &SharedClock::default(),
+    )
+    .await
+    .unwrap();
     assert!(!deferred, "empty bucket must not defer");
 
     let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
@@ -697,9 +721,14 @@ async fn check_step_rate_limit_defers_at_threshold() {
     let mut step_def = mk_step_def("s", "noop", serde_json::json!({}));
     step_def.rate_limit_key = Some("rk-full".into());
 
-    let deferred = check_step_rate_limit(storage.as_ref(), &instance, &step_def)
-        .await
-        .unwrap();
+    let deferred = check_step_rate_limit(
+        storage.as_ref(),
+        &instance,
+        &step_def,
+        &SharedClock::default(),
+    )
+    .await
+    .unwrap();
     assert!(deferred, "full bucket must defer");
 
     let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
@@ -759,7 +788,9 @@ async fn enforce_concurrency_limits_passthrough_when_no_keys() {
         storage.get_instance(id2).await.unwrap().unwrap(),
     ];
 
-    let kept = enforce_concurrency_limits(&storage, insts).await.unwrap();
+    let kept = enforce_concurrency_limits(&storage, insts, &SharedClock::default())
+        .await
+        .unwrap();
     assert_eq!(kept.len(), 2, "no keys => passthrough");
 }
 
@@ -792,7 +823,9 @@ async fn enforce_concurrency_limits_max_one_serialises() {
         storage.get_instance(id2).await.unwrap().unwrap(),
     ];
 
-    let kept = enforce_concurrency_limits(&storage, insts).await.unwrap();
+    let kept = enforce_concurrency_limits(&storage, insts, &SharedClock::default())
+        .await
+        .unwrap();
     assert_eq!(kept.len(), 1, "max=1 must keep exactly one");
 
     // The deferred instance must be back in Scheduled with a fire_at set.
@@ -831,7 +864,9 @@ async fn enforce_concurrency_limits_max_zero_blocks_all() {
         storage.get_instance(id2).await.unwrap().unwrap(),
     ];
 
-    let kept = enforce_concurrency_limits(&storage, insts).await.unwrap();
+    let kept = enforce_concurrency_limits(&storage, insts, &SharedClock::default())
+        .await
+        .unwrap();
     assert_eq!(kept.len(), 0, "max=0 must defer everyone");
 
     for id in [id1, id2] {
@@ -865,7 +900,9 @@ async fn enforce_concurrency_limits_allows_up_to_cap() {
         storage.get_instance(id3).await.unwrap().unwrap(),
     ];
 
-    let kept = enforce_concurrency_limits(&storage, insts).await.unwrap();
+    let kept = enforce_concurrency_limits(&storage, insts, &SharedClock::default())
+        .await
+        .unwrap();
     assert_eq!(kept.len(), 2, "max=2 must keep exactly two of three");
 
     // Exactly one of the three must be back in Scheduled.

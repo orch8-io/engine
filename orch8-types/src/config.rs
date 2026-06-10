@@ -362,6 +362,14 @@ pub struct SchedulerConfig {
     /// Primarily used by the mobile SDK to prevent runaway workflows on-device.
     #[serde(default)]
     pub max_steps_per_instance: u32,
+    /// Time source for scheduling decisions (claiming due instances, delay /
+    /// send-window / rate-limit deferrals, retry backoff, deadline and
+    /// human-input timeout checks, cron evaluation). Defaults to
+    /// [`crate::clock::SystemClock`] — production behavior is unchanged.
+    /// Tests inject a [`crate::clock::ManualClock`] here to advance time
+    /// manually. Not configurable via files/env; skipped by serde.
+    #[serde(skip)]
+    pub clock: crate::clock::SharedClock,
     /// Artifact retention, in seconds. When `> 0`, the background GC sweeper
     /// deletes the durable artifacts of instances that have been in a terminal
     /// state for longer than this window. `0` (default) disables the sweep —
@@ -392,6 +400,7 @@ impl Default for SchedulerConfig {
             node_reaper_stale_secs: default_node_reaper_stale_secs(),
             cron_tick_secs: default_cron_tick_secs(),
             max_steps_per_instance: 0,
+            clock: crate::clock::SharedClock::default(),
             artifact_retention_secs: 0,
         }
     }

@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cron::Schedule;
 use tokio::task::JoinSet;
 use tokio::time::interval;
@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::context::ExecutionContext;
 use orch8_types::cron::CronSchedule;
 use orch8_types::ids::InstanceId;
@@ -17,11 +18,25 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 
 use crate::error::EngineError;
 
-/// Run the cron tick loop. Checks every `tick_interval` for due cron schedules,
-/// creates instances for each, and advances their `next_fire_at`.
+/// Run the cron tick loop on the system clock. Checks every `tick_interval`
+/// for due cron schedules, creates instances for each, and advances their
+/// `next_fire_at`. See [`run_cron_loop_with_clock`] for virtual-time use.
 pub async fn run_cron_loop(
     storage: Arc<dyn StorageBackend>,
     tick_interval: Duration,
+    cancel: CancellationToken,
+) -> Result<(), EngineError> {
+    run_cron_loop_with_clock(storage, tick_interval, SharedClock::default(), cancel).await
+}
+
+/// [`run_cron_loop`] reading "now" from the supplied scheduler clock.
+///
+/// Note: the loop still *ticks* on real (tokio) time; the clock only governs
+/// which schedules are considered due and how their next fire is computed.
+pub async fn run_cron_loop_with_clock(
+    storage: Arc<dyn StorageBackend>,
+    tick_interval: Duration,
+    clock: SharedClock,
     cancel: CancellationToken,
 ) -> Result<(), EngineError> {
     let mut ticker = interval(tick_interval);
@@ -39,7 +54,7 @@ pub async fn run_cron_loop(
                 return Ok(());
             }
             _ = ticker.tick() => {
-                if let Err(e) = process_cron_tick(&storage).await {
+                if let Err(e) = process_cron_tick(&storage, &clock).await {
                     error!(error = %e, "cron tick failed");
                 }
             }
@@ -47,8 +62,11 @@ pub async fn run_cron_loop(
     }
 }
 
-async fn process_cron_tick(storage: &Arc<dyn StorageBackend>) -> Result<(), EngineError> {
-    let now = Utc::now();
+async fn process_cron_tick(
+    storage: &Arc<dyn StorageBackend>,
+    clock: &SharedClock,
+) -> Result<(), EngineError> {
+    let now = clock.now();
     let schedules = storage.claim_due_cron_schedules(now).await?;
 
     if schedules.is_empty() {
@@ -63,9 +81,10 @@ async fn process_cron_tick(storage: &Arc<dyn StorageBackend>) -> Result<(), Engi
     let mut tasks: JoinSet<()> = JoinSet::new();
     for schedule in schedules {
         let storage = Arc::clone(storage);
+        let clock = clock.clone();
         tasks.spawn(async move {
             let cron_id = schedule.id;
-            if let Err(e) = trigger_cron_schedule(storage.as_ref(), &schedule).await {
+            if let Err(e) = trigger_cron_schedule(storage.as_ref(), &schedule, &clock).await {
                 error!(
                     cron_id = %cron_id,
                     error = %e,
@@ -86,8 +105,9 @@ async fn process_cron_tick(storage: &Arc<dyn StorageBackend>) -> Result<(), Engi
 async fn trigger_cron_schedule(
     storage: &dyn StorageBackend,
     schedule: &CronSchedule,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
-    let now = Utc::now();
+    let now = clock.now();
 
     // Create a new instance for this schedule.
     let instance = TaskInstance {
@@ -135,7 +155,7 @@ async fn trigger_cron_schedule(
 
     // Calculate next fire time — always advance even on failure so we don't
     // retry the same tick in a hot error loop.
-    let next = calculate_next_fire(schedule);
+    let next = calculate_next_fire_after(schedule, now);
     match next {
         Some(next_at) => {
             storage
@@ -176,19 +196,30 @@ fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
-/// Calculate the next fire time from a cron expression, respecting the
-/// schedule's timezone. Falls back to UTC if the timezone is invalid.
+/// Calculate the next fire time from a cron expression after the real current
+/// time, respecting the schedule's timezone. Falls back to UTC if the
+/// timezone is invalid.
 pub fn calculate_next_fire(schedule: &CronSchedule) -> Option<chrono::DateTime<Utc>> {
+    calculate_next_fire_after(schedule, Utc::now())
+}
+
+/// [`calculate_next_fire`] evaluated against an explicit "now" — the cron
+/// loop passes its scheduler clock's instant so virtual time controls
+/// schedule advancement in tests.
+pub fn calculate_next_fire_after(
+    schedule: &CronSchedule,
+    now: DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
     let normalized = normalize_cron_expr(&schedule.cron_expr);
     let cron_schedule = Schedule::from_str(&normalized).ok()?;
     if let Ok(tz) = schedule.timezone.parse::<chrono_tz::Tz>() {
-        let now_tz = Utc::now().with_timezone(&tz);
+        let now_tz = now.with_timezone(&tz);
         cron_schedule
             .after(&now_tz)
             .next()
             .map(|dt| dt.with_timezone(&Utc))
     } else {
-        cron_schedule.upcoming(Utc).next()
+        cron_schedule.after(&now).next()
     }
 }
 
