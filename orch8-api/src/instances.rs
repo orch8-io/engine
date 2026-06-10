@@ -39,9 +39,9 @@ pub use inject::InjectBlocksRequest;
 pub(crate) use inject::{__path_inject_blocks, inject_blocks};
 pub(crate) use lifecycle::{
     __path_create_instance, __path_create_instances_batch, __path_get_instance,
-    __path_list_instances, __path_retry_instance, __path_update_context, __path_update_state,
-    create_instance, create_instances_batch, get_instance, list_instances, retry_instance,
-    update_context, update_state,
+    __path_list_instances, __path_resume_from_block, __path_retry_instance, __path_update_context,
+    __path_update_state, create_instance, create_instances_batch, get_instance, list_instances,
+    resume_from_block, retry_instance, update_context, update_state,
 };
 pub(crate) use outputs::{
     __path_get_execution_tree, __path_get_outputs, get_execution_tree, get_outputs,
@@ -61,6 +61,10 @@ pub fn routes() -> Router<AppState> {
         .route("/artifacts/{*key}", get(get_artifact_bytes))
         .route("/instances/{id}/tree", get(get_execution_tree))
         .route("/instances/{id}/retry", post(retry_instance))
+        .route(
+            "/instances/{id}/resume-from/{block_id}",
+            post(resume_from_block),
+        )
         .route(
             "/instances/{id}/checkpoints",
             get(list_checkpoints).post(save_checkpoint),

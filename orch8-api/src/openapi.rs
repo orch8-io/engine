@@ -40,6 +40,7 @@ use utoipa::OpenApi;
         crate::instances::get_artifact_bytes,
         crate::instances::get_execution_tree,
         crate::instances::retry_instance,
+        crate::instances::resume_from_block,
         crate::instances::bulk_update_state,
         crate::instances::bulk_reschedule,
         crate::instances::list_dlq,

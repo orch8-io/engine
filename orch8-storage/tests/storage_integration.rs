@@ -1502,6 +1502,105 @@ async fn delete_block_outputs_no_effect_on_different_block_ids_at_same_instance(
     assert_eq!(step_row.output["result"], "ok");
 }
 
+// ---------------------------------------------------------------------------
+// delete_block_outputs_batch — single round-trip wipe over a set of block IDs.
+// Used by loop/for_each subtree resets and by the resume-from-block API to
+// wipe the target block and everything after it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_block_outputs_batch_removes_only_listed_blocks() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
+
+    for block in ["s1", "s2", "s3"] {
+        s.save_block_output(&mk_output(inst, block, 0))
+            .await
+            .unwrap();
+    }
+    // Two rows for s2 (real output + a later attempt) — both must go.
+    s.save_block_output(&mk_output(inst, "s2", 1))
+        .await
+        .unwrap();
+
+    let removed = s
+        .delete_block_outputs_batch(inst, &[BlockId::new("s2"), BlockId::new("s3")])
+        .await
+        .unwrap();
+    assert_eq!(removed, 3);
+
+    let remaining = s.get_all_outputs(inst).await.unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].block_id.as_str(), "s1");
+}
+
+#[tokio::test]
+async fn delete_block_outputs_batch_removes_retry_and_sentinel_markers() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
+
+    let mut retry_marker = mk_output(inst, "s2", 1);
+    retry_marker.output_ref = Some("__retry__".into());
+    s.save_block_output(&retry_marker).await.unwrap();
+    let mut sentinel = mk_output(inst, "s2", 0);
+    sentinel.output_ref = Some("__in_progress__".into());
+    s.save_block_output(&sentinel).await.unwrap();
+
+    let removed = s
+        .delete_block_outputs_batch(inst, &[BlockId::new("s2")])
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+    assert!(s
+        .get_block_output(inst, &BlockId::new("s2"))
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn delete_block_outputs_batch_empty_list_is_noop() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
+    s.save_block_output(&mk_output(inst, "s1", 0))
+        .await
+        .unwrap();
+
+    let removed = s.delete_block_outputs_batch(inst, &[]).await.unwrap();
+    assert_eq!(removed, 0);
+    assert_eq!(s.get_all_outputs(inst).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn delete_block_outputs_batch_scoped_to_instance() {
+    let s = store().await;
+    let inst1 = InstanceId::new();
+    let inst2 = InstanceId::new();
+    seed_instance(&s, inst1).await;
+    seed_instance(&s, inst2).await;
+
+    s.save_block_output(&mk_output(inst1, "shared", 0))
+        .await
+        .unwrap();
+    s.save_block_output(&mk_output(inst2, "shared", 0))
+        .await
+        .unwrap();
+
+    let removed = s
+        .delete_block_outputs_batch(inst1, &[BlockId::new("shared")])
+        .await
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(s
+        .get_block_output(inst2, &BlockId::new("shared"))
+        .await
+        .unwrap()
+        .is_some());
+}
+
 // ===========================================================================
 // Complex Scenarios
 // ===========================================================================

@@ -62,6 +62,16 @@ pub struct UpdateContextRequest {
     pub(crate) context: ExecutionContext,
 }
 
+/// Body for `POST /instances/{id}/resume-from/{block_id}`. The whole body is
+/// optional; when present, `context` must be a JSON object whose top-level
+/// keys are shallow-merged into `context.data` (same per-key semantics as
+/// `StorageBackend::merge_context_data`) before the instance is re-scheduled.
+#[derive(Default, Deserialize, ToSchema)]
+pub struct ResumeFromRequest {
+    #[serde(default)]
+    pub(crate) context: Option<serde_json::Value>,
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct SendSignalRequest {
     pub(crate) signal_type: SignalType,

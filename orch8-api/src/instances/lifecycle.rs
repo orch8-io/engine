@@ -8,12 +8,13 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use orch8_types::filter::{InstanceFilter, Pagination};
-use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::sequence::BlockDefinition;
 
 use super::types::{
     parse_states, BatchCreateRequest, CountResponse, CreateInstanceRequest, ListQuery,
-    UpdateContextRequest, UpdateStateRequest,
+    ResumeFromRequest, UpdateContextRequest, UpdateStateRequest,
 };
 use crate::error::ApiError;
 use crate::AppState;
@@ -518,5 +519,267 @@ pub async fn retry_instance(
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "id": instance_id, "state": "scheduled" })),
+    ))
+}
+
+/// Recursively collect the IDs of `block` and every block nested inside it
+/// (composite branches, loop bodies, router routes, try/catch/finally arms,
+/// A/B variants, cancellation scopes).
+///
+/// Used by resume-from-block to wipe descendant outputs together with the
+/// composite that owns them — leaving a nested loop's iteration-counter
+/// marker or a nested step's output in place would make the re-run skip or
+/// short-circuit those blocks.
+fn collect_block_ids(block: &BlockDefinition, out: &mut Vec<BlockId>) {
+    fn collect_list(blocks: &[BlockDefinition], out: &mut Vec<BlockId>) {
+        for b in blocks {
+            collect_block_ids(b, out);
+        }
+    }
+    match block {
+        BlockDefinition::Step(s) => out.push(s.id.clone()),
+        BlockDefinition::Parallel(p) => {
+            out.push(p.id.clone());
+            for branch in &p.branches {
+                collect_list(branch, out);
+            }
+        }
+        BlockDefinition::Race(r) => {
+            out.push(r.id.clone());
+            for branch in &r.branches {
+                collect_list(branch, out);
+            }
+        }
+        BlockDefinition::Loop(l) => {
+            out.push(l.id.clone());
+            collect_list(&l.body, out);
+        }
+        BlockDefinition::ForEach(fe) => {
+            out.push(fe.id.clone());
+            collect_list(&fe.body, out);
+        }
+        BlockDefinition::Router(r) => {
+            out.push(r.id.clone());
+            for route in &r.routes {
+                collect_list(&route.blocks, out);
+            }
+            if let Some(default) = &r.default {
+                collect_list(default, out);
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            out.push(tc.id.clone());
+            collect_list(&tc.try_block, out);
+            collect_list(&tc.catch_block, out);
+            if let Some(finally) = &tc.finally_block {
+                collect_list(finally, out);
+            }
+        }
+        BlockDefinition::SubSequence(s) => out.push(s.id.clone()),
+        BlockDefinition::ABSplit(ab) => {
+            out.push(ab.id.clone());
+            for variant in &ab.variants {
+                collect_list(&variant.blocks, out);
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => {
+            out.push(cs.id.clone());
+            collect_list(&cs.blocks, out);
+        }
+    }
+}
+
+/// The ID of a top-level block, regardless of variant.
+fn top_level_block_id(block: &BlockDefinition) -> &BlockId {
+    match block {
+        BlockDefinition::Step(s) => &s.id,
+        BlockDefinition::Parallel(p) => &p.id,
+        BlockDefinition::Race(r) => &r.id,
+        BlockDefinition::Loop(l) => &l.id,
+        BlockDefinition::ForEach(fe) => &fe.id,
+        BlockDefinition::Router(r) => &r.id,
+        BlockDefinition::TryCatch(tc) => &tc.id,
+        BlockDefinition::SubSequence(s) => &s.id,
+        BlockDefinition::ABSplit(ab) => &ab.id,
+        BlockDefinition::CancellationScope(cs) => &cs.id,
+    }
+}
+
+/// DLQ surgery: re-run an instance from an arbitrary block.
+///
+/// Wipes the target block's outputs and the outputs of every block at or
+/// after it in the sequence's top-level `blocks` array (including blocks
+/// nested inside wiped composites), optionally shallow-merges a context
+/// patch into `context.data`, and re-schedules the instance immediately.
+/// Earlier blocks keep their outputs: on the flat all-step execution path
+/// the completed-blocks check skips them, so side-effectful handlers do not
+/// run twice. On the tree path the execution tree is rebuilt from scratch —
+/// the exact same semantics as `POST /instances/{id}/retry`, which also
+/// deletes the tree while preserving real outputs.
+///
+/// Linear assumption: "after" is defined by position in the top-level
+/// `blocks` array, which is the order both execution paths (flat fast path
+/// and tree evaluator) run top-level blocks in. The target must itself be a
+/// top-level block — resuming from a block nested inside a composite is not
+/// supported.
+#[utoipa::path(post, path = "/instances/{id}/resume-from/{block_id}", tag = "instances",
+    params(
+        ("id" = Uuid, Path, description = "Instance ID"),
+        ("block_id" = String, Path, description = "Top-level block to resume from"),
+    ),
+    request_body = Option<ResumeFromRequest>,
+    responses(
+        (status = 200, description = "Instance re-scheduled from the given block", body = serde_json::Value),
+        (status = 400, description = "Unknown block, or instance is in a state that cannot be resumed"),
+        (status = 404, description = "Instance or sequence not found"),
+    )
+)]
+#[allow(clippy::too_many_lines)] // sequential surgery steps — splitting hurts readability
+pub async fn resume_from_block(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, block_id)): Path<(Uuid, String)>,
+    req: Option<Json<ResumeFromRequest>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let instance_id = InstanceId::from_uuid(id);
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+
+    let instance = state
+        .storage
+        .get_instance(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
+
+    // Only quiescent instances can be operated on. Running/Scheduled/Waiting
+    // instances must be paused or cancelled first — wiping outputs under a
+    // live execution would race the scheduler.
+    if !matches!(
+        instance.state,
+        InstanceState::Failed
+            | InstanceState::Paused
+            | InstanceState::Completed
+            | InstanceState::Cancelled
+    ) {
+        return Err(ApiError::InvalidArgument(format!(
+            "cannot resume-from in state {}: pause or cancel the instance first",
+            instance.state
+        )));
+    }
+
+    // Validate the context patch up-front, before any destructive write.
+    let patch = match req.context {
+        None => None,
+        Some(serde_json::Value::Object(map)) => Some(map),
+        Some(_) => {
+            return Err(ApiError::InvalidArgument(
+                "context patch must be a JSON object".into(),
+            ));
+        }
+    };
+
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("sequence {}", instance.sequence_id.into_uuid()))
+        })?;
+
+    let target_idx = sequence
+        .blocks
+        .iter()
+        .position(|b| top_level_block_id(b).as_str() == block_id)
+        .ok_or_else(|| {
+            ApiError::InvalidArgument(format!(
+                "block '{block_id}' is not a top-level block of sequence {}",
+                instance.sequence_id.into_uuid()
+            ))
+        })?;
+
+    // Wipe set: the target block and everything after it in top-level order,
+    // plus all blocks nested inside those (composite iteration markers, retry
+    // markers and in-progress sentinels all live in `block_outputs` under the
+    // block's own ID, so one batched delete clears them all).
+    let mut wipe_ids: Vec<BlockId> = Vec::new();
+    for block in &sequence.blocks[target_idx..] {
+        collect_block_ids(block, &mut wipe_ids);
+    }
+
+    // Delete the stale execution tree so the evaluator rebuilds it from
+    // scratch (same mechanics as `retry_instance`). Earlier blocks keep
+    // their outputs and are memoized on the re-run.
+    state
+        .storage
+        .delete_execution_tree(instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
+
+    let outputs_deleted = state
+        .storage
+        .delete_block_outputs_batch(instance_id, &wipe_ids)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
+    // Purge stale worker_tasks rows for the wiped blocks — the
+    // `UNIQUE(instance_id, block_id)` constraint would otherwise swallow the
+    // re-run's dispatch via `ON CONFLICT DO NOTHING` and strand the instance
+    // in Waiting (same purge the loop/for_each iteration reset performs).
+    let wipe_strs: Vec<String> = wipe_ids.iter().map(|b| b.as_str().to_owned()).collect();
+    state
+        .storage
+        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &wipe_strs)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_tasks"))?;
+
+    // Apply the context patch: shallow per-key merge into `context.data`
+    // (the same per-key semantics as `StorageBackend::merge_context_data`,
+    // which the engine uses for handler-driven context writes).
+    if let Some(patch) = patch {
+        let mut context = instance.context.clone();
+        if !context.data.is_object() {
+            context.data = serde_json::json!({});
+        }
+        if let Some(data) = context.data.as_object_mut() {
+            for (key, value) in patch {
+                data.insert(key, value);
+            }
+        }
+        context.check_size(state.max_context_bytes)?;
+        state
+            .storage
+            .update_instance_context(instance_id, &context)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    }
+
+    state
+        .storage
+        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+    tracing::info!(
+        instance_id = %instance_id,
+        resumed_from = %block_id,
+        outputs_deleted = outputs_deleted,
+        "instance resumed from block"
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": instance_id,
+            "state": "scheduled",
+            "resumed_from": block_id,
+            "outputs_deleted": outputs_deleted,
+        })),
     ))
 }

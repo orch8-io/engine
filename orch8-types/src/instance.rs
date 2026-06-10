@@ -80,7 +80,17 @@ impl InstanceState {
                 Self::Waiting,
                 Self::Running | Self::Scheduled | Self::Cancelled | Self::Failed
             ) | (Self::Paused, Self::Scheduled | Self::Cancelled)
-                | (Self::Failed, Self::Scheduled) // retry from DLQ
+                // Failed -> Scheduled is retry from the DLQ.
+                // Completed / Cancelled -> Scheduled is resume-from-block
+                // surgery: an operator may re-run a finished instance from an
+                // arbitrary block (wiping that block's and all later outputs
+                // first), which requires re-scheduling instances that already
+                // reached a terminal state. All other exits from the terminal
+                // states remain invalid.
+                | (
+                    Self::Failed | Self::Completed | Self::Cancelled,
+                    Self::Scheduled
+                )
         )
     }
 
@@ -191,7 +201,7 @@ mod tests {
     #[test]
     fn invalid_transitions() {
         assert!(!InstanceState::Completed.can_transition_to(InstanceState::Running));
-        assert!(!InstanceState::Cancelled.can_transition_to(InstanceState::Scheduled));
+        assert!(!InstanceState::Cancelled.can_transition_to(InstanceState::Running));
         assert!(!InstanceState::Failed.can_transition_to(InstanceState::Completed));
     }
 
@@ -252,9 +262,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_is_terminal_rejects_all_targets() {
+    fn completed_rejects_all_targets_except_scheduled() {
+        // `Completed -> Scheduled` is the resume-from-block escape hatch;
+        // every other exit from Completed remains invalid.
         for target in [
-            InstanceState::Scheduled,
             InstanceState::Running,
             InstanceState::Waiting,
             InstanceState::Paused,
@@ -267,6 +278,7 @@ mod tests {
                 "Completed -> {target:?} must be invalid"
             );
         }
+        assert!(InstanceState::Completed.can_transition_to(InstanceState::Scheduled));
     }
 
     #[test]
@@ -298,9 +310,10 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_is_terminal_rejects_all_targets() {
+    fn cancelled_rejects_all_targets_except_scheduled() {
+        // `Cancelled -> Scheduled` is the resume-from-block escape hatch;
+        // every other exit from Cancelled remains invalid.
         for target in [
-            InstanceState::Scheduled,
             InstanceState::Running,
             InstanceState::Waiting,
             InstanceState::Paused,
@@ -313,6 +326,7 @@ mod tests {
                 "Cancelled -> {target:?} must be invalid"
             );
         }
+        assert!(InstanceState::Cancelled.can_transition_to(InstanceState::Scheduled));
     }
 
     #[test]
