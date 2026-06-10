@@ -48,7 +48,8 @@ const DEFAULT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// Map an artifact-backend storage error to a step error. A `Unsupported`
 /// backend (not configured) is a permanent misconfiguration — retrying would
 /// only burn the budget. Transient backend failures stay retryable.
-fn artifact_step_err(context: &str, e: &orch8_types::error::StorageError) -> StepError {
+/// Shared with `llm_call`'s multimodal image resolution.
+pub(crate) fn artifact_step_err(context: &str, e: &orch8_types::error::StorageError) -> StepError {
     match e {
         orch8_types::error::StorageError::Unsupported(_) => StepError::Permanent {
             message: format!("{context}: {e}"),
@@ -64,8 +65,9 @@ fn artifact_step_err(context: &str, e: &orch8_types::error::StorageError) -> Ste
 /// Resolve an artifact key from a `ref` param. Accepts a bare key string, a
 /// `{ "key": "…" }` object, or the canonical `{ "artifact": { "key": "…" } }`
 /// shape that `blob_put` (and `tool_call`) emit — so callers can wire
-/// `{{outputs.put.artifact}}` straight through.
-fn extract_key(refval: &Value) -> Option<String> {
+/// `{{outputs.put.artifact}}` straight through. Shared with `llm_call`'s
+/// multimodal image blocks, which accept the same `artifact` ref shapes.
+pub(crate) fn extract_key(refval: &Value) -> Option<String> {
     match refval {
         Value::String(s) => Some(s.clone()),
         Value::Object(_) => {
