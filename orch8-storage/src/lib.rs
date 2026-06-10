@@ -29,7 +29,7 @@ use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::Session;
 use orch8_types::signal::Signal;
-use orch8_types::trigger::TriggerDef;
+use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::WorkerTask;
 
 /// Represents a single telemetry event for batch ingestion.
@@ -1213,7 +1213,21 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
 
+    /// Delete a trigger and its associated poll state (if any).
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
+
+    // === Trigger poll state (activepieces_poll) ===
+
+    /// Fetch the persisted poll cursor/state for a polling trigger.
+    /// Returns `None` if the trigger has never polled.
+    async fn get_trigger_poll_state(
+        &self,
+        slug: &str,
+    ) -> Result<Option<TriggerPollState>, StorageError>;
+
+    /// Insert or replace the poll cursor/state for a polling trigger.
+    async fn upsert_trigger_poll_state(&self, state: &TriggerPollState)
+        -> Result<(), StorageError>;
 
     // === Credentials ===
 

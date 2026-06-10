@@ -236,6 +236,18 @@ CREATE TABLE IF NOT EXISTS triggers (
     updated_at TEXT NOT NULL
 );
 
+-- Runtime state for polling triggers (trigger_type = 'activepieces_poll'):
+-- opaque dedupe cursor returned by the sidecar plus failure bookkeeping.
+-- Rows are deleted explicitly alongside their trigger (see triggers::delete).
+CREATE TABLE IF NOT EXISTS trigger_poll_state (
+    slug TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'null',
+    last_poll_at TEXT,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS credentials (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL DEFAULT '',

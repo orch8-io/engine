@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Orch8, Inc.
 
 import * as http from "node:http";
-import { buildActionContext } from "./context";
+import { buildActionContext, buildTriggerContext } from "./context";
 import { classifyError, PieceExecutionError } from "./errors";
-import { createDefaultLoader, findAction, Piece, PieceLoader } from "./registry";
+import { createDefaultLoader, findAction, findTrigger, Piece, PieceLoader } from "./registry";
 
 /**
  * HTTP shape exchanged with the Rust `ap://` handler.
@@ -39,6 +39,39 @@ export interface ExecuteRequest {
   props?: Record<string, unknown>;
   instance_id?: string;
   block_id?: string;
+}
+
+/**
+ * Polling-trigger protocol (POST /poll), used by the orch8 engine's
+ * `activepieces_poll` trigger loop.
+ *
+ * Request body:
+ *   {
+ *     "piece":   "stripe",
+ *     "trigger": "new_failed_payment",
+ *     "auth":    { ... } | "api-key",
+ *     "props":   { ... trigger-specific ... },
+ *     "state":   { ... store blob from the previous poll ... } | null,
+ *     "slug":    "trigger registration slug"
+ *   }
+ *
+ * Response body:
+ *   Success (HTTP 200): { "ok": true, "items": [ ... ], "state": { ... } }
+ *     - `items`: new events since the cursor (one orch8 instance each)
+ *     - `state`: the trigger's store contents after the poll — the engine
+ *       persists this verbatim and sends it back on the next poll.
+ *   Failure: same envelope and status mapping as /execute.
+ *
+ * Only `TriggerStrategy.POLLING` triggers are supported; webhook-strategy
+ * triggers are rejected with a permanent error.
+ */
+export interface PollRequest {
+  piece: string;
+  trigger: string;
+  auth?: unknown;
+  props?: Record<string, unknown>;
+  state?: Record<string, unknown> | null;
+  slug?: string;
 }
 
 export interface ServerOptions {
@@ -88,6 +121,11 @@ async function handleRequest(
 
   if (req.method === "GET" && (url === "/health" || url === "/")) {
     writeJson(res, 200, { ok: true, service: "orch8-activepieces-worker" });
+    return;
+  }
+
+  if (req.method === "POST" && url === "/poll") {
+    await handlePoll(req, res, loader, timeoutMs, log);
     return;
   }
 
@@ -159,6 +197,120 @@ async function handleRequest(
       action: body.action,
       duration_ms: Date.now() - started,
       instance_id: body.instance_id,
+      error_type: classified.type,
+      error_message: classified.message,
+    });
+    writeJson(res, status, { ok: false, error: classified });
+  }
+}
+
+/**
+ * POST /poll — run a piece's polling trigger headlessly.
+ *
+ * Loads the piece, finds the trigger, seeds a trigger context's store with
+ * the caller-provided `state` blob, invokes `trigger.run(ctx)`, and returns
+ * the produced items plus the store's final contents as the next cursor.
+ */
+async function handlePoll(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  loader: PieceLoader,
+  timeoutMs: number,
+  log: NonNullable<ServerOptions["log"]>,
+): Promise<void> {
+  let body: PollRequest;
+  try {
+    body = await readJson<PollRequest>(req);
+  } catch (err) {
+    writeJson(res, 422, {
+      ok: false,
+      error: { type: "permanent", message: `invalid request body: ${(err as Error).message}` },
+    });
+    return;
+  }
+
+  if (!body || typeof body.piece !== "string" || typeof body.trigger !== "string") {
+    writeJson(res, 422, {
+      ok: false,
+      error: { type: "permanent", message: "request must include string 'piece' and 'trigger' fields" },
+    });
+    return;
+  }
+  if (body.state != null && (typeof body.state !== "object" || Array.isArray(body.state))) {
+    writeJson(res, 422, {
+      ok: false,
+      error: { type: "permanent", message: "'state' must be a JSON object or null" },
+    });
+    return;
+  }
+
+  let piece: Piece;
+  try {
+    piece = await loader.load(body.piece);
+  } catch (err) {
+    respondWithError(res, err, log, { piece: body.piece });
+    return;
+  }
+
+  let trigger;
+  try {
+    trigger = findTrigger(piece, body.trigger);
+  } catch (err) {
+    respondWithError(res, err, log, { piece: body.piece, trigger: body.trigger });
+    return;
+  }
+
+  // Webhook-strategy triggers need platform-side registration (onEnable)
+  // and an inbound URL — neither exists headlessly. Fail fast and clearly.
+  if (typeof trigger.type === "string" && trigger.type.toUpperCase().includes("WEBHOOK")) {
+    respondWithError(
+      res,
+      new PieceExecutionError(
+        "permanent",
+        `trigger '${body.trigger}' uses the webhook strategy; only polling triggers are supported`,
+      ),
+      log,
+      { piece: body.piece, trigger: body.trigger },
+    );
+    return;
+  }
+  if (typeof trigger.run !== "function") {
+    respondWithError(
+      res,
+      new PieceExecutionError("permanent", `trigger '${body.trigger}' has no run() function`),
+      log,
+      { piece: body.piece, trigger: body.trigger },
+    );
+    return;
+  }
+
+  const { ctx, dumpStore } = buildTriggerContext({
+    auth: body.auth,
+    propsValue: body.props ?? {},
+    state: body.state ?? null,
+    slug: body.slug ?? "",
+  });
+
+  const started = Date.now();
+  try {
+    const result = await withTimeout(trigger.run(ctx), timeoutMs, body.piece, body.trigger);
+    const items = Array.isArray(result) ? result : result == null ? [] : [result];
+    log("info", "piece trigger poll completed", {
+      piece: body.piece,
+      trigger: body.trigger,
+      slug: body.slug,
+      items: items.length,
+      duration_ms: Date.now() - started,
+    });
+    writeJson(res, 200, { ok: true, items, state: dumpStore() });
+  } catch (err) {
+    const classified = classifyError(err);
+    const status = classified.type === "retryable" ? 502 : 500;
+    log(classified.type === "retryable" ? "warn" : "error", "piece trigger poll failed", {
+      piece: body.piece,
+      trigger: body.trigger,
+      slug: body.slug,
+      duration_ms: Date.now() - started,
       error_type: classified.type,
       error_message: classified.message,
     });

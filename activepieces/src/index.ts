@@ -18,8 +18,8 @@ import { createServer, ServerOptions } from "./server";
 import { createDefaultLoader } from "./registry";
 
 export { createServer } from "./server";
-export { createDefaultLoader, findAction } from "./registry";
-export { buildActionContext } from "./context";
+export { createDefaultLoader, findAction, findTrigger } from "./registry";
+export { buildActionContext, buildTriggerContext } from "./context";
 export { classifyError, PieceExecutionError } from "./errors";
 
 function parseEnvInt(name: string, fallback: number): number {

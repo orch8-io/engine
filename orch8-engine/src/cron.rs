@@ -231,6 +231,15 @@ pub fn validate_cron_expr(expr: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Next fire time (UTC) for a bare cron expression, accepting the same
+/// 5/6/7-field shapes as [`validate_cron_expr`]. Returns `None` if the
+/// expression is invalid or never fires again. Used by schedule consumers
+/// that don't carry a full [`CronSchedule`] row (e.g. polling triggers).
+pub fn next_fire_from_expr(expr: &str) -> Option<chrono::DateTime<Utc>> {
+    let normalized = normalize_cron_expr(expr);
+    Schedule::from_str(&normalized).ok()?.upcoming(Utc).next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

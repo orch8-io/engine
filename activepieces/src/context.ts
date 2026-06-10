@@ -105,3 +105,68 @@ export function buildActionContext(input: ContextInput): Record<string, unknown>
     generateResumeUrl: (_params: unknown) => "",
   };
 }
+
+export interface TriggerContextInput {
+  auth: unknown;
+  propsValue: Record<string, unknown>;
+  /**
+   * Persisted store contents from the previous poll (the dedupe cursor —
+   * `lastPoll` epoch, seen item ids, ...). `null`/`undefined` on the first
+   * poll. The orch8 engine persists whatever {@link buildTriggerContext}'s
+   * `dumpStore` returns and sends it back on the next poll.
+   */
+  state?: Record<string, unknown> | null;
+  /** Trigger registration slug — used as the step/flow identifier. */
+  slug: string;
+  serverPublicUrl?: string;
+  serverApiUrl?: string;
+}
+
+/**
+ * Stub `TriggerContext` for headless polling-trigger execution.
+ *
+ * Same limitations as {@link buildActionContext}, with one key difference:
+ * the `store` is seeded from the caller-provided `state` blob and its final
+ * contents are returned via `dumpStore()`. AP polling triggers (and the
+ * framework's `pollingHelper`) keep their dedupe cursor in `context.store`,
+ * so persisting the store across polls is exactly what gives us
+ * exactly-once-ish item delivery without the AP platform's database.
+ *
+ * Webhook-only context members (`payload`, `webhookUrl`) are present but
+ * empty — polling triggers don't read them, and webhook triggers fail with
+ * a clear error at the route level before this context is ever built.
+ */
+export function buildTriggerContext(input: TriggerContextInput): {
+  ctx: Record<string, unknown>;
+  dumpStore: () => Record<string, unknown>;
+} {
+  const base = buildActionContext({
+    auth: input.auth,
+    propsValue: input.propsValue,
+    instanceId: input.slug,
+    blockId: input.slug,
+    serverPublicUrl: input.serverPublicUrl,
+    serverApiUrl: input.serverApiUrl,
+  });
+
+  const store = new Map<string, unknown>(Object.entries(input.state ?? {}));
+
+  const ctx: Record<string, unknown> = {
+    ...base,
+    store: {
+      get: async (key: string) => store.get(key) ?? null,
+      put: async (key: string, value: unknown) => {
+        store.set(key, value);
+        return value;
+      },
+      delete: async (key: string) => {
+        store.delete(key);
+      },
+    },
+    // Webhook-trigger members — benign empties for polling triggers.
+    payload: {},
+    webhookUrl: "",
+  };
+
+  return { ctx, dumpStore: () => Object.fromEntries(store) };
+}

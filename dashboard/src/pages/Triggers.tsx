@@ -57,6 +57,11 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
       "Fires when a file appears or changes in a watched directory. Useful for batch ingestion pipelines.",
   },
   {
+    term: "activepieces_poll",
+    definition:
+      "Polls an ActivePieces piece trigger (Stripe, Typeform, ...) via the sidecar on a schedule. Each new item spawns an execution; the dedupe cursor is persisted per registration.",
+  },
+  {
     term: "Secret",
     definition:
       "Optional shared secret. Callers must present it in the x-trigger-secret header — requests without the secret are rejected. Leave empty for open triggers (not recommended in prod).",
