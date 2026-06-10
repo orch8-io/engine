@@ -1,0 +1,29 @@
+[package]
+name = "orch8"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Durable workflow execution as an embeddable Rust library"
+# Pre-1.0 embeddable facade — not published yet.
+publish = false
+
+[dependencies]
+orch8-engine = { path = "../orch8-engine" }
+orch8-storage = { path = "../orch8-storage" }
+orch8-types = { path = "../orch8-types" }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+serde = { workspace = true }
+tempfile = "3"
+
+[lints]
+workspace = true
