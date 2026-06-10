@@ -649,7 +649,7 @@ impl crate::OutputStore for SqliteStorage {
 
     async fn get_block_outputs_batch(
         &self,
-        keys: &[(InstanceId, BlockId)],
+        keys: &[(InstanceId, &BlockId)],
     ) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
         outputs::get_batch(self, keys).await
     }

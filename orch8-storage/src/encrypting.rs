@@ -682,7 +682,7 @@ impl crate::OutputStore for EncryptingStorage {
     }
     async fn get_block_outputs_batch(
         &self,
-        keys: &[(InstanceId, orch8_types::ids::BlockId)],
+        keys: &[(InstanceId, &orch8_types::ids::BlockId)],
     ) -> Result<
         std::collections::HashMap<
             (InstanceId, orch8_types::ids::BlockId),

@@ -68,7 +68,7 @@ pub(super) async fn get(
 
 pub(super) async fn get_batch(
     store: &PostgresStorage,
-    keys: &[(InstanceId, BlockId)],
+    keys: &[(InstanceId, &BlockId)],
 ) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
     if keys.is_empty() {
         return Ok(std::collections::HashMap::new());

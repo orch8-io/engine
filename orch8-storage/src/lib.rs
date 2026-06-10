@@ -681,9 +681,12 @@ pub trait OutputStore: Send + Sync + 'static {
     ///
     /// Returns a map from `(InstanceId, BlockId)` to the latest output
     /// (ordered by `created_at DESC`). Missing pairs are omitted.
+    ///
+    /// Performance Note: `keys` accepts `&BlockId` by reference inside the tuple
+    /// to avoid expensive allocations/clones in hot paths like the scheduler loop.
     async fn get_block_outputs_batch(
         &self,
-        keys: &[(InstanceId, BlockId)],
+        keys: &[(InstanceId, &BlockId)],
     ) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
 
     async fn get_all_outputs(

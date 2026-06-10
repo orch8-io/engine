@@ -45,7 +45,7 @@ const GET_BATCH_CHUNK_SIZE: usize = 400;
 
 pub(super) async fn get_batch(
     storage: &SqliteStorage,
-    keys: &[(InstanceId, BlockId)],
+    keys: &[(InstanceId, &BlockId)],
 ) -> Result<std::collections::HashMap<(InstanceId, BlockId), BlockOutput>, StorageError> {
     if keys.is_empty() {
         return Ok(std::collections::HashMap::new());
