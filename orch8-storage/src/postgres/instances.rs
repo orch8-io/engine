@@ -20,9 +20,9 @@ pub(super) const INSTANCE_INSERT_SQL: &str = r"
         (id, sequence_id, tenant_id, namespace, state, next_fire_at,
          priority, timezone, metadata, context,
          concurrency_key, max_concurrency, idempotency_key,
-         session_id, parent_instance_id,
+         session_id, parent_instance_id, budget,
          created_at, updated_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 ";
 
 /// Bind a `TaskInstance` to an already-prepared query in the canonical column
@@ -50,6 +50,11 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(
             inst.parent_instance_id
                 .map(orch8_types::InstanceId::into_uuid),
+        )
+        .bind(
+            inst.budget
+                .as_ref()
+                .and_then(|b| serde_json::to_value(b).ok()),
         )
         .bind(inst.created_at)
         .bind(inst.updated_at)
@@ -83,7 +88,7 @@ pub(super) async fn create_batch(
                 (id, sequence_id, tenant_id, namespace, state, next_fire_at,
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
-                 session_id, parent_instance_id,
+                 session_id, parent_instance_id, budget,
                  created_at, updated_at) ",
         );
         qb.push_values(chunk, |mut b, inst| {
@@ -107,6 +112,11 @@ pub(super) async fn create_batch(
                     inst.parent_instance_id
                         .map(orch8_types::InstanceId::into_uuid),
                 )
+                .push_bind(
+                    inst.budget
+                        .as_ref()
+                        .and_then(|b| serde_json::to_value(b).ok()),
+                )
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at);
         });
@@ -126,7 +136,7 @@ pub(super) async fn get(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at
            FROM task_instances WHERE id = $1",
     )
     .bind(id.into_uuid())
@@ -590,7 +600,7 @@ pub(super) async fn create_batch_externalized(
                 (id, sequence_id, tenant_id, namespace, state, next_fire_at,
                  priority, timezone, metadata, context,
                  concurrency_key, max_concurrency, idempotency_key,
-                 session_id, parent_instance_id,
+                 session_id, parent_instance_id, budget,
                  created_at, updated_at) ",
         );
         qb.push_values(chunk, |mut b, (inst, _)| {
@@ -613,6 +623,11 @@ pub(super) async fn create_batch_externalized(
                 .push_bind(
                     inst.parent_instance_id
                         .map(orch8_types::InstanceId::into_uuid),
+                )
+                .push_bind(
+                    inst.budget
+                        .as_ref()
+                        .and_then(|b| serde_json::to_value(b).ok()),
                 )
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at);
@@ -732,6 +747,27 @@ pub(super) async fn merge_context_data(
     Ok(())
 }
 
+/// Shallow-merge `patch` into the instance's `metadata` JSONB object (`||`
+/// concatenation — top-level keys in `patch` overwrite, others are
+/// preserved). See [`crate::InstanceStore::merge_instance_metadata`].
+pub(super) async fn merge_metadata(
+    store: &PostgresStorage,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"UPDATE task_instances
+          SET metadata = COALESCE(metadata, '{}'::jsonb) || $2,
+              updated_at = NOW()
+          WHERE id = $1",
+    )
+    .bind(id.into_uuid())
+    .bind(patch)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn list(
     store: &PostgresStorage,
     filter: &InstanceFilter,
@@ -741,7 +777,7 @@ pub(super) async fn list(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at
            FROM task_instances WHERE 1=1",
     );
     apply_instance_filter(&mut qb, filter);

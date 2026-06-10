@@ -22,6 +22,8 @@
 //! | `tool_choice` | string/object | — | Tool selection strategy |
 //! | `total_timeout_secs` | number | `120` | Cumulative timeout across all failover attempts (0 disables) |
 //! | `per_provider_timeout_secs` | number | `60` | Per-provider timeout in failover mode |
+//! | `response_schema` | object | — | JSON Schema the response must satisfy (validated, auto-repaired) |
+//! | `max_repair_attempts` | number | `2` | Schema-repair re-calls per provider attempt (hard cap 5) |
 //!
 //! ## Providers
 //!
@@ -51,6 +53,7 @@
 mod anthropic;
 pub(crate) mod common;
 mod openai;
+mod schema;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -79,7 +82,10 @@ use tracing::warn;
 
 use orch8_types::error::StepError;
 
-use self::common::{permanent, resolve_api_key, resolve_base_url, retryable};
+use self::common::{
+    merge_json_response_fields, permanent, resolve_api_key, resolve_base_url, retryable,
+    set_usage_totals, usage_tokens,
+};
 use super::StepContext;
 
 /// Shared HTTP client for all LLM calls (connection pooling, TLS, keep-alive).
@@ -118,6 +124,11 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
     let dry = ctx.is_dry_run();
 
+    // Compile `response_schema` once per step, BEFORE any provider call (and
+    // before the dry-run skip), so an invalid schema is surfaced as a config
+    // error without burning tokens.
+    let response_schema = schema::compile_response_schema(&ctx.params)?;
+
     if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
         if dry {
             // Validate before skipping: an empty providers array is a config
@@ -127,7 +138,7 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
             }
             return Ok(llm_dry_run_stub(&ctx.params));
         }
-        return handle_llm_call_failover(&ctx.params, providers).await;
+        return handle_llm_call_failover(&ctx.params, providers, response_schema.as_ref()).await;
     }
 
     let provider = ctx
@@ -151,14 +162,153 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(llm_dry_run_stub(&ctx.params));
     }
 
-    let out = if provider == "anthropic" {
-        anthropic::call_anthropic(&ctx.params, &api_key, &base).await?
-    } else {
-        openai::call_openai_compat(&ctx.params, &api_key, &base, provider).await?
+    let out = match response_schema.as_ref() {
+        Some(compiled) => {
+            call_provider_with_schema(&ctx.params, &api_key, &base, provider, compiled)
+                .await
+                .map_err(SchemaCallFailure::into_permanent)?
+        }
+        None => dispatch_provider(&ctx.params, &api_key, &base, provider).await?,
     };
     // Capture token usage for cost aggregation (best-effort — never fails the call).
     record_llm_usage(&ctx, &out).await;
     Ok(out)
+}
+
+/// Route a single call to the correct provider API.
+async fn dispatch_provider(
+    params: &Value,
+    api_key: &str,
+    base: &str,
+    provider: &str,
+) -> Result<Value, StepError> {
+    if provider == "anthropic" {
+        anthropic::call_anthropic(params, api_key, base).await
+    } else {
+        openai::call_openai_compat(params, api_key, base, provider).await
+    }
+}
+
+/// How a schema-validated provider attempt failed.
+enum SchemaCallFailure {
+    /// The underlying provider call failed (network, auth, API error, …).
+    Provider(StepError),
+    /// The provider responded, but every response failed schema validation
+    /// within the repair budget.
+    Exhausted { message: String, details: Value },
+}
+
+impl SchemaCallFailure {
+    /// Error for the single-provider path: validation exhaustion is permanent
+    /// (a step retry would just re-burn the same repair budget).
+    fn into_permanent(self) -> StepError {
+        match self {
+            Self::Provider(e) => e,
+            Self::Exhausted { message, details } => StepError::Permanent {
+                message,
+                details: Some(details),
+            },
+        }
+    }
+
+    /// Error for the failover loop: validation exhaustion is retryable so the
+    /// loop proceeds to the next provider. If ALL providers fail, the failover
+    /// aggregation converts the last error into a permanent one.
+    fn into_retryable_for_failover(self) -> StepError {
+        match self {
+            Self::Provider(e) => e,
+            Self::Exhausted { message, details } => StepError::Retryable {
+                message,
+                details: Some(details),
+            },
+        }
+    }
+}
+
+/// Call one provider with `response_schema` enforcement and bounded repair.
+///
+/// The assistant text is JSON-extracted (fences/prose tolerated) and validated
+/// against the compiled schema. On failure, a repair turn (raw response +
+/// corrective user message) is appended and the SAME provider is re-called, up
+/// to `max_repair_attempts` times. On success the validated object's top-level
+/// fields are merged into the output (existing keys win) and `schema_valid` /
+/// `repair_attempts` are added. Token usage is summed across repair calls into
+/// the final output's `usage` fields.
+async fn call_provider_with_schema(
+    params: &Value,
+    api_key: &str,
+    base: &str,
+    provider: &str,
+    compiled: &schema::CompiledSchema,
+) -> Result<Value, SchemaCallFailure> {
+    let mut work = params.clone();
+    // Nudge OpenAI-compatible providers toward raw JSON output, unless the
+    // step already chose a response_format. Anthropic has no equivalent —
+    // prompt + repair handle it.
+    if provider != "anthropic" {
+        if let Some(obj) = work.as_object_mut() {
+            obj.entry("response_format")
+                .or_insert_with(|| json!({"type": "json_object"}));
+        }
+    }
+
+    let max = compiled.max_repair_attempts;
+    let (mut total_input, mut total_output) = (0i64, 0i64);
+    let mut last_errors: Vec<String> = Vec::new();
+    let mut last_response = String::new();
+
+    for attempt in 0..=max {
+        let mut out = dispatch_provider(&work, api_key, base, provider)
+            .await
+            .map_err(SchemaCallFailure::Provider)?;
+        let (input, output) = usage_tokens(&out);
+        total_input += input;
+        total_output += output;
+
+        let content = out
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        match compiled.validate_text(schema::extract_candidate_json(&content)) {
+            Ok(valid) => {
+                if attempt > 0 {
+                    // Account for the tokens burned by repair calls too.
+                    set_usage_totals(&mut out, total_input, total_output);
+                }
+                if let Ok(serialized) = serde_json::to_string(&valid) {
+                    merge_json_response_fields(&serialized, &mut out);
+                }
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("schema_valid".into(), json!(true));
+                    obj.insert("repair_attempts".into(), json!(attempt));
+                }
+                return Ok(out);
+            }
+            Err(errors) => {
+                warn!(
+                    provider = %provider,
+                    attempt,
+                    errors = ?errors,
+                    "llm_call: response failed response_schema validation"
+                );
+                if attempt < max {
+                    schema::append_repair_turn(&mut work, &content, &errors);
+                }
+                last_errors = errors;
+                last_response = content;
+            }
+        }
+    }
+
+    Err(SchemaCallFailure::Exhausted {
+        message: format!(
+            "response failed response_schema validation after {max} repair attempt(s)"
+        ),
+        details: schema::exhaustion_details(&last_errors, &last_response),
+    })
 }
 
 /// Record LLM token usage as a `usage_event`. Normalizes the two provider usage
@@ -166,18 +316,7 @@ pub async fn handle_llm_call(ctx: StepContext) -> Result<Value, StepError> {
 /// `input_tokens`/`output_tokens`).
 /// Best-effort: a recording failure is logged, never propagated.
 async fn record_llm_usage(ctx: &StepContext, out: &Value) {
-    let Some(usage) = out.get("usage") else {
-        return;
-    };
-    let pick = |a: &str, b: &str| {
-        usage
-            .get(a)
-            .or_else(|| usage.get(b))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-    };
-    let input = pick("input_tokens", "prompt_tokens");
-    let output = pick("output_tokens", "completion_tokens");
+    let (input, output) = usage_tokens(out);
     if input == 0 && output == 0 {
         return; // provider returned no usage — nothing to attribute.
     }
@@ -225,7 +364,15 @@ const DEFAULT_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// Applies both a per-provider timeout and a cumulative timeout across all
 /// attempts. Override via `total_timeout_secs` (0 disables the cumulative cap).
-async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
+///
+/// When `response_schema` is set, validation + repair run per provider
+/// attempt (within that provider's timeout); a provider that exhausts its
+/// repair budget counts as a failed provider and failover proceeds.
+async fn handle_llm_call_failover(
+    params: &Value,
+    providers: &[Value],
+    response_schema: Option<&schema::CompiledSchema>,
+) -> Result<Value, StepError> {
     if providers.is_empty() {
         return Err(permanent("providers array is empty".to_string()));
     }
@@ -236,10 +383,15 @@ async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result
         .map_or(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs);
 
     if total_timeout.is_zero() {
-        return failover_inner(params, providers).await;
+        return failover_inner(params, providers, response_schema).await;
     }
 
-    match tokio::time::timeout(total_timeout, failover_inner(params, providers)).await {
+    match tokio::time::timeout(
+        total_timeout,
+        failover_inner(params, providers, response_schema),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_) => Err(retryable(format!(
             "all providers exceeded total timeout of {total_timeout:?}"
@@ -247,7 +399,11 @@ async fn handle_llm_call_failover(params: &Value, providers: &[Value]) -> Result
     }
 }
 
-async fn failover_inner(params: &Value, providers: &[Value]) -> Result<Value, StepError> {
+async fn failover_inner(
+    params: &Value,
+    providers: &[Value],
+    response_schema: Option<&schema::CompiledSchema>,
+) -> Result<Value, StepError> {
     let per_attempt_timeout = params
         .get("per_provider_timeout_secs")
         .and_then(Value::as_u64)
@@ -285,10 +441,13 @@ async fn failover_inner(params: &Value, providers: &[Value]) -> Result<Value, St
         }
 
         let attempt = async {
-            if provider_name == "anthropic" {
-                anthropic::call_anthropic(&merged, &api_key, &base).await
-            } else {
-                openai::call_openai_compat(&merged, &api_key, &base, provider_name).await
+            match response_schema {
+                Some(compiled) => {
+                    call_provider_with_schema(&merged, &api_key, &base, provider_name, compiled)
+                        .await
+                        .map_err(SchemaCallFailure::into_retryable_for_failover)
+                }
+                None => dispatch_provider(&merged, &api_key, &base, provider_name).await,
             }
         };
 
@@ -317,12 +476,19 @@ async fn failover_inner(params: &Value, providers: &[Value]) -> Result<Value, St
         }
     }
 
-    let error_msg = match last_error.as_ref() {
-        Some(e) => format!("all providers failed, last error: {e}"),
-        None => "all providers failed".to_string(),
+    // Aggregate into a permanent error, carrying forward the last error's
+    // details (e.g. schema validation_errors / last_response) so they aren't
+    // lost when all providers fail.
+    let (message, details) = match last_error {
+        Some(e) => {
+            let message = format!("all providers failed, last error: {e}");
+            let (StepError::Retryable { details, .. } | StepError::Permanent { details, .. }) = e;
+            (message, details)
+        }
+        None => ("all providers failed".to_string(), None),
     };
 
-    Err(permanent(error_msg))
+    Err(StepError::Permanent { message, details })
 }
 
 fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value {
@@ -358,7 +524,7 @@ mod tests {
     fn empty_providers_returns_error() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[]));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None));
         assert!(result.is_err());
     }
 
@@ -452,7 +618,7 @@ mod tests {
     fn cumulative_timeout_returns_error_on_empty_providers_before_timeout() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[]));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -461,7 +627,7 @@ mod tests {
         let params = json!({"total_timeout_secs": 0});
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&params, &[]));
+            .block_on(handle_llm_call_failover(&params, &[], None));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -499,5 +665,339 @@ mod tests {
         assert_eq!(merged["model"], "gpt-4");
         assert!(merged.get("providers").is_none());
         assert!(merged.get("messages").is_some());
+    }
+
+    // --- response_schema validate + repair (mock OpenAI-compatible server) --
+    //
+    // Same dep-free pattern as the webhook delivery tests: a tiny TCP
+    // listener that answers each request with the next queued JSON body and
+    // records the parsed request bodies.
+
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Read one HTTP/1.1 request (headers + Content-Length body bytes).
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1024);
+        let mut tmp = [0u8; 1024];
+        let mut header_end = None;
+        loop {
+            let n = stream.read(&mut tmp).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if header_end.is_none() {
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = Some(pos + 4);
+                }
+            }
+            if let Some(end) = header_end {
+                let headers = std::str::from_utf8(&buf[..end]).unwrap_or("");
+                let cl: usize = headers
+                    .lines()
+                    .find_map(|l| {
+                        let l = l.to_ascii_lowercase();
+                        l.strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= end + cl {
+                    break;
+                }
+            }
+        }
+        buf
+    }
+
+    /// Start a mock OpenAI-compatible server that answers each request with
+    /// the next queued response body (HTTP 200). Returns the base URL (already
+    /// marked SSRF-safe) and the parsed JSON request bodies received.
+    async fn start_openai_mock(
+        responses: Vec<Value>,
+    ) -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let requests_srv = Arc::clone(&requests);
+        let queue = Arc::new(tokio::sync::Mutex::new(VecDeque::from(responses)));
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let raw = read_http_request(&mut stream).await;
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..]) {
+                        requests_srv.lock().await.push(v);
+                    }
+                }
+                let body = queue.lock().await.pop_front().unwrap_or_else(
+                    || json!({"error": {"message": "mock response queue exhausted"}}),
+                );
+                let body = serde_json::to_string(&body).unwrap();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        super::super::builtin::mark_url_safe_for_test(&base).await;
+        (base, requests)
+    }
+
+    /// `OpenAI` chat-completions shaped response with the given assistant text.
+    fn openai_resp(content: &str, prompt: i64, completion: i64) -> Value {
+        json!({
+            "model": "gpt-test",
+            "choices": [
+                {"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": prompt, "completion_tokens": completion},
+        })
+    }
+
+    /// JSON Schema used by the validate+repair tests: `{"name": <string>}`.
+    fn name_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {"name": {"type": "string"}},
+        })
+    }
+
+    async fn test_ctx(params: Value) -> StepContext {
+        let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        StepContext {
+            instance_id: orch8_types::ids::InstanceId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            block_id: orch8_types::ids::BlockId::new("b"),
+            params,
+            context: orch8_types::context::ExecutionContext::default(),
+            attempt: 0,
+            storage,
+            wait_for_input: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn response_schema_valid_on_first_try() {
+        let (base, requests) =
+            start_openai_mock(vec![openai_resp(r#"{"name": "ok"}"#, 10, 5)]).await;
+        let ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_schema": name_schema(),
+        }))
+        .await;
+
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["schema_valid"], true);
+        assert_eq!(out["repair_attempts"], 0);
+        assert_eq!(out["name"], "ok", "validated fields merged into output");
+        assert_eq!(out["usage"]["prompt_tokens"], 10);
+        assert_eq!(out["usage"]["completion_tokens"], 5);
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1, "exactly one provider call");
+        assert_eq!(
+            reqs[0]["response_format"]["type"], "json_object",
+            "json_object nudge injected for OpenAI-compatible provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_schema_repaired_on_second_attempt() {
+        // First response: fenced + wrong type for `name`. Second: valid.
+        let (base, requests) = start_openai_mock(vec![
+            openai_resp("```json\n{\"name\": 42}\n```", 10, 5),
+            openai_resp(r#"{"name": "fixed"}"#, 20, 7),
+        ])
+        .await;
+        let ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_schema": name_schema(),
+        }))
+        .await;
+
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["schema_valid"], true);
+        assert_eq!(out["repair_attempts"], 1);
+        assert_eq!(out["name"], "fixed");
+        // Usage accumulated across the initial call + one repair call.
+        assert_eq!(out["usage"]["prompt_tokens"], 30);
+        assert_eq!(out["usage"]["completion_tokens"], 12);
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 2);
+        // The repair call carries the raw failing response as an assistant
+        // message plus a corrective user message.
+        let msgs = reqs[1]["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "```json\n{\"name\": 42}\n```");
+        assert_eq!(msgs[2]["role"], "user");
+        let repair = msgs[2]["content"].as_str().unwrap();
+        assert!(repair.contains("Validation errors"), "{repair}");
+        assert!(
+            repair.contains("Return ONLY the corrected JSON"),
+            "{repair}"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_schema_exhausted_repairs_is_permanent_with_details() {
+        let (base, requests) = start_openai_mock(vec![
+            openai_resp(r#"{"wrong": 1}"#, 10, 5),
+            openai_resp(r#"{"still": "wrong"}"#, 10, 5),
+        ])
+        .await;
+        let ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_schema": name_schema(),
+            "max_repair_attempts": 1,
+        }))
+        .await;
+
+        let err = handle_llm_call(ctx)
+            .await
+            .expect_err("must exhaust repairs");
+        match err {
+            StepError::Permanent { message, details } => {
+                assert!(
+                    message.contains("response_schema validation after 1 repair attempt"),
+                    "{message}"
+                );
+                let details = details.expect("details must be present");
+                let errors = details["validation_errors"].as_array().unwrap();
+                assert!(!errors.is_empty());
+                assert_eq!(details["last_response"], r#"{"still": "wrong"}"#);
+            }
+            other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other}"),
+        }
+        assert_eq!(requests.lock().await.len(), 2, "initial call + 1 repair");
+    }
+
+    #[tokio::test]
+    async fn response_schema_failover_moves_to_next_provider() {
+        // Provider A keeps returning schema-invalid output; provider B is valid.
+        let (base_a, requests_a) =
+            start_openai_mock(vec![openai_resp(r#"{"nope": true}"#, 1, 1)]).await;
+        let (base_b, requests_b) =
+            start_openai_mock(vec![openai_resp(r#"{"name": "from-b"}"#, 2, 2)]).await;
+        let ctx = test_ctx(json!({
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_schema": name_schema(),
+            "max_repair_attempts": 0,
+            "providers": [
+                {"provider": "openai", "api_key": "k", "model": "m", "base_url": base_a},
+                {"provider": "openai", "api_key": "k", "model": "m", "base_url": base_b},
+            ],
+        }))
+        .await;
+
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["schema_valid"], true);
+        assert_eq!(out["repair_attempts"], 0);
+        assert_eq!(out["name"], "from-b");
+        assert_eq!(out["tried"], json!(["openai", "openai"]));
+        assert_eq!(requests_a.lock().await.len(), 1);
+        assert_eq!(requests_b.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn response_schema_all_providers_fail_validation_is_permanent() {
+        let (base_a, _) = start_openai_mock(vec![openai_resp(r#"{"a": 1}"#, 1, 1)]).await;
+        let (base_b, _) = start_openai_mock(vec![openai_resp("not json at all", 1, 1)]).await;
+        let ctx = test_ctx(json!({
+            "messages": [{"role": "user", "content": "emit json"}],
+            "response_schema": name_schema(),
+            "max_repair_attempts": 0,
+            "providers": [
+                {"provider": "openai", "api_key": "k", "model": "m", "base_url": base_a},
+                {"provider": "openai", "api_key": "k", "model": "m", "base_url": base_b},
+            ],
+        }))
+        .await;
+
+        let err = handle_llm_call(ctx)
+            .await
+            .expect_err("all providers invalid");
+        match err {
+            StepError::Permanent { message, details } => {
+                assert!(message.contains("all providers failed"), "{message}");
+                let details = details.expect("last validation details carried forward");
+                assert!(!details["validation_errors"].as_array().unwrap().is_empty());
+                assert_eq!(details["last_response"], "not json at all");
+            }
+            other @ StepError::Retryable { .. } => panic!("expected Permanent, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_response_schema_fails_without_provider_call() {
+        let (base, requests) = start_openai_mock(vec![]).await;
+        let ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "response_schema": {"type": "not-a-real-type"},
+        }))
+        .await;
+
+        let err = handle_llm_call(ctx)
+            .await
+            .expect_err("bad schema must fail");
+        assert!(matches!(err, StepError::Permanent { .. }), "{err}");
+        assert!(err.to_string().contains("not a valid JSON Schema"), "{err}");
+        assert_eq!(requests.lock().await.len(), 0, "no provider call made");
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_response_schema_skips_validation() {
+        let base = "http://127.0.0.1:2";
+        super::super::builtin::mark_url_safe_for_test(base).await;
+        let mut ctx = test_ctx(json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "response_schema": name_schema(),
+        }))
+        .await;
+        ctx.context.runtime.dry_run = true;
+
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["dry_run"], true);
+        assert_eq!(out["finish_reason"], "dry_run");
+        assert!(
+            out.get("schema_valid").is_none(),
+            "no validation in dry-run"
+        );
     }
 }

@@ -120,6 +120,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: Utc::now() - chrono::Duration::seconds(600),
             updated_at: Utc::now() - chrono::Duration::seconds(600),
         };
@@ -193,6 +194,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

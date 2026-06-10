@@ -1020,6 +1020,13 @@ async fn process_instance(
         }
     }
 
+    // Budget enforcement: if the instance carries a budget and any configured
+    // limit is already exceeded, pause it (pre-flight — before any step work
+    // this tick). Instances without a budget take zero extra queries here.
+    if step_exec::check_budget(storage, &instance).await? {
+        return Ok(());
+    }
+
     // Merge dynamically injected blocks with the sequence definition.
     let blocks = crate::evaluator::merged_blocks(storage.as_ref(), instance.id, &sequence).await?;
 

@@ -119,6 +119,7 @@ async fn seed_instance(storage: &dyn StorageBackend, id: InstanceId) {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -148,6 +149,7 @@ fn mk_handler_instance(tenant: &str, state: InstanceState) -> TaskInstance {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     }
@@ -1501,6 +1503,7 @@ async fn recovery_83_stale_instance_recovered() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now - chrono::Duration::seconds(600),
         updated_at: now - chrono::Duration::seconds(600),
     };
@@ -1534,6 +1537,7 @@ async fn recovery_84_fresh_instance_untouched() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -1568,6 +1572,7 @@ async fn recovery_85_multiple_stale() {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: now - chrono::Duration::seconds(600),
             updated_at: now - chrono::Duration::seconds(600),
         };

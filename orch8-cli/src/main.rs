@@ -4,12 +4,14 @@ use reqwest::{header, Client};
 use serde_json::Value;
 
 mod commands;
+mod templates;
 
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
 use commands::cron::CronCmd;
 use commands::instance::InstanceCmd;
 use commands::sequence::SequenceCmd;
+use commands::templates::TemplatesCmd;
 
 /// Output format for CLI commands.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -87,7 +89,13 @@ enum Commands {
         /// Directory to initialize in (defaults to current directory).
         #[arg(default_value = ".")]
         dir: String,
+        /// Built-in template to write as sequence.json (see `orch8 templates list`).
+        #[arg(long, default_value = "default")]
+        template: String,
     },
+    /// Browse built-in sequence templates.
+    #[command(subcommand)]
+    Templates(TemplatesCmd),
     /// Run database migrations against Postgres. Use this in CI/CD pipelines
     /// or init containers instead of the server's built-in `run_migrations` flag
     /// so that rolling deployments are safe.
@@ -250,7 +258,8 @@ async fn main() -> Result<()> {
         }
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd, format).await?,
         Commands::Config(cmd) => commands::config::run(cmd)?,
-        Commands::Init { dir } => commands::init::run(&dir)?,
+        Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
+        Commands::Templates(cmd) => commands::templates::run(cmd)?,
         Commands::Migrate { .. } | Commands::Completions { .. } => unreachable!(),
     }
 
@@ -376,6 +385,48 @@ mod tests {
         use clap::Parser;
         let cli = Cli::try_parse_from(["orch8", "completions", "bash"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_init_without_template_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["orch8", "init", "my-project"]).unwrap();
+        match cli.command {
+            Commands::Init { dir, template } => {
+                assert_eq!(dir, "my-project");
+                assert_eq!(template, "default");
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_init_with_template_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["orch8", "init", ".", "--template", "react-loop"]).unwrap();
+        match cli.command {
+            Commands::Init { dir, template } => {
+                assert_eq!(dir, ".");
+                assert_eq!(template, "react-loop");
+            }
+            _ => panic!("expected init command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_templates_subcommands() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["orch8", "templates", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Templates(TemplatesCmd::List)
+        ));
+
+        let cli = Cli::try_parse_from(["orch8", "templates", "show", "react-loop"]).unwrap();
+        match cli.command {
+            Commands::Templates(TemplatesCmd::Show { name }) => assert_eq!(name, "react-loop"),
+            _ => panic!("expected templates show command"),
+        }
     }
 
     #[test]

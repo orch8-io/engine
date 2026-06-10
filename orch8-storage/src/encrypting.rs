@@ -325,6 +325,15 @@ impl crate::InstanceStore for EncryptingStorage {
         )))
     }
 
+    async fn merge_instance_metadata(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        // Metadata is never encrypted (only `context.data` is) — pure pass-through.
+        self.inner.merge_instance_metadata(id, patch).await
+    }
+
     async fn list_instances(
         &self,
         filter: &orch8_types::filter::InstanceFilter,
@@ -1462,6 +1471,12 @@ impl crate::TelemetryStore for EncryptingStorage {
         end: DateTime<Utc>,
     ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
         self.inner.query_usage(tenant_id, start, end).await
+    }
+    async fn query_instance_usage_totals(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<(i64, i64), StorageError> {
+        self.inner.query_instance_usage_totals(instance_id).await
     }
 }
 

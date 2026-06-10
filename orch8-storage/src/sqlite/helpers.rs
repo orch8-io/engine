@@ -81,6 +81,11 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
             .get::<Option<String>, _>("parent_instance_id")
             .and_then(|s| Uuid::parse_str(&s).ok())
             .map(InstanceId::from_uuid),
+        budget: row
+            .get::<Option<String>, _>("budget")
+            .as_deref()
+            .map(parse_json)
+            .transpose()?,
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
         updated_at: parse_ts(row.get::<&str, _>("updated_at"))?,
     })

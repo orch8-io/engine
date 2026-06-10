@@ -16,6 +16,58 @@ pub(super) fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Extract normalized `(input, output)` token counts from an LLM step
+/// output's `usage` object. Handles both `OpenAI` (`prompt_tokens` /
+/// `completion_tokens`) and `Anthropic` (`input_tokens` / `output_tokens`)
+/// shapes; missing fields count as 0.
+pub(super) fn usage_tokens(out: &Value) -> (i64, i64) {
+    let Some(usage) = out.get("usage") else {
+        return (0, 0);
+    };
+    let pick = |a: &str, b: &str| {
+        usage
+            .get(a)
+            .or_else(|| usage.get(b))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+    };
+    (
+        pick("input_tokens", "prompt_tokens"),
+        pick("output_tokens", "completion_tokens"),
+    )
+}
+
+/// Overwrite the token counts in `out["usage"]` with accumulated totals
+/// (summed across schema-repair re-calls), updating whichever provider-style
+/// key names are present and falling back to the normalized
+/// `input_tokens` / `output_tokens` names when none are.
+pub(super) fn set_usage_totals(out: &mut Value, input: i64, output: i64) {
+    let Some(obj) = out.as_object_mut() else {
+        return;
+    };
+    let usage = obj
+        .entry("usage")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !usage.is_object() {
+        *usage = Value::Object(serde_json::Map::new());
+    }
+    let Some(map) = usage.as_object_mut() else {
+        return;
+    };
+    let mut set_pair = |a: &str, b: &str, total: i64| {
+        let has_a = map.contains_key(a);
+        let has_b = map.contains_key(b);
+        if has_a || !has_b {
+            map.insert(a.to_string(), Value::from(total));
+        }
+        if has_b {
+            map.insert(b.to_string(), Value::from(total));
+        }
+    };
+    set_pair("input_tokens", "prompt_tokens", input);
+    set_pair("output_tokens", "completion_tokens", output);
+}
+
 pub(super) fn is_json_object_format(params: &Value) -> bool {
     params
         .get("response_format")
@@ -585,6 +637,44 @@ mod tests {
         for name in ["OPENAI_API_KEY", "CUSTOM_LLM_TOKEN", "MY_GROQ_KEY"] {
             assert!(is_allowed_api_key_env(name), "{name} should stay allowed");
         }
+    }
+
+    #[test]
+    fn usage_tokens_normalizes_both_shapes_and_missing() {
+        let openai = json!({"usage": {"prompt_tokens": 12, "completion_tokens": 7}});
+        assert_eq!(usage_tokens(&openai), (12, 7));
+        let anthropic = json!({"usage": {"input_tokens": 3, "output_tokens": 4}});
+        assert_eq!(usage_tokens(&anthropic), (3, 4));
+        assert_eq!(usage_tokens(&json!({})), (0, 0));
+        assert_eq!(usage_tokens(&json!({"usage": {}})), (0, 0));
+    }
+
+    #[test]
+    fn set_usage_totals_updates_present_keys() {
+        let mut out = json!({"usage": {"prompt_tokens": 5, "completion_tokens": 2}});
+        set_usage_totals(&mut out, 30, 11);
+        assert_eq!(out["usage"]["prompt_tokens"], 30);
+        assert_eq!(out["usage"]["completion_tokens"], 11);
+        assert!(out["usage"].get("input_tokens").is_none());
+
+        let mut out = json!({"usage": {"input_tokens": 1, "output_tokens": 1}});
+        set_usage_totals(&mut out, 8, 9);
+        assert_eq!(out["usage"]["input_tokens"], 8);
+        assert_eq!(out["usage"]["output_tokens"], 9);
+    }
+
+    #[test]
+    fn set_usage_totals_inserts_normalized_keys_when_absent() {
+        let mut out = json!({"usage": {}});
+        set_usage_totals(&mut out, 4, 6);
+        assert_eq!(out["usage"]["input_tokens"], 4);
+        assert_eq!(out["usage"]["output_tokens"], 6);
+
+        // Null usage (provider returned none) is replaced with an object.
+        let mut out = json!({"usage": null});
+        set_usage_totals(&mut out, 1, 2);
+        assert_eq!(out["usage"]["input_tokens"], 1);
+        assert_eq!(out["usage"]["output_tokens"], 2);
     }
 
     #[test]

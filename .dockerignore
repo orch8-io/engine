@@ -5,5 +5,7 @@ target/
 dashboard/
 tests/
 docs/
+!docs/agent-patterns
+!docs/agent-patterns/**
 worker-sdk-node/
 *.md

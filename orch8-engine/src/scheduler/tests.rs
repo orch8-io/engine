@@ -117,6 +117,7 @@ async fn seed_instance_with_context(
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -482,6 +483,7 @@ async fn seed_instance_in_state(
         idempotency_key: None,
         session_id: None,
         parent_instance_id: parent,
+        budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -736,6 +738,7 @@ async fn seed_instance_with_concurrency(
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };

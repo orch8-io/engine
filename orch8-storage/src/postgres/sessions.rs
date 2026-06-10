@@ -92,7 +92,7 @@ pub(super) async fn list_instances(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at
            FROM task_instances WHERE session_id = $1 ORDER BY created_at",
     )
     .bind(session_id)

@@ -330,6 +330,14 @@ impl crate::InstanceStore for PostgresStorage {
         instances::merge_context_data(self, id, key, value).await
     }
 
+    async fn merge_instance_metadata(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        instances::merge_metadata(self, id, patch).await
+    }
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -1574,6 +1582,23 @@ impl crate::TelemetryStore for PostgresStorage {
                 output_tokens: r.get("output_tokens"),
             })
             .collect())
+    }
+
+    async fn query_instance_usage_totals(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<(i64, i64), StorageError> {
+        use sqlx::Row;
+        // SUM(bigint) is NUMERIC in Postgres — cast back to BIGINT for i64 decode.
+        let row = sqlx::query(
+            r"SELECT COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+                     COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
+              FROM usage_events WHERE instance_id = $1",
+        )
+        .bind(instance_id.into_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((row.get("input_tokens"), row.get("output_tokens")))
     }
 
     async fn ingest_telemetry_events_batch(

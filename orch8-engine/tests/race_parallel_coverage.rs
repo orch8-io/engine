@@ -79,6 +79,7 @@ async fn setup(blocks: Vec<BlockDefinition>) -> (SqliteStorage, TaskInstance, Ve
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };

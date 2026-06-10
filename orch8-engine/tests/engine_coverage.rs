@@ -3884,6 +3884,7 @@ async fn sequence_config_accessible_in_steps() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };
@@ -3972,6 +3973,7 @@ async fn sequence_priority_ordering() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };

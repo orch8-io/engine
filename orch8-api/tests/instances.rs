@@ -361,3 +361,83 @@ async fn invalid_state_transition_returns_400() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn create_instance_with_budget_echoes_budget_on_get() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    let body = json!({
+        "sequence_id": seq_id,
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "context": { "data": {}, "config": {}, "audit": [] },
+        "budget": {
+            "max_input_tokens": 1000,
+            "max_total_tokens": 5000,
+            "max_steps": 10
+        }
+    });
+
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let inst_id = created["id"].as_str().unwrap();
+
+    let resp = client
+        .get(format!("{}/instances/{inst_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let fetched: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(fetched["budget"]["max_input_tokens"], 1000);
+    assert_eq!(fetched["budget"]["max_total_tokens"], 5000);
+    assert_eq!(fetched["budget"]["max_steps"], 10);
+    // Unset limit is omitted from the serialized budget.
+    assert!(fetched["budget"].get("max_output_tokens").is_none());
+}
+
+#[tokio::test]
+async fn create_instance_without_budget_omits_budget_field() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    let body = json!({
+        "sequence_id": seq_id,
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "context": { "data": {}, "config": {}, "audit": [] }
+    });
+
+    let resp = client
+        .post(format!("{}/instances", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created: serde_json::Value = resp.json().await.unwrap();
+    let inst_id = created["id"].as_str().unwrap();
+
+    let resp = client
+        .get(format!("{}/instances/{inst_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let fetched: serde_json::Value = resp.json().await.unwrap();
+    // skip_serializing_if = Option::is_none — the key is absent entirely.
+    assert!(fetched.get("budget").is_none());
+}

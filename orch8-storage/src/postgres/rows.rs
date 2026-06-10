@@ -81,6 +81,7 @@ pub(super) struct InstanceRow {
     pub idempotency_key: Option<String>,
     pub session_id: Option<Uuid>,
     pub parent_instance_id: Option<Uuid>,
+    pub budget: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -90,6 +91,7 @@ impl InstanceRow {
         let state = InstanceState::from_str(&self.state).map_err(StorageError::Query)?;
         let priority = Priority::try_from(self.priority).unwrap_or(Priority::Normal);
         let context = serde_json::from_value(self.context)?;
+        let budget = self.budget.map(serde_json::from_value).transpose()?;
 
         Ok(TaskInstance {
             id: InstanceId::from_uuid(self.id),
@@ -107,6 +109,7 @@ impl InstanceRow {
             idempotency_key: self.idempotency_key,
             session_id: self.session_id,
             parent_instance_id: self.parent_instance_id.map(InstanceId::from_uuid),
+            budget,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })

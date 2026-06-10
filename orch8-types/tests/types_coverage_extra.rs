@@ -508,6 +508,7 @@ fn inst_46_task_instance_serde_round_trip_all_fields() {
         idempotency_key: Some("idem-123".into()),
         session_id: Some(Uuid::now_v7()),
         parent_instance_id: Some(InstanceId::new()),
+        budget: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -543,6 +544,7 @@ fn inst_47_task_instance_optional_fields_none() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -572,6 +574,7 @@ fn inst_48_task_instance_metadata_json() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

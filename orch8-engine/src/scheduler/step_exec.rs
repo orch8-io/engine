@@ -40,6 +40,78 @@ pub(super) async fn check_step_deadline(
     .await
 }
 
+/// Budget enforcement pre-flight: pause the instance if any configured
+/// budget limit is exceeded. Returns `true` if the instance was paused (the
+/// caller must skip step execution for this tick).
+///
+/// Cost model: instances without a budget short-circuit with zero extra
+/// queries; instances with only `max_steps` use the in-memory
+/// `context.runtime.total_steps_executed` counter (still zero queries);
+/// token limits cost one `usage_events` aggregate query.
+///
+/// On breach the instance is paused via the same `transition_instance`
+/// pattern as `check_human_input` (CAS Running -> Paused) and the
+/// machine-readable reason is merged into `metadata`:
+/// `{"paused_reason": "budget_exceeded", "budget_breach": {...}}`.
+/// Resume via the normal `Paused -> Scheduled` transition; see
+/// [`orch8_types::instance::Budget`] for the one-more-tick v1 semantics.
+pub(super) async fn check_budget(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &orch8_types::instance::TaskInstance,
+) -> Result<bool, EngineError> {
+    let Some(budget) = &instance.budget else {
+        return Ok(false);
+    };
+
+    let steps = i64::from(instance.context.runtime.total_steps_executed);
+    // Only pay for the usage_events aggregate when a token limit is set.
+    let (input_tokens, output_tokens) = if budget.has_token_limits() {
+        storage.query_instance_usage_totals(instance.id).await?
+    } else {
+        (0, 0)
+    };
+
+    let Some(breach) = budget.first_breach(input_tokens, output_tokens, steps) else {
+        return Ok(false);
+    };
+
+    warn!(
+        instance_id = %instance.id,
+        limit = breach.limit,
+        limit_value = breach.limit_value,
+        actual = breach.actual,
+        "instance exceeded budget, pausing"
+    );
+
+    // Record the machine-readable reason BEFORE the state flip so an observer
+    // who sees Paused is guaranteed to also see the breach metadata.
+    storage
+        .merge_instance_metadata(
+            instance.id,
+            &serde_json::json!({
+                "paused_reason": "budget_exceeded",
+                "budget_breach": {
+                    "limit": breach.limit,
+                    "limit_value": breach.limit_value,
+                    "actual": breach.actual,
+                },
+            }),
+        )
+        .await?;
+
+    crate::lifecycle::transition_instance(
+        storage.as_ref(),
+        instance.id,
+        Some(&instance.tenant_id),
+        InstanceState::Running,
+        InstanceState::Paused,
+        None,
+    )
+    .await?;
+
+    Ok(true) // Paused — skip step execution this tick.
+}
+
 /// Check if the step has a delay and defer if so. Returns `true` if deferred.
 pub(super) async fn check_step_delay(
     storage: &dyn StorageBackend,

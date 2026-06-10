@@ -24,5 +24,8 @@ toml.workspace = true
 orch8-types = { path = "../orch8-types" }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

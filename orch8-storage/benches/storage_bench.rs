@@ -68,6 +68,7 @@ fn make_instance(seq_id: SequenceId) -> TaskInstance {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     }

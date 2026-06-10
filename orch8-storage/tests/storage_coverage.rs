@@ -95,6 +95,7 @@ fn make_instance(tenant: &str, seq_id: SequenceId) -> TaskInstance {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     }
@@ -2012,4 +2013,138 @@ async fn t90_storage_handles_empty_string_fields() {
     assert_eq!(fetched.metadata["nested"]["empty"], "");
     assert_eq!(fetched.context.data["empty_field"], "");
     assert_eq!(fetched.context.data["array"], json!([]));
+}
+
+// ---------------------------------------------------------------------------
+// Budget-governed instances (feature: instance budgets)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn t91_budget_column_round_trips() {
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t", seq.id);
+    inst.budget = Some(orch8_types::instance::Budget {
+        max_input_tokens: Some(1_000),
+        max_output_tokens: None,
+        max_total_tokens: Some(5_000),
+        max_steps: Some(7),
+    });
+    s.create_instance(&inst).await.unwrap();
+
+    let fetched = s.get_instance(inst.id).await.unwrap().unwrap();
+    let budget = fetched.budget.expect("budget persisted");
+    assert_eq!(budget.max_input_tokens, Some(1_000));
+    assert_eq!(budget.max_output_tokens, None);
+    assert_eq!(budget.max_total_tokens, Some(5_000));
+    assert_eq!(budget.max_steps, Some(7));
+}
+
+#[tokio::test]
+async fn t92_budget_absent_reads_back_as_none() {
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+
+    let inst = make_instance("t", seq.id);
+    s.create_instance(&inst).await.unwrap();
+
+    let fetched = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert!(fetched.budget.is_none());
+}
+
+#[tokio::test]
+async fn t93_budget_round_trips_through_batch_create_and_list() {
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut with_budget = make_instance("t", seq.id);
+    with_budget.budget = Some(orch8_types::instance::Budget {
+        max_steps: Some(3),
+        ..Default::default()
+    });
+    let without_budget = make_instance("t", seq.id);
+    s.create_instances_batch(&[with_budget.clone(), without_budget.clone()])
+        .await
+        .unwrap();
+
+    let fetched = s.get_instance(with_budget.id).await.unwrap().unwrap();
+    assert_eq!(fetched.budget.unwrap().max_steps, Some(3));
+    let fetched = s.get_instance(without_budget.id).await.unwrap().unwrap();
+    assert!(fetched.budget.is_none());
+}
+
+#[tokio::test]
+async fn t94_merge_instance_metadata_preserves_existing_keys() {
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+
+    let mut inst = make_instance("t", seq.id);
+    inst.metadata = json!({"owner": "alice", "env": "prod"});
+    s.create_instance(&inst).await.unwrap();
+
+    s.merge_instance_metadata(
+        inst.id,
+        &json!({
+            "paused_reason": "budget_exceeded",
+            "budget_breach": {"limit": "max_steps", "limit_value": 3, "actual": 4},
+        }),
+    )
+    .await
+    .unwrap();
+
+    let fetched = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(fetched.metadata["owner"], "alice");
+    assert_eq!(fetched.metadata["env"], "prod");
+    assert_eq!(fetched.metadata["paused_reason"], "budget_exceeded");
+    assert_eq!(fetched.metadata["budget_breach"]["limit"], "max_steps");
+    assert_eq!(fetched.metadata["budget_breach"]["actual"], 4);
+}
+
+#[tokio::test]
+async fn t95_query_instance_usage_totals_sums_per_instance() {
+    use orch8_storage::TelemetryStore;
+
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t", seq.id);
+    s.create_instance(&inst).await.unwrap();
+    let other = make_instance("t", seq.id);
+    s.create_instance(&other).await.unwrap();
+
+    let mk_event = |instance_id, input, output| orch8_storage::UsageEvent {
+        tenant_id: "t".into(),
+        instance_id: Some(instance_id),
+        block_id: Some("s1".into()),
+        kind: "llm_tokens".into(),
+        model: "test-model".into(),
+        input_tokens: input,
+        output_tokens: output,
+        created_at: Utc::now(),
+    };
+    s.record_usage_event(&mk_event(inst.id, 100, 40))
+        .await
+        .unwrap();
+    s.record_usage_event(&mk_event(inst.id, 25, 10))
+        .await
+        .unwrap();
+    // Another instance's usage must not bleed into the totals.
+    s.record_usage_event(&mk_event(other.id, 999, 999))
+        .await
+        .unwrap();
+
+    let (input, output) = s.query_instance_usage_totals(inst.id).await.unwrap();
+    assert_eq!(input, 125);
+    assert_eq!(output, 50);
+
+    // Instance with no usage rows sums to zero.
+    let empty = make_instance("t", seq.id);
+    s.create_instance(&empty).await.unwrap();
+    let (input, output) = s.query_instance_usage_totals(empty.id).await.unwrap();
+    assert_eq!((input, output), (0, 0));
 }

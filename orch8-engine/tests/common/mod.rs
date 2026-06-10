@@ -418,6 +418,7 @@ pub fn mk_instance_with_ctx(seq_id: SequenceId, data: Value) -> TaskInstance {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     }

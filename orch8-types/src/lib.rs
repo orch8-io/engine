@@ -34,7 +34,7 @@ pub mod worker_filter;
 pub use config::{EngineConfig, SecretString};
 pub use error::{StepError, StorageError};
 pub use ids::*;
-pub use instance::{InstanceState, Priority, TaskInstance};
+pub use instance::{Budget, BudgetBreach, InstanceState, Priority, TaskInstance};
 
 /// Shared serde default value functions used across types.
 pub mod serde_defaults {

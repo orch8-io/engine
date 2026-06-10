@@ -352,6 +352,7 @@ async fn cache_key_serves_from_cache_on_second_instance() {
         idempotency_key: None,
         session_id: None,
         parent_instance_id: None,
+        budget: None,
         created_at: now,
         updated_at: now,
     };

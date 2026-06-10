@@ -393,6 +393,23 @@ pub trait InstanceStore: Send + Sync + 'static {
         value: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    /// Shallow-merge `patch` into the instance's `metadata` JSON object.
+    ///
+    /// Existing keys not present in `patch` are preserved; keys present in
+    /// `patch` overwrite. Used by the scheduler's budget enforcement to record
+    /// `paused_reason` / `budget_breach` without clobbering caller-supplied
+    /// metadata.
+    ///
+    /// Every backend MUST implement this -- there is deliberately no default
+    /// impl so a missing implementation fails at compile time rather than
+    /// silently dropping the patch (same convention as
+    /// [`Self::record_or_get_emit_dedupe`]).
+    async fn merge_instance_metadata(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -1480,6 +1497,19 @@ pub trait TelemetryStore: Send + Sync + 'static {
         _end: DateTime<Utc>,
     ) -> Result<Vec<UsageAggregate>, StorageError> {
         Ok(Vec::new())
+    }
+
+    /// Sum recorded usage for a single instance across all `usage_events`
+    /// rows. Returns `(input_tokens, output_tokens)`.
+    ///
+    /// Used by the scheduler's budget enforcement — only called for instances
+    /// that actually carry a token budget, so backends without usage tracking
+    /// can keep the default `(0, 0)` (a budgetless deployment never breaches).
+    async fn query_instance_usage_totals(
+        &self,
+        _instance_id: InstanceId,
+    ) -> Result<(i64, i64), StorageError> {
+        Ok((0, 0))
     }
 }
 

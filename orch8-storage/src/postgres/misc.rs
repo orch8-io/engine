@@ -19,7 +19,7 @@ pub(super) async fn find_by_idempotency_key(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at
            FROM task_instances
            WHERE tenant_id = $1 AND idempotency_key = $2",
     )
@@ -119,7 +119,7 @@ pub(super) async fn get_child_instances(
         r"SELECT id, sequence_id, tenant_id, namespace, state, next_fire_at,
                   priority, timezone, metadata, context,
                   concurrency_key, max_concurrency, idempotency_key,
-                  session_id, parent_instance_id, created_at, updated_at
+                  session_id, parent_instance_id, budget, created_at, updated_at
            FROM task_instances WHERE parent_instance_id = $1 ORDER BY created_at",
     )
     .bind(parent_instance_id.into_uuid())

@@ -266,6 +266,7 @@ pub(super) async fn dispatch_block(
                     idempotency_key: None,
                     session_id: instance.session_id,
                     parent_instance_id: Some(instance.id),
+                    budget: None,
                     created_at: now,
                     updated_at: now,
                 };

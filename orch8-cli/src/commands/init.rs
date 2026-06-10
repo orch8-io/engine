@@ -4,13 +4,19 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rand::RngCore;
 
-pub fn run(dir: &str) -> Result<()> {
+use crate::templates;
+
+pub fn run(dir: &str, template: &str) -> Result<()> {
+    // Resolve the template before touching the filesystem so an unknown
+    // name fails cleanly without leaving a half-initialized directory.
+    let template = templates::find(template)?;
+
     let base = Path::new(dir);
     if !base.exists() {
         fs::create_dir_all(base).context("failed to create directory")?;
     }
 
-    write_scaffolds(base)?;
+    write_scaffolds(base, template)?;
 
     println!("Initialized Orch8 project in {dir}/");
     println!();
@@ -94,34 +100,6 @@ level = "info"                             # trace, debug, info, warn, error
 json = true                                # true = JSON logs, false = pretty
 "#;
 
-const SEQUENCE_JSON_TEMPLATE: &str = r#"{
-  "tenant_id": "demo",
-  "namespace": "default",
-  "name": "hello-world",
-  "version": 1,
-  "blocks": [
-    {
-      "type": "Step",
-      "id": "greet",
-      "handler": "greet_user",
-      "params": { "message": "Hello from Orch8!" }
-    },
-    {
-      "type": "Step",
-      "id": "wait",
-      "handler": "noop",
-      "delay": "5s"
-    },
-    {
-      "type": "Step",
-      "id": "complete",
-      "handler": "noop",
-      "params": { "message": "Workflow complete." }
-    }
-  ]
-}
-"#;
-
 const DOCKER_COMPOSE_TEMPLATE: &str = r#"services:
   postgres:
     image: postgres:16-alpine
@@ -157,12 +135,12 @@ volumes:
   pgdata:
 "#;
 
-fn write_scaffolds(base: &Path) -> Result<()> {
+fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
     let api_key = generate_api_key();
     #[allow(clippy::literal_string_with_formatting_args)]
     let orch8_toml = ORCH8_TOML_TEMPLATE.replace("{api_key}", &api_key);
     write_if_absent(&base.join("orch8.toml"), &orch8_toml)?;
-    write_if_absent(&base.join("sequence.json"), SEQUENCE_JSON_TEMPLATE)?;
+    write_if_absent(&base.join("sequence.json"), template.json)?;
     write_if_absent(&base.join("docker-compose.yml"), DOCKER_COMPOSE_TEMPLATE)
 }
 
@@ -180,4 +158,69 @@ fn write_if_absent(path: &Path, content: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_default_writes_all_scaffolds() {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path().to_str().unwrap(), "default").unwrap();
+
+        for file in ["orch8.toml", "sequence.json", "docker-compose.yml"] {
+            assert!(dir.path().join(file).exists(), "{file} should be created");
+        }
+        // Default behavior unchanged: sequence.json is the default template.
+        let written = fs::read_to_string(dir.path().join("sequence.json")).unwrap();
+        assert_eq!(written, templates::find("default").unwrap().json);
+    }
+
+    #[test]
+    fn init_with_template_writes_that_template() {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path().to_str().unwrap(), "react-loop").unwrap();
+
+        let written = fs::read_to_string(dir.path().join("sequence.json")).unwrap();
+        assert_eq!(written, templates::find("react-loop").unwrap().json);
+        // The rest of the scaffold is template-independent.
+        assert!(dir.path().join("orch8.toml").exists());
+        assert!(dir.path().join("docker-compose.yml").exists());
+    }
+
+    #[test]
+    fn init_unknown_template_errors_and_creates_nothing() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("project");
+        let err = run(target.to_str().unwrap(), "no-such-template").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown template `no-such-template`"), "{msg}");
+        assert!(
+            msg.contains("default") && msg.contains("react-loop"),
+            "{msg}"
+        );
+        // Failed before touching the filesystem.
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn init_does_not_overwrite_existing_sequence_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let sequence = dir.path().join("sequence.json");
+        fs::write(&sequence, "{\"custom\": true}").unwrap();
+
+        run(dir.path().to_str().unwrap(), "guardrail-validation").unwrap();
+
+        let written = fs::read_to_string(&sequence).unwrap();
+        assert_eq!(written, "{\"custom\": true}");
+    }
+
+    #[test]
+    fn init_creates_missing_directory() {
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("nested").join("project");
+        run(target.to_str().unwrap(), "default").unwrap();
+        assert!(target.join("sequence.json").exists());
+    }
 }

@@ -413,6 +413,14 @@ impl crate::InstanceStore for SqliteStorage {
         instances::merge_context_data(self, id, key, value).await
     }
 
+    async fn merge_instance_metadata(
+        &self,
+        id: InstanceId,
+        patch: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        instances::merge_metadata(self, id, patch).await
+    }
+
     async fn list_instances(
         &self,
         filter: &InstanceFilter,
@@ -1756,6 +1764,22 @@ impl crate::TelemetryStore for SqliteStorage {
             .collect())
     }
 
+    async fn query_instance_usage_totals(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<(i64, i64), StorageError> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, \
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens \
+             FROM usage_events WHERE instance_id = ?1",
+        )
+        .bind(instance_id.to_string())
+        .fetch_one(self.pool())
+        .await?;
+        Ok((row.get("input_tokens"), row.get("output_tokens")))
+    }
+
     async fn ingest_telemetry_events_batch(
         &self,
         events: &[crate::TelemetryEvent],
@@ -2788,6 +2812,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: now,
             updated_at: now,
         };
@@ -2817,6 +2842,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: now,
             updated_at: now,
         };
@@ -3021,6 +3047,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: now,
             updated_at: now,
         }
@@ -3448,6 +3475,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: now,
             updated_at: now,
         };

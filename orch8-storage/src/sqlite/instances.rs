@@ -18,7 +18,7 @@ use super::SqliteStorage;
 /// insert sites (`create`, `create_batch`, `create_externalized`,
 /// `create_batch_externalized`, `create_instance_with_dedupe`) bind against
 /// this string via [`bind_instance_insert`].
-pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)";
+pub(super) const INSTANCE_INSERT_SQL: &str = "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)";
 
 /// Bind a `TaskInstance` to an already-prepared query in the canonical column
 /// order used by [`INSTANCE_INSERT_SQL`]. Kept out of `sqlx::query(...)` so
@@ -43,6 +43,7 @@ pub(super) fn bind_instance_insert<'q>(
         .bind(&i.idempotency_key)
         .bind(i.session_id.map(|u| u.to_string()))
         .bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
+        .bind(i.budget.as_ref().map(serde_json::to_string).transpose()?)
         .bind(ts(i.created_at))
         .bind(ts(i.updated_at)))
 }
@@ -67,11 +68,15 @@ pub(super) async fn create_batch(
 
     for chunk in instances.chunks(500) {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,created_at,updated_at) ",
+            "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at) ",
         );
         qb.push_values(chunk, |mut b, i| {
             let metadata = serde_json::to_string(&i.metadata).unwrap_or_else(|_| "{}".to_string());
             let context = serde_json::to_string(&i.context).unwrap_or_else(|_| "{}".to_string());
+            let budget = i
+                .budget
+                .as_ref()
+                .and_then(|bd| serde_json::to_string(bd).ok());
             b.push_bind(i.id.into_uuid().to_string())
                 .push_bind(i.sequence_id.into_uuid().to_string())
                 .push_bind(i.tenant_id.as_str())
@@ -87,6 +92,7 @@ pub(super) async fn create_batch(
                 .push_bind(&i.idempotency_key)
                 .push_bind(i.session_id.map(|u| u.to_string()))
                 .push_bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
+                .push_bind(budget)
                 .push_bind(ts(i.created_at))
                 .push_bind(ts(i.updated_at));
         });
@@ -629,6 +635,27 @@ pub(super) async fn merge_context_data(
             .await?;
     }
     tx.commit().await?;
+    Ok(())
+}
+
+/// Shallow-merge `patch` into the instance's `metadata` object using SQLite's
+/// `json_patch` (RFC 7386 merge — top-level keys in `patch` overwrite, others
+/// are preserved). See [`crate::InstanceStore::merge_instance_metadata`].
+pub(super) async fn merge_metadata(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    patch: &serde_json::Value,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances \
+         SET metadata = json_patch(coalesce(metadata, '{}'), ?2), updated_at = ?3 \
+         WHERE id = ?1",
+    )
+    .bind(id.to_string())
+    .bind(serde_json::to_string(patch)?)
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await?;
     Ok(())
 }
 

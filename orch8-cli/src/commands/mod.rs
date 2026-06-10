@@ -6,3 +6,4 @@ pub mod init;
 pub mod instance;
 pub mod sequence;
 pub mod signal;
+pub mod templates;

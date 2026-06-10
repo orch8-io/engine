@@ -40,6 +40,11 @@ pub struct CreateInstanceRequest {
     pub(crate) concurrency_key: Option<String>,
     pub(crate) max_concurrency: Option<u32>,
     pub(crate) idempotency_key: Option<String>,
+    /// Optional resource budget (token/step caps) enforced by the scheduler.
+    /// When any configured limit is exceeded the instance is paused with
+    /// `metadata.paused_reason = "budget_exceeded"`. Default: no budget.
+    #[serde(default)]
+    pub(crate) budget: Option<orch8_types::instance::Budget>,
 }
 
 pub fn default_timezone() -> String {
@@ -60,6 +65,16 @@ pub struct UpdateStateRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateContextRequest {
     pub(crate) context: ExecutionContext,
+}
+
+/// Body for `POST /instances/{id}/resume-from/{block_id}`. The whole body is
+/// optional; when present, `context` must be a JSON object whose top-level
+/// keys are shallow-merged into `context.data` (same per-key semantics as
+/// `StorageBackend::merge_context_data`) before the instance is re-scheduled.
+#[derive(Default, Deserialize, ToSchema)]
+pub struct ResumeFromRequest {
+    #[serde(default)]
+    pub(crate) context: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, ToSchema)]

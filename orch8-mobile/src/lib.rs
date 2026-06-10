@@ -1559,6 +1559,7 @@ mod tests {
             idempotency_key: None,
             session_id: None,
             parent_instance_id: None,
+            budget: None,
             created_at: chrono::Utc::now() - chrono::Duration::hours(48),
             updated_at: chrono::Utc::now() - chrono::Duration::hours(48),
         };
