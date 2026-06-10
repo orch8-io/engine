@@ -23,8 +23,8 @@ use owo_colors::OwoColorize;
 use serde_json::Value;
 
 use orch8::{
-    BlockOutput, Clock, CreateInstanceOptions, Engine, ExecutionContext, InstanceId,
-    InstanceState, ManualClock, SequenceDefinition, SharedClock, Storage,
+    BlockOutput, Clock, CreateInstanceOptions, Engine, ExecutionContext, InstanceId, InstanceState,
+    ManualClock, SequenceDefinition, SharedClock, Storage,
 };
 
 /// Tenant every dev-session sequence and instance runs under.
@@ -57,7 +57,7 @@ pub struct DevCmd {
     pub skip_timers: bool,
 
     /// Register a stub handler returning fixed JSON (repeatable),
-    /// e.g. --mock send_email='{"sent":true}'.
+    /// e.g. `--mock send_email='{"sent":true}'`.
     #[arg(long, value_name = "HANDLER=JSON")]
     pub mock: Vec<String>,
 
@@ -149,7 +149,8 @@ pub fn parse_sequence(raw: &str, version: i32) -> Result<LoadedSequence> {
     // each hot reload publishes a fresh immutable version.
     obj.insert("id".into(), serde_json::json!(uuid::Uuid::now_v7()));
     obj.insert("tenant_id".into(), serde_json::json!(DEV_TENANT));
-    obj.entry("namespace").or_insert(serde_json::json!("default"));
+    obj.entry("namespace")
+        .or_insert(serde_json::json!("default"));
     obj.insert("version".into(), serde_json::json!(version));
     obj.insert("created_at".into(), serde_json::json!(Utc::now()));
 
@@ -348,7 +349,10 @@ impl DevSession {
                 handler.bold(),
             );
         }
-        let seq_id = self.engine.upsert_sequence(loaded.definition.clone()).await?;
+        let seq_id = self
+            .engine
+            .upsert_sequence(loaded.definition.clone())
+            .await?;
         let instance_id = self.engine.create_instance(seq_id, opts).await?;
         self.instances_run += 1;
         self.run = Some(RunState {
@@ -565,10 +569,8 @@ impl InstanceOpts {
 /// Entry point for `orch8 dev`.
 pub async fn run(cmd: DevCmd) -> Result<()> {
     let started = Instant::now();
-    let seq_path = resolve_sequence_path(
-        Path::new(&cmd.path),
-        cmd.sequence.as_deref().map(Path::new),
-    )?;
+    let seq_path =
+        resolve_sequence_path(Path::new(&cmd.path), cmd.sequence.as_deref().map(Path::new))?;
 
     let mocks: Vec<(String, Value)> = cmd
         .mock
@@ -589,7 +591,9 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
 
     // --skip-timers: keep a ManualClock handle for advancing, hand the engine
     // a shared view of it. Starts at real "now" (forward-only discipline).
-    let manual_clock = cmd.skip_timers.then(|| Arc::new(ManualClock::new(Utc::now())));
+    let manual_clock = cmd
+        .skip_timers
+        .then(|| Arc::new(ManualClock::new(Utc::now())));
     let shared_clock = manual_clock
         .as_ref()
         .map(|c| SharedClock::from_arc(Arc::clone(c) as Arc<dyn Clock>));
@@ -603,7 +607,11 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
         seq_path.display().to_string().bold(),
         if cmd.skip_timers { "virtual" } else { "real" },
         if cmd.dry_run { "on" } else { "off" },
-        if cmd.once { ", once" } else { ", watching for changes — ctrl-c to stop" },
+        if cmd.once {
+            ", once"
+        } else {
+            ", watching for changes — ctrl-c to stop"
+        },
     );
 
     let mut version = 1;
@@ -952,7 +960,7 @@ mod tests {
     // -- e2e: dev session with virtual time -----------------------------------
 
     /// A sequence with a 3-day delay completes near-instantly under
-    /// `--skip-timers`: the session advances the ManualClock to the deferral
+    /// `--skip-timers`: the session advances the `ManualClock` to the deferral
     /// instead of waiting.
     #[tokio::test]
     async fn dev_session_skips_three_day_delay_with_virtual_clock() {

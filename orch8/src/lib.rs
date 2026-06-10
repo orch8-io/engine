@@ -100,14 +100,12 @@ pub use storage::Storage;
 /// Context passed to step handlers during execution (params, instance
 /// context, attempt counter, storage handle).
 pub use orch8_engine::handlers::StepContext;
+/// Result of a single manual tick (see [`Engine::tick_once`]).
+pub use orch8_engine::scheduler::TickOnceResult as TickResult;
 /// Virtual time: the scheduler reads "now" through a [`Clock`]. Inject a
 /// [`ManualClock`] via [`EngineBuilder::clock`] to fast-forward over delays,
 /// send windows and retry backoffs (see `orch8-types/src/clock.rs`).
 pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
-/// One persisted step result (see [`Engine::block_outputs`]).
-pub use orch8_types::output::BlockOutput;
-/// Result of a single manual tick (see [`Engine::tick_once`]).
-pub use orch8_engine::scheduler::TickOnceResult as TickResult;
 /// Per-instance execution context (`data`, `config`, audit trail).
 pub use orch8_types::context::ExecutionContext;
 /// Error type returned by step handlers — `Retryable` errors are retried per
@@ -117,6 +115,8 @@ pub use orch8_types::error::StepError;
 pub use orch8_types::filter::InstanceFilter;
 pub use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
 pub use orch8_types::instance::{Budget, InstanceState, Priority, TaskInstance};
+/// One persisted step result (see [`Engine::block_outputs`]).
+pub use orch8_types::output::BlockOutput;
 /// Workflow definition types: a sequence is a list of blocks (steps,
 /// parallel groups, loops, routers, ...). Usually deserialized from JSON.
 pub use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
