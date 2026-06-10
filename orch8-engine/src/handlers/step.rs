@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
@@ -130,6 +130,19 @@ pub async fn execute_step_dry(
     let timeout = exec.timeout;
     let cache_key = exec.cache_key;
 
+    // Span around the handler invocation, exported via OTLP when the server
+    // is configured with an endpoint. Structured handler events (e.g. the
+    // `gen_ai.client.inference` event from `llm_call`) ride inside it.
+    // Cardinality stays sane: identity fields only — no params, no outputs.
+    let step_span = tracing::info_span!(
+        "orch8.step",
+        instance_id = %instance_id,
+        block_id = %block_id,
+        handler = %exec.handler_name,
+        tenant_id = %exec.tenant_id,
+        attempt = attempt,
+    );
+
     let step_ctx = StepContext {
         instance_id,
         tenant_id: exec.tenant_id,
@@ -141,8 +154,9 @@ pub async fn execute_step_dry(
         wait_for_input: exec.wait_for_input,
     };
 
+    let handler_fut = handler(step_ctx).instrument(step_span);
     let result = if let Some(dur) = timeout {
-        match tokio::time::timeout(dur, handler(step_ctx)).await {
+        match tokio::time::timeout(dur, handler_fut).await {
             Ok(res) => res,
             Err(_) => {
                 return Err(EngineError::StepTimeout {
@@ -152,7 +166,7 @@ pub async fn execute_step_dry(
             }
         }
     } else {
-        handler(step_ctx).await
+        handler_fut.await
     };
 
     match result {
@@ -289,6 +303,17 @@ pub async fn execute_step(
     let timeout = exec.timeout;
     let cache_key = exec.cache_key;
 
+    // Same `orch8.step` span as `execute_step_dry` — the tree-evaluator path
+    // must export identically-shaped spans as the flat scheduler path.
+    let step_span = tracing::info_span!(
+        "orch8.step",
+        instance_id = %instance_id,
+        block_id = %block_id,
+        handler = %exec.handler_name,
+        tenant_id = %exec.tenant_id,
+        attempt = attempt,
+    );
+
     let step_ctx = StepContext {
         instance_id,
         tenant_id: exec.tenant_id,
@@ -301,8 +326,9 @@ pub async fn execute_step(
     };
 
     // Execute with optional timeout.
+    let handler_fut = handler(step_ctx).instrument(step_span);
     let result = if let Some(dur) = timeout {
-        match tokio::time::timeout(dur, handler(step_ctx)).await {
+        match tokio::time::timeout(dur, handler_fut).await {
             Ok(res) => res,
             Err(_) => {
                 return Err(EngineError::StepTimeout {
@@ -312,7 +338,7 @@ pub async fn execute_step(
             }
         }
     } else {
-        handler(step_ctx).await
+        handler_fut.await
     };
 
     match result {
@@ -488,6 +514,102 @@ mod tests {
         assert_eq!(
             calculate_backoff(10, initial, max, multiplier),
             Duration::from_secs(10)
+        );
+    }
+
+    /// Asserts the `orch8.step` span (exported via OTLP when the server has an
+    /// endpoint configured) wraps handler invocation and carries the expected
+    /// identity fields. Span emission is asserted via a tracing test layer
+    /// rather than `opentelemetry_sdk`'s in-memory exporter — wiring the OpenTelemetry
+    /// bridge into orch8-engine's dev-deps just for this would drag the whole
+    /// opentelemetry stack into the engine's test build for no extra signal:
+    /// the tracing span IS the unit the OTLP layer exports.
+    #[tokio::test]
+    async fn execute_step_dry_emits_orch8_step_span_around_handler() {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct SpanCapture {
+            spans: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        }
+
+        struct FieldVisitor(HashMap<String, String>);
+        impl tracing::field::Visit for FieldVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+
+        impl<S> tracing_subscriber::Layer<S> for SpanCapture
+        where
+            S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        {
+            fn on_new_span(
+                &self,
+                attrs: &tracing::span::Attributes<'_>,
+                _id: &tracing::span::Id,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if attrs.metadata().name() == "orch8.step" {
+                    let mut visitor = FieldVisitor(HashMap::new());
+                    attrs.record(&mut visitor);
+                    self.spans.lock().unwrap().push(visitor.0);
+                }
+            }
+        }
+
+        let capture = SpanCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let mut handlers = HandlerRegistry::new();
+        handlers.register("mock_step", |_ctx| async {
+            Ok(serde_json::json!({"ok": true}))
+        });
+
+        let instance_id = InstanceId::new();
+        let exec = StepExecParams {
+            instance_id,
+            tenant_id: TenantId::unchecked("tenant-a"),
+            block_id: BlockId::new("step-1"),
+            handler_name: "mock_step".into(),
+            params: serde_json::json!({}),
+            context: orch8_types::context::ExecutionContext::default(),
+            attempt: 0,
+            timeout: None,
+            externalize_threshold: 0,
+            wait_for_input: None,
+            cache_key: None,
+        };
+
+        let output = execute_step_dry(&storage, &handlers, exec)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(output.output["ok"], true);
+
+        let spans = capture.spans.lock().unwrap();
+        assert_eq!(spans.len(), 1, "expected exactly one orch8.step span");
+        let fields = &spans[0];
+        assert_eq!(fields.get("handler").map(String::as_str), Some("mock_step"));
+        assert_eq!(
+            fields.get("tenant_id").map(String::as_str),
+            Some("tenant-a")
+        );
+        assert_eq!(fields.get("block_id").map(String::as_str), Some("step-1"));
+        assert_eq!(fields.get("attempt").map(String::as_str), Some("0"));
+        assert_eq!(
+            fields.get("instance_id").cloned(),
+            Some(instance_id.to_string())
         );
     }
 }
