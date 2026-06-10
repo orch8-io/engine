@@ -44,41 +44,42 @@ The server starts on `http://localhost:8080`. Migrations run automatically.
 ### 4. Create a sequence
 
 ```bash
+SEQUENCE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
 curl -s -X POST http://localhost:8080/sequences \
   -H 'Content-Type: application/json' \
-  -d '{
-    "tenant_id": "demo",
-    "namespace": "default",
-    "name": "hello-world",
-    "version": 1,
-    "blocks": [
+  -d "{
+    \"id\": \"$SEQUENCE_ID\",
+    \"tenant_id\": \"demo\",
+    \"namespace\": \"default\",
+    \"name\": \"hello-world\",
+    \"version\": 1,
+    \"created_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+    \"blocks\": [
       {
-        "type": "step",
-        "id": "greet",
-        "handler": "noop",
-        "params": { "message": "Hello from Orch8!" }
+        \"type\": \"step\",
+        \"id\": \"greet\",
+        \"handler\": \"noop\",
+        \"params\": { \"message\": \"Hello from Orch8!\" }
       },
       {
-        "type": "step",
-        "id": "wait",
-        "handler": "noop",
-        "delay": "2s"
+        \"type\": \"step\",
+        \"id\": \"wait\",
+        \"handler\": \"noop\",
+        \"delay\": { \"duration\": 2000 }
       },
       {
-        "type": "step",
-        "id": "finish",
-        "handler": "noop",
-        "params": { "message": "Done." }
+        \"type\": \"step\",
+        \"id\": \"finish\",
+        \"handler\": \"noop\",
+        \"params\": { \"message\": \"Done.\" }
       }
     ]
-  }'
+  }"
 ```
 
-Save the returned `id` as `SEQUENCE_ID`:
-
-```bash
-SEQUENCE_ID="550e8400-e29b-41d4-a716-446655440000"  # replace with actual id
-```
+The sequence `id` and `created_at` are supplied by the client; `delay.duration`
+is in milliseconds. (Tip: `orch8 init --template <name>` and `orch8 templates list`
+scaffold ready-made sequences so you don't have to hand-write this JSON.)
 
 ### 5. Create an instance
 

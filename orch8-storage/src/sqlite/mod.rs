@@ -783,6 +783,24 @@ impl crate::OutputStore for SqliteStorage {
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError> {
         outputs::delete_by_id(self, id).await
     }
+
+    async fn get_outputs_page(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_page(self, instance_id, limit, offset).await
+    }
+
+    async fn copy_block_outputs(
+        &self,
+        src: InstanceId,
+        dst: InstanceId,
+        block_ids: &[BlockId],
+    ) -> Result<u64, StorageError> {
+        outputs::copy_for_blocks(self, src, dst, block_ids).await
+    }
 }
 
 // ============================================================================
@@ -4170,5 +4188,189 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         storage.acquire_manifest_lock("tenant-1").await.unwrap();
         storage.release_manifest_lock("tenant-1").await.unwrap();
+    }
+
+    /// Seed a sequence plus `n` instances of it (block_outputs has an FK to
+    /// task_instances, so copy targets must exist as rows).
+    async fn seed_instances(storage: &SqliteStorage, n: usize) -> Vec<InstanceId> {
+        let now = Utc::now();
+        let seq = orch8_types::sequence::SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("t"),
+            namespace: Namespace::new("ns"),
+            name: "copy-test".into(),
+            version: 1,
+            deprecated: false,
+            status: SequenceStatus::default(),
+            blocks: vec![],
+            interceptors: None,
+            created_at: now,
+        };
+        storage.create_sequence(&seq).await.unwrap();
+
+        let mut ids = Vec::with_capacity(n);
+        for _ in 0..n {
+            let inst = TaskInstance {
+                id: InstanceId::new(),
+                sequence_id: seq.id,
+                tenant_id: TenantId::unchecked("t"),
+                namespace: Namespace::new("ns"),
+                state: InstanceState::Running,
+                next_fire_at: None,
+                priority: Priority::Normal,
+                timezone: "UTC".into(),
+                metadata: serde_json::json!({}),
+                context: ExecutionContext::default(),
+                concurrency_key: None,
+                max_concurrency: None,
+                idempotency_key: None,
+                session_id: None,
+                parent_instance_id: None,
+                budget: None,
+                created_at: now,
+                updated_at: now,
+            };
+            storage.create_instance(&inst).await.unwrap();
+            ids.push(inst.id);
+        }
+        ids
+    }
+
+    fn mk_block_output(
+        instance_id: InstanceId,
+        block: &str,
+        output_ref: Option<&str>,
+        offset_secs: i64,
+    ) -> orch8_types::output::BlockOutput {
+        orch8_types::output::BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id,
+            block_id: BlockId::new(block),
+            output: serde_json::json!({"v": block}),
+            output_ref: output_ref.map(str::to_owned),
+            output_size: 7,
+            attempt: 2,
+            created_at: Utc::now() - chrono::Duration::seconds(100 - offset_secs),
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_block_outputs_copies_inline_rows_with_fresh_identity() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let ids = seed_instances(&storage, 2).await;
+        let (src, dst) = (ids[0], ids[1]);
+
+        let s1 = mk_block_output(src, "s1", None, 0);
+        let s2 = mk_block_output(src, "s2", None, 1);
+        let s3 = mk_block_output(src, "s3", None, 2);
+        for o in [&s1, &s2, &s3] {
+            storage.save_block_output(o).await.unwrap();
+        }
+
+        let copied = storage
+            .copy_block_outputs(src, dst, &[BlockId::new("s1"), BlockId::new("s2")])
+            .await
+            .unwrap();
+        assert_eq!(copied, 2);
+
+        let dst_outputs = storage.get_all_outputs(dst).await.unwrap();
+        assert_eq!(dst_outputs.len(), 2, "s3 was not in the copy set");
+        let copy_s1 = dst_outputs
+            .iter()
+            .find(|o| o.block_id.as_str() == "s1")
+            .unwrap();
+        // Fresh primary key + dst instance_id, everything else preserved.
+        assert_ne!(copy_s1.id, s1.id);
+        assert_eq!(copy_s1.instance_id, dst);
+        assert_eq!(copy_s1.output, s1.output);
+        assert_eq!(copy_s1.attempt, s1.attempt);
+        assert_eq!(copy_s1.output_size, s1.output_size);
+        assert_eq!(
+            copy_s1.created_at.timestamp(),
+            s1.created_at.timestamp(),
+            "created_at preserved so execution order survives the copy"
+        );
+
+        // Source rows untouched.
+        assert_eq!(storage.get_all_outputs(src).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn copy_block_outputs_skips_externalized_and_sentinel_rows() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let ids = seed_instances(&storage, 2).await;
+        let (src, dst) = (ids[0], ids[1]);
+
+        // s1: retry marker then a real inline output; s2: externalized only.
+        storage
+            .save_block_output(&mk_block_output(src, "s1", Some("__retry__"), 0))
+            .await
+            .unwrap();
+        storage
+            .save_block_output(&mk_block_output(src, "s1", None, 1))
+            .await
+            .unwrap();
+        storage
+            .save_block_output(&mk_block_output(src, "s2", Some("ext:ref"), 2))
+            .await
+            .unwrap();
+
+        let copied = storage
+            .copy_block_outputs(src, dst, &[BlockId::new("s1"), BlockId::new("s2")])
+            .await
+            .unwrap();
+        assert_eq!(copied, 1, "only s1's inline row is copied");
+
+        let dst_outputs = storage.get_all_outputs(dst).await.unwrap();
+        assert_eq!(dst_outputs.len(), 1);
+        assert_eq!(dst_outputs[0].block_id.as_str(), "s1");
+        assert!(dst_outputs[0].output_ref.is_none());
+    }
+
+    #[tokio::test]
+    async fn copy_block_outputs_empty_block_set_is_noop() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let ids = seed_instances(&storage, 2).await;
+        let (src, dst) = (ids[0], ids[1]);
+
+        storage
+            .save_block_output(&mk_block_output(src, "s1", None, 0))
+            .await
+            .unwrap();
+
+        let copied = storage.copy_block_outputs(src, dst, &[]).await.unwrap();
+        assert_eq!(copied, 0);
+        assert!(storage.get_all_outputs(dst).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_outputs_page_orders_and_paginates() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let ids = seed_instances(&storage, 1).await;
+        let src = ids[0];
+
+        for (i, block) in ["s1", "s2", "s3"].iter().enumerate() {
+            storage
+                .save_block_output(&mk_block_output(
+                    src,
+                    block,
+                    None,
+                    i64::try_from(i).unwrap(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        let page1 = storage.get_outputs_page(src, 2, 0).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].block_id.as_str(), "s1");
+        assert_eq!(page1[1].block_id.as_str(), "s2");
+
+        let page2 = storage.get_outputs_page(src, 2, 2).await.unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].block_id.as_str(), "s3");
+
+        let beyond = storage.get_outputs_page(src, 2, 5).await.unwrap();
+        assert!(beyond.is_empty());
     }
 }

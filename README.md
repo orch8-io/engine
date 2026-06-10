@@ -321,7 +321,7 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 4,347 tests covering core paths. Honest about what it isn't yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
-- **No replay debugger or time-skipping test tooling.** Temporal's SDKs ship deterministic replay + timer-skip helpers; we don't.
+- **No replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet. Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
 - **Workflow versioning is younger.** Sequence definitions are versioned, but the migration ergonomics for in-flight instances aren't as polished as Temporal's `GetVersion` / patch system.
 - **SDK depth varies.** TypeScript SDK has both authoring + worker support; Go and Python SDKs are worker-focused for now.
 - **API is stable but evolving.** Pre-1.0 means breaking changes are possible; we'll mark them in releases and keep them minimal.

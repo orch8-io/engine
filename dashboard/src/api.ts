@@ -289,6 +289,58 @@ export async function listSequences(
   return Array.isArray(raw) ? raw : raw.items;
 }
 
+export interface CreateSequenceResponse {
+  id: string;
+  warnings?: string[];
+}
+
+/**
+ * Register a new sequence definition. The body is the full sequence JSON
+ * (the server validates structure and returns lint warnings, if any).
+ */
+export function createSequence(
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<CreateSequenceResponse> {
+  return mutate("/sequences", "POST", body, undefined, signal);
+}
+
+// ─── Usage / cost ────────────────────────────────────────────────────────────
+
+export interface UsageEntry {
+  kind: string;
+  model: string;
+  events: number;
+  input_tokens: number;
+  output_tokens: number;
+  /** Estimated list-price cost in USD; null when the model has no pricing-table entry. */
+  cost_usd: number | null;
+}
+
+export interface UsageResponse {
+  tenant: string;
+  start: string;
+  end: string;
+  usage: UsageEntry[];
+  /** Window-wide total over the known-model entries. */
+  total_cost_usd: number;
+  /** Always true — costs are computed from static list prices, not invoices. */
+  cost_is_estimate: boolean;
+}
+
+export interface GetUsageParams {
+  /** Honored only for unscoped/admin callers; scoped keys are locked to their tenant. */
+  tenant?: string;
+  /** Window start (RFC 3339). Defaults server-side to 30 days before `end`. */
+  start?: string;
+  /** Window end (RFC 3339). Defaults server-side to now. */
+  end?: string;
+}
+
+export function getUsage(params?: GetUsageParams, signal?: AbortSignal): Promise<UsageResponse> {
+  return request("/usage", params as Record<string, string | undefined>, signal);
+}
+
 // ─── Operations: DLQ / circuit breakers / cluster ────────────────────────────
 
 export interface ListDlqParams {

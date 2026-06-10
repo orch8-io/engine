@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::config::{SchedulerConfig, WebhookConfig};
 use orch8_types::filter::InstanceFilter;
 use orch8_types::ids::{BlockId, InstanceId};
@@ -26,7 +27,7 @@ mod step_exec;
 #[cfg(test)]
 mod tests;
 
-pub use step_exec::check_human_input;
+pub use step_exec::{check_human_input, check_human_input_at};
 
 /// Result of a single tick execution, suitable for mobile/embedded callers
 /// that drive the engine manually rather than via the continuous tick loop.
@@ -64,6 +65,10 @@ pub(crate) struct TickContext<'a> {
     pub max_per_tenant: u32,
     pub externalize_threshold: u32,
     pub counters: Option<Arc<TickCounters>>,
+    /// Time source for all scheduling decisions made during this tick
+    /// (claiming, deferrals, deadline/timeout checks). Defaults to the
+    /// system clock via `SchedulerConfig::clock`.
+    pub clock: &'a SharedClock,
 }
 
 /// Execute a single scheduling pass: claim due instances, process them, handle
@@ -96,6 +101,7 @@ pub async fn tick_once(
         max_per_tenant: config.max_instances_per_tenant,
         externalize_threshold: config.externalize_output_threshold,
         counters: Some(Arc::clone(&counters)),
+        clock: &config.clock,
     };
 
     let join_handles = process_tick(&ctx).await?;
@@ -108,7 +114,7 @@ pub async fn tick_once(
         let _ = handle.await;
     }
 
-    process_signalled_instances(storage, config.batch_size).await?;
+    process_signalled_instances(storage, config.batch_size, &config.clock).await?;
 
     process_waiting_deadlines(
         storage,
@@ -117,6 +123,7 @@ pub async fn tick_once(
         &webhook_config,
         cancel,
         config.batch_size,
+        &config.clock,
     )
     .await?;
 
@@ -209,6 +216,7 @@ pub async fn run_tick_loop(
                     externalize_threshold,
                     // The tick loop does not need per-tick counters — pass None.
                     counters: None,
+                    clock: &config.clock,
                 };
                 match process_tick(&ctx).await {
                     Ok(_join_handles) => {
@@ -236,7 +244,7 @@ pub async fn run_tick_loop(
                 // picked up by claim_due_instances (which only claims
                 // scheduled instances). Without this, resume/cancel signals
                 // on paused instances would never be processed.
-                if let Err(e) = process_signalled_instances(&storage, batch_size).await {
+                if let Err(e) = process_signalled_instances(&storage, batch_size, &config.clock).await {
                     error!(error = %e, "signalled instance processing failed");
                 }
                 // Check SLA deadlines for waiting instances (external worker
@@ -249,6 +257,7 @@ pub async fn run_tick_loop(
                     &webhook_config,
                     &cancel,
                     batch_size,
+                    &config.clock,
                 ).await {
                     error!(error = %e, "waiting deadline processing failed");
                 }
@@ -289,7 +298,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     }
     let fetch_limit = std::cmp::min(ctx.batch_size, u32::try_from(available).unwrap_or(u32::MAX));
 
-    let now = Utc::now();
+    let now = ctx.clock.now();
     let instances = ctx
         .storage
         .claim_due_instances(now, fetch_limit, ctx.max_per_tenant)
@@ -304,7 +313,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
     // instances share a concurrency_key, more than `max_concurrency` may be
     // Running simultaneously. We put the excess back to Scheduled here,
     // synchronously, so the observable Running count never exceeds the limit.
-    let mut instances = enforce_concurrency_limits(ctx.storage, instances).await?;
+    let mut instances = enforce_concurrency_limits(ctx.storage, instances, ctx.clock).await?;
 
     let count = instances.len();
     tracing::Span::current().record("claimed", count);
@@ -353,7 +362,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             );
             if let Err(e) = ctx
                 .storage
-                .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
+                .update_instance_state(instance.id, InstanceState::Scheduled, Some(ctx.clock.now()))
                 .await
             {
                 // If this write fails the row stays `Running` and is never
@@ -376,6 +385,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
         let counters = ctx.counters.clone();
         let externalize_threshold = ctx.externalize_threshold;
         let max_steps_per_instance = ctx.max_steps_per_instance;
+        let clock = ctx.clock.clone();
 
         crate::metrics::inc(crate::metrics::INSTANCES_CLAIMED);
 
@@ -415,6 +425,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     externalize_threshold,
                     max_steps_per_instance,
                     &cancel,
+                    &clock,
                 )
                 .await
             })
@@ -499,6 +510,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 async fn enforce_concurrency_limits(
     storage: &Arc<dyn StorageBackend>,
     instances: Vec<orch8_types::instance::TaskInstance>,
+    clock: &SharedClock,
 ) -> Result<Vec<orch8_types::instance::TaskInstance>, EngineError> {
     // Collect concurrency keys present in the batch.
     let mut key_instances: HashMap<&str, Vec<usize>> = HashMap::with_capacity(instances.len() / 2);
@@ -546,7 +558,7 @@ async fn enforce_concurrency_limits(
         return Ok(instances);
     }
 
-    let defer_at = Utc::now() + chrono::Duration::seconds(1);
+    let defer_at = clock.now() + chrono::Duration::seconds(1);
     let mut deferred_ids: Vec<InstanceId> = Vec::with_capacity(deferred_indices.len());
     for &idx in &deferred_indices {
         let inst = &instances[idx];
@@ -579,6 +591,7 @@ async fn enforce_concurrency_limits(
 async fn process_signalled_instances(
     storage: &Arc<dyn StorageBackend>,
     batch_size: u32,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     let signalled = storage.get_signalled_instance_ids(batch_size).await?;
     if signalled.is_empty() {
@@ -610,7 +623,7 @@ async fn process_signalled_instances(
                 "waking scheduled instance with pending signal"
             );
             if let Err(e) = storage
-                .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+                .update_instance_state(instance_id, InstanceState::Scheduled, Some(clock.now()))
                 .await
             {
                 warn!(
@@ -653,6 +666,7 @@ async fn process_waiting_deadlines(
     webhook_config: &WebhookConfig,
     cancel: &CancellationToken,
     batch_size: u32,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     use orch8_types::filter::{InstanceFilter, Pagination};
 
@@ -718,6 +732,7 @@ async fn process_waiting_deadlines(
                         webhook_config,
                         cancel,
                         prev,
+                        clock,
                     )
                     .await?
                     {
@@ -738,7 +753,7 @@ async fn process_waiting_deadlines(
                             .current_step_started_at
                             .or(instance.context.runtime.started_at);
                         if let Some(started) = baseline {
-                            let elapsed = Utc::now() - started;
+                            let elapsed = clock.now() - started;
                             if elapsed
                                 > chrono::Duration::from_std(timeout)
                                     .unwrap_or(chrono::Duration::days(365))
@@ -754,7 +769,7 @@ async fn process_waiting_deadlines(
                                     Some(&instance.tenant_id),
                                     InstanceState::Waiting,
                                     InstanceState::Scheduled,
-                                    Some(Utc::now()),
+                                    Some(clock.now()),
                                 )
                                 .await?;
                                 handled = true;
@@ -772,6 +787,7 @@ async fn process_waiting_deadlines(
 
 /// SLA deadline check variant for instances in `Waiting` state.
 /// Delegates to the shared `handle_deadline_breach` with `from_state = Waiting`.
+#[allow(clippy::too_many_arguments)]
 async fn check_step_deadline_waiting(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -780,6 +796,7 @@ async fn check_step_deadline_waiting(
     _webhook_config: &WebhookConfig,
     _cancel: &CancellationToken,
     prev_output: Option<&orch8_types::output::BlockOutput>,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     handle_deadline_breach(
         storage,
@@ -788,6 +805,7 @@ async fn check_step_deadline_waiting(
         step_def,
         prev_output,
         InstanceState::Waiting,
+        clock,
     )
     .await
 }
@@ -807,6 +825,7 @@ pub(crate) async fn handle_deadline_breach(
     step_def: &orch8_types::sequence::StepDef,
     prev_output: Option<&orch8_types::output::BlockOutput>,
     from_state: InstanceState,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     let Some(deadline) = step_def.deadline else {
         return Ok(false);
@@ -817,7 +836,7 @@ pub(crate) async fn handle_deadline_breach(
     let Some(baseline) = baseline else {
         return Ok(false);
     };
-    let elapsed = Utc::now() - baseline;
+    let elapsed = clock.now() - baseline;
     if elapsed < chrono::Duration::from_std(deadline).unwrap_or(chrono::TimeDelta::MAX) {
         return Ok(false);
     }
@@ -977,6 +996,7 @@ async fn process_instance(
     externalize_threshold: u32,
     max_steps_per_instance: u32,
     cancel: &CancellationToken,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
 
@@ -987,9 +1007,11 @@ async fn process_instance(
 
     // claim_due_instances already set state to Running.
     // Stamp runtime.started_at on the first run so timeout / escalation
-    // handlers (e.g. human_review) can compute elapsed time.
+    // handlers (e.g. human_review) can compute elapsed time. Uses the
+    // scheduler clock (not wall time) because this value is the baseline for
+    // deadline / human-input timeout *scheduling decisions*.
     let instance = if instance.context.runtime.started_at.is_none() {
-        let started_at = Utc::now();
+        let started_at = clock.now();
         storage
             .update_instance_started_at(instance_id, started_at)
             .await?;
@@ -1061,8 +1083,10 @@ async fn process_instance(
                 let prev = deadline_outputs_ref
                     .get(&(&instance.id, &step_def.id))
                     .copied();
-                if step_exec::check_step_deadline(storage, handlers, &instance, step_def, prev)
-                    .await?
+                if step_exec::check_step_deadline(
+                    storage, handlers, &instance, step_def, prev, clock,
+                )
+                .await?
                 {
                     return Ok(());
                 }
@@ -1074,7 +1098,7 @@ async fn process_instance(
     if let (Some(ref key), Some(max)) = (&instance.concurrency_key, instance.max_concurrency) {
         let position = storage.concurrency_position(instance_id, key).await?;
         if position > i64::from(max) {
-            let defer_at = Utc::now() + chrono::Duration::seconds(2);
+            let defer_at = clock.now() + chrono::Duration::seconds(2);
             storage
                 .update_instance_state(instance_id, InstanceState::Scheduled, Some(defer_at))
                 .await?;
@@ -1116,6 +1140,7 @@ async fn process_instance(
             &sequence,
             max_steps_per_instance,
             cancel,
+            clock,
         )
         .await;
     }
@@ -1152,6 +1177,7 @@ async fn process_instance(
             &instance,
             step_def,
             cancel,
+            clock,
         )
         .await?;
 
@@ -1262,6 +1288,12 @@ async fn process_instance(
 ///
 /// Uses a CAS (conditional update) so a concurrent cancel/fail cannot be
 /// silently overwritten.
+///
+/// Clock note: this intentionally uses real `Utc::now()` rather than the
+/// scheduler clock — the semantics are "wake immediately". Under a
+/// `ManualClock` that starts at or after real time (the documented
+/// discipline), real now <= virtual now, so the parent is due on the very
+/// next virtual tick.
 async fn wake_parent_if_child(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
@@ -1310,6 +1342,7 @@ async fn wake_parent_if_child(
 /// The evaluator returns an `EvalOutcome` carrying the tree state so we can
 /// transition the instance without re-reading the tree from the database.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn process_instance_tree(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -1318,6 +1351,7 @@ async fn process_instance_tree(
     sequence: &SequenceDefinition,
     max_steps_per_instance: u32,
     cancel: &CancellationToken,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     use crate::evaluator::EvalOutcome;
     let instance_id = instance.id;
@@ -1391,7 +1425,7 @@ async fn process_instance_tree(
                 Some(&instance.tenant_id),
                 current,
                 InstanceState::Scheduled,
-                Some(Utc::now()),
+                Some(clock.now()),
             )
             .await
             {

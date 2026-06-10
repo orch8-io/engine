@@ -10,10 +10,12 @@ mod artifacts;
 mod audit;
 mod bulk;
 mod checkpoints;
+mod fork;
 mod inject;
 mod lifecycle;
 mod outputs;
 mod signals;
+mod timeline;
 mod types;
 
 // Re-exports for `crate::instances::*` compatibility (openapi.rs references
@@ -35,6 +37,8 @@ pub(crate) use checkpoints::{
     save_checkpoint,
 };
 pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
+pub use fork::ForkResponse;
+pub(crate) use fork::{__path_fork_instance, fork_instance};
 pub use inject::InjectBlocksRequest;
 pub(crate) use inject::{__path_inject_blocks, inject_blocks};
 pub(crate) use lifecycle::{
@@ -47,6 +51,9 @@ pub(crate) use outputs::{
     __path_get_execution_tree, __path_get_outputs, get_execution_tree, get_outputs,
 };
 pub(crate) use signals::{__path_send_signal, send_signal};
+pub(crate) use timeline::{__path_get_timeline, get_timeline};
+pub use timeline::{TimelineEntry, TimelineInstance, TimelineResponse, TimelineStateTransition};
+pub use types::ForkRequest;
 // Request/query types the MCP server reuses so its tools/call dispatch goes
 // through the exact same wire shapes as the REST endpoints.
 pub(crate) use types::{CreateInstanceRequest, ListQuery, SendSignalRequest};
@@ -63,11 +70,13 @@ pub fn routes() -> Router<AppState> {
         .route("/instances/{id}/artifacts", get(list_instance_artifacts))
         .route("/artifacts/{*key}", get(get_artifact_bytes))
         .route("/instances/{id}/tree", get(get_execution_tree))
+        .route("/instances/{id}/timeline", get(get_timeline))
         .route("/instances/{id}/retry", post(retry_instance))
         .route(
             "/instances/{id}/resume-from/{block_id}",
             post(resume_from_block),
         )
+        .route("/instances/{id}/fork", post(fork_instance))
         .route(
             "/instances/{id}/checkpoints",
             get(list_checkpoints).post(save_checkpoint),

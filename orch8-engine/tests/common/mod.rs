@@ -682,6 +682,7 @@ pub fn default_config() -> SchedulerConfig {
         node_reaper_stale_secs: 120,
         cron_tick_secs: 10,
         max_steps_per_instance: 0,
+        clock: orch8_types::clock::SharedClock::default(),
         artifact_retention_secs: 0,
     }
 }

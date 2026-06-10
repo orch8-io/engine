@@ -6,11 +6,12 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::config::WebhookConfig;
 use orch8_types::instance::InstanceState;
 
@@ -28,6 +29,7 @@ pub(super) async fn check_step_deadline(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     prev_output: Option<&orch8_types::output::BlockOutput>,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     super::handle_deadline_breach(
         storage,
@@ -36,6 +38,7 @@ pub(super) async fn check_step_deadline(
         step_def,
         prev_output,
         InstanceState::Running,
+        clock,
     )
     .await
 }
@@ -112,22 +115,55 @@ pub(super) async fn check_budget(
     Ok(true) // Paused — skip step execution this tick.
 }
 
+/// Metadata key prefix recording the `fire_at` a delayed block was deferred
+/// to. Once `clock.now() >= fire_at`, the delay has been served and the block
+/// executes instead of being re-deferred.
+const DELAY_UNTIL_PREFIX: &str = "_delay_until:";
+
 /// Check if the step has a delay and defer if so. Returns `true` if deferred.
+///
+/// The deferral target is recorded in instance metadata
+/// (`"_delay_until:<block_id>": <rfc3339>`). On a later claim, if the
+/// scheduler clock has reached that instant the delay is considered served
+/// and the step proceeds to execution; otherwise the deferral is recomputed
+/// from the current clock (preserving the historical "delay re-applies while
+/// pending" behavior). Without the marker a duration-based delay would
+/// re-defer on every claim and the block could never run.
 pub(super) async fn check_step_delay(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     let Some(delay) = &step_def.delay else {
         return Ok(false);
     };
 
+    let now = clock.now();
+    let marker_key = format!("{DELAY_UNTIL_PREFIX}{}", step_def.id.as_str());
+    let served = instance
+        .metadata
+        .get(&marker_key)
+        .and_then(|v| v.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .is_some_and(|until| now >= until.with_timezone(&Utc));
+    if served {
+        return Ok(false);
+    }
+
     let fire_at = crate::scheduling::delay::calculate_next_fire_at(
-        Utc::now(),
+        now,
         delay,
         &instance.timezone,
         Some(&instance.context.config),
     );
+
+    storage
+        .merge_instance_metadata(
+            instance.id,
+            &serde_json::json!({ marker_key: fire_at.to_rfc3339() }),
+        )
+        .await?;
 
     crate::lifecycle::transition_instance(
         storage,
@@ -153,13 +189,14 @@ pub(super) async fn check_send_window(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     let Some(window) = &step_def.send_window else {
         return Ok(false);
     };
 
     let Some(next_open) =
-        crate::scheduling::send_window::check_window(Utc::now(), window, &instance.timezone)
+        crate::scheduling::send_window::check_window(clock.now(), window, &instance.timezone)
     else {
         return Ok(false); // Inside window
     };
@@ -188,6 +225,7 @@ pub(super) async fn check_step_rate_limit(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
+    clock: &SharedClock,
 ) -> Result<bool, EngineError> {
     let Some(key) = &step_def.rate_limit_key else {
         return Ok(false);
@@ -195,7 +233,7 @@ pub(super) async fn check_step_rate_limit(
 
     let resource_key = orch8_types::ids::ResourceKey::new(key.clone());
     let check = storage
-        .check_rate_limit(&instance.tenant_id, &resource_key, Utc::now())
+        .check_rate_limit(&instance.tenant_id, &resource_key, clock.now())
         .await?;
 
     if let orch8_types::rate_limit::RateLimitCheck::Exceeded { retry_after } = check {
@@ -267,12 +305,26 @@ async fn accept_human_input(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+/// [`check_human_input_at`] evaluated at the real current time. Kept as the
+/// stable public entry point for integration tests and external callers.
 pub async fn check_human_input(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     human_def: &orch8_types::sequence::HumanInputDef,
+) -> Result<bool, EngineError> {
+    check_human_input_at(storage, instance, step_def, human_def, Utc::now()).await
+}
+
+/// [`check_human_input`] with an explicit "now" — the scheduler passes its
+/// clock's instant here so input timeouts respect virtual time in tests.
+#[allow(clippy::too_many_lines)]
+pub async fn check_human_input_at(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    human_def: &orch8_types::sequence::HumanInputDef,
+    now: DateTime<Utc>,
 ) -> Result<bool, EngineError> {
     // Dry-run auto-approve: resolve the gate with the default (first) choice so
     // the simulation flows past human gates instead of pausing. Behaviorally
@@ -351,7 +403,7 @@ pub async fn check_human_input(
             .current_step_started_at
             .or(instance.context.runtime.started_at);
         if let Some(started) = baseline {
-            let elapsed = chrono::Utc::now() - started;
+            let elapsed = now - started;
             if elapsed > chrono::Duration::from_std(timeout).unwrap_or(chrono::Duration::days(365))
             {
                 // Timeout expired — fail or escalate.
@@ -386,7 +438,7 @@ pub async fn check_human_input(
                         Some(&instance.tenant_id),
                         InstanceState::Running,
                         InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
+                        Some(now),
                     )
                     .await?;
                     return Ok(true); // Deferred — do NOT fall through to the step handler
@@ -415,6 +467,7 @@ pub async fn check_human_input(
 /// Returns `StepOutcome` wrapped in `Result` — the outcome tells the caller
 /// whether to continue executing more blocks or stop.
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_step_block(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -423,6 +476,7 @@ pub(super) async fn execute_step_block(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     cancel: &CancellationToken,
+    clock: &SharedClock,
 ) -> Result<StepOutcome, EngineError> {
     let instance_id = instance.id;
 
@@ -449,23 +503,24 @@ pub(super) async fn execute_step_block(
         }
     }
 
-    if check_step_delay(storage.as_ref(), instance, step_def).await? {
+    if check_step_delay(storage.as_ref(), instance, step_def, clock).await? {
         return Ok(StepOutcome::Deferred);
     }
 
-    if check_send_window(storage.as_ref(), instance, step_def).await? {
+    if check_send_window(storage.as_ref(), instance, step_def, clock).await? {
         return Ok(StepOutcome::Deferred);
     }
 
-    if check_step_rate_limit(storage.as_ref(), instance, step_def).await? {
+    if check_step_rate_limit(storage.as_ref(), instance, step_def, clock).await? {
         return Ok(StepOutcome::Deferred);
     }
 
     // Stamp per-step start time and current step ID so wait_for_input
     // timeouts are measured correctly and the mobile notifier can identify
-    // which step the instance is waiting on.
+    // which step the instance is waiting on. Uses the scheduler clock — this
+    // timestamp is the baseline for timeout scheduling decisions.
     {
-        let step_started = chrono::Utc::now();
+        let step_started = clock.now();
         if let Some(mut inst) = storage.get_instance(instance_id).await? {
             let expected_updated_at = inst.updated_at;
             inst.context.runtime.current_step = Some(step_def.id.clone());
@@ -481,7 +536,9 @@ pub(super) async fn execute_step_block(
     // API can discover the instance and process_signalled_instances will wake it
     // when the signal arrives.
     if let Some(human_def) = &step_def.wait_for_input {
-        if check_human_input(storage.as_ref(), instance, step_def, human_def).await? {
+        if check_human_input_at(storage.as_ref(), instance, step_def, human_def, clock.now())
+            .await?
+        {
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,
@@ -674,7 +731,7 @@ pub(super) async fn execute_step_block(
                         Some(&instance.tenant_id),
                         InstanceState::Running,
                         InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
+                        Some(clock.now()),
                     )
                     .await?;
                     Ok(StepOutcome::Deferred)
@@ -769,6 +826,7 @@ pub(super) async fn execute_step_block(
                 webhook_config,
                 message,
                 cancel,
+                clock,
             )
             .await?;
             Ok(StepOutcome::Failed)
@@ -823,6 +881,7 @@ pub(super) async fn execute_step_block(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_retryable_failure(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
@@ -831,6 +890,7 @@ pub(super) async fn handle_retryable_failure(
     webhook_config: &WebhookConfig,
     message: &str,
     cancel: &CancellationToken,
+    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
     if let Some(retry) = &step_def.retry {
@@ -882,7 +942,7 @@ pub(super) async fn handle_retryable_failure(
             retry.max_backoff,
             retry.backoff_multiplier,
         );
-        let fire_at = Utc::now()
+        let fire_at = clock.now()
             + chrono::Duration::from_std(backoff).unwrap_or_else(|_| chrono::Duration::zero());
 
         warn!(

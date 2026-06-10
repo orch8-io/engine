@@ -28,6 +28,10 @@ confidence-threshold = 0.8
 
 [[licenses.exceptions]]
 allow = ["BUSL-1.1"]
+crate = "orch8"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
 crate = "orch8-mobile"
 
 [[licenses.exceptions]]

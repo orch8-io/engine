@@ -687,6 +687,24 @@ impl crate::OutputStore for PostgresStorage {
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError> {
         outputs::delete_by_id(self, id).await
     }
+
+    async fn get_outputs_page(
+        &self,
+        instance_id: InstanceId,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_page(self, instance_id, limit, offset).await
+    }
+
+    async fn copy_block_outputs(
+        &self,
+        src: InstanceId,
+        dst: InstanceId,
+        block_ids: &[BlockId],
+    ) -> Result<u64, StorageError> {
+        outputs::copy_for_blocks(self, src, dst, block_ids).await
+    }
 }
 
 // ============================================================================

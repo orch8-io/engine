@@ -1,6 +1,11 @@
 pub mod circuit_breaker;
 pub mod credentials;
 pub mod cron;
+/// Virtual time for scheduling decisions — re-exported from `orch8-types` so
+/// engine users can write `orch8_engine::clock::ManualClock`.
+pub mod clock {
+    pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
+}
 pub mod error;
 pub mod evaluator;
 pub mod expression;
@@ -270,8 +275,12 @@ impl Engine {
         let cron_storage = Arc::clone(&self.storage);
         let cron_cancel = self.cancel.clone();
         let cron_tick = std::time::Duration::from_secs(self.config.cron_tick_secs);
+        let cron_clock = self.config.clock.clone();
         set.spawn(async move {
-            if let Err(e) = cron::run_cron_loop(cron_storage, cron_tick, cron_cancel).await {
+            if let Err(e) =
+                cron::run_cron_loop_with_clock(cron_storage, cron_tick, cron_clock, cron_cancel)
+                    .await
+            {
                 tracing::error!(error = %e, "cron loop exited with error");
             }
         });

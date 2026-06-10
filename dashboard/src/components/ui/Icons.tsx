@@ -191,6 +191,14 @@ export const IconDatabase = (p: P) => (
   </SVG>
 );
 
+export const IconCost = (p: P) => (
+  <SVG {...p}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 6.5v11" />
+    <path d="M14.5 8.5c-.5-.8-1.4-1.2-2.5-1.2-1.5 0-2.7.8-2.7 2.1 0 2.7 5.4 1.5 5.4 4.2 0 1.3-1.2 2.1-2.7 2.1-1.1 0-2-.4-2.5-1.2" />
+  </SVG>
+);
+
 export const IconPhone = (p: P) => (
   <SVG {...p}>
     <rect x="7" y="2" width="10" height="20" rx="2" />

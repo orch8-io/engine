@@ -42,3 +42,13 @@ export function fmtDelta(n: number): string {
   const sign = n > 0 ? "+" : "−";
   return `${sign}${fmtCount(Math.abs(n))}`;
 }
+
+/**
+ * USD amount with adaptive precision: 2 decimals at/above $1 ("$12.35"),
+ * 4 below ("$0.0123") so sub-cent LLM costs stay legible. `null`/`undefined`
+ * (unknown model — no entry in the pricing table) renders as an em-dash.
+ */
+export function fmtUsd(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return `$${n.toFixed(Math.abs(n) >= 1 ? 2 : 4)}`;
+}
