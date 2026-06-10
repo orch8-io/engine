@@ -47,6 +47,9 @@ pub(crate) use outputs::{
     __path_get_execution_tree, __path_get_outputs, get_execution_tree, get_outputs,
 };
 pub(crate) use signals::{__path_send_signal, send_signal};
+// Request/query types the MCP server reuses so its tools/call dispatch goes
+// through the exact same wire shapes as the REST endpoints.
+pub(crate) use types::{CreateInstanceRequest, ListQuery, SendSignalRequest};
 
 pub fn routes() -> Router<AppState> {
     Router::new()

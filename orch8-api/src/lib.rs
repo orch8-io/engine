@@ -8,6 +8,7 @@ pub mod cron;
 pub mod error;
 pub mod health;
 pub mod instances;
+pub mod mcp_server;
 pub mod metrics;
 pub mod mobile_sync;
 pub mod model_pricing;
@@ -94,6 +95,7 @@ fn api_routes() -> Router<AppState> {
         .merge(telemetry::routes())
         .merge(rollback::routes())
         .merge(usage::routes())
+        .merge(mcp_server::routes())
 }
 
 /// Build the axum router with all routes.
