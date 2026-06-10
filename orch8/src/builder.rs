@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use orch8_engine::handlers::{HandlerRegistry, StepContext};
 use orch8_engine::recovery;
+use orch8_types::clock::SharedClock;
 use orch8_types::config::SchedulerConfig;
 use orch8_types::error::StepError;
 use orch8_types::ids::TenantId;
@@ -22,6 +23,7 @@ pub struct EngineBuilder {
     handlers: HandlerRegistry,
     tick_interval: Duration,
     tenant: String,
+    clock: SharedClock,
 }
 
 impl EngineBuilder {
@@ -35,6 +37,7 @@ impl EngineBuilder {
             handlers,
             tick_interval: Duration::from_millis(SchedulerConfig::default().tick_interval_ms),
             tenant: "default".to_string(),
+            clock: SharedClock::default(),
         }
     }
 
@@ -72,6 +75,35 @@ impl EngineBuilder {
         self
     }
 
+    /// Time source for all scheduling decisions (claiming due instances,
+    /// delay / send-window deferrals, retry backoff, cron evaluation).
+    /// Default: the real system clock.
+    ///
+    /// Inject a [`crate::ManualClock`] (wrapped via
+    /// [`crate::SharedClock::from_arc`]) to control virtual time — e.g. a
+    /// test or dev loop that fast-forwards over a 3-day delay:
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// use std::sync::Arc;
+    ///
+    /// let manual = Arc::new(orch8::ManualClock::new(chrono::Utc::now()));
+    /// let engine = orch8::Engine::builder()
+    ///     .storage(orch8::Storage::sqlite_in_memory())
+    ///     .clock(orch8::SharedClock::from_arc(
+    ///         Arc::clone(&manual) as Arc<dyn orch8::Clock>
+    ///     ))
+    ///     .build()
+    ///     .await?;
+    /// // ... later: manual.advance(chrono::Duration::days(3));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Open the storage backend (applying schema/migrations), recover any
     /// instances left `Running` by a previous crash, and return the engine.
     ///
@@ -92,6 +124,7 @@ impl EngineBuilder {
             tick_interval_ms: u64::try_from(self.tick_interval.as_millis())
                 .unwrap_or(u64::MAX)
                 .max(1),
+            clock: self.clock,
             ..SchedulerConfig::default()
         };
 

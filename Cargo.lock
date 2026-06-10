@@ -2818,6 +2818,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "orch8",
  "orch8-types",
  "owo-colors",
  "rand 0.8.6",

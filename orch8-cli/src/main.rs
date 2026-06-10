@@ -9,6 +9,7 @@ mod templates;
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
 use commands::cron::CronCmd;
+use commands::dev::DevCmd;
 use commands::instance::InstanceCmd;
 use commands::sequence::SequenceCmd;
 use commands::templates::TemplatesCmd;
@@ -96,6 +97,9 @@ enum Commands {
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
+    /// Run a sequence locally on an ephemeral in-process engine with hot
+    /// reload and optional virtual time (no server needed).
+    Dev(DevCmd),
     /// Run database migrations against Postgres. Use this in CI/CD pipelines
     /// or init containers instead of the server's built-in `run_migrations` flag
     /// so that rolling deployments are safe.
@@ -230,6 +234,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Handle dev before building the HTTP client — it runs an embedded
+    // engine and never talks to a server.
+    if let Commands::Dev(cmd) = cli.command {
+        return commands::dev::run(cmd).await;
+    }
+
     // Handle migrate before building the HTTP client — it does not need one.
     if let Commands::Migrate { database_url } = cli.command {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -260,7 +270,9 @@ async fn main() -> Result<()> {
         Commands::Config(cmd) => commands::config::run(cmd)?,
         Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
         Commands::Templates(cmd) => commands::templates::run(cmd)?,
-        Commands::Migrate { .. } | Commands::Completions { .. } => unreachable!(),
+        Commands::Dev(..) | Commands::Migrate { .. } | Commands::Completions { .. } => {
+            unreachable!()
+        }
     }
 
     Ok(())

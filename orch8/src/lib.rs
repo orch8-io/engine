@@ -100,6 +100,12 @@ pub use storage::Storage;
 /// Context passed to step handlers during execution (params, instance
 /// context, attempt counter, storage handle).
 pub use orch8_engine::handlers::StepContext;
+/// Virtual time: the scheduler reads "now" through a [`Clock`]. Inject a
+/// [`ManualClock`] via [`EngineBuilder::clock`] to fast-forward over delays,
+/// send windows and retry backoffs (see `orch8-types/src/clock.rs`).
+pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
+/// One persisted step result (see [`Engine::block_outputs`]).
+pub use orch8_types::output::BlockOutput;
 /// Result of a single manual tick (see [`Engine::tick_once`]).
 pub use orch8_engine::scheduler::TickOnceResult as TickResult;
 /// Per-instance execution context (`data`, `config`, audit trail).

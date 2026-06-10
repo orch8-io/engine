@@ -14,13 +14,14 @@ clap_complete = "4"
 serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 reqwest = { workspace = true }
 anyhow.workspace = true
 tabled = "0.17"
 rand.workspace = true
 owo-colors = "4"
 toml.workspace = true
+orch8 = { path = "../orch8" }
 orch8-types = { path = "../orch8-types" }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 
