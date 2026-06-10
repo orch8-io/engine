@@ -25,6 +25,31 @@
 //! | `response_schema` | object | — | JSON Schema the response must satisfy (validated, auto-repaired) |
 //! | `max_repair_attempts` | number | `2` | Schema-repair re-calls per provider attempt (hard cap 5) |
 //! | `max_image_bytes` | number | 20 MiB | Per-image size cap, pre-encoding (can only lower the default) |
+//! | `stream` | bool | `false` | Consume the provider's SSE stream (see Streaming) |
+//! | `stream_idle_timeout_secs` | number | `30` | Max gap between streamed chunks before failing retryable |
+//!
+//! ## Streaming
+//!
+//! With `stream: true` the provider call uses the streaming wire protocol
+//! (`OpenAI` `/chat/completions` SSE with `stream_options.include_usage`;
+//! Anthropic `/messages` event stream). Incremental text deltas are published
+//! to the in-process [`crate::stream_bus`] as `llm_delta` events — clients
+//! watching `GET /instances/{id}/stream` receive them live. The step's
+//! **durable output is unchanged**: deltas are accumulated and the completed
+//! output has exactly the non-streaming shape (message, `finish_reason`,
+//! `usage`, tool calls), so downstream blocks are unaffected.
+//!
+//! Failure taxonomy: a mid-stream connection drop, a stream that ends before
+//! the provider's terminal event (`[DONE]` / `message_stop`), or a chunk gap
+//! exceeding `stream_idle_timeout_secs` all fail **retryable** (and are
+//! eligible for provider failover). Provider `error` events map to the usual
+//! retryable/permanent split.
+//!
+//! Interactions: `stream` combined with `response_schema` falls back to
+//! non-streaming (logged) — the validate/repair loop requires complete
+//! responses, and the durable output is identical either way. `dry_run`
+//! skips the provider call entirely, exactly as without streaming. Failover
+//! and multimodal content work unchanged (request building is shared).
 //!
 //! ## Multimodal content
 //!
@@ -82,6 +107,7 @@ pub(crate) mod common;
 mod multimodal;
 mod openai;
 mod schema;
+mod sse;
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -144,6 +170,33 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     })
 }
 
+/// Live-delta publisher for a streaming `llm_call` step: forwards incremental
+/// text fragments to the per-instance [`crate::stream_bus`] channel so clients
+/// watching the instance's SSE stream see tokens as they arrive. Publishing is
+/// best-effort and a no-op when nobody is subscribed; the durable step output
+/// is always the full accumulated response regardless.
+pub(crate) struct DeltaSink {
+    instance_id: orch8_types::ids::InstanceId,
+    block_id: String,
+}
+
+impl DeltaSink {
+    /// Publish one text delta for this step.
+    fn publish(&self, delta: &str) {
+        let bus = crate::stream_bus::stream_bus();
+        if !bus.has_subscribers(self.instance_id) {
+            return; // skip the event allocation when nobody is watching
+        }
+        bus.publish(
+            self.instance_id,
+            crate::stream_bus::StreamEvent::LlmDelta {
+                block_id: self.block_id.clone(),
+                delta: delta.to_string(),
+            },
+        );
+    }
+}
+
 /// Main handler: routes to the correct provider API.
 ///
 /// If the params contain a `providers` array, iterates through each provider
@@ -156,6 +209,31 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
     // before the dry-run skip), so an invalid schema is surfaced as a config
     // error without burning tokens.
     let response_schema = schema::compile_response_schema(&ctx.params)?;
+
+    // Streaming applies only without `response_schema`: the validate/repair
+    // loop needs complete responses, so `stream` + `response_schema` falls
+    // back to a regular (non-streaming) call with identical durable output.
+    let stream_requested = ctx
+        .params
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let delta_sink = if stream_requested && !dry {
+        if response_schema.is_some() {
+            warn!(
+                block_id = %ctx.block_id.as_str(),
+                "llm_call: stream=true combined with response_schema — falling back to non-streaming"
+            );
+            None
+        } else {
+            Some(DeltaSink {
+                instance_id: ctx.instance_id,
+                block_id: ctx.block_id.as_str().to_string(),
+            })
+        }
+    } else {
+        None
+    };
 
     if let Some(providers) = ctx.params.get("providers").and_then(Value::as_array) {
         if dry {
@@ -170,7 +248,13 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
         // Resolve artifact-backed image blocks ONCE, before the failover loop
         // and schema paths, so every provider attempt reuses the fetched bytes.
         multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
-        return handle_llm_call_failover(&ctx.params, &providers, response_schema.as_ref()).await;
+        return handle_llm_call_failover(
+            &ctx.params,
+            &providers,
+            response_schema.as_ref(),
+            delta_sink.as_ref(),
+        )
+        .await;
     }
 
     let provider = ctx
@@ -204,7 +288,9 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
                 .await
                 .map_err(SchemaCallFailure::into_permanent)?
         }
-        None => dispatch_provider(&ctx.params, &api_key, &base, &provider).await?,
+        None => {
+            dispatch_provider(&ctx.params, &api_key, &base, &provider, delta_sink.as_ref()).await?
+        }
     };
     emit_gen_ai_telemetry(&ctx.params, &provider, &out);
     // Capture token usage for cost aggregation (best-effort — never fails the call).
@@ -251,17 +337,20 @@ fn emit_gen_ai_telemetry(params: &Value, provider: &str, out: &Value) {
     );
 }
 
-/// Route a single call to the correct provider API.
+/// Route a single call to the correct provider API. `deltas: Some(_)` selects
+/// the streaming wire protocol (SSE consumption + delta publication); the
+/// returned output has the same shape either way.
 async fn dispatch_provider(
     params: &Value,
     api_key: &str,
     base: &str,
     provider: &str,
+    deltas: Option<&DeltaSink>,
 ) -> Result<Value, StepError> {
     if provider == "anthropic" {
-        anthropic::call_anthropic(params, api_key, base).await
+        anthropic::call_anthropic(params, api_key, base, deltas).await
     } else {
-        openai::call_openai_compat(params, api_key, base, provider).await
+        openai::call_openai_compat(params, api_key, base, provider, deltas).await
     }
 }
 
@@ -334,7 +423,9 @@ async fn call_provider_with_schema(
     let mut last_response = String::new();
 
     for attempt in 0..=max {
-        let mut out = dispatch_provider(&work, api_key, base, provider)
+        // Always non-streaming: schema validation + repair needs the complete
+        // response (the `stream` fallback is decided in `handle_llm_call`).
+        let mut out = dispatch_provider(&work, api_key, base, provider, None)
             .await
             .map_err(SchemaCallFailure::Provider)?;
         let (input, output) = usage_tokens(&out);
@@ -448,6 +539,7 @@ async fn handle_llm_call_failover(
     params: &Value,
     providers: &[Value],
     response_schema: Option<&schema::CompiledSchema>,
+    delta_sink: Option<&DeltaSink>,
 ) -> Result<Value, StepError> {
     if providers.is_empty() {
         return Err(permanent("providers array is empty".to_string()));
@@ -459,12 +551,12 @@ async fn handle_llm_call_failover(
         .map_or(DEFAULT_TOTAL_TIMEOUT, Duration::from_secs);
 
     if total_timeout.is_zero() {
-        return failover_inner(params, providers, response_schema).await;
+        return failover_inner(params, providers, response_schema, delta_sink).await;
     }
 
     match tokio::time::timeout(
         total_timeout,
-        failover_inner(params, providers, response_schema),
+        failover_inner(params, providers, response_schema, delta_sink),
     )
     .await
     {
@@ -479,6 +571,7 @@ async fn failover_inner(
     params: &Value,
     providers: &[Value],
     response_schema: Option<&schema::CompiledSchema>,
+    delta_sink: Option<&DeltaSink>,
 ) -> Result<Value, StepError> {
     let per_attempt_timeout = params
         .get("per_provider_timeout_secs")
@@ -523,7 +616,9 @@ async fn failover_inner(
                         .await
                         .map_err(SchemaCallFailure::into_retryable_for_failover)
                 }
-                None => dispatch_provider(&merged, &api_key, &base, provider_name).await,
+                None => {
+                    dispatch_provider(&merged, &api_key, &base, provider_name, delta_sink).await
+                }
             }
         };
 
@@ -601,7 +696,7 @@ mod tests {
     fn empty_providers_returns_error() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[], None));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None, None));
         assert!(result.is_err());
     }
 
@@ -695,7 +790,7 @@ mod tests {
     fn cumulative_timeout_returns_error_on_empty_providers_before_timeout() {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&json!({}), &[], None));
+            .block_on(handle_llm_call_failover(&json!({}), &[], None, None));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -704,7 +799,7 @@ mod tests {
         let params = json!({"total_timeout_secs": 0});
         let result = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(handle_llm_call_failover(&params, &[], None));
+            .block_on(handle_llm_call_failover(&params, &[], None, None));
         assert!(matches!(result, Err(StepError::Permanent { .. })));
     }
 
@@ -1380,5 +1475,458 @@ mod tests {
             out.get("schema_valid").is_none(),
             "no validation in dry-run"
         );
+    }
+
+    // --- streaming (mock SSE servers) ---------------------------------------
+    //
+    // Same dep-free TCP pattern as `start_openai_mock`, but the response is a
+    // Server-Sent Events body (no Content-Length; body ends when the
+    // connection closes). `hold_open` keeps the socket open after the body to
+    // exercise the inter-chunk idle timeout.
+
+    async fn start_sse_mock(
+        sse_body: String,
+        hold_open: bool,
+    ) -> (String, Arc<tokio::sync::Mutex<Vec<Value>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base = format!("http://127.0.0.1:{port}");
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let requests_srv = Arc::clone(&requests);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let raw = read_http_request(&mut stream).await;
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..]) {
+                        requests_srv.lock().await.push(v);
+                    }
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Cache-Control: no-cache\r\nConnection: close\r\n\r\n{sse_body}"
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+                if hold_open {
+                    // Leave the connection open with no further data so the
+                    // client's idle timeout (not EOF) decides the outcome.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        super::super::builtin::mark_url_safe_for_test(&base).await;
+        (base, requests)
+    }
+
+    /// Render JSON chunks as `OpenAI`-style `data:` SSE events.
+    fn openai_sse(chunks: &[Value], with_done: bool) -> String {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for chunk in chunks {
+            let _ = write!(body, "data: {chunk}\n\n");
+        }
+        if with_done {
+            body.push_str("data: [DONE]\n\n");
+        }
+        body
+    }
+
+    /// Render `(event, data)` pairs as Anthropic-style named SSE events.
+    fn anthropic_sse(events: &[(&str, Value)]) -> String {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        for (name, data) in events {
+            let _ = write!(body, "event: {name}\ndata: {data}\n\n");
+        }
+        body
+    }
+
+    /// A complete `OpenAI` SSE stream producing "Hello world" with usage 10/5.
+    fn openai_hello_stream() -> String {
+        openai_sse(
+            &[
+                json!({"id": "c1", "model": "gpt-test", "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {"content": "Hello "}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {"content": "world"}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}),
+            ],
+            true,
+        )
+    }
+
+    fn stream_params(base: &str) -> Value {
+        json!({
+            "provider": "openai",
+            "model": "gpt-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+        })
+    }
+
+    #[tokio::test]
+    async fn openai_streaming_output_matches_non_streaming_shape() {
+        // Non-streaming reference call.
+        let (base_ref, _) = start_openai_mock(vec![openai_resp("Hello world", 10, 5)]).await;
+        let mut ref_params = stream_params(&base_ref);
+        ref_params["stream"] = json!(false);
+        let reference = handle_llm_call(test_ctx(ref_params).await).await.unwrap();
+
+        // Streaming call over the canned SSE stream.
+        let (base, requests) = start_sse_mock(openai_hello_stream(), false).await;
+        let out = handle_llm_call(test_ctx(stream_params(&base)).await)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out, reference,
+            "accumulated streaming output must equal the non-streaming shape"
+        );
+        assert_eq!(out["message"]["content"], "Hello world");
+        assert_eq!(out["usage"]["prompt_tokens"], 10);
+        assert_eq!(out["usage"]["completion_tokens"], 5);
+        assert_eq!(out["finish_reason"], "stop");
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0]["stream"], true, "provider asked to stream");
+        assert_eq!(
+            reqs[0]["stream_options"]["include_usage"], true,
+            "usage requested so the streamed output keeps token accounting"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_streaming_accumulates_tool_call_deltas() {
+        let body = openai_sse(
+            &[
+                json!({"model": "gpt-test", "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                    {"index": 0, "id": "call_1", "type": "function", "function": {"name": "search", "arguments": ""}}
+                ]}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": "{\"q\":"}}
+                ]}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {"tool_calls": [
+                    {"index": 0, "function": {"arguments": "\"rust\"}"}}
+                ]}, "finish_reason": null}]}),
+                json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}),
+            ],
+            true,
+        );
+        let (base, _requests) = start_sse_mock(body, false).await;
+        let out = handle_llm_call(test_ctx(stream_params(&base)).await)
+            .await
+            .unwrap();
+
+        assert_eq!(out["finish_reason"], "tool_calls");
+        assert_eq!(
+            out["message"]["content"],
+            Value::Null,
+            "tool-call-only response keeps content null like non-streaming"
+        );
+        let calls = out["message"]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "call_1");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["name"], "search");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"q\":\"rust\"}");
+        assert_eq!(out["usage"]["prompt_tokens"], 7);
+    }
+
+    #[tokio::test]
+    async fn openai_stream_dropped_before_done_is_retryable() {
+        // Chunks but no `[DONE]`: the connection closes mid-response.
+        let body = openai_sse(
+            &[json!({"model": "gpt-test", "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": "Hel"}, "finish_reason": null}]})],
+            false,
+        );
+        let (base, _) = start_sse_mock(body, false).await;
+        let err = handle_llm_call(test_ctx(stream_params(&base)).await)
+            .await
+            .expect_err("incomplete stream must fail");
+        match err {
+            StepError::Retryable { message, .. } => {
+                assert!(message.contains("[DONE]"), "{message}");
+            }
+            other @ StepError::Permanent { .. } => panic!("expected Retryable, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_stream_idle_timeout_is_retryable() {
+        // One chunk, then the socket stays open and silent.
+        let body = openai_sse(
+            &[json!({"model": "gpt-test", "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": "He"}, "finish_reason": null}]})],
+            false,
+        );
+        let (base, _) = start_sse_mock(body, true).await;
+        let mut params = stream_params(&base);
+        params["stream_idle_timeout_secs"] = json!(1);
+        let err = handle_llm_call(test_ctx(params).await)
+            .await
+            .expect_err("stalled stream must fail");
+        match err {
+            StepError::Retryable { message, .. } => {
+                assert!(message.contains("stalled"), "{message}");
+            }
+            other @ StepError::Permanent { .. } => panic!("expected Retryable, got {other}"),
+        }
+    }
+
+    /// A complete Anthropic event stream producing "a cat" with usage 4/2.
+    fn anthropic_cat_stream() -> String {
+        anthropic_sse(&[
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {
+                "id": "m1", "model": "claude-test", "role": "assistant",
+                "usage": {"input_tokens": 4, "output_tokens": 1}}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}}),
+            ),
+            ("ping", json!({"type": "ping"})),
+            (
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "a "}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "cat"}}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            (
+                "message_delta",
+                json!({"type": "message_delta",
+                "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}}),
+            ),
+            ("message_stop", json!({"type": "message_stop"})),
+        ])
+    }
+
+    fn anthropic_stream_params(base: &str) -> Value {
+        json!({
+            "provider": "anthropic",
+            "model": "claude-test",
+            "api_key": "k",
+            "base_url": base,
+            "messages": [{"role": "user", "content": "describe"}],
+            "stream": true,
+        })
+    }
+
+    #[tokio::test]
+    async fn anthropic_streaming_output_matches_non_streaming_shape() {
+        // Non-streaming reference call against the canned full response.
+        let (base_ref, _) = start_openai_mock(vec![json!({
+            "content": [{"type": "text", "text": "a cat"}],
+            "model": "claude-test",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 4, "output_tokens": 2},
+        })])
+        .await;
+        let mut ref_params = anthropic_stream_params(&base_ref);
+        ref_params["stream"] = json!(false);
+        let reference = handle_llm_call(test_ctx(ref_params).await).await.unwrap();
+
+        let (base, requests) = start_sse_mock(anthropic_cat_stream(), false).await;
+        let out = handle_llm_call(test_ctx(anthropic_stream_params(&base)).await)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            out, reference,
+            "accumulated streaming output must equal the non-streaming shape"
+        );
+        assert_eq!(out["message"]["content"], "a cat");
+        assert_eq!(out["usage"], json!({"input_tokens": 4, "output_tokens": 2}));
+        assert_eq!(out["finish_reason"], "end_turn");
+        assert_eq!(out["model"], "claude-test");
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0]["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_streaming_accumulates_tool_use_input_json() {
+        let body = anthropic_sse(&[
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {
+                "id": "m1", "model": "claude-test", "role": "assistant",
+                "usage": {"input_tokens": 9, "output_tokens": 1}}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "tool_use", "id": "tc_1", "name": "search", "input": {}}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"q\":"}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "\"rust\"}"}}),
+            ),
+            (
+                "content_block_stop",
+                json!({"type": "content_block_stop", "index": 0}),
+            ),
+            (
+                "message_delta",
+                json!({"type": "message_delta",
+                "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 6}}),
+            ),
+            ("message_stop", json!({"type": "message_stop"})),
+        ]);
+        let (base, _) = start_sse_mock(body, false).await;
+        let out = handle_llm_call(test_ctx(anthropic_stream_params(&base)).await)
+            .await
+            .unwrap();
+
+        assert_eq!(out["finish_reason"], "tool_use");
+        let calls = out["message"]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["id"], "tc_1");
+        assert_eq!(calls[0]["function"]["name"], "search");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"q\":\"rust\"}");
+        assert_eq!(out["usage"]["output_tokens"], 6);
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_overloaded_error_event_is_retryable() {
+        let body = anthropic_sse(&[
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {
+                "id": "m1", "model": "claude-test", "role": "assistant",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+            ),
+            (
+                "error",
+                json!({"type": "error",
+                "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+            ),
+        ]);
+        let (base, _) = start_sse_mock(body, false).await;
+        let err = handle_llm_call(test_ctx(anthropic_stream_params(&base)).await)
+            .await
+            .expect_err("error event must fail the call");
+        match err {
+            StepError::Retryable { message, .. } => {
+                assert!(message.contains("overloaded_error"), "{message}");
+            }
+            other @ StepError::Permanent { .. } => panic!("expected Retryable, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_dropped_before_message_stop_is_retryable() {
+        let body = anthropic_sse(&[
+            (
+                "message_start",
+                json!({"type": "message_start", "message": {
+                "id": "m1", "model": "claude-test", "role": "assistant",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+            ),
+            (
+                "content_block_start",
+                json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}}),
+            ),
+        ]);
+        let (base, _) = start_sse_mock(body, false).await;
+        let err = handle_llm_call(test_ctx(anthropic_stream_params(&base)).await)
+            .await
+            .expect_err("incomplete stream must fail");
+        match err {
+            StepError::Retryable { message, .. } => {
+                assert!(message.contains("message_stop"), "{message}");
+            }
+            other @ StepError::Permanent { .. } => panic!("expected Retryable, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_with_response_schema_falls_back_to_non_streaming() {
+        // The mock serves a plain (non-SSE) JSON response — proving the call
+        // went out as a regular completion despite `stream: true`.
+        let (base, requests) =
+            start_openai_mock(vec![openai_resp(r#"{"name": "ok"}"#, 10, 5)]).await;
+        let mut params = stream_params(&base);
+        params["response_schema"] = name_schema();
+        let out = handle_llm_call(test_ctx(params).await).await.unwrap();
+        assert_eq!(out["schema_valid"], true);
+        assert_eq!(out["name"], "ok");
+
+        let reqs = requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert!(
+            reqs[0].get("stream").is_none(),
+            "request body must not ask the provider to stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_publishes_llm_deltas_to_bus() {
+        use crate::stream_bus::{stream_bus, StreamEvent};
+
+        let (base, _) = start_sse_mock(openai_hello_stream(), false).await;
+        let ctx = test_ctx(stream_params(&base)).await;
+        let instance_id = ctx.instance_id;
+        let mut rx = stream_bus().subscribe(instance_id);
+
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["message"]["content"], "Hello world");
+
+        let mut deltas = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            let StreamEvent::LlmDelta { block_id, delta } = event;
+            assert_eq!(block_id, "b");
+            deltas.push(delta);
+        }
+        assert_eq!(deltas, vec!["Hello ".to_string(), "world".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn failover_streams_from_second_provider_after_first_fails() {
+        // Provider A's key env var is unset → skipped; provider B streams.
+        let (base_b, requests_b) = start_sse_mock(openai_hello_stream(), false).await;
+        let ctx = test_ctx(json!({
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true,
+            "providers": [
+                {"provider": "openai", "api_key_env": "LLM_TEST_UNSET_STREAM_KEY", "model": "m", "base_url": base_b},
+                {"provider": "openai", "api_key": "k", "model": "gpt-test", "base_url": base_b},
+            ],
+        }))
+        .await;
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["tried"], json!(["openai", "openai"]));
+        assert_eq!(out["message"]["content"], "Hello world");
+        assert_eq!(out["usage"]["completion_tokens"], 5);
+        assert_eq!(requests_b.lock().await.len(), 1);
     }
 }

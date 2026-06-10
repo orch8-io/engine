@@ -24,6 +24,7 @@ pub mod scheduler;
 pub mod scheduling;
 pub mod sequence_cache;
 pub mod signals;
+pub mod stream_bus;
 pub mod template;
 pub mod triggers;
 pub mod webhooks;

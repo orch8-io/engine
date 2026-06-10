@@ -3,10 +3,14 @@
 //! `GET /instances/{id}/stream` returns a Server-Sent Events stream that emits:
 //! - `state` events when instance state changes
 //! - `output` events when new block outputs appear
+//! - `llm_delta` events with incremental text from a streaming `llm_call`
+//!   step (`stream: true`), forwarded live from the in-process
+//!   [`orch8_engine::stream_bus`] — not polled from storage
 //! - `done` event when the instance reaches a terminal state
 //!
-//! The stream polls storage at a configurable interval (default 500ms) and sends
-//! keepalive comments every 15s. Closes when the instance reaches a terminal state.
+//! State/output changes poll storage at a configurable interval (default
+//! 500ms); keepalive comments are sent every 15s. Closes when the instance
+//! reaches a terminal state.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -14,8 +18,10 @@ use std::time::Duration;
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use orch8_engine::stream_bus::{stream_bus, StreamEvent};
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 
@@ -33,6 +39,19 @@ const fn default_poll_ms() -> u64 {
     500
 }
 
+/// Await the next live event from the stream-bus subscription. With no
+/// subscription left (`None`, after the channel closed) pends forever — the
+/// caller guards the select arm with `delta_rx.is_some()`, so this branch is
+/// then never polled.
+async fn next_delta(
+    rx: Option<&mut broadcast::Receiver<StreamEvent>>,
+) -> Result<StreamEvent, broadcast::error::RecvError> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 const fn is_terminal(state: InstanceState) -> bool {
     matches!(
         state,
@@ -47,7 +66,7 @@ const fn is_terminal(state: InstanceState) -> bool {
         ("poll_ms" = Option<u64>, Query, description = "Poll interval in ms (min 100ms)"),
     ),
     responses(
-        (status = 200, description = "Server-Sent Events stream of instance state/tree/output changes", content_type = "text/event-stream"),
+        (status = 200, description = "Server-Sent Events stream of instance state/output changes plus live llm_delta events from streaming llm_call steps", content_type = "text/event-stream"),
         (status = 404, description = "Instance not found"),
         (status = 503, description = "Too many concurrent streams"),
     )
@@ -103,6 +122,12 @@ pub(crate) async fn stream_instance(
     let shutdown = state.shutdown.clone();
     let storage = state.storage.clone();
 
+    // Subscribe to the in-process stream bus BEFORE the response starts, so
+    // llm_delta events published after the client connects are never missed.
+    // The engine runs in the same process (orch8-server); in API-only
+    // deployments the channel simply never receives anything.
+    let mut delta_rx = Some(stream_bus().subscribe(instance_id));
+
     tokio::spawn(async move {
         // Hold the permit for the lifetime of the stream task; dropped
         // automatically on return/panic, freeing a slot.
@@ -123,6 +148,36 @@ pub(crate) async fn stream_instance(
                 () = shutdown.cancelled() => break,
                 () = tx.closed() => break,
                 _ = ticker.tick() => {}
+                event = next_delta(delta_rx.as_mut()), if delta_rx.is_some() => {
+                    match event {
+                        Ok(ev) => {
+                            // `StreamEvent` serialization is infallible (plain
+                            // strings + tag); fall back to `{}` defensively.
+                            let payload = serde_json::to_string(&ev)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            let sse = Event::default().event("llm_delta").data(payload);
+                            if tx.send(Ok(sse)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            // Best-effort live view: a slow client just loses
+                            // deltas; the durable output event carries the
+                            // full text anyway.
+                            tracing::debug!(
+                                skipped,
+                                instance_id = %instance_id.into_uuid(),
+                                "stream: client lagged behind llm_delta broadcast"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            delta_rx = None;
+                        }
+                    }
+                    // Deltas don't advance the storage poll; wait for the
+                    // next tick before re-querying.
+                    continue;
+                }
             }
 
             // If the last iterations failed, wait an extra backoff period
