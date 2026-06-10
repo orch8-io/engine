@@ -254,6 +254,17 @@ impl Engine {
         Ok(instance.id)
     }
 
+    /// List every block output recorded for an instance so far, in storage
+    /// order. Useful for progress reporting while an instance runs (each
+    /// completed step persists one output row) and for inspecting results
+    /// after it reaches a terminal state.
+    pub async fn block_outputs(
+        &self,
+        id: InstanceId,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
+        Ok(self.inner.storage.get_all_outputs(id).await?)
+    }
+
     /// Fetch the current snapshot of an instance (state, context, timestamps).
     pub async fn get_instance(&self, id: InstanceId) -> Result<TaskInstance, Error> {
         self.inner
