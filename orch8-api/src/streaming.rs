@@ -134,6 +134,12 @@ pub(crate) async fn stream_instance(
         let _permit = permit;
 
         let mut last_output_at: Option<chrono::DateTime<chrono::Utc>> = None;
+        // IDs of outputs already sent that share `last_output_at`'s exact
+        // timestamp. The storage query bound is inclusive (>=) so outputs
+        // created in the same millisecond as the cursor are re-fetched rather
+        // than silently skipped; this set filters out the ones already sent.
+        let mut sent_at_cursor: std::collections::HashSet<uuid::Uuid> =
+            std::collections::HashSet::new();
         let mut last_state: Option<InstanceState> = None;
         let mut ticker = tokio::time::interval(poll_interval);
         // Skip the immediate first tick so we don't double-query right after the prefetch above.
@@ -241,6 +247,13 @@ pub(crate) async fn stream_instance(
                 Ok(outputs) => {
                     if !outputs.is_empty() {
                         for output in &outputs {
+                            // Boundary rows at the inclusive cursor timestamp
+                            // may have been delivered on the previous poll.
+                            if Some(output.created_at) == last_output_at
+                                && sent_at_cursor.contains(&output.id)
+                            {
+                                continue;
+                            }
                             // Serialisation of owned `BlockOutput` is infallible in practice —
                             // if it ever fails, drop the payload but keep the stream alive.
                             let payload = serde_json::to_string(output).unwrap_or_else(|e| {
@@ -258,6 +271,10 @@ pub(crate) async fn stream_instance(
                             }
                             if last_output_at.is_none_or(|t| output.created_at > t) {
                                 last_output_at = Some(output.created_at);
+                                sent_at_cursor.clear();
+                            }
+                            if Some(output.created_at) == last_output_at {
+                                sent_at_cursor.insert(output.id);
                             }
                         }
                     }

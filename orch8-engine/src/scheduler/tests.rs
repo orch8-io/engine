@@ -917,6 +917,138 @@ async fn enforce_concurrency_limits_allows_up_to_cap() {
 }
 
 #[tokio::test]
+async fn enforce_concurrency_limits_preserves_claim_order() {
+    // Regression: the deferred-index removal previously used `swap_remove`,
+    // which pulls tail elements into the holes and scrambles the priority
+    // order established by claim_due_instances. With keyed instances at
+    // indices 1 and 3 deferred from [u0, k1, u2, k3, u4], the survivors must
+    // come back as [u0, u2, u4] — not [u0, u4, u2].
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+    let unkeyed: Vec<InstanceId> = (0..3).map(|_| InstanceId::new()).collect();
+    let keyed: Vec<InstanceId> = (0..2).map(|_| InstanceId::new()).collect();
+    for &id in &unkeyed {
+        seed_instance_with_concurrency(storage.as_ref(), id, None, None, InstanceState::Running)
+            .await;
+    }
+    for &id in &keyed {
+        seed_instance_with_concurrency(
+            storage.as_ref(),
+            id,
+            Some("ck-order"),
+            Some(0), // zero slots — both keyed instances are deferred
+            InstanceState::Running,
+        )
+        .await;
+    }
+
+    // Claim order: u0, k0, u1, k1, u2 (keyed at indices 1 and 3).
+    let order = [unkeyed[0], keyed[0], unkeyed[1], keyed[1], unkeyed[2]];
+    let mut insts = Vec::new();
+    for id in order {
+        insts.push(storage.get_instance(id).await.unwrap().unwrap());
+    }
+
+    let kept = enforce_concurrency_limits(&storage, insts, &SharedClock::default())
+        .await
+        .unwrap();
+    let kept_ids: Vec<InstanceId> = kept.iter().map(|i| i.id).collect();
+    assert_eq!(
+        kept_ids,
+        vec![unkeyed[0], unkeyed[1], unkeyed[2]],
+        "survivors must keep their claim-time order"
+    );
+}
+
+#[tokio::test]
+async fn wait_for_input_baseline_survives_reentry() {
+    // Regression: execute_step_block used to re-stamp
+    // `current_step_started_at` on EVERY entry into a step. A Waiting
+    // instance woken by process_waiting_deadlines re-enters the same step,
+    // so each wake reset the wait_for_input timeout baseline — the timeout
+    // could only fire through a stale-snapshot accident. The stamp must be
+    // first-entry-only.
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let instance_id = InstanceId::new();
+    seed_instance_with_context(storage.as_ref(), instance_id, ExecutionContext::default()).await;
+
+    let mut step_def = mk_step_def("gate", "human_review", serde_json::json!({}));
+    step_def.wait_for_input = Some(orch8_types::sequence::HumanInputDef {
+        prompt: "approve?".into(),
+        timeout: None,
+        escalation_handler: None,
+        choices: None,
+        store_as: None,
+        allow_comment: false,
+    });
+
+    let registry = HandlerRegistry::new();
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+
+    // First entry: defers and stamps the baseline.
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let outcome = execute_step_block(
+        &storage,
+        &registry,
+        &webhook_config,
+        0,
+        &instance,
+        &step_def,
+        &cancel,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, StepOutcome::Deferred));
+    let first_stamp = storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .context
+        .runtime
+        .current_step_started_at
+        .expect("first entry stamps current_step_started_at");
+
+    // Simulate a wake: back to Running, then re-enter the same step later.
+    storage
+        .update_instance_state(instance_id, InstanceState::Running, None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    let outcome = execute_step_block(
+        &storage,
+        &registry,
+        &webhook_config,
+        0,
+        &instance,
+        &step_def,
+        &cancel,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, StepOutcome::Deferred));
+
+    let second_stamp = storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .context
+        .runtime
+        .current_step_started_at
+        .unwrap();
+    assert_eq!(
+        first_stamp, second_stamp,
+        "re-entry must keep the original timeout baseline"
+    );
+}
+
+#[tokio::test]
 async fn wait_for_drain_waits_for_permits_returned() {
     // Acquire a permit, spawn a task that holds it briefly, then ensure drain waits.
     let sem = Arc::new(Semaphore::new(2));

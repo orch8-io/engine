@@ -74,12 +74,18 @@ pub(super) async fn update_node_state(
         _ => (None, None),
     };
     if let Some(ref s) = started {
-        sqlx::query("UPDATE execution_tree SET state=?2, started_at=?3 WHERE id=?1")
-            .bind(node_id.into_uuid().to_string())
-            .bind(state.to_string())
-            .bind(s)
-            .execute(&storage.pool)
-            .await?;
+        // COALESCE keeps the first Running transition's timestamp so a
+        // re-dispatch (e.g. worker retry, Waiting→Running) doesn't overwrite
+        // it — parity with the Postgres impl and the wait_for_input timeout
+        // baseline, which is measured from the node's original start.
+        sqlx::query(
+            "UPDATE execution_tree SET state=?2, started_at=COALESCE(started_at, ?3) WHERE id=?1",
+        )
+        .bind(node_id.into_uuid().to_string())
+        .bind(state.to_string())
+        .bind(s)
+        .execute(&storage.pool)
+        .await?;
     } else if let Some(ref c) = completed {
         sqlx::query("UPDATE execution_tree SET state=?2, completed_at=?3 WHERE id=?1")
             .bind(node_id.into_uuid().to_string())
@@ -121,8 +127,10 @@ pub(super) async fn update_nodes_state(
     qb.push_bind(state_str);
     match state {
         NodeState::Running => {
-            qb.push(", started_at=");
+            // First-transition-only semantics — see update_node_state.
+            qb.push(", started_at=COALESCE(started_at, ");
             qb.push_bind(now);
+            qb.push(")");
         }
         NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped => {
             qb.push(", completed_at=");
@@ -148,9 +156,11 @@ pub(super) async fn batch_activate_nodes(
         return Ok(());
     }
     let now = ts(chrono::Utc::now());
-    let mut qb = sqlx::QueryBuilder::new("UPDATE execution_tree SET state='running', started_at=");
+    let mut qb = sqlx::QueryBuilder::new(
+        "UPDATE execution_tree SET state='running', started_at=COALESCE(started_at, ",
+    );
     qb.push_bind(now);
-    qb.push(" WHERE state='pending' AND id IN (");
+    qb.push(") WHERE state='pending' AND id IN (");
     let mut sep = qb.separated(", ");
     for id in node_ids {
         sep.push_bind(id.to_string());

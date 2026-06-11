@@ -642,7 +642,16 @@ impl SyncOrchestrator {
             .get_sequence_by_name(&tenant, &ns, &seq.name, None)
             .await
         {
-            let _ = self.backend.delete_sequence(existing.id).await;
+            // Propagate delete failures — silently continuing into
+            // create_sequence with the old row still present either violates
+            // the unique constraint or leaves duplicate rows, and the sync
+            // would report success for an update that never happened.
+            self.backend
+                .delete_sequence(existing.id)
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: format!("failed to replace sequence '{}': {e}", seq.name),
+                })?;
         }
         self.backend
             .create_sequence(seq)

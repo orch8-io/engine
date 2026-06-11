@@ -519,9 +519,18 @@ pub(super) async fn execute_step_block(
     // timeouts are measured correctly and the mobile notifier can identify
     // which step the instance is waiting on. Uses the scheduler clock — this
     // timestamp is the baseline for timeout scheduling decisions.
-    {
-        let step_started = clock.now();
-        if let Some(mut inst) = storage.get_instance(instance_id).await? {
+    //
+    // Stamp only on the FIRST entry into a step. Re-entries (e.g. a Waiting
+    // instance woken by process_waiting_deadlines) must keep the original
+    // baseline — re-stamping would reset the wait_for_input timeout on every
+    // wake, so it could never expire.
+    let mut step_started = clock.now();
+    if let Some(mut inst) = storage.get_instance(instance_id).await? {
+        if inst.context.runtime.current_step.as_ref() == Some(&step_def.id) {
+            if let Some(t) = inst.context.runtime.current_step_started_at {
+                step_started = t;
+            }
+        } else {
             let expected_updated_at = inst.updated_at;
             inst.context.runtime.current_step = Some(step_def.id.clone());
             inst.context.runtime.current_step_started_at = Some(step_started);
@@ -536,8 +545,22 @@ pub(super) async fn execute_step_block(
     // API can discover the instance and process_signalled_instances will wake it
     // when the signal arrives.
     if let Some(human_def) = &step_def.wait_for_input {
-        if check_human_input_at(storage.as_ref(), instance, step_def, human_def, clock.now())
-            .await?
+        // Evaluate the gate against the durable per-step baseline rather than
+        // the claim-time snapshot, which may still carry a *previous* step's
+        // stamp (claimed before the stamp above) and would fire the timeout
+        // prematurely for any gate reached after a slow earlier step.
+        let mut gate_instance = instance.clone();
+        gate_instance.context.runtime.current_step = Some(step_def.id.clone());
+        gate_instance.context.runtime.current_step_started_at = Some(step_started);
+        let gate_instance = &gate_instance;
+        if check_human_input_at(
+            storage.as_ref(),
+            gate_instance,
+            step_def,
+            human_def,
+            clock.now(),
+        )
+        .await?
         {
             crate::lifecycle::transition_instance(
                 storage.as_ref(),

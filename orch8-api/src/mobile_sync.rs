@@ -532,8 +532,34 @@ struct CreateCommandRequest {
 
 async fn create_command(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<CreateCommandRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = tenant_ctx
+        .as_ref()
+        .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
+        .unwrap_or_default();
+
+    // Verify the caller owns the target device BEFORE enqueuing anything —
+    // without this check any tenant could inject commands (including
+    // `complete_step`) into another tenant's device queue. Same fall-open
+    // convention as `resolve_approval`: an empty tenant (insecure mode /
+    // root key without X-Tenant-Id) skips the scope check.
+    if !tenant_id.is_empty() {
+        let device = state
+            .storage
+            .get_mobile_device(&req.device_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?;
+        let owned = device.is_some_and(|d| d.tenant_id == tenant_id);
+        if !owned {
+            return Err(ApiError::NotFound(format!(
+                "device {} not found",
+                req.device_id
+            )));
+        }
+    }
+
     let command = MobileCommand {
         id: uuid::Uuid::new_v4().to_string(),
         device_id: req.device_id.clone(),

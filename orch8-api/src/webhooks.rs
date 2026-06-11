@@ -88,7 +88,7 @@ pub fn public_routes() -> Router<AppState> {
     params(("slug" = String, Path, description = "Webhook slug (the trigger slug)")),
     request_body = serde_json::Value,
     responses(
-        (status = 201, description = "Instance created from webhook payload"),
+        (status = 202, description = "Webhook accepted; instance created and queued for execution"),
         (status = 401, description = "Missing or invalid `x-trigger-secret`"),
         (status = 404, description = "Unknown slug, disabled trigger, or non-webhook trigger type"),
     )

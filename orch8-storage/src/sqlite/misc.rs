@@ -102,8 +102,12 @@ pub(super) async fn recover_stale_instances(
     let cutoff = chrono::Utc::now()
         - chrono::Duration::from_std(stale_threshold)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    // Reset next_fire_at as well (parity with the Postgres impl): a stale
+    // instance may carry a far-future next_fire_at from before it wedged, and
+    // claim_due would otherwise not pick the recovered instance up until that
+    // time naturally arrives.
     let result = sqlx::query(
-        "UPDATE task_instances SET state='scheduled', updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
+        "UPDATE task_instances SET state='scheduled', next_fire_at=?1, updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
     )
     .bind(ts(chrono::Utc::now()))
     .bind(ts(cutoff))
@@ -136,15 +140,60 @@ pub(super) async fn claim_worker_tasks_from_queue(
     worker_id: &str,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    // `BEGIN IMMEDIATE` (not sqlx's default DEFERRED) — the SELECT and UPDATE
+    // form a read-then-write claim; under DEFERRED two concurrent pollers can
+    // both SELECT the same pending rows before either UPDATE runs and claim
+    // the same task twice. Same convention as `workers::claim`.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let result =
+        claim_from_queue_inner(&mut conn, queue_name, handler_name, worker_id, None, limit).await;
+    match result {
+        Ok(tasks) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(tasks)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+/// Shared SELECT + UPDATE claim body for the queue-routing claims. When
+/// `tenant_id` is `Some`, the SELECT joins `task_instances` to scope the
+/// claim to that tenant.
+async fn claim_from_queue_inner(
+    conn: &mut sqlx::SqliteConnection,
+    queue_name: &str,
+    handler_name: &str,
+    worker_id: &str,
+    tenant_id: Option<&TenantId>,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(chrono::Utc::now());
-    let mut tx = storage.pool.begin().await?;
-    let rows = sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' LIMIT ?3")
+    let rows = if let Some(tenant) = tenant_id {
+        sqlx::query(
+            "SELECT wt.* FROM worker_tasks wt
+             JOIN task_instances ti ON ti.id = wt.instance_id
+             WHERE wt.queue_name=?1 AND wt.handler_name=?2 AND wt.state='pending'
+               AND ti.tenant_id=?4
+             LIMIT ?3",
+        )
         .bind(queue_name)
         .bind(handler_name)
         .bind(limit as i64)
-        .fetch_all(&mut *tx)
-        .await
-        ?;
+        .bind(tenant.as_str())
+        .fetch_all(&mut *conn)
+        .await?
+    } else {
+        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' LIMIT ?3")
+            .bind(queue_name)
+            .bind(handler_name)
+            .bind(limit as i64)
+            .fetch_all(&mut *conn)
+            .await?
+    };
     let mut tasks: Vec<WorkerTask> = rows
         .iter()
         .map(row_to_worker_task)
@@ -169,9 +218,8 @@ pub(super) async fn claim_worker_tasks_from_queue(
             separated.push_bind(t.id.to_string());
         }
         separated.push_unseparated(")");
-        qb.build().execute(&mut *tx).await?;
+        qb.build().execute(&mut *conn).await?;
     }
-    tx.commit().await?;
     Ok(tasks)
 }
 
@@ -187,49 +235,29 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     tenant_id: &TenantId,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let now = ts(chrono::Utc::now());
-    let mut tx = storage.pool.begin().await?;
-    let rows = sqlx::query(
-        "SELECT wt.* FROM worker_tasks wt
-         JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.queue_name=?1 AND wt.handler_name=?2 AND wt.state='pending'
-           AND ti.tenant_id=?4
-         LIMIT ?3",
+    // BEGIN IMMEDIATE for the same double-claim reason as
+    // `claim_worker_tasks_from_queue` above.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let result = claim_from_queue_inner(
+        &mut conn,
+        queue_name,
+        handler_name,
+        worker_id,
+        Some(tenant_id),
+        limit,
     )
-    .bind(queue_name)
-    .bind(handler_name)
-    .bind(limit as i64)
-    .bind(tenant_id.as_str())
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut tasks: Vec<WorkerTask> = rows
-        .iter()
-        .map(row_to_worker_task)
-        .collect::<Result<Vec<_>, _>>()?;
-    let now_dt = chrono::Utc::now();
-    for t in &mut tasks {
-        t.state = orch8_types::worker::WorkerTaskState::Claimed;
-        t.worker_id = Some(worker_id.to_string());
-        t.claimed_at = Some(now_dt);
-        t.heartbeat_at = Some(now_dt);
-    }
-    if !tasks.is_empty() {
-        let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
-        qb.push_bind(worker_id);
-        qb.push(", claimed_at=");
-        qb.push_bind(&now);
-        qb.push(", heartbeat_at=");
-        qb.push_bind(&now);
-        qb.push(" WHERE id IN (");
-        let mut separated = qb.separated(",");
-        for t in &tasks {
-            separated.push_bind(t.id.to_string());
+    .await;
+    match result {
+        Ok(tasks) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(tasks)
         }
-        separated.push_unseparated(")");
-        qb.build().execute(&mut *tx).await?;
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
     }
-    tx.commit().await?;
-    Ok(tasks)
 }
 
 // === Dynamic Step Injection ===
@@ -365,41 +393,55 @@ pub(super) async fn create_instance_with_dedupe(
     let scope_value = scope.value();
     let cand_str = instance.id.into_uuid().to_string();
 
-    // `?` leans on the `From<sqlx::Error> for StorageError` impl so each
-    // failure surfaces with its real variant (PoolTimedOut → PoolExhausted,
-    // etc.) instead of being flattened to `Query`.
-    let mut tx = storage.pool.begin().await?;
+    // `BEGIN IMMEDIATE` acquires the write lock up-front. With sqlx's default
+    // DEFERRED begin, a concurrent dedupe race upgrades mid-transaction and
+    // can fail with SQLITE_BUSY_SNAPSHOT instead of cleanly serialising —
+    // same convention as `claim_due` / `workers::claim`.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-    // Insert the child instance FIRST so any FK on emit_event_dedupe is
-    // satisfied (mirrors the Postgres path after migration 031).
-    super::instances::bind_instance_insert(
-        sqlx::query(super::instances::INSTANCE_INSERT_SQL),
-        instance,
-    )?
-    .execute(&mut *tx)
-    .await?;
+    let result: Result<u64, StorageError> = async {
+        // Insert the child instance FIRST so any FK on emit_event_dedupe is
+        // satisfied (mirrors the Postgres path after migration 031).
+        super::instances::bind_instance_insert(
+            sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+            instance,
+        )?
+        .execute(&mut *conn)
+        .await?;
 
-    let inserted = sqlx::query(
-        "INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
-         VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(scope_kind, scope_value, dedupe_key) DO NOTHING",
-    )
-    .bind(scope_kind)
-    .bind(&scope_value)
-    .bind(key)
-    .bind(&cand_str)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-
-    if inserted > 0 {
-        tx.commit().await?;
-        return Ok(crate::EmitDedupeOutcome::Inserted);
+        let inserted = sqlx::query(
+            "INSERT INTO emit_event_dedupe (scope_kind, scope_value, dedupe_key, child_instance_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope_kind, scope_value, dedupe_key) DO NOTHING",
+        )
+        .bind(scope_kind)
+        .bind(&scope_value)
+        .bind(key)
+        .bind(&cand_str)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        Ok(inserted)
     }
+    .await;
 
-    // Key already taken — rollback the unnecessary child instance, then
-    // look up the existing child id outside the transaction.
-    tx.rollback().await?;
+    match result {
+        Ok(inserted) if inserted > 0 => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            return Ok(crate::EmitDedupeOutcome::Inserted);
+        }
+        Ok(_) => {
+            // Key already taken — rollback the unnecessary child instance,
+            // then look up the existing child id outside the transaction.
+            sqlx::query("ROLLBACK").execute(&mut *conn).await?;
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(e);
+        }
+    }
+    drop(conn);
 
     let row: (String,) = sqlx::query_as(
         "SELECT child_instance_id FROM emit_event_dedupe

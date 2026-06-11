@@ -573,11 +573,17 @@ async fn enforce_concurrency_limits(
         .batch_reschedule_instances(&deferred_ids, defer_at)
         .await?;
 
-    let mut kept = instances;
-    deferred_indices.sort_unstable_by(|a, b| b.cmp(a));
-    for idx in deferred_indices {
-        kept.swap_remove(idx);
-    }
+    // Order-preserving removal: `swap_remove` would pull tail elements into
+    // the holes, scrambling the priority order established by
+    // claim_due_instances (e.g. deferring indices [1,3] from [A,B,C,D,E]
+    // would yield [A,E,C] instead of [A,C,E]).
+    let deferred_set: std::collections::HashSet<usize> = deferred_indices.into_iter().collect();
+    let kept = instances
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !deferred_set.contains(i))
+        .map(|(_, inst)| inst)
+        .collect();
 
     Ok(kept)
 }
@@ -680,6 +686,11 @@ async fn process_waiting_deadlines(
         sort_ascending: true,
     };
     let waiting = storage.list_instances(&filter, &pagination).await?;
+    if waiting.is_empty() {
+        // Nothing to do — skip the per-instance sequence-cache walk that
+        // would otherwise run on every tick of an idle engine.
+        return Ok(());
+    }
 
     // Build a map from instance -> sequence so we can collect all deadline
     // block IDs before issuing a single batch query.
@@ -747,6 +758,15 @@ async fn process_waiting_deadlines(
                 // tick's check_human_input fires the escalation/failure path.
                 if let Some(human_def) = &step_def.wait_for_input {
                     if let Some(timeout) = human_def.timeout {
+                        // Only the step the instance is actually waiting on may
+                        // wake it. Without this guard, a sequence with several
+                        // wait_for_input steps would compare an earlier step's
+                        // timeout against the current step's start time.
+                        if let Some(current) = &instance.context.runtime.current_step {
+                            if current != &step_def.id {
+                                continue;
+                            }
+                        }
                         let baseline = instance
                             .context
                             .runtime

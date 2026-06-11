@@ -100,7 +100,8 @@ pub(super) async fn get_after_created_at(
 ) -> Result<Vec<BlockOutput>, StorageError> {
     let rows = if let Some(after) = after {
         sqlx::query(
-            "SELECT * FROM block_outputs WHERE instance_id=?1 AND created_at > ?2 ORDER BY created_at"
+            // Inclusive bound — see StorageBackend::get_outputs_after_created_at.
+            "SELECT * FROM block_outputs WHERE instance_id=?1 AND created_at >= ?2 ORDER BY created_at"
         )
         .bind(instance_id.into_uuid().to_string())
         .bind(ts(after))
@@ -250,22 +251,43 @@ pub(super) async fn copy_for_blocks(
     sep.push_unseparated(") ORDER BY created_at, id");
     let rows = qb.build().fetch_all(&storage.pool).await?;
     let outputs: Vec<BlockOutput> = rows.iter().map(row_to_output).collect::<Result<_, _>>()?;
+    if outputs.is_empty() {
+        return Ok(0);
+    }
 
+    // Single multi-row INSERT instead of one round-trip per row — fork-from
+    // copies can span hundreds of outputs. Fresh UUIDs still come from Rust
+    // (SQLite has no UUIDv7 generator). Chunked to stay under SQLite's
+    // bind-parameter limit (default 32766; 8 binds per row).
     let mut tx = storage.pool.begin().await?;
-    for out in &outputs {
-        sqlx::query(
-            "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-        )
-        .bind(uuid::Uuid::now_v7().to_string())
-        .bind(dst.into_uuid().to_string())
-        .bind(out.block_id.as_str())
-        .bind(serde_json::to_string(&out.output)?)
-        .bind(&out.output_ref)
-        .bind(out.output_size as i64)
-        .bind(out.attempt as i64)
-        .bind(ts(out.created_at))
-        .execute(&mut *tx)
-        .await?;
+    let dst_str = dst.into_uuid().to_string();
+    for chunk in outputs.chunks(512) {
+        let mut qb = sqlx::QueryBuilder::new(
+            "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) ",
+        );
+        let mut rows_values = Vec::with_capacity(chunk.len());
+        for out in chunk {
+            rows_values.push((
+                uuid::Uuid::now_v7().to_string(),
+                serde_json::to_string(&out.output)?,
+                ts(out.created_at),
+                out,
+            ));
+        }
+        qb.push_values(
+            rows_values.iter(),
+            |mut b, (id, output_json, created, out)| {
+                b.push_bind(id)
+                    .push_bind(&dst_str)
+                    .push_bind(out.block_id.as_str())
+                    .push_bind(output_json)
+                    .push_bind(&out.output_ref)
+                    .push_bind(out.output_size as i64)
+                    .push_bind(out.attempt as i64)
+                    .push_bind(created);
+            },
+        );
+        qb.build().execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(outputs.len() as u64)

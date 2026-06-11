@@ -126,7 +126,7 @@ pub(super) async fn get_after_created_at(
     let rows = if let Some(after) = after {
         sqlx::query_as::<_, BlockOutputRow>(
             r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
-               FROM block_outputs WHERE instance_id = $1 AND created_at > $2 ORDER BY created_at",
+               FROM block_outputs WHERE instance_id = $1 AND created_at >= $2 ORDER BY created_at",
         )
         .bind(instance_id.into_uuid())
         .bind(after)

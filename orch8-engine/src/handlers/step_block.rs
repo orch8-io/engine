@@ -270,18 +270,38 @@ pub async fn execute_step_node(
     // transitions the instance back to Scheduled, and the next evaluator pass
     // finds the signal and completes the node.
     if let Some(ref human_def) = step_def.wait_for_input {
-        let deferred =
-            crate::scheduler::check_human_input(storage.as_ref(), instance, step_def, human_def)
-                .await?;
+        // Evaluate the gate against this node's own start time. The shared
+        // `current_step_started_at` runtime field is a single slot that
+        // parallel branches overwrite, and at claim time it may still carry a
+        // previous step's stamp — either way the timeout baseline would be
+        // wrong for this node.
+        let gate_instance = node.started_at.map(|node_started| {
+            let mut patched = instance.clone();
+            patched.context.runtime.current_step = Some(step_def.id.clone());
+            patched.context.runtime.current_step_started_at = Some(node_started);
+            patched
+        });
+        let deferred = crate::scheduler::check_human_input(
+            storage.as_ref(),
+            gate_instance.as_ref().unwrap_or(instance),
+            step_def,
+            human_def,
+        )
+        .await?;
         if deferred {
             // Record which step the instance is waiting on so the mobile
-            // notifier (and approvals API) can identify it.
+            // notifier (and approvals API) can identify it. Stamp only on the
+            // first entry — re-stamping on every evaluator pass would reset
+            // the wait_for_input timeout baseline used by the deadline sweep.
             if let Some(mut inst) = storage.get_instance(instance.id).await? {
-                inst.context.runtime.current_step = Some(step_def.id.clone());
-                inst.context.runtime.current_step_started_at = Some(chrono::Utc::now());
-                storage
-                    .update_instance_context(instance.id, &inst.context)
-                    .await?;
+                if inst.context.runtime.current_step.as_ref() != Some(&step_def.id) {
+                    inst.context.runtime.current_step = Some(step_def.id.clone());
+                    inst.context.runtime.current_step_started_at =
+                        Some(node.started_at.unwrap_or_else(chrono::Utc::now));
+                    storage
+                        .update_instance_context(instance.id, &inst.context)
+                        .await?;
+                }
             }
             // No signal yet — set node to Waiting so the instance transitions
             // to Waiting state and process_signalled_instances can wake it.

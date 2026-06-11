@@ -607,11 +607,36 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    // Read-modify-write in a transaction for SQLite (no JSONB).
-    let mut tx = storage.pool.begin().await?;
+    // Read-modify-write for SQLite (no JSONB). `BEGIN IMMEDIATE` (not sqlx's
+    // default DEFERRED) — under DEFERRED two concurrent merges for the same
+    // instance can both read the same context snapshot before either commits,
+    // and the second writer silently drops the first writer's key. IMMEDIATE
+    // serialises the whole read-modify-write, matching the atomicity of the
+    // Postgres `jsonb_set` single-statement path.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let result = merge_context_data_inner(&mut conn, id, key, value).await;
+    match result {
+        Ok(()) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
+}
+
+async fn merge_context_data_inner(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), StorageError> {
     let row = sqlx::query("SELECT context FROM task_instances WHERE id=?1")
         .bind(id.to_string())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     if let Some(row) = row {
         let ctx_str: String = row.get("context");
@@ -631,10 +656,9 @@ pub(super) async fn merge_context_data(
             .bind(id.to_string())
             .bind(ctx_json)
             .bind(ts(Utc::now()))
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

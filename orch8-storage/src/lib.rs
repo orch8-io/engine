@@ -694,8 +694,11 @@ pub trait OutputStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<BlockOutput>, StorageError>;
 
-    /// Return block outputs created after the given timestamp.
-    /// Used by SSE streaming to avoid fetching the entire history on every poll.
+    /// Return block outputs created at or after the given timestamp
+    /// (inclusive). Used by SSE streaming to avoid fetching the entire
+    /// history on every poll. The bound is inclusive so outputs sharing the
+    /// cursor's exact timestamp (same-millisecond batches) are never skipped;
+    /// callers deduplicate boundary rows by output id.
     /// When `after` is `None`, behaves like `get_all_outputs`.
     async fn get_outputs_after_created_at(
         &self,

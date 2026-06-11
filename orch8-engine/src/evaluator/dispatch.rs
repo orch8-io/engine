@@ -81,17 +81,13 @@ pub(super) async fn dispatch_block(
             }
             // Bump the per-instance step counter so max_steps_per_instance
             // enforcement (checked at the scheduler level) sees accurate counts.
-            // Re-read context from storage first so we don't clobber mutations
-            // made during step execution (e.g. check_human_input's merge_context_data).
+            // `increment_total_steps` touches only the counter path atomically,
+            // so concurrent context mutations made during step execution (e.g.
+            // check_human_input's merge_context_data) are not clobbered, and
+            // two steps completing in the same tick can't lose an increment.
             if matches!(result, Ok(true)) {
-                if let Some(mut inst) = storage.get_instance(instance.id).await.ok().flatten() {
-                    inst.context.runtime.total_steps_executed += 1;
-                    if let Err(e) = storage
-                        .update_instance_context(instance.id, &inst.context)
-                        .await
-                    {
-                        tracing::warn!(instance_id = %instance.id, error = %e, "failed to update step counter");
-                    }
+                if let Err(e) = storage.increment_total_steps(instance.id).await {
+                    tracing::warn!(instance_id = %instance.id, error = %e, "failed to update step counter");
                 }
             }
             result
