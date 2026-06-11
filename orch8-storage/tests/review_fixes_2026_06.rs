@@ -1,4 +1,4 @@
-//! Regression tests for the 2026-06 deep-review fixes (SQLite backend).
+//! Regression tests for the 2026-06 deep-review fixes (`SQLite` backend).
 //!
 //! Each test reproduces a bug found during the review:
 //!

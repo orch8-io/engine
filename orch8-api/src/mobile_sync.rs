@@ -92,17 +92,12 @@ async fn handle_sync(
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<SyncRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    const MAX_SYNC_ITEMS_PER_ARRAY: usize = 500;
+
     let tenant_id = tenant_ctx
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
         .unwrap_or_default();
-
-    // Bound the per-request write fan-out. Each array element drives one or
-    // more DB writes done synchronously while holding a pool connection; an
-    // unbounded array lets a single authenticated device serialize the
-    // database. Devices that genuinely accumulate more than this while offline
-    // simply sync across multiple requests.
-    const MAX_SYNC_ITEMS_PER_ARRAY: usize = 500;
     if req.status_updates.len() > MAX_SYNC_ITEMS_PER_ARRAY
         || req.approval_requests.len() > MAX_SYNC_ITEMS_PER_ARRAY
         || req.step_delegations.len() > MAX_SYNC_ITEMS_PER_ARRAY
