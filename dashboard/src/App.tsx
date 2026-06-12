@@ -3,6 +3,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import Layout from "./components/Layout";
 import Overview from "./pages/Overview";
 import Tasks from "./pages/Tasks";
+import Workers from "./pages/Workers";
 import Instances from "./pages/Instances";
 import InstanceDetail from "./pages/InstanceDetail";
 import Approvals from "./pages/Approvals";
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="sequences" element={<Sequences />} />
           <Route path="sequences/:id" element={<SequenceDetail />} />
           <Route path="tasks" element={<Tasks />} />
+          <Route path="workers" element={<Workers />} />
           <Route path="cron" element={<Cron />} />
           <Route path="triggers" element={<Triggers />} />
           <Route path="operations" element={<Operations />} />

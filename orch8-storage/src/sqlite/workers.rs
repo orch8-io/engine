@@ -463,3 +463,90 @@ pub(super) async fn stats(
         active_workers,
     })
 }
+
+// === Worker Registry ===
+
+pub(super) async fn upsert_registration(
+    storage: &SqliteStorage,
+    reg: &orch8_types::worker::WorkerRegistration,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO worker_registrations (worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(worker_id, handler_name) DO UPDATE
+         SET queue_name = excluded.queue_name,
+             version = excluded.version,
+             tenant_id = excluded.tenant_id,
+             last_seen_at = excluded.last_seen_at",
+    )
+    .bind(&reg.worker_id)
+    .bind(&reg.handler_name)
+    .bind(&reg.queue_name)
+    .bind(&reg.version)
+    .bind(&reg.tenant_id)
+    .bind(ts(reg.last_seen_at))
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn list_registrations(
+    storage: &SqliteStorage,
+    seen_within_secs: Option<i64>,
+) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let rows: Vec<Row> = if let Some(secs) = seen_within_secs {
+        let cutoff = ts(Utc::now() - chrono::Duration::seconds(secs));
+        sqlx::query_as(
+            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
+             FROM worker_registrations
+             WHERE last_seen_at >= ?1
+             ORDER BY last_seen_at DESC",
+        )
+        .bind(cutoff)
+        .fetch_all(&storage.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
+             FROM worker_registrations
+             ORDER BY last_seen_at DESC",
+        )
+        .fetch_all(&storage.pool)
+        .await?
+    };
+    rows.into_iter()
+        .map(
+            |(worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)| {
+                Ok(orch8_types::worker::WorkerRegistration {
+                    worker_id,
+                    handler_name,
+                    queue_name,
+                    version,
+                    tenant_id,
+                    last_seen_at: super::helpers::parse_ts(&last_seen_at)?,
+                })
+            },
+        )
+        .collect()
+}
+
+pub(super) async fn claimed_counts_by_worker(
+    storage: &SqliteStorage,
+) -> Result<Vec<(String, i64)>, StorageError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT worker_id, COUNT(*) FROM worker_tasks
+         WHERE state = 'claimed' AND worker_id IS NOT NULL
+         GROUP BY worker_id",
+    )
+    .fetch_all(&storage.pool)
+    .await?;
+    Ok(rows)
+}

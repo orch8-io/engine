@@ -82,6 +82,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled,
+        builtin_handlers: Arc::new(crate::builtin_handler_names()),
     };
 
     // Attach tenant middleware (require_tenant = false) so `X-Tenant-Id`

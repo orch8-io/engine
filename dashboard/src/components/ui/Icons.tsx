@@ -205,3 +205,11 @@ export const IconPhone = (p: P) => (
     <path d="M11 18h2" />
   </SVG>
 );
+export const IconWorkers = (p: P) => (
+  <SVG {...p}>
+    <rect x="3" y="4" width="18" height="6" rx="1" />
+    <rect x="3" y="14" width="18" height="6" rx="1" />
+    <path d="M7 7h.01" />
+    <path d="M7 17h.01" />
+  </SVG>
+);

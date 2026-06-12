@@ -417,3 +417,91 @@ fn apply_worker_task_filter<'a>(
         qb.push(" AND queue_name = ").push_bind(queue);
     }
 }
+
+// === Worker Registry ===
+
+pub(super) async fn upsert_registration(
+    store: &PostgresStorage,
+    reg: &orch8_types::worker::WorkerRegistration,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"INSERT INTO worker_registrations
+            (worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)
+          VALUES ($1,$2,$3,$4,$5,$6)
+          ON CONFLICT (worker_id, handler_name) DO UPDATE
+          SET queue_name = EXCLUDED.queue_name,
+              version = EXCLUDED.version,
+              tenant_id = EXCLUDED.tenant_id,
+              last_seen_at = EXCLUDED.last_seen_at",
+    )
+    .bind(&reg.worker_id)
+    .bind(&reg.handler_name)
+    .bind(&reg.queue_name)
+    .bind(&reg.version)
+    .bind(&reg.tenant_id)
+    .bind(reg.last_seen_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn list_registrations(
+    store: &PostgresStorage,
+    seen_within_secs: Option<i64>,
+) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = if let Some(secs) = seen_within_secs {
+        sqlx::query_as(
+            r"SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
+              FROM worker_registrations
+              WHERE last_seen_at >= NOW() - ($1::bigint * INTERVAL '1 second')
+              ORDER BY last_seen_at DESC",
+        )
+        .bind(secs)
+        .fetch_all(&store.pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r"SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
+              FROM worker_registrations
+              ORDER BY last_seen_at DESC",
+        )
+        .fetch_all(&store.pool)
+        .await?
+    };
+    Ok(rows
+        .into_iter()
+        .map(
+            |(worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)| {
+                orch8_types::worker::WorkerRegistration {
+                    worker_id,
+                    handler_name,
+                    queue_name,
+                    version,
+                    tenant_id,
+                    last_seen_at,
+                }
+            },
+        )
+        .collect())
+}
+
+pub(super) async fn claimed_counts_by_worker(
+    store: &PostgresStorage,
+) -> Result<Vec<(String, i64)>, StorageError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        r"SELECT worker_id, COUNT(*) FROM worker_tasks
+          WHERE state = 'claimed' AND worker_id IS NOT NULL
+          GROUP BY worker_id",
+    )
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows)
+}

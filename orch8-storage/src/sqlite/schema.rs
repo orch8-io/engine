@@ -118,6 +118,16 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS worker_registrations (
+    worker_id TEXT NOT NULL,
+    handler_name TEXT NOT NULL,
+    queue_name TEXT,
+    version TEXT,
+    tenant_id TEXT,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (worker_id, handler_name)
+);
+
 CREATE TABLE IF NOT EXISTS resource_pools (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,

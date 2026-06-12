@@ -896,6 +896,24 @@ impl crate::WorkerStore for PostgresStorage {
         )
         .await
     }
+
+    async fn upsert_worker_registration(
+        &self,
+        registration: &orch8_types::worker::WorkerRegistration,
+    ) -> Result<(), StorageError> {
+        workers::upsert_registration(self, registration).await
+    }
+
+    async fn list_worker_registrations(
+        &self,
+        seen_within_secs: Option<i64>,
+    ) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError> {
+        workers::list_registrations(self, seen_within_secs).await
+    }
+
+    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
+        workers::claimed_counts_by_worker(self).await
+    }
 }
 
 // ============================================================================

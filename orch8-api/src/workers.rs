@@ -20,6 +20,8 @@ use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/workers", get(list_workers))
+        .route("/handlers", get(list_handlers))
         .route("/workers/tasks", get(list_tasks))
         .route("/workers/tasks/stats", get(task_stats))
         .route("/workers/tasks/poll", post(poll_tasks))
@@ -35,10 +37,41 @@ pub(crate) struct PollRequest {
     worker_id: String,
     #[serde(default = "default_poll_limit")]
     limit: u32,
+    /// Optional worker build/deploy version, recorded on the worker registry.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 const fn default_poll_limit() -> u32 {
     1
+}
+
+/// Record a worker registration from a poll. Best-effort: a registry write
+/// failure must never fail the poll itself, so errors are logged and dropped.
+async fn record_registration(
+    state: &AppState,
+    worker_id: &str,
+    handler_name: &str,
+    queue_name: Option<&str>,
+    version: Option<&str>,
+    tenant_id: Option<&orch8_types::ids::TenantId>,
+) {
+    let registration = orch8_types::worker::WorkerRegistration {
+        worker_id: worker_id.to_string(),
+        handler_name: handler_name.to_string(),
+        queue_name: queue_name.map(ToString::to_string),
+        version: version.map(ToString::to_string),
+        tenant_id: tenant_id.map(|t| t.as_str().to_string()),
+        last_seen_at: chrono::Utc::now(),
+    };
+    if let Err(e) = state.storage.upsert_worker_registration(&registration).await {
+        tracing::warn!(
+            error = %e,
+            worker_id,
+            handler_name,
+            "failed to record worker registration"
+        );
+    }
 }
 
 #[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
@@ -72,6 +105,16 @@ pub(crate) async fn poll_tasks(
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?
     };
 
+    record_registration(
+        &state,
+        &req.worker_id,
+        &req.handler_name,
+        None,
+        req.version.as_deref(),
+        scoped.as_ref(),
+    )
+    .await;
+
     Ok(Json(tasks))
 }
 
@@ -82,6 +125,9 @@ pub(crate) struct QueuePollRequest {
     worker_id: String,
     #[serde(default = "default_poll_limit")]
     limit: u32,
+    /// Optional worker build/deploy version, recorded on the worker registry.
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[utoipa::path(post, path = "/workers/tasks/poll/queue", tag = "workers",
@@ -121,7 +167,170 @@ pub(crate) async fn poll_tasks_from_queue(
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?
     };
 
+    record_registration(
+        &state,
+        &req.worker_id,
+        &req.handler_name,
+        Some(&req.queue_name),
+        req.version.as_deref(),
+        scoped.as_ref(),
+    )
+    .await;
+
     Ok(Json(tasks))
+}
+
+/// Aggregated view of one worker on the fleet, grouped from its
+/// per-handler registrations.
+#[derive(serde::Serialize, ToSchema)]
+pub(crate) struct WorkerInfo {
+    pub worker_id: String,
+    /// Handler names this worker has polled for.
+    pub handlers: Vec<String>,
+    /// Named queues this worker has polled (empty when default queue only).
+    pub queues: Vec<String>,
+    /// Most recently reported version string, if any.
+    pub version: Option<String>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+    /// True when the worker polled within the liveness window.
+    pub alive: bool,
+    /// Number of tasks currently claimed by this worker.
+    pub in_flight: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ListWorkersQuery {
+    /// Liveness window in seconds (default 60).
+    #[serde(default = "default_alive_within_secs")]
+    alive_within_secs: i64,
+    /// Include workers whose last poll is older than the liveness window.
+    #[serde(default)]
+    include_stale: bool,
+}
+
+const fn default_alive_within_secs() -> i64 {
+    60
+}
+
+#[utoipa::path(get, path = "/workers", tag = "workers",
+    params(
+        ("alive_within_secs" = Option<i64>, Query, description = "Liveness window in seconds (default 60)"),
+        ("include_stale" = Option<bool>, Query, description = "Include workers not seen within the window"),
+    ),
+    responses((status = 200, description = "Worker fleet with liveness", body = Vec<WorkerInfo>))
+)]
+pub(crate) async fn list_workers(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Query(query): Query<ListWorkersQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let registrations = state
+        .storage
+        .list_worker_registrations(None)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_registration"))?;
+    let in_flight: std::collections::HashMap<String, i64> = state
+        .storage
+        .claimed_task_counts_by_worker()
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+        .into_iter()
+        .collect();
+
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+    let mut by_worker: std::collections::BTreeMap<String, WorkerInfo> =
+        std::collections::BTreeMap::new();
+    for reg in registrations {
+        // Tenant-scoped callers see their own workers plus unscoped ones.
+        if let Some(ref tid) = scoped {
+            if reg.tenant_id.as_deref().is_some_and(|t| t != tid.as_str()) {
+                continue;
+            }
+        }
+        let entry = by_worker
+            .entry(reg.worker_id.clone())
+            .or_insert_with(|| WorkerInfo {
+                worker_id: reg.worker_id.clone(),
+                handlers: Vec::new(),
+                queues: Vec::new(),
+                version: None,
+                last_seen_at: reg.last_seen_at,
+                alive: false,
+                in_flight: 0,
+            });
+        if !entry.handlers.contains(&reg.handler_name) {
+            entry.handlers.push(reg.handler_name);
+        }
+        if let Some(queue) = reg.queue_name {
+            if !entry.queues.contains(&queue) {
+                entry.queues.push(queue);
+            }
+        }
+        // Registrations arrive newest-first, so the first version wins.
+        if entry.version.is_none() {
+            entry.version = reg.version;
+        }
+        if reg.last_seen_at > entry.last_seen_at {
+            entry.last_seen_at = reg.last_seen_at;
+        }
+    }
+
+    let alive_cutoff =
+        chrono::Utc::now() - chrono::Duration::seconds(query.alive_within_secs.max(1));
+    let mut workers: Vec<WorkerInfo> = by_worker
+        .into_values()
+        .map(|mut w| {
+            w.alive = w.last_seen_at >= alive_cutoff;
+            w.in_flight = in_flight.get(&w.worker_id).copied().unwrap_or(0);
+            w.handlers.sort_unstable();
+            w.queues.sort_unstable();
+            w
+        })
+        .filter(|w| query.include_stale || w.alive)
+        .collect();
+    workers.sort_by_key(|w| std::cmp::Reverse(w.last_seen_at));
+
+    Ok(Json(workers))
+}
+
+/// Catalog of every handler name the engine can serve.
+#[derive(serde::Serialize, ToSchema)]
+pub(crate) struct HandlerCatalog {
+    /// Handlers executed in-process by the engine.
+    pub builtin: Vec<String>,
+    /// Handler names served by external workers (from the worker registry).
+    pub external: Vec<String>,
+}
+
+#[utoipa::path(get, path = "/handlers", tag = "workers",
+    responses((status = 200, description = "Handler catalog", body = HandlerCatalog))
+)]
+pub(crate) async fn list_handlers(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+) -> Result<impl IntoResponse, ApiError> {
+    let registrations = state
+        .storage
+        .list_worker_registrations(None)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_registration"))?;
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+    let mut external: Vec<String> = registrations
+        .into_iter()
+        .filter(|reg| {
+            scoped.as_ref().is_none_or(|tid| {
+                reg.tenant_id.as_deref().is_none_or(|t| t == tid.as_str())
+            })
+        })
+        .map(|reg| reg.handler_name)
+        .collect();
+    external.sort_unstable();
+    external.dedup();
+
+    Ok(Json(HandlerCatalog {
+        builtin: state.builtin_handlers.as_ref().clone(),
+        external,
+    }))
 }
 
 #[derive(Deserialize, ToSchema)]

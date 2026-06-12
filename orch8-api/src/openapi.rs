@@ -66,6 +66,8 @@ use utoipa::OpenApi;
         crate::workers::heartbeat_task,
         crate::workers::list_tasks,
         crate::workers::task_stats,
+        crate::workers::list_workers,
+        crate::workers::list_handlers,
         // Triggers
         crate::triggers::create_trigger,
         crate::triggers::list_triggers,
@@ -190,6 +192,9 @@ use utoipa::OpenApi;
         crate::sessions::UpdateSessionStateRequest,
         crate::sequences::MigrateInstanceRequest,
         crate::workers::QueuePollRequest,
+        crate::workers::WorkerInfo,
+        crate::workers::HandlerCatalog,
+        orch8_types::worker::WorkerRegistration,
         crate::pools::CreatePoolRequest,
         crate::pools::AddResourceRequest,
         crate::pools::UpdateResourceRequest,

@@ -299,3 +299,160 @@ async fn poll_from_named_queue_isolates_tasks() {
     let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
     assert_eq!(tasks.len(), 0);
 }
+
+#[tokio::test]
+async fn poll_registers_worker_even_with_no_tasks() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Poll for a handler that has no pending tasks — the worker must still
+    // appear on the registry (liveness is poll recency, not task claims).
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .json(&json!({
+            "handler_name": "idle_handler",
+            "worker_id": "idle-worker",
+            "limit": 1,
+            "version": "1.2.3"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = client
+        .get(format!("{}/workers", srv.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let w = workers
+        .iter()
+        .find(|w| w["worker_id"] == "idle-worker")
+        .expect("idle worker registered");
+    assert_eq!(w["alive"], true);
+    assert_eq!(w["version"], "1.2.3");
+    assert_eq!(w["in_flight"], 0);
+    assert!(w["handlers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|h| h == "idle_handler"));
+}
+
+#[tokio::test]
+async fn get_workers_reports_in_flight_and_queue() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    seed_worker_task(&srv, inst_id).await;
+
+    // Claim via queue-scoped poll so queue_name lands on the registration.
+    let resp = client
+        .post(format!("{}/workers/tasks/poll/queue", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "queue_name": "q1",
+            "handler_name": "external_handler",
+            "worker_id": "queue-worker",
+            "limit": 10
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(tasks.len(), 1);
+
+    let resp = client
+        .get(format!("{}/workers", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let w = workers
+        .iter()
+        .find(|w| w["worker_id"] == "queue-worker")
+        .expect("queue worker registered");
+    assert_eq!(w["in_flight"], 1);
+    assert!(w["queues"].as_array().unwrap().iter().any(|q| q == "q1"));
+}
+
+#[tokio::test]
+async fn get_workers_scopes_by_tenant() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Worker registered under tenant t1 (tenant-scoped poll).
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "handler_name": "h_t1",
+            "worker_id": "tenant1-worker",
+            "limit": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A t2-scoped caller must not see t1's worker.
+    let resp = client
+        .get(format!("{}/workers", srv.base_url))
+        .header("X-Tenant-Id", "t2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(
+        !workers.iter().any(|w| w["worker_id"] == "tenant1-worker"),
+        "t1 worker must be invisible to t2"
+    );
+
+    // The owning tenant sees it.
+    let resp = client
+        .get(format!("{}/workers", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let workers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert!(workers.iter().any(|w| w["worker_id"] == "tenant1-worker"));
+}
+
+#[tokio::test]
+async fn get_handlers_lists_builtin_and_external() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .json(&json!({
+            "handler_name": "my_external_handler",
+            "worker_id": "w1",
+            "limit": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = client
+        .get(format!("{}/handlers", srv.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let catalog: serde_json::Value = resp.json().await.unwrap();
+    let builtin = catalog["builtin"].as_array().unwrap();
+    assert!(builtin.iter().any(|h| h == "noop"));
+    assert!(builtin.iter().any(|h| h == "http_request"));
+    let external = catalog["external"].as_array().unwrap();
+    assert!(external.iter().any(|h| h == "my_external_handler"));
+}

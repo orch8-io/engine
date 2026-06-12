@@ -72,6 +72,24 @@ pub struct AppState {
     pub publisher: Option<Arc<orch8_publisher::SequencePublisher>>,
     pub push_provider: Arc<dyn orch8_push::PushProvider>,
     pub mobile_sync_enabled: bool,
+    /// Names of handlers the engine executes in-process. Served by
+    /// `GET /handlers` alongside externally-registered handler names.
+    pub builtin_handlers: Arc<Vec<String>>,
+}
+
+/// Compute the built-in handler name list for [`AppState::builtin_handlers`].
+///
+/// Builds a throwaway [`orch8_engine::handlers::HandlerRegistry`] with all
+/// built-ins registered and returns its sorted name list.
+#[must_use]
+pub fn builtin_handler_names() -> Vec<String> {
+    let mut registry = orch8_engine::handlers::HandlerRegistry::new();
+    orch8_engine::handlers::builtin::register_builtins(&mut registry);
+    registry
+        .handler_names()
+        .into_iter()
+        .map(ToString::to_string)
+        .collect()
 }
 
 /// Assemble the versioned API sub-router (without state applied).

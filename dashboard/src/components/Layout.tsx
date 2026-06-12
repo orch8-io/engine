@@ -26,6 +26,7 @@ import {
   IconDatabase,
   IconPhone,
   IconCost,
+  IconWorkers,
 } from "./ui/Icons";
 
 const CONN_TONE = {
@@ -40,6 +41,7 @@ const NAV = [
   { to: "/approvals", label: "Approvals", icon: IconCheckCircle },
   { to: "/sequences", label: "Sequences", icon: IconLayers },
   { to: "/tasks", label: "Tasks", icon: IconList },
+  { to: "/workers", label: "Workers", icon: IconWorkers },
   { to: "/cron", label: "Cron", icon: IconClock },
   { to: "/triggers", label: "Triggers", icon: IconZap },
   { to: "/sessions", label: "Sessions", icon: IconSession },

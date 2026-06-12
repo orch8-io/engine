@@ -1096,6 +1096,26 @@ pub trait WorkerStore: Send + Sync + 'static {
         tenant_id: &TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
+
+    // === Worker Registry ===
+
+    /// Upsert a worker registration (one row per `worker_id` +
+    /// `handler_name`), refreshing `last_seen_at`. Called on every poll, so
+    /// implementations must keep this a single cheap statement.
+    async fn upsert_worker_registration(
+        &self,
+        registration: &orch8_types::worker::WorkerRegistration,
+    ) -> Result<(), StorageError>;
+
+    /// List worker registrations seen within the last `seen_within_secs`
+    /// seconds (all rows when `None`), most recently seen first.
+    async fn list_worker_registrations(
+        &self,
+        seen_within_secs: Option<i64>,
+    ) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError>;
+
+    /// Count currently-claimed worker tasks grouped by claiming worker id.
+    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError>;
 }
 
 // ============================================================================

@@ -238,6 +238,7 @@ fn build_app_state(
         publisher: None,
         push_provider,
         mobile_sync_enabled,
+        builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
     }
 }
 

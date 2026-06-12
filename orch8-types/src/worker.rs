@@ -135,3 +135,24 @@ pub struct WorkerTask {
     pub error_retryable: Option<bool>,
     pub created_at: DateTime<Utc>,
 }
+
+/// A worker's self-reported registration, refreshed on every poll.
+///
+/// One row per `(worker_id, handler_name)` pair — a worker that serves three
+/// handlers appears three times. `last_seen_at` is bumped on every poll, so
+/// liveness is "polled recently", independent of whether tasks were claimed.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkerRegistration {
+    pub worker_id: String,
+    pub handler_name: String,
+    /// Named queue the worker polled, when using queue-scoped polling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
+    /// Optional worker-reported build/deploy version string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Tenant scope of the polling credential, when tenant-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    pub last_seen_at: DateTime<Utc>,
+}

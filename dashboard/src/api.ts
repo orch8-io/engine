@@ -119,6 +119,33 @@ export function getWorkerTaskStats(signal?: AbortSignal): Promise<WorkerTaskStat
   return request("/workers/tasks/stats", undefined, signal);
 }
 
+/** Aggregated fleet view of one worker, grouped from its per-handler registrations. */
+export interface WorkerInfo {
+  worker_id: string;
+  handlers: string[];
+  queues: string[];
+  version: string | null;
+  last_seen_at: string;
+  alive: boolean;
+  in_flight: number;
+}
+
+export function listWorkers(
+  params?: { alive_within_secs?: string; include_stale?: string },
+  signal?: AbortSignal,
+): Promise<WorkerInfo[]> {
+  return request("/workers", params, signal);
+}
+
+export interface HandlerCatalog {
+  builtin: string[];
+  external: string[];
+}
+
+export function listHandlers(signal?: AbortSignal): Promise<HandlerCatalog> {
+  return request("/handlers", undefined, signal);
+}
+
 export function checkHealth(signal?: AbortSignal): Promise<void> {
   return request("/health/live", undefined, signal);
 }
