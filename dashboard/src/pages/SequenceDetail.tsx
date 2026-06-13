@@ -1,13 +1,35 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import { usePageTitle } from "../hooks/usePageTitle";
-import { getSequence, type SequenceDefinition } from "../api";
+import { getSequence, createInstance, type SequenceDefinition } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
 import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
 import { Id } from "../components/ui/Mono";
 import { IconChevronDown, IconChevronRight } from "../components/ui/Icons";
+
+/** Build a starter `context.data` object from a sequence's `input_schema`.
+ *  Uses each property's `default` when present, otherwise a type-appropriate
+ *  empty value, so the Run editor opens pre-shaped to the declared contract. */
+function schemaDefaults(schema: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  if (!schema || typeof schema !== "object") return {};
+  const props = schema.properties;
+  if (!props || typeof props !== "object") return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(props as Record<string, unknown>)) {
+    const p = (raw ?? {}) as Record<string, unknown>;
+    if ("default" in p) {
+      out[key] = p.default;
+      continue;
+    }
+    const t = Array.isArray(p.type) ? p.type[0] : p.type;
+    out[key] =
+      t === "string" ? "" : t === "integer" || t === "number" ? 0 : t === "boolean" ? false : t === "array" ? [] : t === "object" ? {} : null;
+  }
+  return out;
+}
 
 interface BlockLike {
   type?: string;
@@ -255,8 +277,14 @@ function BlockView({ block }: { block: BlockLike }) {
 export default function SequenceDetail() {
   usePageTitle("Sequence");
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [seq, setSeq] = useState<SequenceDefinition | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [runOpen, setRunOpen] = useState(false);
+  const [runJson, setRunJson] = useState("{}");
+  const [runBusy, setRunBusy] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -264,6 +292,46 @@ export default function SequenceDetail() {
       .then(setSeq)
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [id]);
+
+  const openRun = () => {
+    if (!seq) return;
+    // Prefill the editor from input_schema defaults when present, so the
+    // operator starts from the declared contract instead of a blank object.
+    setRunJson(JSON.stringify(schemaDefaults(seq.input_schema), null, 2));
+    setRunError(null);
+    setRunOpen(true);
+  };
+
+  const submitRun = async () => {
+    if (!seq) return;
+    let data: unknown;
+    try {
+      data = JSON.parse(runJson);
+    } catch {
+      setRunError("context.data is not valid JSON");
+      return;
+    }
+    if (data === null || typeof data !== "object" || Array.isArray(data)) {
+      setRunError("context.data must be a JSON object");
+      return;
+    }
+    setRunBusy(true);
+    setRunError(null);
+    try {
+      const res = await createInstance({
+        sequence_id: seq.id,
+        tenant_id: seq.tenant_id,
+        namespace: seq.namespace,
+        context: { data: data as Record<string, unknown>, config: {}, audit: [] },
+      });
+      navigate(`/instances/${res.id}`);
+    } catch (e) {
+      // input_schema validation failures surface here as a 422 with details.
+      setRunError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunBusy(false);
+    }
+  };
 
   if (!id)
     return <div className="notice notice-warn">Missing sequence id</div>;
@@ -293,12 +361,20 @@ export default function SequenceDetail() {
             : "Loading sequence definition…"
         }
         actions={
-          seq &&
-          (seq.deprecated ? (
-            <Badge tone="hold">deprecated</Badge>
-          ) : (
-            <Badge tone="ok">active</Badge>
-          ))
+          seq && (
+            <div className="flex items-center gap-3">
+              {!seq.deprecated && (
+                <Button variant="primary" size="sm" onClick={openRun}>
+                  Run
+                </Button>
+              )}
+              {seq.deprecated ? (
+                <Badge tone="hold">deprecated</Badge>
+              ) : (
+                <Badge tone="ok">active</Badge>
+              )}
+            </div>
+          )
         }
       />
 
@@ -307,6 +383,53 @@ export default function SequenceDetail() {
       {seq && (
         <>
           <Glossary items={PAGE_GLOSSARY} />
+
+          {runOpen && (
+            <Section
+              eyebrow="Run"
+              title="Start a new execution"
+              description={
+                seq.input_schema ? (
+                  <>
+                    This sequence declares an{" "}
+                    <code className="font-mono text-ink">input_schema</code>; the
+                    editor is pre-shaped from it. The engine validates{" "}
+                    <code className="font-mono">context.data</code> against the
+                    schema on submit and rejects a bad payload with{" "}
+                    <strong className="text-ink">422</strong> before any work runs.
+                  </>
+                ) : (
+                  <>
+                    Provide the initial <code className="font-mono">context.data</code>{" "}
+                    for the new instance. No <code className="font-mono">input_schema</code>{" "}
+                    is declared, so any JSON object is accepted.
+                  </>
+                )
+              }
+            >
+              <div className="space-y-4">
+                <div>
+                  <div className="field-label mb-1">context.data (JSON)</div>
+                  <textarea
+                    value={runJson}
+                    onChange={(e) => setRunJson(e.target.value)}
+                    rows={12}
+                    spellCheck={false}
+                    className="w-full bg-sunken border border-rule px-2.5 py-2 text-[12px] font-mono text-ink placeholder:text-faint focus:border-signal focus:outline-none"
+                  />
+                </div>
+                {runError && <div className="notice notice-warn">{runError}</div>}
+                <div className="flex justify-end gap-2">
+                  <Button size="sm" variant="ghost" disabled={runBusy} onClick={() => setRunOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" variant="primary" disabled={runBusy} onClick={submitRun}>
+                    {runBusy ? "Starting…" : "Start instance"}
+                  </Button>
+                </div>
+              </div>
+            </Section>
+          )}
 
           <Section
             eyebrow="Metadata"

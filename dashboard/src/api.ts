@@ -287,6 +287,21 @@ export async function retryInstance(
   return mutate(`/instances/${encodeURIComponent(id)}/retry`, "POST", undefined, undefined, signal);
 }
 
+export interface CreateInstanceBody {
+  sequence_id: string;
+  tenant_id: string;
+  namespace: string;
+  context: { data: Record<string, unknown>; config: Record<string, unknown>; audit: unknown[] };
+  dry_run?: boolean;
+}
+
+export async function createInstance(
+  body: CreateInstanceBody,
+  signal?: AbortSignal,
+): Promise<{ id: string; deduplicated?: boolean }> {
+  return mutate("/instances", "POST", body, undefined, signal);
+}
+
 // ─── Sequences ───────────────────────────────────────────────────────────────
 
 export interface SequenceDefinition {
@@ -298,6 +313,8 @@ export interface SequenceDefinition {
   deprecated: boolean;
   blocks: unknown[];
   interceptors?: unknown;
+  /** Optional JSON Schema describing `context.data`. When set, instance creates are validated against it. */
+  input_schema?: Record<string, unknown> | null;
   created_at: string;
 }
 
