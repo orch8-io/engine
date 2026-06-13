@@ -334,6 +334,7 @@ async fn a3_loop_halts_on_non_retryable_error() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let lp_block = BlockDefinition::Loop(Box::new(loop_def.clone()));
 
@@ -704,6 +705,7 @@ async fn a5a_for_each_snapshots_collection_at_iteration_start() {
         item_var: "it".into(),
         body: vec![mk_step("body", "builtin.noop")],
         max_iterations: 10,
+    retain_iterations: None,
     }));
     let fe_def = if let BlockDefinition::ForEach(ref f) = fe {
         f.clone()
@@ -826,6 +828,7 @@ async fn a5b_for_each_trycatch_inner_recovers_failed_iteration() {
         item_var: "it".into(),
         body: vec![try_catch_block.clone()],
         max_iterations: 10,
+    retain_iterations: None,
     }));
     let fe_def = if let BlockDefinition::ForEach(ref f) = fe {
         f.clone()
@@ -1121,6 +1124,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let fe_def = ForEachDef {
         id: BlockId::new("fe"),
@@ -1128,6 +1132,7 @@ async fn a5c_loop_in_for_each_state_per_iteration() {
         item_var: "x".into(),
         body: vec![BlockDefinition::Loop(Box::new(inner_loop_def.clone()))],
         max_iterations: 10,
+    retain_iterations: None,
     };
     let fe_block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
 

@@ -1153,7 +1153,7 @@ Evaluates conditions in order against `context.data`. First match wins. Falls th
 }
 ```
 
-Repeats body while `condition` evaluates to truthy in `context.data`. Safety cap via `max_iterations` (default 1000).
+Repeats body while `condition` evaluates to truthy in `context.data`. Safety cap via `max_iterations` (default 1000). Optional `retain_iterations: N` bounds storage on long-running loops — only the N most recent body-step output rows per block are kept; older rows are compacted at each iteration boundary (unset = keep everything).
 
 ---
 
@@ -1172,7 +1172,7 @@ Repeats body while `condition` evaluates to truthy in `context.data`. Safety cap
 }
 ```
 
-Iterates over `context.data[collection]` (must be an array). Each iteration has `item_var` available in context. Empty or missing collection completes immediately.
+Iterates over `context.data[collection]` (must be an array). Each iteration has `item_var` available in context. Empty or missing collection completes immediately. Supports the same optional `retain_iterations: N` output-compaction bound as `Loop`.
 
 ---
 

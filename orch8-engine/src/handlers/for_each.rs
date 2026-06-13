@@ -239,6 +239,27 @@ pub async fn execute_for_each(
         };
         storage.save_block_output(&marker).await?;
 
+        // Compact old body-step outputs once the retained window is exceeded.
+        if let Some(retain) = fe_def.retain_iterations {
+            match crate::evaluator::compact_iteration_outputs(
+                storage,
+                instance.id,
+                &fe_def.body,
+                retain,
+            )
+            .await
+            {
+                Ok(n) if n > 0 => crate::metrics::inc_by(crate::metrics::LOOP_OUTPUTS_COMPACTED, n),
+                Ok(_) => {}
+                Err(e) => warn!(
+                    instance_id = %instance.id,
+                    block_id = %fe_def.id,
+                    error = %e,
+                    "for_each output compaction failed (continuing)"
+                ),
+            }
+        }
+
         debug!(
             instance_id = %instance.id,
             block_id = %fe_def.id,
@@ -928,6 +949,7 @@ mod tests {
                 },
             ))],
             max_iterations: 4,
+        retain_iterations: None,
         };
         let registry = HandlerRegistry::new();
         let tree = s.get_execution_tree(inst_id).await.unwrap();

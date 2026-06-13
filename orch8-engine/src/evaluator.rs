@@ -279,6 +279,96 @@ fn build_nodes(
     }
 }
 
+/// Collect every block id reachable inside `blocks` (the block itself plus all
+/// descendants), mirroring `build_nodes`' recursion. Used to scope output
+/// compaction to a loop/foreach body.
+fn collect_body_block_ids(blocks: &[BlockDefinition], out: &mut std::collections::HashSet<BlockId>) {
+    for block in blocks {
+        out.insert(block_meta(block).0.clone());
+        match block {
+            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
+            BlockDefinition::Parallel(p) => {
+                for branch in &p.branches {
+                    collect_body_block_ids(branch, out);
+                }
+            }
+            BlockDefinition::Race(r) => {
+                for branch in &r.branches {
+                    collect_body_block_ids(branch, out);
+                }
+            }
+            BlockDefinition::Loop(l) => collect_body_block_ids(&l.body, out),
+            BlockDefinition::ForEach(f) => collect_body_block_ids(&f.body, out),
+            BlockDefinition::Router(r) => {
+                for route in &r.routes {
+                    collect_body_block_ids(&route.blocks, out);
+                }
+                if let Some(default) = &r.default {
+                    collect_body_block_ids(default, out);
+                }
+            }
+            BlockDefinition::TryCatch(tc) => {
+                collect_body_block_ids(&tc.try_block, out);
+                collect_body_block_ids(&tc.catch_block, out);
+                if let Some(finally) = &tc.finally_block {
+                    collect_body_block_ids(finally, out);
+                }
+            }
+            BlockDefinition::ABSplit(ab) => {
+                for variant in &ab.variants {
+                    collect_body_block_ids(&variant.blocks, out);
+                }
+            }
+            BlockDefinition::CancellationScope(cs) => collect_body_block_ids(&cs.blocks, out),
+        }
+    }
+}
+
+/// Compact a loop/foreach body's accumulated outputs, keeping only the `retain`
+/// most recent rows per body block id. A long-running loop appends one output
+/// row per iteration per body step; without a bound this grows without limit.
+/// Returns the number of rows deleted. `retain == 0` is a no-op (treated as
+/// "retain everything", matching an unset policy).
+pub(crate) async fn compact_iteration_outputs(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    body: &[BlockDefinition],
+    retain: u32,
+) -> Result<u64, EngineError> {
+    if retain == 0 {
+        return Ok(0);
+    }
+    let mut block_ids: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+    collect_body_block_ids(body, &mut block_ids);
+    if block_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let all = storage.get_all_outputs(instance_id).await?;
+    let mut by_block: HashMap<&BlockId, Vec<&orch8_types::output::BlockOutput>> = HashMap::new();
+    for o in &all {
+        if block_ids.contains(&o.block_id) {
+            by_block.entry(&o.block_id).or_default().push(o);
+        }
+    }
+
+    let retain = retain as usize;
+    let mut deleted = 0u64;
+    for (_, mut rows) in by_block {
+        if rows.len() <= retain {
+            continue;
+        }
+        // Oldest first; delete everything before the last `retain`.
+        rows.sort_by_key(|o| o.created_at);
+        let cut = rows.len() - retain;
+        for o in rows.iter().take(cut) {
+            storage.delete_block_output_by_id(o.id).await?;
+            deleted += 1;
+        }
+    }
+    Ok(deleted)
+}
+
 fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
     match block {
         BlockDefinition::Step(s) => (&s.id, BlockType::Step),

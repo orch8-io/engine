@@ -133,6 +133,7 @@ async fn loop_empty_body_completes_immediately() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -157,6 +158,7 @@ async fn loop_max_iterations_zero_fails() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -181,6 +183,7 @@ async fn loop_falsy_condition_completes_without_activating_body() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     // context.data lacks `keep_going` → falsy via expression engine.
@@ -208,6 +211,7 @@ async fn loop_first_tick_activates_body() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -239,6 +243,7 @@ async fn loop_body_completion_increments_iteration_marker() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -283,6 +288,7 @@ async fn loop_cap_reached_after_increment_leaves_body_terminal() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -331,6 +337,7 @@ async fn loop_body_failure_fails_loop() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -365,6 +372,7 @@ async fn loop_preexisting_marker_at_cap_short_circuits() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -405,6 +413,7 @@ async fn loop_running_body_does_not_increment_counter() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -443,6 +452,7 @@ async fn loop_condition_flips_false_mid_run_completes_cleanly() {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"keep": true})).await;
@@ -497,6 +507,7 @@ async fn loop_break_on_exits_when_condition_met() {
         break_on: Some("stop_now".into()),
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"stop_now": true})).await;
@@ -542,6 +553,7 @@ async fn loop_break_on_does_not_exit_when_condition_falsy() {
         break_on: Some("should_stop".into()),
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     // should_stop is false → break_on should NOT trigger
@@ -593,6 +605,7 @@ async fn loop_continue_on_error_skips_failed_iteration() {
         break_on: None,
         continue_on_error: true,
         poll_interval: None,
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -644,6 +657,7 @@ async fn loop_poll_interval_sets_next_fire_at() {
         break_on: None,
         continue_on_error: false,
         poll_interval: Some(30),
+    retain_iterations: None,
     };
     let block = BlockDefinition::Loop(Box::new(loop_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -693,6 +707,7 @@ async fn for_each_empty_body_completes_immediately() {
         item_var: "it".into(),
         body: vec![],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"items": [1, 2, 3]})).await;
@@ -723,6 +738,7 @@ async fn for_each_missing_collection_completes() {
         item_var: "it".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({})).await;
@@ -754,6 +770,7 @@ async fn for_each_non_array_completes() {
         item_var: "it".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"items": "not-an-array"})).await;
@@ -784,6 +801,7 @@ async fn for_each_empty_collection_completes() {
         item_var: "it".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"items": []})).await;
@@ -815,6 +833,7 @@ async fn for_each_first_tick_binds_item_var_and_activates_body() {
         item_var: "cur".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"xs": ["alpha", "beta", "gamma"]})).await;
@@ -875,6 +894,7 @@ async fn for_each_snapshot_is_stable_under_context_mutation() {
         item_var: "cur".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"xs": ["a", "b"]})).await;
@@ -956,6 +976,7 @@ async fn for_each_body_failure_fails_node() {
         item_var: "it".into(),
         body: vec![mk_step("body")],
         max_iterations: 100,
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"xs": [1, 2]})).await;
@@ -1004,6 +1025,7 @@ async fn for_each_max_iterations_caps_below_collection_length() {
         item_var: "it".into(),
         body: vec![mk_step("body")],
         max_iterations: 1, // collection has 3 items but cap is 1.
+    retain_iterations: None,
     };
     let block = BlockDefinition::ForEach(Box::new(fe_def.clone()));
     let (storage, instance, tree) = setup(block, json!({"xs": [1, 2, 3]})).await;

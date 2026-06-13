@@ -60,6 +60,7 @@ fn build_sequence() -> SequenceDefinition {
         break_on: None,
         continue_on_error: false,
         poll_interval: None,
+    retain_iterations: None,
     }));
     let outer = BlockDefinition::ForEach(Box::new(ForEachDef {
         id: BlockId::new("fe1"),
@@ -67,6 +68,7 @@ fn build_sequence() -> SequenceDefinition {
         item_var: "item".into(),
         body: vec![inner_loop],
         max_iterations: 1000,
+    retain_iterations: None,
     }));
     SequenceDefinition {
         id: SequenceId::new(),

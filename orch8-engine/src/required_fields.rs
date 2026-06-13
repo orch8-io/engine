@@ -310,6 +310,7 @@ mod tests {
             break_on: None,
             continue_on_error: false,
             poll_interval: None,
+        retain_iterations: None,
         };
         let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Loop(
             Box::new(lp),
@@ -354,6 +355,7 @@ mod tests {
             item_var: "item".into(),
             body: vec![BlockDefinition::Step(fe_step)],
             max_iterations: 10,
+        retain_iterations: None,
         };
         let tc = TryCatchDef {
             id: BlockId::new("tc"),

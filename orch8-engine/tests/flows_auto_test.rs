@@ -268,6 +268,7 @@ async fn run_100_exhaustive_flow_tests() {
             break_on: None,
             continue_on_error: false,
             poll_interval: None,
+        retain_iterations: None,
         }));
 
         let seq = mk_sequence(vec![lp]);

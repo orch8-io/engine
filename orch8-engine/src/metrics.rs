@@ -21,6 +21,9 @@ pub const CRON_SKIPPED: &str = "orch8_cron_skipped_total";
 /// Alert-only SLA breaches (sequence `max_runtime` / `max_step_runtime`).
 /// Labeled `type=max_runtime|max_step_runtime`.
 pub const SLA_BREACHED: &str = "orch8_sla_breached_total";
+/// Body-step output rows compacted (deleted) by a loop/foreach
+/// `retain_iterations` policy.
+pub const LOOP_OUTPUTS_COMPACTED: &str = "orch8_loop_outputs_compacted_total";
 /// Items returned by `ActivePieces` sidecar polls (one instance per item).
 pub const AP_POLL_ITEMS: &str = "orch8_ap_poll_items_total";
 /// Failed `ActivePieces` sidecar polls (recorded on the trigger's state row).

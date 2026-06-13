@@ -2033,6 +2033,7 @@ mod tests {
             break_on: None,
             continue_on_error: false,
             poll_interval: None,
+        retain_iterations: None,
         }));
         let seq = mk_seq(vec![lp]);
         let warnings = validate_sequence_templates(&seq);
