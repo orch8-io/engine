@@ -82,7 +82,7 @@ fn default_next_fires_n() -> u32 {
 
 /// Iteratively compute the next `n` fire instants (UTC) for a schedule,
 /// starting strictly after `now`. Each instant is fed back as the new "after"
-/// bound, so the DST-correct [`calculate_next_fire_after`] governs every step —
+/// bound, so the DST-correct [`orch8_engine::cron::calculate_next_fire_after`] governs every step —
 /// gap occurrences clamp, ambiguous occurrences fire once. Stops early if the
 /// expression has no further occurrences.
 fn compute_next_fires(
