@@ -13,6 +13,8 @@ pub const RATE_LIMITS_EXCEEDED: &str = "orch8_rate_limits_exceeded_total";
 pub const RECOVERY_STALE: &str = "orch8_recovery_stale_instances_total";
 pub const WEBHOOKS_SENT: &str = "orch8_webhooks_sent_total";
 pub const WEBHOOKS_FAILED: &str = "orch8_webhooks_failed_total";
+/// Exhausted webhook deliveries parked in the outbox for later redelivery.
+pub const WEBHOOKS_PARKED: &str = "orch8_webhooks_parked_total";
 pub const CRON_TRIGGERED: &str = "orch8_cron_triggered_total";
 /// Occurrences skipped by a schedule's `skip` overlap policy.
 pub const CRON_SKIPPED: &str = "orch8_cron_skipped_total";

@@ -1268,6 +1268,20 @@ Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints ar
 
 ---
 
+## Webhook Outbox
+
+An outbound webhook that exhausts all its retries is parked in the outbox instead of being dropped, so a delivery is never silently lost. (Each parking increments the `orch8_webhooks_parked_total` metric.)
+
+```
+GET    /webhooks/outbox?limit=100        # list parked deliveries (newest first)
+POST   /webhooks/outbox/{id}/redeliver   # fresh send-with-retry; removes the row on success
+DELETE /webhooks/outbox/{id}             # discard a parked delivery
+```
+
+`redeliver` returns `200 { "redelivered": true }` and deletes the row when the delivery succeeds, or **502** (row kept) when it fails again. Each entry carries `url`, `event_type`, `instance_id`, the original `payload` (replayed verbatim), `attempts`, `last_error`, and `created_at`.
+
+---
+
 ## Additional Endpoints
 
 The following endpoint groups are available via the OpenAPI spec (Swagger UI at `/swagger-ui/`) but not yet fully documented here:

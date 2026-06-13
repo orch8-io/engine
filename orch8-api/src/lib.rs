@@ -26,6 +26,7 @@ pub mod telemetry;
 pub mod test_harness;
 pub mod triggers;
 pub mod usage;
+pub mod webhook_outbox;
 pub mod webhooks;
 pub mod workers;
 
@@ -114,6 +115,7 @@ fn api_routes() -> Router<AppState> {
         .merge(telemetry::routes())
         .merge(rollback::routes())
         .merge(usage::routes())
+        .merge(webhook_outbox::routes())
         .merge(mcp_server::routes())
 }
 

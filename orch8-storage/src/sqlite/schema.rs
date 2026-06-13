@@ -493,9 +493,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1))
 );
 CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
+
+CREATE TABLE IF NOT EXISTS webhook_outbox (
+    id          TEXT PRIMARY KEY,
+    url         TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    instance_id TEXT,
+    payload     TEXT NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    last_error  TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_created ON webhook_outbox(created_at DESC);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 12;
+pub(super) const SCHEMA_VERSION: i64 = 13;

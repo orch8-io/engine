@@ -1116,6 +1116,31 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Count currently-claimed worker tasks grouped by claiming worker id.
     async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError>;
+
+    // === Webhook Outbox ===
+
+    /// Park a webhook delivery that exhausted its retries, for later
+    /// inspection / redelivery. Best-effort: callers log on error rather than
+    /// failing the originating operation.
+    async fn park_webhook(
+        &self,
+        entry: &orch8_types::webhook_outbox::WebhookOutboxEntry,
+    ) -> Result<(), StorageError>;
+
+    /// List parked webhook deliveries, most recently parked first.
+    async fn list_webhook_outbox(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+
+    /// Fetch one parked delivery by id.
+    async fn get_webhook_outbox(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+
+    /// Remove a parked delivery (after a successful redelivery or a discard).
+    async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
 }
 
 // ============================================================================

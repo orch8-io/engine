@@ -62,6 +62,10 @@ use utoipa::OpenApi;
         crate::cron::update_cron,
         crate::cron::delete_cron,
         crate::cron::next_fires,
+        // Webhook outbox
+        crate::webhook_outbox::list_outbox,
+        crate::webhook_outbox::redeliver_outbox,
+        crate::webhook_outbox::discard_outbox,
         // Workers
         crate::workers::poll_tasks,
         crate::workers::poll_tasks_from_queue,
@@ -161,6 +165,8 @@ use utoipa::OpenApi;
         // Cron
         orch8_types::cron::CronSchedule,
         orch8_types::cron::OverlapPolicy,
+        orch8_types::webhook_outbox::WebhookOutboxEntry,
+        crate::webhook_outbox::RedeliverResponse,
         // Worker
         orch8_types::worker::WorkerTask,
         orch8_types::worker::WorkerTaskState,

@@ -48,6 +48,7 @@ mod sequences;
 mod sessions;
 mod signals;
 mod triggers;
+mod webhook_outbox;
 mod workers;
 
 use async_trait::async_trait;
@@ -1053,6 +1054,31 @@ impl crate::WorkerStore for SqliteStorage {
 
     async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
         workers::claimed_counts_by_worker(self).await
+    }
+
+    async fn park_webhook(
+        &self,
+        entry: &orch8_types::webhook_outbox::WebhookOutboxEntry,
+    ) -> Result<(), StorageError> {
+        webhook_outbox::park(self, entry).await
+    }
+
+    async fn list_webhook_outbox(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
+        webhook_outbox::list(self, limit).await
+    }
+
+    async fn get_webhook_outbox(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
+        webhook_outbox::get(self, id).await
+    }
+
+    async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError> {
+        webhook_outbox::delete(self, id).await
     }
 }
 

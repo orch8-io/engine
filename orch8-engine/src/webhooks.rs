@@ -1,17 +1,32 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
+use orch8_storage::StorageBackend;
 use orch8_types::config::WebhookConfig;
 use orch8_types::ids::InstanceId;
+use orch8_types::webhook_outbox::WebhookOutboxEntry;
 
 use crate::metrics;
+
+/// Process-global outbox sink + config, set once at engine startup. When set,
+/// a delivery that exhausts its retries is parked here instead of dropped, and
+/// the config is used to sign redeliveries.
+static OUTBOX_STORAGE: OnceLock<Arc<dyn StorageBackend>> = OnceLock::new();
+static OUTBOX_CONFIG: OnceLock<WebhookConfig> = OnceLock::new();
+
+/// Wire the webhook outbox. Exhausted deliveries park via `storage`; `config`
+/// signs redeliveries. Idempotent — only the first call takes effect.
+pub fn init_outbox(storage: Arc<dyn StorageBackend>, config: WebhookConfig) {
+    let _ = OUTBOX_STORAGE.set(storage);
+    let _ = OUTBOX_CONFIG.set(config);
+}
 
 /// Shared HTTP client (connection pooling, TLS, keep-alive).
 ///
@@ -44,7 +59,7 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 /// Webhook event payload sent to configured URLs.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
     pub event_type: String,
     pub instance_id: Option<InstanceId>,
@@ -90,6 +105,50 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
     }
 }
 
+/// One full retry pass. Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)`
+/// after exhausting `max_retries` (or on shutdown). Does NOT park — callers
+/// decide what to do with a failure.
+async fn try_send(
+    url: &str,
+    event: &WebhookEvent,
+    timeout: Duration,
+    max_retries: u32,
+    secret: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(event).map_err(|e| format!("serialize: {e}"))?;
+
+    let mut last_error = String::from("no attempts made");
+    for attempt in 0..=max_retries {
+        match send_request(url, &body, timeout, secret).await {
+            Ok(status) if status < 400 => {
+                metrics::inc(metrics::WEBHOOKS_SENT);
+                debug!(url = %url, event_type = %event.event_type, "webhook delivered");
+                return Ok(());
+            }
+            Ok(status) => {
+                last_error = format!("http {status}");
+                warn!(url = %url, status, attempt, "webhook returned error status");
+            }
+            Err(e) => {
+                last_error = e.clone();
+                warn!(url = %url, error = %e, attempt, "webhook request failed");
+            }
+        }
+
+        if attempt < max_retries {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    warn!(url = %url, attempt, "webhook retry aborted by shutdown");
+                    return Err("aborted by shutdown".into());
+                }
+                () = tokio::time::sleep(backoff_duration(attempt)) => {}
+            }
+        }
+    }
+    Err(last_error)
+}
+
 async fn send_with_retry(
     url: &str,
     event: &WebhookEvent,
@@ -98,49 +157,10 @@ async fn send_with_retry(
     secret: Option<&str>,
     cancel: &CancellationToken,
 ) {
-    let body = match serde_json::to_vec(event) {
-        Ok(b) => b,
-        Err(e) => {
-            error!(error = %e, "failed to serialize webhook event");
-            return;
-        }
+    let last_error = match try_send(url, event, timeout, max_retries, secret, cancel).await {
+        Ok(()) => return,
+        Err(reason) => reason,
     };
-
-    for attempt in 0..=max_retries {
-        match send_request(url, &body, timeout, secret).await {
-            Ok(status) if status < 400 => {
-                metrics::inc(metrics::WEBHOOKS_SENT);
-                debug!(url = %url, event_type = %event.event_type, "webhook delivered");
-                return;
-            }
-            Ok(status) => {
-                warn!(
-                    url = %url,
-                    status = status,
-                    attempt = attempt,
-                    "webhook returned error status"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    url = %url,
-                    error = %e,
-                    attempt = attempt,
-                    "webhook request failed"
-                );
-            }
-        }
-
-        if attempt < max_retries {
-            tokio::select! {
-                () = cancel.cancelled() => {
-                    warn!(url = %url, attempt, "webhook retry aborted by shutdown");
-                    return;
-                }
-                () = tokio::time::sleep(backoff_duration(attempt)) => {}
-            }
-        }
-    }
 
     metrics::inc(metrics::WEBHOOKS_FAILED);
     error!(
@@ -148,6 +168,49 @@ async fn send_with_retry(
         event_type = %event.event_type,
         "webhook delivery failed after all retries"
     );
+
+    // Park the exhausted delivery so it isn't silently lost.
+    if let Some(storage) = OUTBOX_STORAGE.get() {
+        let entry = WebhookOutboxEntry {
+            id: uuid::Uuid::now_v7(),
+            url: url.to_string(),
+            event_type: event.event_type.clone(),
+            instance_id: event.instance_id.map(InstanceId::into_uuid),
+            payload: serde_json::to_value(event).unwrap_or(serde_json::Value::Null),
+            attempts: i32::try_from(max_retries.saturating_add(1)).unwrap_or(i32::MAX),
+            last_error: Some(last_error),
+            created_at: Utc::now(),
+        };
+        match storage.park_webhook(&entry).await {
+            Ok(()) => metrics::inc(metrics::WEBHOOKS_PARKED),
+            Err(e) => warn!(url = %url, error = %e, "failed to park exhausted webhook"),
+        }
+    }
+}
+
+/// Redeliver a parked webhook to its original URL — one fresh retry pass using
+/// the engine's webhook config for signing. `Ok(())` means the caller should
+/// delete the outbox row; `Err(reason)` means it should stay parked.
+pub async fn redeliver(entry: &WebhookOutboxEntry, cancel: &CancellationToken) -> Result<(), String> {
+    let event: WebhookEvent =
+        serde_json::from_value(entry.payload.clone()).map_err(|e| format!("bad payload: {e}"))?;
+    let (timeout, max_retries, secret) = match OUTBOX_CONFIG.get() {
+        Some(c) => (
+            Duration::from_secs(c.timeout_secs),
+            c.max_retries,
+            c.secret.as_ref().map(|s| s.expose().to_string()),
+        ),
+        None => (Duration::from_secs(10), 3, None),
+    };
+    try_send(
+        &entry.url,
+        &event,
+        timeout,
+        max_retries,
+        secret.as_deref(),
+        cancel,
+    )
+    .await
 }
 
 /// Send an HTTP POST request via reqwest (TLS, connection pooling, proper HTTP).

@@ -196,6 +196,10 @@ pub async fn run_tick_loop(
     let webhook_config = Arc::new(config.webhooks.clone());
     let externalize_threshold = config.externalize_output_threshold;
 
+    // Wire the webhook outbox: exhausted deliveries are parked via storage and
+    // can be redelivered through the API. Idempotent across restarts.
+    crate::webhooks::init_outbox(Arc::clone(&storage), config.webhooks.clone());
+
     let mut ticker = interval(tick_duration);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

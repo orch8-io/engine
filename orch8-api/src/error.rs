@@ -37,6 +37,9 @@ pub enum ApiError {
 
     #[error("unprocessable entity: {0}")]
     UnprocessableEntity(String),
+
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
 }
 
 impl ApiError {
@@ -71,6 +74,7 @@ impl IntoResponse for ApiError {
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
         };
         let body = match &self {
             Self::Internal(msg) => {

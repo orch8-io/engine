@@ -8,11 +8,15 @@ import {
   resetCircuitBreaker,
   drainClusterNode,
   retryInstance,
+  listWebhookOutbox,
+  redeliverWebhook,
+  discardWebhook,
   type TaskInstance,
   type CircuitBreakerState,
   type ClusterNode,
   type BreakerState,
   type WorkerTask,
+  type WebhookOutboxEntry,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
 import { usePageTitle } from "../hooks/usePageTitle";
@@ -111,9 +115,12 @@ export default function Operations() {
     [],
   );
 
+  const outboxFetcher = useCallback((signal?: AbortSignal) => listWebhookOutbox(100, signal), []);
+
   const dlq = usePolling<TaskInstance[]>(dlqFetcher);
   const cbs = usePolling<CircuitBreakerState[]>(cbFetcher);
   const nodes = usePolling<ClusterNode[]>(nodesFetcher);
+  const outbox = usePolling<WebhookOutboxEntry[]>(outboxFetcher);
   const failedTasks = usePolling<WorkerTask[]>(failedTasksFetcher, 5000);
 
   const [toast, setToast] = useState<string | null>(null);
@@ -191,7 +198,131 @@ export default function Operations() {
         onChange={nodes.refresh}
         showToast={showToast}
       />
+      <WebhookOutboxSection
+        data={outbox.data}
+        loading={outbox.loading && !outbox.data}
+        onChange={outbox.refresh}
+        showToast={showToast}
+      />
     </div>
+  );
+}
+
+function WebhookOutboxSection({
+  data,
+  loading,
+  onChange,
+  showToast,
+}: {
+  data: WebhookOutboxEntry[] | null | undefined;
+  loading: boolean;
+  onChange: () => void;
+  showToast: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const redeliver = async (e: WebhookOutboxEntry) => {
+    setBusy(e.id);
+    try {
+      await redeliverWebhook(e.id);
+      showToast(`Redelivered ${e.event_type}`);
+      onChange();
+    } catch (err) {
+      showToast(`Redelivery failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const discard = async (e: WebhookOutboxEntry) => {
+    if (!confirm(`Discard parked ${e.event_type} → ${e.url}? This cannot be undone.`)) return;
+    setBusy(e.id);
+    try {
+      await discardWebhook(e.id);
+      showToast("Discarded");
+      onChange();
+    } catch (err) {
+      showToast(`Failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Section
+      eyebrow="Webhook outbox"
+      title="Parked deliveries"
+      description={
+        <>
+          Outbound webhooks that exhausted their retries are parked here instead
+          of being silently dropped. <strong className="text-ink">Redeliver</strong>{" "}
+          runs a fresh send-with-retry pass and removes the row on success;{" "}
+          <strong className="text-ink">discard</strong> drops it permanently.
+        </>
+      }
+      meta={
+        <span>
+          <span className="text-faint">PARKED</span>{" "}
+          <span className="text-ink-dim">{data?.length ?? 0}</span>
+        </span>
+      }
+    >
+      {loading && <SkeletonTable rows={3} cols={5} />}
+      {data && (
+        <Table>
+          <THead>
+            <TH>Event</TH>
+            <TH>URL</TH>
+            <TH>Attempts</TH>
+            <TH>Last error</TH>
+            <TH>Parked</TH>
+            <TH className="text-right">Actions</TH>
+          </THead>
+          <tbody>
+            {data.map((e) => (
+              <TR key={e.id}>
+                <TD className="font-mono text-[12px]">{e.event_type}</TD>
+                <TD className="font-mono text-[12px] text-muted truncate max-w-[260px]" title={e.url}>
+                  {e.url}
+                </TD>
+                <TD className="tabular text-[12px]">{e.attempts}</TD>
+                <TD className="text-[12px] text-warn truncate max-w-[180px]" title={e.last_error ?? ""}>
+                  {e.last_error ?? "—"}
+                </TD>
+                <TD>
+                  <Relative at={e.created_at} />
+                </TD>
+                <TD className="text-right">
+                  <div className="inline-flex gap-1">
+                    <Button
+                      variant="default"
+                      size="sm"
+                      disabled={busy === e.id}
+                      onClick={() => redeliver(e)}
+                    >
+                      <IconRetry size={13} /> Redeliver
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy === e.id}
+                      onClick={() => discard(e)}
+                    >
+                      Discard
+                    </Button>
+                  </div>
+                </TD>
+              </TR>
+            ))}
+            {data.length === 0 && (
+              <Empty colSpan={99}>
+                No parked deliveries — every webhook has been delivered.
+              </Empty>
+            )}
+          </tbody>
+        </Table>
+      )}
+    </Section>
   );
 }
 

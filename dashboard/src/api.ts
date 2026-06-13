@@ -457,6 +457,32 @@ export function listDlq(
   return request("/instances/dlq", params as Record<string, string | undefined>, signal);
 }
 
+export interface WebhookOutboxEntry {
+  id: string;
+  url: string;
+  event_type: string;
+  instance_id?: string | null;
+  payload: unknown;
+  attempts: number;
+  last_error?: string | null;
+  created_at: string;
+}
+
+export function listWebhookOutbox(limit = 100, signal?: AbortSignal): Promise<WebhookOutboxEntry[]> {
+  return request("/webhooks/outbox", { limit: String(limit) }, signal);
+}
+
+export function redeliverWebhook(
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ redelivered: boolean }> {
+  return mutate(`/webhooks/outbox/${encodeURIComponent(id)}/redeliver`, "POST", undefined, undefined, signal);
+}
+
+export function discardWebhook(id: string, signal?: AbortSignal): Promise<null> {
+  return mutate(`/webhooks/outbox/${encodeURIComponent(id)}`, "DELETE", undefined, undefined, signal);
+}
+
 export type BreakerState = "closed" | "open" | "half_open";
 
 export interface CircuitBreakerState {

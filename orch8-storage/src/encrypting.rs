@@ -1125,6 +1125,31 @@ impl crate::WorkerStore for EncryptingStorage {
     async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
         self.inner.claimed_task_counts_by_worker().await
     }
+
+    async fn park_webhook(
+        &self,
+        entry: &orch8_types::webhook_outbox::WebhookOutboxEntry,
+    ) -> Result<(), StorageError> {
+        self.inner.park_webhook(entry).await
+    }
+
+    async fn list_webhook_outbox(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
+        self.inner.list_webhook_outbox(limit).await
+    }
+
+    async fn get_webhook_outbox(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
+        self.inner.get_webhook_outbox(id).await
+    }
+
+    async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError> {
+        self.inner.delete_webhook_outbox(id).await
+    }
 }
 
 // ============================================================================
