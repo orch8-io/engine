@@ -1184,6 +1184,34 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Acknowledge (delete) a delivered command.
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError>;
+
+    // === Worker Version Pins ===
+
+    /// Create-or-update a `(tenant, handler)` minimum-version pin.
+    async fn upsert_worker_version_pin(
+        &self,
+        pin: &orch8_types::worker::WorkerVersionPin,
+    ) -> Result<(), StorageError>;
+
+    /// Fetch the pin for a `(tenant, handler)` pair, if any.
+    async fn get_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError>;
+
+    /// List pins, optionally filtered by tenant.
+    async fn list_worker_version_pins(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError>;
+
+    /// Delete a `(tenant, handler)` pin.
+    async fn delete_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<(), StorageError>;
 }
 
 // ============================================================================

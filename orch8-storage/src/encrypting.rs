@@ -1194,6 +1194,36 @@ impl crate::WorkerStore for EncryptingStorage {
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {
         self.inner.delete_worker_command(id).await
     }
+
+    async fn upsert_worker_version_pin(
+        &self,
+        pin: &orch8_types::worker::WorkerVersionPin,
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_worker_version_pin(pin).await
+    }
+
+    async fn get_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError> {
+        self.inner.get_worker_version_pin(tenant_id, handler_name).await
+    }
+
+    async fn list_worker_version_pins(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError> {
+        self.inner.list_worker_version_pins(tenant_id).await
+    }
+
+    async fn delete_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_worker_version_pin(tenant_id, handler_name).await
+    }
 }
 
 // ============================================================================

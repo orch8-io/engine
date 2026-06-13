@@ -32,6 +32,93 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/commands", post(enqueue_command))
         .route("/workers/commands/{id}", axum::routing::delete(ack_command))
         .route("/workers/{worker_id}/commands", get(list_commands))
+        .route(
+            "/workers/version-pins",
+            post(set_version_pin).get(list_version_pins),
+        )
+        .route(
+            "/workers/version-pins/{tenant_id}/{handler_name}",
+            axum::routing::delete(delete_version_pin),
+        )
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct SetVersionPinRequest {
+    tenant_id: String,
+    handler_name: String,
+    min_version: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ListPinsQuery {
+    tenant_id: Option<String>,
+}
+
+/// Create-or-update a minimum-worker-version pin for a `(tenant, handler)`.
+#[utoipa::path(post, path = "/workers/version-pins", tag = "workers",
+    request_body = SetVersionPinRequest,
+    responses((status = 200, description = "Pin set", body = orch8_types::worker::WorkerVersionPin))
+)]
+pub(crate) async fn set_version_pin(
+    State(state): State<AppState>,
+    Json(req): Json<SetVersionPinRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if req.handler_name.trim().is_empty() || req.min_version.trim().is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "handler_name and min_version are required".into(),
+        ));
+    }
+    let now = chrono::Utc::now();
+    let pin = orch8_types::worker::WorkerVersionPin {
+        tenant_id: req.tenant_id,
+        handler_name: req.handler_name,
+        min_version: req.min_version,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .storage
+        .upsert_worker_version_pin(&pin)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_version_pin"))?;
+    Ok((StatusCode::OK, Json(pin)))
+}
+
+/// List worker version pins, optionally filtered by tenant.
+#[utoipa::path(get, path = "/workers/version-pins", tag = "workers",
+    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
+    responses((status = 200, description = "Pins", body = Vec<orch8_types::worker::WorkerVersionPin>))
+)]
+pub(crate) async fn list_version_pins(
+    State(state): State<AppState>,
+    Query(q): Query<ListPinsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let pins = state
+        .storage
+        .list_worker_version_pins(q.tenant_id.as_deref())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_version_pin"))?;
+    Ok(Json(pins))
+}
+
+/// Delete a worker version pin.
+#[utoipa::path(delete, path = "/workers/version-pins/{tenant_id}/{handler_name}", tag = "workers",
+    params(
+        ("tenant_id" = String, Path, description = "Tenant id"),
+        ("handler_name" = String, Path, description = "Handler name"),
+    ),
+    responses((status = 204, description = "Deleted"))
+)]
+pub(crate) async fn delete_version_pin(
+    State(state): State<AppState>,
+    Path((tenant_id, handler_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    state
+        .storage
+        .delete_worker_version_pin(&tenant_id, &handler_name)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_version_pin"))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -148,6 +235,30 @@ async fn record_registration(
     }
 }
 
+/// Is this worker blocked by a `(tenant, handler)` version pin? Returns `true`
+/// only when a pin exists and the worker's reported version doesn't satisfy it.
+/// Best-effort: a lookup error never blocks the poll (returns `false`).
+async fn version_pin_blocks(
+    state: &AppState,
+    tenant_id: Option<&orch8_types::ids::TenantId>,
+    handler_name: &str,
+    worker_version: Option<&str>,
+) -> bool {
+    let tenant = tenant_id.map_or("", orch8_types::ids::TenantId::as_str);
+    match state
+        .storage
+        .get_worker_version_pin(tenant, handler_name)
+        .await
+    {
+        Ok(Some(pin)) => !orch8_types::worker::version_satisfies(worker_version, &pin.min_version),
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!(error = %e, handler_name, "version pin lookup failed; allowing poll");
+            false
+        }
+    }
+}
+
 #[utoipa::path(post, path = "/workers/tasks/poll", tag = "workers",
     request_body = PollRequest,
     responses((status = 200, description = "Claimed worker tasks", body = Vec<orch8_types::worker::WorkerTask>))
@@ -158,13 +269,30 @@ pub(crate) async fn poll_tasks(
     Json(req): Json<PollRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let limit = req.limit.min(1000);
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+
+    // Version pin: a worker below the (tenant, handler) min version is given no
+    // tasks for that handler. Still record the registration so the operator can
+    // see the stale-version worker is polling.
+    if version_pin_blocks(&state, scoped.as_ref(), &req.handler_name, req.version.as_deref()).await {
+        record_registration(
+            &state,
+            &req.worker_id,
+            &req.handler_name,
+            None,
+            req.version.as_deref(),
+            scoped.as_ref(),
+        )
+        .await;
+        return Ok(Json(Vec::<orch8_types::worker::WorkerTask>::new()));
+    }
+
     // When a tenant is scoped, route through the tenant-aware claim so
     // the predicate is enforced INSIDE the lock window. The previous
     // "claim then filter" path would mark a foreign tenant's row claimed
     // with this worker_id, drop it from the response, and leave a ghost
     // `claimed` row invisible to its owning tenant until the stale-task
     // reaper reset it.
-    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
     let tasks = if let Some(ref tid) = scoped {
         state
             .storage
@@ -216,6 +344,21 @@ pub(crate) async fn poll_tasks_from_queue(
     let limit = req.limit.min(1000);
     // Tenant-scoped claim path — see `poll_tasks` comment for the rationale.
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, None);
+
+    // Version pin (same as the default poll path).
+    if version_pin_blocks(&state, scoped.as_ref(), &req.handler_name, req.version.as_deref()).await {
+        record_registration(
+            &state,
+            &req.worker_id,
+            &req.handler_name,
+            Some(&req.queue_name),
+            req.version.as_deref(),
+            scoped.as_ref(),
+        )
+        .await;
+        return Ok(Json(Vec::<orch8_types::worker::WorkerTask>::new()));
+    }
+
     let tasks = if let Some(ref tid) = scoped {
         state
             .storage

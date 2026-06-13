@@ -27,6 +27,7 @@ mod queue_routing;
 mod triggers;
 mod webhook_outbox;
 mod worker_commands;
+mod worker_version_pins;
 mod workers;
 
 use async_trait::async_trait;
@@ -985,6 +986,36 @@ impl crate::WorkerStore for PostgresStorage {
 
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {
         worker_commands::delete(self, id).await
+    }
+
+    async fn upsert_worker_version_pin(
+        &self,
+        pin: &orch8_types::worker::WorkerVersionPin,
+    ) -> Result<(), StorageError> {
+        worker_version_pins::upsert(self, pin).await
+    }
+
+    async fn get_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError> {
+        worker_version_pins::get(self, tenant_id, handler_name).await
+    }
+
+    async fn list_worker_version_pins(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError> {
+        worker_version_pins::list(self, tenant_id).await
+    }
+
+    async fn delete_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+    ) -> Result<(), StorageError> {
+        worker_version_pins::delete(self, tenant_id, handler_name).await
     }
 }
 

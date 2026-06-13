@@ -528,9 +528,18 @@ CREATE TABLE IF NOT EXISTS worker_commands (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_worker_commands_worker ON worker_commands(worker_id, created_at);
+
+CREATE TABLE IF NOT EXISTS worker_version_pins (
+    tenant_id    TEXT NOT NULL,
+    handler_name TEXT NOT NULL,
+    min_version  TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, handler_name)
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 15;
+pub(super) const SCHEMA_VERSION: i64 = 16;

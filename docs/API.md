@@ -1282,6 +1282,20 @@ DELETE /webhooks/outbox/{id}             # discard a parked delivery
 
 ---
 
+## Worker Version Pins
+
+Pin a minimum worker version per `(tenant, handler)`. A worker reporting a version below the pin is given no tasks for that handler at poll time — roll a fixed build out before older workers pick up affected work.
+
+```
+POST   /workers/version-pins                        # { tenant_id, handler_name, min_version } (upsert)
+GET    /workers/version-pins?tenant_id=acme         # list
+DELETE /workers/version-pins/{tenant_id}/{handler_name}
+```
+
+Versions compare numerically (`1.10.0 ≥ 1.9.0`; `"2"` == `"2.0.0"`), with a lexical fallback for non-numeric schemes. A worker that reports no `version` never satisfies a pin.
+
+---
+
 ## Worker Control Channel
 
 Queue control commands for a specific worker. The worker polls its channel and acts on pending commands.

@@ -456,3 +456,103 @@ async fn get_handlers_lists_builtin_and_external() {
     let external = catalog["external"].as_array().unwrap();
     assert!(external.iter().any(|h| h == "my_external_handler"));
 }
+
+#[tokio::test]
+async fn version_pin_blocks_old_worker_and_allows_new() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    seed_worker_task(&srv, inst_id).await;
+
+    // Pin external_handler to >= 2.0.0 for tenant t1.
+    let resp = client
+        .post(format!("{}/workers/version-pins", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "tenant_id": "t1", "handler_name": "external_handler", "min_version": "2.0.0" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // A 1.x worker is blocked → no tasks.
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "handler_name": "external_handler", "worker_id": "old", "limit": 10, "version": "1.9.0" }))
+        .send()
+        .await
+        .unwrap();
+    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(tasks.len(), 0, "old worker must be blocked by the pin");
+
+    // A worker with no version is also blocked.
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "handler_name": "external_handler", "worker_id": "nover", "limit": 10 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.json::<Vec<serde_json::Value>>().await.unwrap().len(), 0);
+
+    // A 2.1 worker satisfies the pin and claims the task.
+    let resp = client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "handler_name": "external_handler", "worker_id": "new", "limit": 10, "version": "2.1.0" }))
+        .send()
+        .await
+        .unwrap();
+    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(tasks.len(), 1, "new worker must satisfy the pin");
+}
+
+#[tokio::test]
+async fn version_pin_crud() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{}/workers/version-pins", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "tenant_id": "t1", "handler_name": "h", "min_version": "1.0.0" }))
+        .send()
+        .await
+        .unwrap();
+
+    // Upsert overwrites min_version.
+    client
+        .post(format!("{}/workers/version-pins", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "tenant_id": "t1", "handler_name": "h", "min_version": "3.0.0" }))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{}/workers/version-pins?tenant_id=t1", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let pins: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(pins.as_array().unwrap().len(), 1);
+    assert_eq!(pins[0]["min_version"], "3.0.0");
+
+    let resp = client
+        .delete(format!("{}/workers/version-pins/t1/h", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = client
+        .get(format!("{}/workers/version-pins", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap().as_array().unwrap().len(), 0);
+}

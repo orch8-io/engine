@@ -204,3 +204,77 @@ impl std::str::FromStr for WorkerCommandKind {
         }
     }
 }
+
+/// A minimum-worker-version pin for a `(tenant, handler)` pair. A worker
+/// reporting a version below `min_version` is not given tasks for that handler
+/// at poll time — used to roll a fixed worker build out before old workers can
+/// pick up affected work.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkerVersionPin {
+    pub tenant_id: String,
+    pub handler_name: String,
+    pub min_version: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Does a worker's reported `version` satisfy a `min_version` pin?
+///
+/// Both are parsed as dot-separated numeric components (`"1.10.2"`) and
+/// compared numerically (so `1.10.0 >= 1.9.0`, unlike a string compare).
+/// Missing components default to 0 (`"2" == "2.0.0"`). If either side has a
+/// non-numeric component the comparison falls back to a plain string `>=`.
+/// A worker that reports no version never satisfies a pin (it's treated as too
+/// old to trust).
+#[must_use]
+pub fn version_satisfies(worker: Option<&str>, min_version: &str) -> bool {
+    let Some(worker) = worker else {
+        return false;
+    };
+    match (parse_version(worker), parse_version(min_version)) {
+        (Some(mut w), Some(mut m)) => {
+            // Pad to equal length so "2" compares equal to "2.0.0".
+            let len = w.len().max(m.len());
+            w.resize(len, 0);
+            m.resize(len, 0);
+            w >= m
+        }
+        // Non-numeric versions: lexical fallback.
+        _ => worker >= min_version,
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version_satisfies;
+
+    #[test]
+    fn numeric_versions_compare_numerically() {
+        assert!(version_satisfies(Some("1.10.0"), "1.9.0"));
+        assert!(!version_satisfies(Some("1.9.0"), "1.10.0"));
+        assert!(version_satisfies(Some("2"), "2.0.0"));
+        assert!(version_satisfies(Some("v2.1"), "2.0.0"));
+        assert!(version_satisfies(Some("2.0.0"), "2.0.0"));
+    }
+
+    #[test]
+    fn missing_worker_version_never_satisfies() {
+        assert!(!version_satisfies(None, "1.0.0"));
+    }
+
+    #[test]
+    fn non_numeric_falls_back_to_lexical() {
+        assert!(version_satisfies(Some("2024-06-01"), "2024-05-01"));
+        assert!(!version_satisfies(Some("2024-04-01"), "2024-05-01"));
+    }
+}
+
+/// Parse `"1.10.2"` → `[1, 10, 2]`. Returns `None` if any component is not a
+/// non-negative integer. Trailing/leading whitespace is trimmed.
+fn parse_version(v: &str) -> Option<Vec<u64>> {
+    let v = v.trim().trim_start_matches('v');
+    if v.is_empty() {
+        return None;
+    }
+    v.split('.').map(|c| c.parse::<u64>().ok()).collect()
+}
