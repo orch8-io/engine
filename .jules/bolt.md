@@ -42,3 +42,6 @@
 ## 2025-10-28 - [Zero-Allocation Reference Tuples in Hot Path Iterators]
 **Learning:** In the fast path of the scheduler (scheduler.rs:1026), passing &BlockId by reference into get_block_outputs_batch avoids allocating and copying Strings for every step that requires a deadline check. Prior to this, BlockId was cloned on every iteration inside a loop processing active steps, introducing significant memory overhead across the cluster.
 **Action:** Always prefer accepting references within collections (&[(InstanceId, &BlockId)]) for database batch operations if the caller only holds references, preventing O(N) string clones on execution hot paths.
+## 2025-10-29 - [Avoid HashSet Allocation in Array Filtering on Hot Paths]
+**Learning:** In the `enforce_concurrency_limits` hot path within `orch8-engine/src/scheduler.rs`, building a `HashSet` simply to test indices for exclusion incurs unnecessary memory allocation and hashing overhead. When checking small numbers of exclusion indices against elements in a loop, sorting the array and using binary search provides a much faster and zero-allocation alternative.
+**Action:** When filtering out items by index or ID on hot execution paths, avoid allocating a `HashSet`. Instead, sort the indices (`.sort_unstable()`) and use `.binary_search().is_err()` to identify elements to keep.
