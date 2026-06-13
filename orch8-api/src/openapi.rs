@@ -19,6 +19,7 @@ use utoipa::OpenApi;
         // Health
         crate::health::liveness,
         crate::health::readiness,
+        crate::health::info,
         // Sequences
         crate::sequences::create_sequence,
         crate::sequences::get_sequence,

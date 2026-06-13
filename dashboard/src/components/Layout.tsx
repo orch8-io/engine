@@ -2,9 +2,11 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useCallback, useEffect, useState } from "react";
 import {
   checkHealth,
+  getEngineInfo,
   getWorkerTaskStats,
   listApprovals,
   type ApprovalsResponse,
+  type EngineInfo,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
 import { Wordmark } from "./ui/Brand";
@@ -60,6 +62,14 @@ export default function Layout() {
   const [conn, setConn] = useState<ConnState>("connecting");
   const [workers, setWorkers] = useState<number>(0);
   const [lastPoll, setLastPoll] = useState<string>("—");
+  const [info, setInfo] = useState<EngineInfo | null>(null);
+
+  // Deployment info is static for the life of the process — fetch once.
+  useEffect(() => {
+    getEngineInfo()
+      .then(setInfo)
+      .catch(() => setInfo(null));
+  }, []);
 
   const approvalsFetcher = useCallback(
     (signal?: AbortSignal) => listApprovals({ limit: "1" }, signal),
@@ -145,6 +155,15 @@ export default function Layout() {
 
       {/* ── Main ────────────────────────────────────────────── */}
       <main className="overflow-y-auto">
+        {info?.env_label && (
+          <div
+            className="sticky top-0 z-20 h-6 flex items-center justify-center text-[10px] font-mono uppercase tracking-[0.2em] text-white"
+            style={{ background: info.env_color || "#b45309" }}
+            title={`Environment: ${info.env_label}`}
+          >
+            {info.env_label}
+          </div>
+        )}
         <div className="max-w-[1280px] mx-auto px-12 py-10 fade-in">
           <Outlet />
         </div>

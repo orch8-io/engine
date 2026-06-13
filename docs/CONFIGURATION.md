@@ -169,6 +169,13 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_OTLP_ENDPOINT` | — | OTLP collector endpoint (e.g. `http://localhost:4317`). Unset/empty = trace export disabled |
 | `ORCH8_OTLP_PROTOCOL` | `grpc` | OTLP transport protocol. Only `grpc` is supported |
 
+### Dashboard Chrome
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_ENV_LABEL` | — | Environment name (e.g. `production`, `staging`) shown as a colored banner across the dashboard. Unset = no banner. Served by `GET /info` |
+| `ORCH8_ENV_COLOR` | `#b45309` | CSS color for the environment banner (e.g. `#dc2626` for a red production banner) |
+
 ---
 
 ## Example Configurations

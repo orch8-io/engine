@@ -150,6 +150,17 @@ export function checkHealth(signal?: AbortSignal): Promise<void> {
   return request("/health/live", undefined, signal);
 }
 
+/** Engine version + optional operator-set environment label/color. */
+export interface EngineInfo {
+  version: string;
+  env_label: string | null;
+  env_color: string | null;
+}
+
+export function getEngineInfo(signal?: AbortSignal): Promise<EngineInfo> {
+  return request("/info", undefined, signal);
+}
+
 // ─── Instances ───────────────────────────────────────────────────────────────
 
 export type InstanceState =

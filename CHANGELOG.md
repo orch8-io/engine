@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Environment banner**: `ORCH8_ENV_LABEL` + `ORCH8_ENV_COLOR` render a colored banner strip across the dashboard (e.g. a red `PRODUCTION` ribbon), served by the new unauthenticated `GET /info` endpoint alongside the engine version. A small thing Temporal users have requested and not received.
+
 - **DST-correct cron schedules**: explicit, unit-tested semantics for both DST edges. Nonexistent local times (spring forward — a 02:30 schedule on the day 02:00 jumps to 03:00) fire at the **first valid instant after the gap** instead of silently skipping the day (the failure mode Temporal documents as unhandled, temporalio/temporal#8205); ambiguous local times (fall back) fire **once**, at the first occurrence. Gap detection re-evaluates the expression against a fixed offset frozen at "now" and clamps occurrences that fall inside the gap. Tested against both hemispheres (`America/New_York`, `America/Santiago`) under virtual time.
 
 - **Signal injection on resume-from and fork**: both `POST /instances/{id}/resume-from/{block_id}` and `POST /instances/{id}/fork` accept an optional `signals: [{signal_type, payload}]` array, enqueued before the instance becomes claimable — resume-from enqueues before the wake transition, fork now creates the clone un-claimable (`next_fire_at` unset), seeds outputs and signals, then arms it. This removes the race window of the separate "reset, then signal" two-call pattern (the gap Temporal's ResetWithSignal proposal, temporalio/temporal#8074, is still open for) — and as a side effect closes a pre-existing fork race where the scheduler could claim a fork before its seeded outputs landed.
