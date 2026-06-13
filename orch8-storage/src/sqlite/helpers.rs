@@ -335,6 +335,24 @@ pub(super) fn apply_filter_sql<'q>(
             separated.push_unseparated(")");
         }
     }
+    if let Some(serde_json::Value::Object(map)) = &filter.metadata_filter {
+        // SQLite fallback for the Postgres `metadata @> {...}` containment
+        // filter: one `json_extract` text-equality per top-level key. The path
+        // is built with `'$."' || ? || '"'` so the bound key is treated as a
+        // literal (quoted) member — matching Postgres's top-level containment
+        // semantics even when the key itself contains dots. CAST(... AS TEXT)
+        // normalizes numeric/string JSON scalars to text for comparison.
+        for (key, value) in map {
+            let needle = match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            qb.push(" AND CAST(json_extract(metadata, '$.\"' || ");
+            qb.push_bind(key.as_str());
+            qb.push(" || '\"') AS TEXT) = ");
+            qb.push_bind(needle);
+        }
+    }
     if let Some(ref p) = filter.priority {
         qb.push(" AND priority=");
         qb.push_bind(*p as i16);

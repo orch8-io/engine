@@ -441,3 +441,62 @@ async fn create_instance_without_budget_omits_budget_field() {
     // skip_serializing_if = Option::is_none — the key is absent entirely.
     assert!(fetched.get("budget").is_none());
 }
+
+#[tokio::test]
+async fn list_instances_filters_by_metadata_key_value() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    // Two instances differing only in a metadata value.
+    for env in ["prod", "staging"] {
+        let body = json!({
+            "sequence_id": seq_id,
+            "tenant_id": "t1",
+            "namespace": "ns1",
+            "metadata": { "env": env, "team": "core" },
+            "context": { "data": {}, "config": {}, "audit": [] }
+        });
+        let resp = client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // Filter by metadata.env=prod -> exactly one.
+    let resp = client
+        .get(format!("{}/instances?metadata.env=prod", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page: serde_json::Value = resp.json().await.unwrap();
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "exactly one prod instance");
+    assert_eq!(items[0]["metadata"]["env"], "prod");
+
+    // Two-key filter that matches both keys on the prod row -> still one.
+    let resp = client
+        .get(format!("{}/instances?metadata.env=prod&metadata.team=core", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let page: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+
+    // A value that matches nothing -> empty.
+    let resp = client
+        .get(format!("{}/instances?metadata.env=qa", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let page: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 0);
+}

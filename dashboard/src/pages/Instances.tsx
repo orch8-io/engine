@@ -91,9 +91,13 @@ export default function Instances() {
   const [stateFilter, setStateFilter] = useState("");
   const [namespaceFilter, setNamespaceFilter] = useState("");
   const [tenantFilter, setTenantFilter] = useState("");
+  const [metadataKey, setMetadataKey] = useState("");
+  const [metadataValue, setMetadataValue] = useState("");
 
   const debouncedNamespace = useDebounce(namespaceFilter, 300);
   const debouncedTenant = useDebounce(tenantFilter, 300);
+  const debouncedMetaKey = useDebounce(metadataKey, 300);
+  const debouncedMetaValue = useDebounce(metadataValue, 300);
 
   const fetcher = useCallback(
     (signal?: AbortSignal) =>
@@ -101,14 +105,21 @@ export default function Instances() {
         state: stateFilter || undefined,
         namespace: debouncedNamespace || undefined,
         tenant_id: debouncedTenant || undefined,
+        // Only filter when both key and value are present.
+        metadata:
+          debouncedMetaKey && debouncedMetaValue
+            ? { [debouncedMetaKey]: debouncedMetaValue }
+            : undefined,
         limit: "100",
       }, signal),
-    [stateFilter, debouncedNamespace, debouncedTenant],
+    [stateFilter, debouncedNamespace, debouncedTenant, debouncedMetaKey, debouncedMetaValue],
   );
   const { data: instances, loading, error, updatedAt, refresh } =
     usePolling<TaskInstance[]>(fetcher);
 
-  const hasFilters = Boolean(stateFilter || namespaceFilter || tenantFilter);
+  const hasFilters = Boolean(
+    stateFilter || namespaceFilter || tenantFilter || (metadataKey && metadataValue),
+  );
 
   const stateSummary = useMemo<StateSegment[] | null>(() => {
     if (!instances) return null;
@@ -206,6 +217,30 @@ export default function Instances() {
               value={tenantFilter}
               onChange={(e) => setTenantFilter(e.target.value)}
             />
+          </div>
+        </div>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-[200px_1fr_1fr] gap-3">
+          <div className="md:col-start-2">
+            <label className="field-label block mb-1.5">Metadata key</label>
+            <Input
+              type="text"
+              placeholder="e.g. env"
+              value={metadataKey}
+              onChange={(e) => setMetadataKey(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="field-label block mb-1.5">Metadata value</label>
+            <Input
+              type="text"
+              placeholder="e.g. prod"
+              value={metadataValue}
+              onChange={(e) => setMetadataValue(e.target.value)}
+            />
+            <p className="annotation mt-1">
+              Exact match on a top-level <code className="font-mono">metadata</code> key.
+              Both fields required — served by the GIN index, no Elasticsearch.
+            </p>
           </div>
         </div>
       </Section>

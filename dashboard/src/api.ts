@@ -241,13 +241,22 @@ export interface ListInstancesParams {
   state?: string;
   limit?: string;
   offset?: string;
+  /** Top-level metadata equality filters; sent as `metadata.<key>=<value>` query params. */
+  metadata?: Record<string, string>;
 }
 
 export async function listInstances(
   params?: ListInstancesParams,
   signal?: AbortSignal,
 ): Promise<TaskInstance[]> {
-  const raw = await request<TaskInstance[] | { items: TaskInstance[] }>("/instances", params as Record<string, string | undefined>, signal);
+  const { metadata, ...rest } = params ?? {};
+  const query: Record<string, string | undefined> = { ...rest };
+  if (metadata) {
+    for (const [k, v] of Object.entries(metadata)) {
+      if (v) query[`metadata.${k}`] = v;
+    }
+  }
+  const raw = await request<TaskInstance[] | { items: TaskInstance[] }>("/instances", query, signal);
   return Array.isArray(raw) ? raw : raw.items;
 }
 

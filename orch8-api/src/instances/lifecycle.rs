@@ -38,6 +38,29 @@ fn mode_scoped_idempotency_key(key: Option<&str>, dry_run: bool) -> Option<Strin
     })
 }
 
+/// Collect `metadata.<key>=<value>` query params into a flat JSON object used
+/// as the metadata equality filter. Returns `None` when no such params are
+/// present (so the common unfiltered list path stays a no-op). Keys are the
+/// part after the `metadata.` prefix; values are kept as JSON strings —
+/// matching is string-equality on top-level metadata keys.
+fn build_metadata_filter(
+    raw: &std::collections::HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    for (k, v) in raw {
+        if let Some(key) = k.strip_prefix("metadata.") {
+            if !key.is_empty() {
+                obj.insert(key.to_string(), serde_json::Value::String(v.clone()));
+            }
+        }
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
+}
+
 #[utoipa::path(post, path = "/instances", tag = "instances",
     request_body = CreateInstanceRequest,
     responses(
@@ -323,6 +346,7 @@ pub async fn list_instances(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<crate::auth::TenantContext>>,
     Query(q): Query<ListQuery>,
+    Query(raw): Query<std::collections::HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
     // Enforce tenant isolation: header-based tenant overrides query param.
     let tenant_id = if let Some(axum::Extension(ctx)) = &tenant_ctx {
@@ -330,12 +354,20 @@ pub async fn list_instances(
     } else {
         q.tenant_id.map(TenantId::unchecked)
     };
+
+    // Top-level metadata equality filters: every `?metadata.<key>=<value>`
+    // query param becomes one entry in a JSON object matched against the
+    // instance's `metadata` (Postgres `@>` containment over the existing GIN
+    // index; SQLite `json_extract` text-equality). String-equality only — the
+    // indexed substitute for Temporal's search attributes.
+    let metadata_filter = build_metadata_filter(&raw);
+
     let filter = InstanceFilter {
         tenant_id,
         namespace: q.namespace.map(Namespace::new),
         sequence_id: q.sequence_id.map(SequenceId::from_uuid),
         states: q.state.as_deref().map(parse_states).transpose()?,
-        metadata_filter: None,
+        metadata_filter,
         priority: None,
     };
 
