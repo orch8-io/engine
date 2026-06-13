@@ -594,6 +594,128 @@ async fn batch_action_signal_requires_signal_type() {
 }
 
 #[tokio::test]
+async fn batch_action_pause_resume_and_signal_apply_to_active() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    // Two active (just-created) instances.
+    for _ in 0..2 {
+        let body = json!({
+            "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1",
+            "metadata": { "grp": "pr" },
+            "context": { "data": {}, "config": {}, "audit": [] }
+        });
+        let resp = client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    // pause, resume, then a custom signal all enqueue to the 2 active instances.
+    for action in [
+        json!({ "filter": { "tenant_id": "t1", "metadata": { "grp": "pr" } }, "action": "pause" }),
+        json!({ "filter": { "tenant_id": "t1", "metadata": { "grp": "pr" } }, "action": "resume" }),
+        json!({ "filter": { "tenant_id": "t1", "metadata": { "grp": "pr" } }, "action": "signal", "signal_type": "nudge" }),
+    ] {
+        let resp = client
+            .post(format!("{}/instances/batch-action", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&action)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let out: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(out["matched"], 2, "action {} matched", action["action"]);
+        assert_eq!(out["applied"], 2, "action {} applied", action["action"]);
+        assert_eq!(out["skipped"], 0);
+        assert_eq!(out["failed"], 0);
+    }
+}
+
+#[tokio::test]
+async fn batch_action_retry_skips_non_failed_instances() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    // Active instances are not Failed → retry matches but skips every one.
+    for _ in 0..2 {
+        let body = json!({
+            "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1",
+            "metadata": { "grp": "rt" },
+            "context": { "data": {}, "config": {}, "audit": [] }
+        });
+        client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let action = json!({ "filter": { "tenant_id": "t1", "metadata": { "grp": "rt" } }, "action": "retry" });
+    let resp = client
+        .post(format!("{}/instances/batch-action", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&action)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(out["matched"], 2);
+    assert_eq!(out["applied"], 0, "non-failed instances are not retried");
+    assert_eq!(out["skipped"], 2);
+}
+
+#[tokio::test]
+async fn batch_action_honors_limit_cap() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    for _ in 0..3 {
+        let body = json!({
+            "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1",
+            "metadata": { "grp": "cap" },
+            "context": { "data": {}, "config": {}, "audit": [] }
+        });
+        client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // limit=1 caps the matched set regardless of how many match the filter.
+    let action = json!({
+        "filter": { "tenant_id": "t1", "metadata": { "grp": "cap" } },
+        "action": "pause",
+        "limit": 1,
+        "dry_run": true
+    });
+    let resp = client
+        .post(format!("{}/instances/batch-action", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&action)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let out: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(out["matched"], 1, "limit caps the matched set");
+}
+
+#[tokio::test]
 async fn get_children_returns_child_instances() {
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};

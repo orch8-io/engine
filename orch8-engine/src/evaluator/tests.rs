@@ -1814,3 +1814,57 @@ async fn compact_iteration_outputs_noop_cases() {
     assert_eq!(super::compact_iteration_outputs(&s, inst_id, &body, 0).await.unwrap(), 0);
     assert_eq!(s.get_all_outputs(inst_id).await.unwrap().len(), 2);
 }
+
+// COMPACT3: a body with multiple step ids retains N PER block independently,
+// and retain == row-count is the exact no-op boundary.
+#[tokio::test]
+async fn compact_iteration_outputs_is_per_block_and_boundary_exact() {
+    use orch8_storage::OutputStore;
+    use orch8_types::output::BlockOutput;
+
+    let s = SqliteStorage::in_memory().await.unwrap();
+    let inst_id = InstanceId::new();
+    seed_instance_ev(&s, inst_id).await;
+
+    // Two distinct body steps "a" and "b", three iterations each.
+    let base = chrono::Utc::now();
+    for block in ["a", "b"] {
+        for i in 0..3u32 {
+            s.save_block_output(&BlockOutput {
+                id: uuid::Uuid::now_v7(),
+                instance_id: inst_id,
+                block_id: BlockId::new(block),
+                output: serde_json::json!({ "i": i }),
+                output_ref: None,
+                output_size: 0,
+                attempt: 0,
+                created_at: base + chrono::Duration::seconds(i64::from(i)),
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    let body = vec![mk_step("a"), mk_step("b")];
+
+    // Exact boundary: retain == 3 rows per block → nothing deleted.
+    assert_eq!(
+        super::compact_iteration_outputs(&s, inst_id, &body, 3).await.unwrap(),
+        0,
+        "retain equal to row count must delete nothing"
+    );
+    assert_eq!(s.get_all_outputs(inst_id).await.unwrap().len(), 6);
+
+    // retain=1 deletes 2 from EACH block (not 2 total across blocks).
+    let deleted = super::compact_iteration_outputs(&s, inst_id, &body, 1)
+        .await
+        .unwrap();
+    assert_eq!(deleted, 4, "2 deleted per block × 2 blocks");
+    let all = s.get_all_outputs(inst_id).await.unwrap();
+    assert_eq!(all.iter().filter(|o| o.block_id.as_str() == "a").count(), 1);
+    assert_eq!(all.iter().filter(|o| o.block_id.as_str() == "b").count(), 1);
+    // Each retained row is the newest iteration (i == 2) for its block.
+    for o in &all {
+        assert_eq!(o.output["i"].as_u64().unwrap(), 2, "newest iteration retained per block");
+    }
+}

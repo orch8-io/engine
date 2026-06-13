@@ -609,6 +609,58 @@ async fn worker_reported_logs_persist_and_list() {
 }
 
 #[tokio::test]
+async fn worker_reported_logs_persist_on_fail_path() {
+    // The fail endpoint shares `persist_reported_logs` with complete — a worker
+    // that dies should still leave its breadcrumbs in the instance log.
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    let task_id = seed_worker_task(&srv, inst_id).await;
+
+    // Claim the task first so the failure is accepted.
+    client
+        .post(format!("{}/workers/tasks/poll", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "handler_name": "external_handler", "worker_id": "worker-1", "limit": 1 }))
+        .send()
+        .await
+        .unwrap();
+
+    // Fail permanently, attaching diagnostic logs.
+    let resp = client
+        .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "message": "boom",
+            "retryable": false,
+            "logs": [
+                { "ts": "2026-01-01T00:00:00Z", "level": "error", "message": "connection refused" }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The failure logs are retrievable on the instance.
+    let resp = client
+        .get(format!("{}/instances/{inst_id}/logs", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let logs: serde_json::Value = resp.json().await.unwrap();
+    let arr = logs.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["message"], "connection refused");
+    assert_eq!(arr[0]["level"], "error");
+    assert_eq!(arr[0]["block_id"], "s1");
+}
+
+#[tokio::test]
 async fn instance_logs_empty_when_none() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

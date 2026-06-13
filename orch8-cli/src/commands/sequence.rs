@@ -305,4 +305,56 @@ mod tests {
         let c = json!({ "blocks": [2] });
         assert_ne!(content_fingerprint(&a), content_fingerprint(&c));
     }
+
+    #[test]
+    fn fingerprint_skips_null_valued_keys() {
+        // A key present but explicitly null must be omitted, so it fingerprints
+        // identically to the same content with the key absent — otherwise a
+        // serializer that emits `"sla": null` would force a spurious version bump.
+        let with_null = json!({ "blocks": [1], "sla": null, "on_failure": null });
+        let absent = json!({ "blocks": [1] });
+        assert_eq!(content_fingerprint(&with_null), content_fingerprint(&absent));
+    }
+
+    #[test]
+    fn fingerprint_tracks_every_content_key() {
+        // Changing any whitelisted content key (beyond `blocks`) must change the
+        // fingerprint — guards against a key being dropped from the whitelist.
+        let base = json!({ "blocks": [1] });
+        for key in ["interceptors", "input_schema", "sla", "on_failure", "on_cancel"] {
+            let mut changed = base.clone();
+            changed[key] = json!({ "marker": key });
+            assert_ne!(
+                content_fingerprint(&base),
+                content_fingerprint(&changed),
+                "fingerprint ignored content key `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_unchanged_with_missing_server_version_defaults_to_zero() {
+        // Server record matches content but carries no `version` field.
+        let server = json!({ "blocks": [{ "type": "step", "id": "s1", "handler": "a", "params": {} }] });
+        let local = seq(7, "a");
+        assert_eq!(decide(Some(&server), &local), ApplyDecision::Unchanged(0));
+    }
+
+    #[test]
+    fn decide_changed_with_missing_server_version_applies_v1() {
+        // Changed content + absent server version → bump from the 0 fallback to 1.
+        let server = json!({ "blocks": [{ "type": "step", "id": "s1", "handler": "a", "params": {} }] });
+        let local = seq(7, "b");
+        assert_eq!(decide(Some(&server), &local), ApplyDecision::Apply(1));
+    }
+
+    #[test]
+    fn decide_changed_with_overflowing_server_version_does_not_panic() {
+        // A version beyond i32::MAX must clamp to the 0 fallback (→ Apply(1)),
+        // never panic or wrap.
+        let mut server = seq(0, "a");
+        server["version"] = json!(i64::from(i32::MAX) + 1000);
+        let local = seq(0, "b");
+        assert_eq!(decide(Some(&server), &local), ApplyDecision::Apply(1));
+    }
 }

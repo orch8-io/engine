@@ -267,6 +267,33 @@ mod version_tests {
         assert!(version_satisfies(Some("2024-06-01"), "2024-05-01"));
         assert!(!version_satisfies(Some("2024-04-01"), "2024-05-01"));
     }
+
+    #[test]
+    fn numeric_compare_beats_lexical_on_padded_minor() {
+        // String compare would rank "1.9.5" >= "1.10" (since '9' > '1'); numeric
+        // padding must correctly rank 1.9.5 < 1.10.
+        assert!(!version_satisfies(Some("1.9.5"), "1.10"));
+        assert!(version_satisfies(Some("1.10"), "1.9.5"));
+    }
+
+    #[test]
+    fn mixed_numeric_and_non_numeric_uses_lexical() {
+        // One side parses, the other does not → lexical `>=` over the raw strings
+        // (so the numeric ordering is NOT honored — "9.0" beats "10.x" lexically).
+        assert!(version_satisfies(Some("9.0"), "10.x"));
+        assert!(!version_satisfies(Some("abc"), "abd"));
+        assert!(version_satisfies(Some("abd"), "abc"));
+    }
+
+    #[test]
+    fn empty_and_malformed_components_fall_back() {
+        // Empty worker string parses to None → lexical. Internal empty components
+        // ("1..2", "1.2.") fail u64 parse → lexical, never panic.
+        assert!(version_satisfies(Some(""), "")); // "" >= ""
+        assert!(!version_satisfies(Some(""), "1.0.0")); // "" < "1.0.0"
+        assert!(!version_satisfies(Some("1..2"), "1.9.9")); // lexical: "1..2" < "1.9.9"
+        assert!(!version_satisfies(Some("-1"), "0")); // negative fails parse → "-1" < "0"
+    }
 }
 
 /// Parse `"1.10.2"` → `[1, 10, 2]`. Returns `None` if any component is not a
