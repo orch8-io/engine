@@ -481,6 +481,19 @@ second  minute  hour  day  month  day_of_week  year
   0       9      *     *     *      MON-FRI      *
 ```
 
+Standard 5-field Unix cron (`m h dom mon dow`) is also accepted and
+normalized (seconds `0`, year `*`).
+
+**DST behavior (explicit, unit-tested):**
+
+- **Nonexistent local time** (spring forward — e.g. a 02:30 schedule in
+  `America/New_York` on the day clocks jump 02:00 → 03:00): the occurrence
+  fires at the **first valid instant after the gap** (03:00 local). It is
+  never silently skipped.
+- **Ambiguous local time** (fall back — a 01:30 schedule on the day clocks
+  rewind 02:00 → 01:00): the occurrence fires **once**, at the first
+  (pre-transition) occurrence. Never twice.
+
 **Response:** `201 Created`
 
 ```json

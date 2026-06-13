@@ -206,21 +206,68 @@ pub fn calculate_next_fire(schedule: &CronSchedule) -> Option<chrono::DateTime<U
 /// [`calculate_next_fire`] evaluated against an explicit "now" — the cron
 /// loop passes its scheduler clock's instant so virtual time controls
 /// schedule advancement in tests.
+///
+/// ## DST semantics (explicit, tested in `tests/cron_dst.rs`)
+///
+/// - **Nonexistent local time** (spring forward — e.g. a 02:30 schedule in
+///   `America/New_York` on the day 02:00 jumps to 03:00): the occurrence
+///   fires at the **first valid instant after the gap** (03:00) instead of
+///   silently skipping the day. The underlying cron iterator skips
+///   nonexistent wall times entirely; we detect the gap and clamp.
+/// - **Ambiguous local time** (fall back — e.g. a 01:30 schedule on the day
+///   01:59 rewinds to 01:00): the occurrence fires **once**, at the first
+///   (pre-transition) occurrence. No double fire.
 pub fn calculate_next_fire_after(
     schedule: &CronSchedule,
     now: DateTime<Utc>,
 ) -> Option<chrono::DateTime<Utc>> {
+    use chrono::{LocalResult, Offset, TimeZone};
+
     let normalized = normalize_cron_expr(&schedule.cron_expr);
     let cron_schedule = Schedule::from_str(&normalized).ok()?;
-    if let Ok(tz) = schedule.timezone.parse::<chrono_tz::Tz>() {
-        let now_tz = now.with_timezone(&tz);
-        cron_schedule
-            .after(&now_tz)
-            .next()
-            .map(|dt| dt.with_timezone(&Utc))
-    } else {
-        cron_schedule.after(&now).next()
+    let Ok(tz) = schedule.timezone.parse::<chrono_tz::Tz>() else {
+        return cron_schedule.after(&now).next();
+    };
+
+    let now_tz = now.with_timezone(&tz);
+    let next = cron_schedule
+        .after(&now_tz)
+        .next()
+        .map(|dt| dt.with_timezone(&Utc));
+
+    // DST-gap detection: re-evaluate the schedule against a fixed offset
+    // frozen at "now". That iterator advances in pure wall-clock terms, so
+    // its first candidate is the next *wall time* the expression matches —
+    // including wall times the real timezone skips. If that candidate does
+    // not exist in the real timezone, the occurrence fell inside a DST gap:
+    // fire at the first valid instant after the gap rather than losing the
+    // occurrence (the failure mode documented as unfixed in Temporal #8205).
+    let now_fixed = now.with_timezone(&now_tz.offset().fix());
+    if let Some(candidate) = cron_schedule.after(&now_fixed).next() {
+        let wall = candidate.naive_local();
+        if matches!(tz.from_local_datetime(&wall), LocalResult::None) {
+            // Probe forward minute-by-minute for the gap's end. DST gaps are
+            // 30–120 minutes in practice; 48h bounds pathological zones.
+            let mut probe = wall;
+            for _ in 0..(48 * 60) {
+                probe += chrono::Duration::minutes(1);
+                match tz.from_local_datetime(&probe) {
+                    LocalResult::Single(dt) | LocalResult::Ambiguous(dt, _) => {
+                        let gap_end = dt.with_timezone(&Utc);
+                        // Keep the regular result if a valid occurrence
+                        // happens before the gap closes.
+                        return match next {
+                            Some(n) if n <= gap_end => Some(n),
+                            _ => Some(gap_end),
+                        };
+                    }
+                    LocalResult::None => {}
+                }
+            }
+        }
     }
+
+    next
 }
 
 /// Validate a cron expression. Returns an error message if invalid.
