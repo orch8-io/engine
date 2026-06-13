@@ -24,6 +24,10 @@ pub const SLA_BREACHED: &str = "orch8_sla_breached_total";
 /// Body-step output rows compacted (deleted) by a loop/foreach
 /// `retain_iterations` policy.
 pub const LOOP_OUTPUTS_COMPACTED: &str = "orch8_loop_outputs_compacted_total";
+/// Tasks delivered to a push-mode queue's target URL.
+pub const TASKS_PUSHED: &str = "orch8_tasks_pushed_total";
+/// Push deliveries that failed after all retries (task stays pending).
+pub const TASKS_PUSH_FAILED: &str = "orch8_tasks_push_failed_total";
 /// Items returned by `ActivePieces` sidecar polls (one instance per item).
 pub const AP_POLL_ITEMS: &str = "orch8_ap_poll_items_total";
 /// Failed `ActivePieces` sidecar polls (recorded on the trigger's state row).

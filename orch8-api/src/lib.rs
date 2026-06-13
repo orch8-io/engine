@@ -17,6 +17,7 @@ pub mod model_pricing;
 pub mod openapi;
 pub mod plugins;
 pub mod pools;
+pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod request_id;
 pub mod rollback;
@@ -118,6 +119,7 @@ fn api_routes() -> Router<AppState> {
         .merge(usage::routes())
         .merge(webhook_outbox::routes())
         .merge(queue_routing::routes())
+        .merge(queue_dispatch::routes())
         .merge(mcp_server::routes())
 }
 

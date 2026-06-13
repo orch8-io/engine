@@ -23,6 +23,7 @@ mod rows;
 mod sequences;
 mod sessions;
 mod signals;
+mod queue_dispatch;
 mod queue_routing;
 mod triggers;
 mod webhook_outbox;
@@ -1016,6 +1017,36 @@ impl crate::WorkerStore for PostgresStorage {
         handler_name: &str,
     ) -> Result<(), StorageError> {
         worker_version_pins::delete(self, tenant_id, handler_name).await
+    }
+
+    async fn upsert_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+    ) -> Result<(), StorageError> {
+        queue_dispatch::upsert(self, config).await
+    }
+
+    async fn get_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        queue_dispatch::get(self, tenant_id, queue_name).await
+    }
+
+    async fn list_queue_dispatch(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        queue_dispatch::list(self, tenant_id).await
+    }
+
+    async fn delete_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<(), StorageError> {
+        queue_dispatch::delete(self, tenant_id, queue_name).await
     }
 }
 

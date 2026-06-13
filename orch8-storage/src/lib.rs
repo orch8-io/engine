@@ -1212,6 +1212,35 @@ pub trait WorkerStore: Send + Sync + 'static {
         tenant_id: &str,
         handler_name: &str,
     ) -> Result<(), StorageError>;
+
+    // === Queue Dispatch Config ===
+
+    /// Create-or-update a `(tenant, queue)` dispatch config.
+    async fn upsert_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+    ) -> Result<(), StorageError>;
+
+    /// Fetch the dispatch config for a `(tenant, queue)` pair, if any.
+    async fn get_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+
+    /// List dispatch configs, optionally filtered by tenant. Secrets are not
+    /// returned (the `secret` field is always `None` in listed rows).
+    async fn list_queue_dispatch(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+
+    /// Delete a `(tenant, queue)` dispatch config.
+    async fn delete_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<(), StorageError>;
 }
 
 // ============================================================================

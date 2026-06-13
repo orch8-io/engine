@@ -537,9 +537,20 @@ CREATE TABLE IF NOT EXISTS worker_version_pins (
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (tenant_id, handler_name)
 );
+
+CREATE TABLE IF NOT EXISTS queue_dispatch (
+    tenant_id  TEXT NOT NULL,
+    queue_name TEXT NOT NULL,
+    mode       TEXT NOT NULL DEFAULT 'poll',
+    push_url   TEXT,
+    secret     TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_name)
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 17;

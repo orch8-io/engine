@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod lint;
 pub mod metrics;
 pub mod preload;
+pub mod push;
 pub mod queue_routing;
 pub mod recovery;
 pub mod required_fields;

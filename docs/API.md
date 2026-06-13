@@ -1282,6 +1282,20 @@ DELETE /webhooks/outbox/{id}             # discard a parked delivery
 
 ---
 
+## Queue Dispatch Mode (poll / push)
+
+By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed task envelope to a target URL. The durable task row is still written (completion is reported the usual way).
+
+```
+POST   /queues/dispatch                       # { tenant_id, queue_name, mode: "poll"|"push", push_url?, secret? }
+GET    /queues/dispatch?tenant_id=acme        # list (secrets never returned)
+DELETE /queues/dispatch/{tenant_id}/{queue_name}
+```
+
+`push` requires a non-empty `push_url`. When a `secret` is set, the envelope is HMAC-signed (`X-Orch8-Timestamp` + `X-Orch8-Signature: sha256=…` over `"{ts}.{body}"`) — the same scheme as outbound webhooks. A push failure leaves the task pending; flip the queue back to `poll` to recover.
+
+---
+
 ## Worker Version Pins
 
 Pin a minimum worker version per `(tenant, handler)`. A worker reporting a version below the pin is given no tasks for that handler at poll time — roll a fixed build out before older workers pick up affected work.

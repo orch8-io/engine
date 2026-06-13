@@ -186,6 +186,16 @@ pub(crate) async fn dispatch_step_to_external_worker(
 
     storage.create_worker_task(&task).await?;
 
+    // If the resolved queue is push-mode, POST a signed envelope to its target
+    // (best-effort; the durable row above is the source of truth).
+    crate::push::maybe_push_task(
+        storage,
+        instance.tenant_id.as_str(),
+        &task,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
     // Mark the execution node as Waiting so the evaluator won't re-dispatch it.
     // The instance state is NOT changed here — the evaluator may have other steps
     // to execute within the same composite. The caller (evaluator / process_instance_tree)

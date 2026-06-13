@@ -28,6 +28,7 @@ pub mod session;
 pub mod signal;
 pub mod suggest;
 pub mod trigger;
+pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod webhook_outbox;
 pub mod worker;

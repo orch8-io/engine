@@ -1224,6 +1224,36 @@ impl crate::WorkerStore for EncryptingStorage {
     ) -> Result<(), StorageError> {
         self.inner.delete_worker_version_pin(tenant_id, handler_name).await
     }
+
+    async fn upsert_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_queue_dispatch(config).await
+    }
+
+    async fn get_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        self.inner.get_queue_dispatch(tenant_id, queue_name).await
+    }
+
+    async fn list_queue_dispatch(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        self.inner.list_queue_dispatch(tenant_id).await
+    }
+
+    async fn delete_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_queue_dispatch(tenant_id, queue_name).await
+    }
 }
 
 // ============================================================================

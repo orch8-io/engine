@@ -71,6 +71,10 @@ use utoipa::OpenApi;
         crate::queue_routing::list_rules,
         crate::queue_routing::get_rule,
         crate::queue_routing::delete_rule,
+        // Queue dispatch
+        crate::queue_dispatch::set_dispatch,
+        crate::queue_dispatch::list_dispatch,
+        crate::queue_dispatch::delete_dispatch,
         // Workers
         crate::workers::poll_tasks,
         crate::workers::poll_tasks_from_queue,
@@ -180,6 +184,9 @@ use utoipa::OpenApi;
         crate::webhook_outbox::RedeliverResponse,
         orch8_types::queue_routing::QueueRoutingRule,
         crate::queue_routing::CreateRoutingRuleRequest,
+        orch8_types::queue_dispatch::QueueDispatchConfig,
+        orch8_types::queue_dispatch::DispatchMode,
+        crate::queue_dispatch::SetDispatchRequest,
         // Worker
         orch8_types::worker::WorkerTask,
         orch8_types::worker::WorkerTaskState,

@@ -1122,6 +1122,15 @@ pub(super) async fn dispatch_to_external_worker(
 
     storage.create_worker_task(&task).await?;
 
+    // Push-mode queues: POST a signed envelope to the target (best-effort).
+    crate::push::maybe_push_task(
+        storage,
+        instance.tenant_id.as_str(),
+        &task,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
     // Transition instance Running -> Waiting so the scheduler doesn't re-claim it.
     crate::lifecycle::transition_instance(
         storage,
