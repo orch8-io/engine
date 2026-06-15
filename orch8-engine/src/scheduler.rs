@@ -1058,9 +1058,15 @@ async fn process_sla_breaches(
         .collect();
     let existing = storage.get_block_outputs_batch(&keys).await?;
 
+    // ⚡ Bolt: Build a reference map to avoid cloning `c.block_id` on every lookup below
+    let mut existing_ref = std::collections::HashMap::with_capacity(existing.len());
+    for (k, v) in &existing {
+        existing_ref.insert((&k.0, &k.1), v);
+    }
+
     for c in &candidates {
         let instance = &active[c.idx];
-        if existing.contains_key(&(instance.id, c.block_id.clone())) {
+        if existing_ref.contains_key(&(&instance.id, &c.block_id)) {
             continue;
         }
         // Persist the sentinel BEFORE emitting so a crash mid-emit cannot

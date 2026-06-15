@@ -42,3 +42,6 @@
 ## 2025-10-28 - [Zero-Allocation Reference Tuples in Hot Path Iterators]
 **Learning:** In the fast path of the scheduler (scheduler.rs:1026), passing &BlockId by reference into get_block_outputs_batch avoids allocating and copying Strings for every step that requires a deadline check. Prior to this, BlockId was cloned on every iteration inside a loop processing active steps, introducing significant memory overhead across the cluster.
 **Action:** Always prefer accepting references within collections (&[(InstanceId, &BlockId)]) for database batch operations if the caller only holds references, preventing O(N) string clones on execution hot paths.
+## 2024-05-14 - Remove hot-path BlockId cloning in SLA breach check
+**Learning:** In `process_sla_breaches` (`orch8-engine/src/scheduler.rs`), `BlockId` was being cloned and looked up in a HashMap for every potential SLA breach candidate on every tick. The fix avoids this string allocation using zero-allocation references and an early return.
+**Action:** When filtering collections like candidates using a HashMap of database outputs, build a temporary reference map (e.g. `(&InstanceId, &BlockId)`) to avoid O(N) string clones on hot execution paths.
