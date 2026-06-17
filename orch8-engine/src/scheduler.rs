@@ -619,11 +619,13 @@ async fn enforce_concurrency_limits(
     // the holes, scrambling the priority order established by
     // claim_due_instances (e.g. deferring indices [1,3] from [A,B,C,D,E]
     // would yield [A,E,C] instead of [A,C,E]).
-    let deferred_set: std::collections::HashSet<usize> = deferred_indices.into_iter().collect();
+    // ⚡ Bolt: Use zero-allocation sort and binary search to avoid massive HashSet allocation overhead
+    // on the hot execution path.
+    deferred_indices.sort_unstable();
     let kept = instances
         .into_iter()
         .enumerate()
-        .filter(|(i, _)| !deferred_set.contains(i))
+        .filter(|(i, _)| deferred_indices.binary_search(i).is_err())
         .map(|(_, inst)| inst)
         .collect();
 

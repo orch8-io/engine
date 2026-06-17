@@ -42,3 +42,6 @@
 ## 2025-10-28 - [Zero-Allocation Reference Tuples in Hot Path Iterators]
 **Learning:** In the fast path of the scheduler (scheduler.rs:1026), passing &BlockId by reference into get_block_outputs_batch avoids allocating and copying Strings for every step that requires a deadline check. Prior to this, BlockId was cloned on every iteration inside a loop processing active steps, introducing significant memory overhead across the cluster.
 **Action:** Always prefer accepting references within collections (&[(InstanceId, &BlockId)]) for database batch operations if the caller only holds references, preventing O(N) string clones on execution hot paths.
+## 2025-10-31 - [HashSet Allocation Overhead in Priority Queue Ordering]
+**Learning:** In `enforce_concurrency_limits` inside `orch8-engine/src/scheduler.rs`, the logic used a `HashSet` to filter out indices of instances that hit concurrency limits. This `HashSet` creation allocates memory and hashes every excluded index, creating significant overhead on the hot path for the execution engine loop simply to filter an array.
+**Action:** Replace `HashSet` with `Vec::sort_unstable()` and `Vec::binary_search()` to perform an O(log N) zero-allocation lookup when filtering deferred elements out of the batch in scheduler execution paths.
