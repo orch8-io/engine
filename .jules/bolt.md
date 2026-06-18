@@ -50,9 +50,5 @@
 **Action:** When working with `HashMap`s with compound keys built from batch queries, construct a local `HashSet` or `HashMap` of references (e.g. `(&InstanceId, &BlockId)`) outside the loop, allowing zero-allocation lookups inside the hot loop.
 
 ## 2025-10-29 - [Eliminate redundant elements from binary search vectors]
-**Learning:** In the  hot path for both Postgres and SQLite backends, an exclusion vector of indices was populated with potential duplicates (e.g., if multiple elements mapped to the same index contextually, though structural constraints try to prevent it, or simply from naive slice iterations). Sorting the vector via  prepares it for , but any duplicate elements remain. Duplicates increase the slice length, subtly degrading CPU cache utilization and increasing the depth of subsequent  calls.
-**Action:** Always call  immediately after  on a  before using it as the target for  lookups in execution hot paths.
-
-## 2025-10-29 - [Eliminate redundant elements from binary search vectors]
 **Learning:** In the `filter_by_concurrency` hot path for both Postgres and SQLite backends, an exclusion vector of indices was populated and then sorted to allow `binary_search`. Omitting `.dedup()` after `.sort_unstable()` means any duplicate values added during the collection phase unnecessarily pad the slice length, subtly degrading CPU cache utilization and increasing the depth of the subsequent `binary_search` lookups across every task filtered.
 **Action:** Always explicitly call `.dedup()` immediately after `.sort_unstable()` on a `Vec` before using it as the target for `binary_search` lookups in execution hot paths.
