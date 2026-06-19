@@ -31,12 +31,12 @@ pub(crate) use bulk::{
     __path_batch_action, __path_bulk_reschedule, __path_bulk_update_state, __path_list_dlq,
     batch_action, bulk_reschedule, bulk_update_state, list_dlq,
 };
-pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
 pub(crate) use checkpoints::{
     __path_get_latest_checkpoint, __path_list_checkpoints, __path_prune_checkpoints,
     __path_save_checkpoint, get_latest_checkpoint, list_checkpoints, prune_checkpoints,
     save_checkpoint,
 };
+pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
 pub use fork::ForkResponse;
 pub(crate) use fork::{__path_fork_instance, fork_instance};
 pub use inject::InjectBlocksRequest;
@@ -53,8 +53,8 @@ pub(crate) use outputs::{
     __path_get_execution_tree, __path_get_outputs, get_execution_tree, get_outputs,
 };
 pub(crate) use signals::{__path_send_signal, send_signal};
-pub use timeline::{TimelineEntry, TimelineInstance, TimelineResponse, TimelineStateTransition};
 pub(crate) use timeline::{__path_get_timeline, get_timeline};
+pub use timeline::{TimelineEntry, TimelineInstance, TimelineResponse, TimelineStateTransition};
 pub use types::{
     BatchAction, BatchActionRequest, BatchActionResponse, BulkFilter, ForkRequest, InjectedSignal,
     ResumeFromRequest,
