@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use orch8_types::cluster::ClusterNode;
 
+use crate::auth::OptionalAdmin;
+use crate::api_keys::require_admin;
 use crate::error::ApiError;
 use crate::AppState;
 
@@ -40,8 +42,10 @@ pub(crate) async fn list_nodes(
 )]
 pub(crate) async fn drain_node(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&admin)?;
     state
         .storage
         .drain_node(id)

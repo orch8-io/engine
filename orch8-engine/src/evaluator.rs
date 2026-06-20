@@ -1259,7 +1259,14 @@ pub async fn cancel_subtree(
     // Sort for O(log N) lookup without allocating a HashSet.
     to_cancel.sort_unstable();
 
-    // Cancel worker tasks for any Waiting descendants before we flip their state.
+    // Mark every descendant as Cancelled FIRST so a crash between here and the
+    // worker-task cancellation below leaves nodes in a safe terminal state
+    // rather than Waiting with no associated worker task.
+    storage
+        .update_nodes_state(&to_cancel, NodeState::Cancelled)
+        .await?;
+
+    // Cancel worker tasks for any formerly-Waiting descendants.
     for node in tree {
         if node.state == NodeState::Waiting && to_cancel.binary_search(&node.id).is_ok() {
             storage
@@ -1267,11 +1274,6 @@ pub async fn cancel_subtree(
                 .await?;
         }
     }
-
-    // Mark every descendant as Cancelled in a single round-trip.
-    storage
-        .update_nodes_state(&to_cancel, NodeState::Cancelled)
-        .await?;
 
     Ok(())
 }

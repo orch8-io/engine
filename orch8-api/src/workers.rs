@@ -15,6 +15,7 @@ use orch8_types::worker_filter::WorkerTaskFilter;
 
 use orch8_types::execution::NodeState;
 
+use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
 use crate::AppState;
 
@@ -61,8 +62,13 @@ pub(crate) struct ListPinsQuery {
 )]
 pub(crate) async fn set_version_pin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<SetVersionPinRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(req.tenant_id),
+    )?;
     if req.handler_name.trim().is_empty() || req.min_version.trim().is_empty() {
         return Err(ApiError::InvalidArgument(
             "handler_name and min_version are required".into(),
@@ -70,7 +76,7 @@ pub(crate) async fn set_version_pin(
     }
     let now = chrono::Utc::now();
     let pin = orch8_types::worker::WorkerVersionPin {
-        tenant_id: req.tenant_id,
+        tenant_id: tenant_id.into_string(),
         handler_name: req.handler_name,
         min_version: req.min_version,
         created_at: now,
@@ -91,11 +97,13 @@ pub(crate) async fn set_version_pin(
 )]
 pub(crate) async fn list_version_pins(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListPinsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
     let pins = state
         .storage
-        .list_worker_version_pins(q.tenant_id.as_deref())
+        .list_worker_version_pins(scoped.as_ref().map(orch8_types::ids::TenantId::as_str))
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_version_pin"))?;
     Ok(Json(pins))
@@ -111,8 +119,14 @@ pub(crate) async fn list_version_pins(
 )]
 pub(crate) async fn delete_version_pin(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path((tenant_id, handler_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(&tenant_id),
+        "worker_version_pin",
+    )?;
     state
         .storage
         .delete_worker_version_pin(&tenant_id, &handler_name)
@@ -132,14 +146,22 @@ pub(crate) struct EnqueueCommandRequest {
 
 /// Queue a control command for a worker. The worker picks it up via
 /// `GET /workers/{worker_id}/commands` and acks it after acting.
+///
+/// This is an operator/admin endpoint: only callers with an admin context may
+/// enqueue commands to the worker fleet.
 #[utoipa::path(post, path = "/workers/commands", tag = "workers",
     request_body = EnqueueCommandRequest,
-    responses((status = 201, description = "Command queued", body = orch8_types::worker::WorkerCommand))
+    responses(
+        (status = 201, description = "Command queued", body = orch8_types::worker::WorkerCommand),
+        (status = 403, description = "Admin context required"),
+    )
 )]
 pub(crate) async fn enqueue_command(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     Json(req): Json<EnqueueCommandRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
     if req.worker_id.trim().is_empty() {
         return Err(ApiError::InvalidArgument("worker_id is required".into()));
     }

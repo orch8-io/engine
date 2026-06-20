@@ -50,6 +50,13 @@ fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
     Uuid::parse_str(s).map_err(|e| StorageError::Query(format!("invalid UUID '{s}': {e}")))
 }
 
+fn parse_uuid_opt(s: Option<String>) -> Result<Option<Uuid>, StorageError> {
+    match s {
+        Some(v) => Ok(Some(parse_uuid(&v)?)),
+        None => Ok(None),
+    }
+}
+
 fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, StorageError> {
     serde_json::from_str(s).map_err(StorageError::Serialization)
 }
@@ -74,12 +81,8 @@ pub(super) fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<TaskInsta
             .get::<Option<i32>, _>("max_concurrency")
             .map(|v| v as u32),
         idempotency_key: row.get::<Option<String>, _>("idempotency_key"),
-        session_id: row
-            .get::<Option<String>, _>("session_id")
-            .and_then(|s| Uuid::parse_str(&s).ok()),
-        parent_instance_id: row
-            .get::<Option<String>, _>("parent_instance_id")
-            .and_then(|s| Uuid::parse_str(&s).ok())
+        session_id: parse_uuid_opt(row.get::<Option<String>, _>("session_id"))?,
+        parent_instance_id: parse_uuid_opt(row.get::<Option<String>, _>("parent_instance_id"))?
             .map(InstanceId::from_uuid),
         budget: row
             .get::<Option<String>, _>("budget")

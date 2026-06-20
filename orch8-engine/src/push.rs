@@ -23,6 +23,18 @@ fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .pool_max_idle_per_host(4)
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error("too many redirects");
+                }
+                if crate::handlers::builtin::redirect_target_allowed(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("blocked: redirect targets a private/internal network address")
+                }
+            }))
             .build()
             .unwrap_or_default()
     })

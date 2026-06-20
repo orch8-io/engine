@@ -404,7 +404,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             );
             if let Err(e) = ctx
                 .storage
-                .update_instance_state(instance.id, InstanceState::Scheduled, Some(ctx.clock.now()))
+                .conditional_update_instance_state(instance.id, InstanceState::Running, InstanceState::Scheduled, Some(ctx.clock.now()))
                 .await
             {
                 // If this write fails the row stays `Running` and is never
@@ -485,7 +485,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     // Safety net: transition to Failed so the instance doesn't
                     // stay in Running forever and get re-claimed every tick.
                     if let Err(te) = storage
-                        .update_instance_state(instance_id, InstanceState::Failed, None)
+                        .conditional_update_instance_state(instance_id, InstanceState::Running, InstanceState::Failed, None)
                         .await
                     {
                         error!(
@@ -503,7 +503,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                         "instance processing panicked"
                     );
                     if let Err(te) = storage
-                        .update_instance_state(instance_id, InstanceState::Failed, None)
+                        .conditional_update_instance_state(instance_id, InstanceState::Running, InstanceState::Failed, None)
                         .await
                     {
                         error!(
@@ -677,7 +677,7 @@ async fn process_signalled_instances(
                 "waking scheduled instance with pending signal"
             );
             if let Err(e) = storage
-                .update_instance_state(instance_id, InstanceState::Scheduled, Some(clock.now()))
+                .conditional_update_instance_state(instance_id, InstanceState::Scheduled, InstanceState::Scheduled, Some(clock.now()))
                 .await
             {
                 warn!(
@@ -1434,7 +1434,7 @@ async fn process_instance(
         if position > i64::from(max) {
             let defer_at = clock.now() + chrono::Duration::seconds(2);
             storage
-                .update_instance_state(instance_id, InstanceState::Scheduled, Some(defer_at))
+                .conditional_update_instance_state(instance_id, InstanceState::Running, InstanceState::Scheduled, Some(defer_at))
                 .await?;
             debug!(
                 instance_id = %instance_id,

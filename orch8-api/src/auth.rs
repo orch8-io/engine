@@ -35,15 +35,20 @@ pub fn enforce_tenant_create(
     tenant_ctx: &OptionalTenant,
     body_tenant_id: &TenantId,
 ) -> Result<TenantId, ApiError> {
-    if let Some(axum::Extension(ctx)) = tenant_ctx {
+    let id = if let Some(axum::Extension(ctx)) = tenant_ctx {
         if !body_tenant_id.as_str().is_empty() && *body_tenant_id != ctx.tenant_id {
             return Err(ApiError::Forbidden(
                 "tenant_id in body does not match X-Tenant-Id header".into(),
             ));
         }
-        Ok(ctx.tenant_id.clone())
+        ctx.tenant_id.clone()
     } else {
-        Ok(body_tenant_id.clone())
+        body_tenant_id.clone()
+    };
+    if id.as_str().is_empty() {
+        Ok(TenantId::unchecked("default"))
+    } else {
+        Ok(id)
     }
 }
 
@@ -275,6 +280,15 @@ mod tests {
         let body = TenantId::unchecked("tenant-x");
         let id = enforce_tenant_create(&None, &body).expect("must succeed");
         assert_eq!(id.as_str(), "tenant-x");
+    }
+
+    #[test]
+    fn enforce_tenant_create_falls_back_to_default_when_unspecified() {
+        // No header and no (or empty) body tenant_id → use the reserved
+        // "default" tenant so resources remain retrievable.
+        let body = TenantId::unchecked("");
+        let id = enforce_tenant_create(&None, &body).expect("must succeed");
+        assert_eq!(id.as_str(), "default");
     }
 
     #[test]

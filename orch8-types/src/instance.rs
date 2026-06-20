@@ -228,7 +228,10 @@ impl Budget {
             ("max_steps", self.max_steps, steps),
         ];
         checks.into_iter().find_map(|(limit, cap, actual)| {
-            cap.filter(|&limit_value| actual > limit_value)
+            // Negative limits are nonsensical and would otherwise report a
+            // breach for every non-negative actual value. Treat them as
+            // unconfigured.
+            cap.filter(|&limit_value| limit_value >= 0 && actual > limit_value)
                 .map(|limit_value| BudgetBreach {
                     limit,
                     limit_value,
@@ -540,6 +543,19 @@ mod tests {
             Budget::default().first_breach(i64::MAX, i64::MAX, i64::MAX),
             None
         );
+    }
+
+    #[test]
+    fn budget_negative_limits_are_ignored() {
+        // Negative limits should not cause an immediate breach for every
+        // non-negative actual value.
+        let budget = Budget {
+            max_input_tokens: Some(-1),
+            max_output_tokens: Some(-1),
+            max_total_tokens: Some(-1),
+            max_steps: Some(-1),
+        };
+        assert_eq!(budget.first_breach(100, 100, 100), None);
     }
 
     #[test]

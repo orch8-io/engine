@@ -74,7 +74,7 @@ pub(super) async fn claim(
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' LIMIT ?2",
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
     .bind(limit as i64)

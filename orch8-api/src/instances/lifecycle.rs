@@ -78,11 +78,19 @@ pub async fn create_instance(
     // Ref#5: delegate header/body tenant reconciliation to the shared helper
     // instead of re-implementing the rule inline (the inline copy drifted from
     // `enforce_tenant_create` once already).
+    // Reject an explicitly empty tenant_id when the caller has not supplied a
+    // header. If a tenant header is present it remains authoritative even when
+    // the body field is blank.
+    if req.tenant_id.as_str().trim().is_empty() && tenant_ctx.is_none() {
+        return Err(ApiError::InvalidArgument(
+            "tenant_id must not be empty".into(),
+        ));
+    }
+
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &req.tenant_id)?;
 
-    // Reject empty tenant / namespace up-front. Without this the DB happily
-    // accepts the blank strings and the resulting row leaks into the default
-    // tenant's view — tenant isolation requires non-empty scoping values.
+    // Defensive: the shared helper falls back to "default" when both the body
+    // and header are absent, so the tenant can never be empty here.
     if tenant_id.as_str().trim().is_empty() {
         return Err(ApiError::InvalidArgument(
             "tenant_id must not be empty".into(),
@@ -215,13 +223,20 @@ pub async fn create_instances_batch(
     // that lets blank tenant/namespace rows leak into the default tenant's
     // view (tenant isolation requires non-empty scoping values).
     let mut sequence_ids = std::collections::HashSet::new();
+    let mut authoritative_tenants = std::collections::HashMap::new();
     for (i, r) in req.instances.iter().enumerate() {
-        crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
-        if r.tenant_id.as_str().trim().is_empty() {
+        if r.tenant_id.as_str().trim().is_empty() && tenant_ctx.is_none() {
             return Err(ApiError::InvalidArgument(format!(
                 "instances[{i}]: tenant_id must not be empty"
             )));
         }
+        let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &r.tenant_id)?;
+        if tenant_id.as_str().trim().is_empty() {
+            return Err(ApiError::InvalidArgument(format!(
+                "instances[{i}]: tenant_id must not be empty"
+            )));
+        }
+        authoritative_tenants.insert(i, tenant_id);
         if r.namespace.as_str().trim().is_empty() {
             return Err(ApiError::InvalidArgument(format!(
                 "instances[{i}]: namespace must not be empty"
@@ -262,7 +277,8 @@ pub async fn create_instances_batch(
     let instances: Vec<TaskInstance> = req
         .instances
         .into_iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(i, r)| {
             let mut context = r.context;
             context.runtime.dry_run = r.dry_run || context.runtime.dry_run;
             context.runtime.dry_run_auto_approve =
@@ -270,10 +286,13 @@ pub async fn create_instances_batch(
             // Same mode-namespacing as the single-create path (see E1).
             let idempotency_key =
                 mode_scoped_idempotency_key(r.idempotency_key.as_deref(), context.runtime.dry_run);
+            let tenant_id = authoritative_tenants
+                .remove(&i)
+                .expect("tenant enforced above");
             TaskInstance {
                 id: InstanceId::new(),
                 sequence_id: r.sequence_id,
-                tenant_id: r.tenant_id,
+                tenant_id,
                 namespace: r.namespace,
                 state: InstanceState::Scheduled,
                 next_fire_at: Some(r.next_fire_at.unwrap_or(now)),

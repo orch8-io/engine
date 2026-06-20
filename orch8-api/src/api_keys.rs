@@ -30,7 +30,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Require that the caller authenticated with the root/admin key.
-fn require_admin(admin: &OptionalAdmin) -> Result<(), ApiError> {
+pub(crate) fn require_admin(admin: &OptionalAdmin) -> Result<(), ApiError> {
     if admin.is_some() {
         Ok(())
     } else {

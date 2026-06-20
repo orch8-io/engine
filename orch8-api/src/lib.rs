@@ -21,6 +21,7 @@ pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod request_id;
 pub mod rollback;
+pub mod security;
 pub mod sequences;
 pub mod sessions;
 pub mod streaming;

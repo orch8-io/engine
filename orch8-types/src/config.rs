@@ -635,13 +635,19 @@ impl EngineConfig {
         if self.engine.max_concurrent_steps == 0 {
             errors.push("engine.max_concurrent_steps must be > 0".into());
         }
-        if self.engine.stale_instance_threshold_secs > 0
-            && self.engine.tick_interval_ms > 0
-            && self.engine.stale_instance_threshold_secs * 1000 <= self.engine.tick_interval_ms
-        {
-            errors.push(
-                "engine.stale_instance_threshold_secs must be greater than tick_interval_ms".into(),
-            );
+        if self.engine.stale_instance_threshold_secs > 0 && self.engine.tick_interval_ms > 0 {
+            match self.engine.stale_instance_threshold_secs.checked_mul(1000) {
+                Some(stale_ms) if stale_ms <= self.engine.tick_interval_ms => {
+                    errors.push(
+                        "engine.stale_instance_threshold_secs must be greater than tick_interval_ms"
+                            .into(),
+                    );
+                }
+                None => {
+                    errors.push("engine.stale_instance_threshold_secs is too large".into());
+                }
+                _ => {}
+            }
         }
         if !self.engine.encryption_key.is_empty() && self.engine.encryption_key.expose().len() != 64
         {
@@ -911,6 +917,15 @@ mod tests {
         let mut cfg = EngineConfig::default();
         cfg.engine.tick_interval_ms = 5000;
         cfg.engine.stale_instance_threshold_secs = 4; // 4s = 4000ms < 5000ms tick
+        let errs = cfg.validate().unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("stale_instance_threshold")));
+    }
+
+    #[test]
+    fn validate_catches_stale_threshold_overflow() {
+        let mut cfg = EngineConfig::default();
+        cfg.engine.tick_interval_ms = 1;
+        cfg.engine.stale_instance_threshold_secs = u64::MAX;
         let errs = cfg.validate().unwrap_err();
         assert!(errs.iter().any(|e| e.contains("stale_instance_threshold")));
     }

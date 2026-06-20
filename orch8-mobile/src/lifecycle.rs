@@ -12,7 +12,9 @@ use tracing::{debug, info, warn};
 
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
-use orch8_types::ids::{InstanceId, Namespace, TenantId};
+use orch8_types::ids::{InstanceId, Namespace};
+#[cfg(test)]
+use orch8_types::ids::TenantId;
 use orch8_types::instance::{InstanceState, TaskInstance};
 
 use crate::error::MobileError;
@@ -92,7 +94,7 @@ impl InstanceLifecycleManager {
             });
         }
 
-        let tenant = TenantId::new("mobile").expect("valid tenant");
+        let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let seq = self
             .storage

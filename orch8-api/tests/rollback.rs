@@ -58,7 +58,7 @@ async fn rollback_policy_crud() {
         .send()
         .await
         .unwrap();
-    assert_eq!(get_resp.status(), 500); // Policy not found → Internal error
+    assert_eq!(get_resp.status(), 404);
 }
 
 #[tokio::test]
