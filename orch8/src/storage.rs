@@ -113,8 +113,14 @@ mod tests {
     fn postgres_debug_redacts_password() {
         let storage = Storage::postgres("postgres://user:secret@host/db");
         let debug = format!("{storage:?}");
-        assert!(!debug.contains("secret"), "password must not appear in Debug: {debug}");
-        assert!(debug.contains("user@host"), "user/host should still appear: {debug}");
+        assert!(
+            !debug.contains("secret"),
+            "password must not appear in Debug: {debug}"
+        );
+        assert!(
+            debug.contains("user@host"),
+            "user/host should still appear: {debug}"
+        );
     }
 
     #[test]
@@ -122,6 +128,9 @@ mod tests {
         // Sqlite path is not a secret, but we verify Debug is well-formed.
         let storage = Storage::sqlite("/tmp/orch8.db");
         let debug = format!("{storage:?}");
-        assert!(debug.contains("/tmp/orch8.db"), "path should appear: {debug}");
+        assert!(
+            debug.contains("/tmp/orch8.db"),
+            "path should appear: {debug}"
+        );
     }
 }

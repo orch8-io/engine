@@ -89,11 +89,7 @@ pub(super) async fn create_batch(
             .map(|inst| {
                 Ok::<_, StorageError>({
                     let context = serde_json::to_value(&inst.context)?;
-                    let budget = inst
-                        .budget
-                        .as_ref()
-                        .map(serde_json::to_value)
-                        .transpose()?;
+                    let budget = inst.budget.as_ref().map(serde_json::to_value).transpose()?;
                     (context, budget)
                 })
             })
@@ -107,29 +103,32 @@ pub(super) async fn create_batch(
                  session_id, parent_instance_id, budget,
                  created_at, updated_at) ",
         );
-        qb.push_values(chunk.iter().zip(rows.iter()), |mut b, (inst, (context, budget))| {
-            b.push_bind(inst.id.into_uuid())
-                .push_bind(inst.sequence_id.into_uuid())
-                .push_bind(inst.tenant_id.as_str())
-                .push_bind(inst.namespace.as_str())
-                .push_bind(inst.state.to_string())
-                .push_bind(inst.next_fire_at)
-                .push_bind(inst.priority as i16)
-                .push_bind(&inst.timezone)
-                .push_bind(&inst.metadata)
-                .push_bind(context)
-                .push_bind(&inst.concurrency_key)
-                .push_bind(inst.max_concurrency.map(|v| v as i32))
-                .push_bind(&inst.idempotency_key)
-                .push_bind(inst.session_id)
-                .push_bind(
-                    inst.parent_instance_id
-                        .map(orch8_types::InstanceId::into_uuid),
-                )
-                .push_bind(budget.as_ref())
-                .push_bind(inst.created_at)
-                .push_bind(inst.updated_at);
-        });
+        qb.push_values(
+            chunk.iter().zip(rows.iter()),
+            |mut b, (inst, (context, budget))| {
+                b.push_bind(inst.id.into_uuid())
+                    .push_bind(inst.sequence_id.into_uuid())
+                    .push_bind(inst.tenant_id.as_str())
+                    .push_bind(inst.namespace.as_str())
+                    .push_bind(inst.state.to_string())
+                    .push_bind(inst.next_fire_at)
+                    .push_bind(inst.priority as i16)
+                    .push_bind(&inst.timezone)
+                    .push_bind(&inst.metadata)
+                    .push_bind(context)
+                    .push_bind(&inst.concurrency_key)
+                    .push_bind(inst.max_concurrency.map(|v| v as i32))
+                    .push_bind(&inst.idempotency_key)
+                    .push_bind(inst.session_id)
+                    .push_bind(
+                        inst.parent_instance_id
+                            .map(orch8_types::InstanceId::into_uuid),
+                    )
+                    .push_bind(budget.as_ref())
+                    .push_bind(inst.created_at)
+                    .push_bind(inst.updated_at);
+            },
+        );
         let result = qb.build().execute(&mut *tx).await?;
         count += result.rows_affected();
     }

@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use orch8_types::cluster::ClusterNode;
 
-use crate::auth::OptionalAdmin;
 use crate::api_keys::require_admin;
+use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
 use crate::AppState;
 

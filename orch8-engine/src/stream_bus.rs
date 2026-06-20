@@ -63,13 +63,17 @@ impl Deref for Subscription {
     type Target = broadcast::Receiver<StreamEvent>;
 
     fn deref(&self) -> &Self::Target {
-        self.receiver.as_ref().expect("subscription receiver present")
+        self.receiver
+            .as_ref()
+            .expect("subscription receiver present")
     }
 }
 
 impl DerefMut for Subscription {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.receiver.as_mut().expect("subscription receiver present")
+        self.receiver
+            .as_mut()
+            .expect("subscription receiver present")
     }
 }
 
@@ -226,7 +230,10 @@ mod tests {
             !bus.has_subscribers(id),
             "subscription Drop must decrement receiver count"
         );
-        assert!(bus.is_empty(), "last subscriber Drop must remove the channel");
+        assert!(
+            bus.is_empty(),
+            "last subscriber Drop must remove the channel"
+        );
     }
 
     #[tokio::test]
@@ -237,7 +244,10 @@ mod tests {
         let rx2 = bus.subscribe(id);
         assert!(bus.has_subscribers(id));
         drop(rx1);
-        assert!(bus.has_subscribers(id), "second subscriber keeps channel alive");
+        assert!(
+            bus.has_subscribers(id),
+            "second subscriber keeps channel alive"
+        );
         drop(rx2);
         assert!(!bus.has_subscribers(id));
         assert!(bus.is_empty());

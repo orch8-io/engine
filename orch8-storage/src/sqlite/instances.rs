@@ -76,11 +76,7 @@ pub(super) async fn create_batch(
                 Ok::<_, StorageError>({
                     let metadata = serde_json::to_string(&i.metadata)?;
                     let context = serde_json::to_string(&i.context)?;
-                    let budget = i
-                        .budget
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()?;
+                    let budget = i.budget.as_ref().map(serde_json::to_string).transpose()?;
                     (metadata, context, budget)
                 })
             })
@@ -89,26 +85,29 @@ pub(super) async fn create_batch(
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO task_instances (id,sequence_id,tenant_id,namespace,state,next_fire_at,priority,timezone,metadata,context,concurrency_key,max_concurrency,idempotency_key,session_id,parent_instance_id,budget,created_at,updated_at) ",
         );
-        qb.push_values(chunk.iter().zip(rows.iter()), |mut b, (i, (metadata, context, budget))| {
-            b.push_bind(i.id.into_uuid().to_string())
-                .push_bind(i.sequence_id.into_uuid().to_string())
-                .push_bind(i.tenant_id.as_str())
-                .push_bind(i.namespace.as_str())
-                .push_bind(i.state.to_string())
-                .push_bind(i.next_fire_at.map(ts))
-                .push_bind(i.priority as i16)
-                .push_bind(&i.timezone)
-                .push_bind(metadata)
-                .push_bind(context)
-                .push_bind(&i.concurrency_key)
-                .push_bind(i.max_concurrency.map(|v| v as i32))
-                .push_bind(&i.idempotency_key)
-                .push_bind(i.session_id.map(|u| u.to_string()))
-                .push_bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
-                .push_bind(budget.as_ref())
-                .push_bind(ts(i.created_at))
-                .push_bind(ts(i.updated_at));
-        });
+        qb.push_values(
+            chunk.iter().zip(rows.iter()),
+            |mut b, (i, (metadata, context, budget))| {
+                b.push_bind(i.id.into_uuid().to_string())
+                    .push_bind(i.sequence_id.into_uuid().to_string())
+                    .push_bind(i.tenant_id.as_str())
+                    .push_bind(i.namespace.as_str())
+                    .push_bind(i.state.to_string())
+                    .push_bind(i.next_fire_at.map(ts))
+                    .push_bind(i.priority as i16)
+                    .push_bind(&i.timezone)
+                    .push_bind(metadata)
+                    .push_bind(context)
+                    .push_bind(&i.concurrency_key)
+                    .push_bind(i.max_concurrency.map(|v| v as i32))
+                    .push_bind(&i.idempotency_key)
+                    .push_bind(i.session_id.map(|u| u.to_string()))
+                    .push_bind(i.parent_instance_id.map(|u| u.into_uuid().to_string()))
+                    .push_bind(budget.as_ref())
+                    .push_bind(ts(i.created_at))
+                    .push_bind(ts(i.updated_at));
+            },
+        );
         let result = qb.build().execute(&mut *tx).await?;
         total_affected += result.rows_affected();
     }
