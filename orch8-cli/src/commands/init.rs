@@ -56,7 +56,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
 fn generate_api_key() -> String {
     use std::fmt::Write as _;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().fold(String::with_capacity(64), |mut s, b| {
         let _ = write!(s, "{b:02x}");
         s

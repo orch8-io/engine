@@ -30,7 +30,7 @@ pub fn calculate_next_fire_at(
     if let Some(jitter) = delay.jitter {
         let jitter_ms = i64::try_from(jitter.as_millis()).unwrap_or(i64::MAX);
         if jitter_ms > 0 {
-            let offset = rand::thread_rng().gen_range(-jitter_ms..=jitter_ms);
+            let offset = rand::rng().random_range(-jitter_ms..=jitter_ms);
             target += Duration::milliseconds(offset);
         }
     }
