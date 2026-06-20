@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use rand::Rng;
 
 use orch8_types::pool::{PoolAssignment, PoolResource, RotationStrategy};
@@ -36,7 +36,7 @@ pub fn select_resource(
             if total_weight == 0 {
                 return PoolAssignment::Empty;
             }
-            let mut pick = rand::thread_rng().gen_range(0..total_weight);
+            let mut pick = rand::rng().random_range(0..total_weight);
             for r in &available {
                 if pick < r.weight {
                     return PoolAssignment::Assigned(r.resource_key.clone());
@@ -48,7 +48,7 @@ pub fn select_resource(
                 PoolAssignment::Assigned(r.resource_key.clone())
             })
         }
-        RotationStrategy::Random => match available.choose(&mut rand::thread_rng()) {
+        RotationStrategy::Random => match available.choose(&mut rand::rng()) {
             Some(r) => PoolAssignment::Assigned(r.resource_key.clone()),
             None => PoolAssignment::Empty,
         },
