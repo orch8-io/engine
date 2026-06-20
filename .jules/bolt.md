@@ -45,3 +45,6 @@
 ## 2025-10-29 - [Avoid HashSet Allocation in Array Filtering on Hot Paths]
 **Learning:** In the `enforce_concurrency_limits` hot path within `orch8-engine/src/scheduler.rs`, building a `HashSet` simply to test indices for exclusion incurs unnecessary memory allocation and hashing overhead. When checking small numbers of exclusion indices against elements in a loop, sorting the array and using binary search provides a much faster and zero-allocation alternative.
 **Action:** When filtering out items by index or ID on hot execution paths, avoid allocating a `HashSet`. Instead, sort the indices (`.sort_unstable()`) and use `.binary_search().is_err()` to identify elements to keep.
+## 2025-10-28 - [Zero-Allocation Compound HashMap Lookups]
+**Learning:** In hot loops where a compound key (like `(InstanceId, BlockId)`) is used to query a `HashMap`, using `.contains_key(&(id1, id2.clone()))` allocates a new `String` for the second part of the tuple on every iteration.
+**Action:** When working with `HashMap`s with compound keys built from batch queries, construct a local `HashSet` or `HashMap` of references (e.g. `(&InstanceId, &BlockId)`) outside the loop, allowing zero-allocation lookups inside the hot loop.

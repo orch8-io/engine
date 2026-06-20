@@ -1061,10 +1061,14 @@ async fn process_sla_breaches(
         .map(|c| (active[c.idx].id, &c.block_id))
         .collect();
     let existing = storage.get_block_outputs_batch(&keys).await?;
+    let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
+    for k in existing.keys() {
+        existing_ref.insert((&k.0, &k.1));
+    }
 
     for c in &candidates {
         let instance = &active[c.idx];
-        if existing.contains_key(&(instance.id, c.block_id.clone())) {
+        if existing_ref.contains(&(&instance.id, &c.block_id)) {
             continue;
         }
         // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
