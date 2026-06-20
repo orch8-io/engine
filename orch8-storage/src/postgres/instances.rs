@@ -313,6 +313,9 @@ async fn filter_by_concurrency_pg(
     }
 
     excluded.sort_unstable();
+    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+    // during the `binary_search` filtering phase, improving hot path performance.
+    excluded.dedup();
 
     Ok(candidates
         .into_iter()

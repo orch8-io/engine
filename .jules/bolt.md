@@ -48,3 +48,7 @@
 ## 2025-10-28 - [Zero-Allocation Compound HashMap Lookups]
 **Learning:** In hot loops where a compound key (like `(InstanceId, BlockId)`) is used to query a `HashMap`, using `.contains_key(&(id1, id2.clone()))` allocates a new `String` for the second part of the tuple on every iteration.
 **Action:** When working with `HashMap`s with compound keys built from batch queries, construct a local `HashSet` or `HashMap` of references (e.g. `(&InstanceId, &BlockId)`) outside the loop, allowing zero-allocation lookups inside the hot loop.
+
+## 2025-10-29 - [Eliminate redundant elements from binary search vectors]
+**Learning:** In the `filter_by_concurrency` hot path for both Postgres and SQLite backends, an exclusion vector of indices was populated and then sorted to allow `binary_search`. Omitting `.dedup()` after `.sort_unstable()` means any duplicate values added during the collection phase unnecessarily pad the slice length, subtly degrading CPU cache utilization and increasing the depth of the subsequent `binary_search` lookups across every task filtered.
+**Action:** Always explicitly call `.dedup()` immediately after `.sort_unstable()` on a `Vec` before using it as the target for `binary_search` lookups in execution hot paths.

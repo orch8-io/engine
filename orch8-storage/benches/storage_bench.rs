@@ -159,7 +159,11 @@ fn bench_block_outputs(c: &mut Criterion) {
             || runtime.block_on(SqliteStorage::in_memory()).unwrap(),
             |s| {
                 runtime.block_on(async {
-                    let inst_id = InstanceId::new();
+                    let seq = make_sequence();
+                    s.create_sequence(&seq).await.unwrap();
+                    let inst = make_instance(seq.id);
+                    let inst_id = inst.id;
+                    s.create_instance(&inst).await.unwrap();
                     let out = BlockOutput {
                         id: Uuid::now_v7(),
                         instance_id: inst_id,
@@ -189,7 +193,11 @@ fn bench_signals(c: &mut Criterion) {
             || runtime.block_on(SqliteStorage::in_memory()).unwrap(),
             |s| {
                 runtime.block_on(async {
-                    let inst_id = InstanceId::new();
+                    let seq = make_sequence();
+                    s.create_sequence(&seq).await.unwrap();
+                    let inst = make_instance(seq.id);
+                    let inst_id = inst.id;
+                    s.create_instance(&inst).await.unwrap();
                     for _ in 0..100 {
                         let sig = Signal {
                             id: Uuid::now_v7(),
@@ -219,7 +227,11 @@ fn bench_execution_tree(c: &mut Criterion) {
             || runtime.block_on(SqliteStorage::in_memory()).unwrap(),
             |s| {
                 runtime.block_on(async {
-                    let inst_id = InstanceId::new();
+                    let seq = make_sequence();
+                    s.create_sequence(&seq).await.unwrap();
+                    let inst = make_instance(seq.id);
+                    let inst_id = inst.id;
+                    s.create_instance(&inst).await.unwrap();
                     let root_id = ExecutionNodeId::new();
                     let mut nodes = vec![ExecutionNode {
                         id: root_id,
@@ -263,7 +275,11 @@ fn bench_worker_tasks(c: &mut Criterion) {
             || runtime.block_on(SqliteStorage::in_memory()).unwrap(),
             |s| {
                 runtime.block_on(async {
-                    let inst_id = InstanceId::new();
+                    let seq = make_sequence();
+                    s.create_sequence(&seq).await.unwrap();
+                    let inst = make_instance(seq.id);
+                    let inst_id = inst.id;
+                    s.create_instance(&inst).await.unwrap();
                     for i in 0..50 {
                         let task = WorkerTask {
                             id: Uuid::now_v7(),
