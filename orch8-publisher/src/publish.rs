@@ -152,7 +152,7 @@ mod tests {
     use crate::manifest::ManifestGenerator;
     use ed25519_dalek::SigningKey;
     use orch8_types::sequence::SequenceStatus;
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
 
     fn setup() -> (SequencePublisher, SigningKey) {
         let cdn = Box::new(MemoryCdnBackend::new());

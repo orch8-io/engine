@@ -144,7 +144,7 @@ pub fn prune_removed(removed: &mut Vec<ManifestRemoved>) {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
+    use rand_core::OsRng;
 
     fn test_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)
