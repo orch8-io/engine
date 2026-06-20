@@ -52,3 +52,7 @@
 ## 2025-10-29 - [Eliminate redundant elements from binary search vectors]
 **Learning:** In the `filter_by_concurrency` hot path for both Postgres and SQLite backends, an exclusion vector of indices was populated and then sorted to allow `binary_search`. Omitting `.dedup()` after `.sort_unstable()` means any duplicate values added during the collection phase unnecessarily pad the slice length, subtly degrading CPU cache utilization and increasing the depth of the subsequent `binary_search` lookups across every task filtered.
 **Action:** Always explicitly call `.dedup()` immediately after `.sort_unstable()` on a `Vec` before using it as the target for `binary_search` lookups in execution hot paths.
+
+## 2025-10-30 - [Avoid HashMap Allocation in Tree Indexing]
+**Learning:** In the `cancel_subtree` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<ParentId, Vec<ChildId>>` to index the tree for a BFS traversal introduces massive hashing and memory allocation overhead on the cancellation hot path, resulting in O(N²) overall cost for deep trees when combining the allocation and iteration per node.
+**Action:** Replace dynamic parent-to-children index maps (`HashMap<ParentId, Vec<ChildId>>`) with a flat `Vec<(ParentId, ChildId)>` sorted by parent ID. This allows using `.partition_point()` to perform O(log N) zero-allocation lookups for children on every visited node.

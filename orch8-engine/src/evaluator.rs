@@ -1238,20 +1238,23 @@ pub async fn cancel_subtree(
     // A parent -> children index makes the BFS O(n); scanning the full tree
     // per popped node is O(n²) on deep chains (large ForEach / nested
     // Parallel), and this runs on the cancellation hot path.
-    let mut children_of: std::collections::HashMap<ExecutionNodeId, Vec<ExecutionNodeId>> =
-        std::collections::HashMap::new();
-    for node in tree {
-        if let Some(pid) = node.parent_id {
-            children_of.entry(pid).or_default().push(node.id);
-        }
-    }
+    // We build a sorted Vec instead of a HashMap to avoid allocation overhead.
+    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|p| (p, n.id)))
+        .collect();
+    children_of.sort_unstable_by_key(|&(p, _)| p);
+
     let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
     let mut stack = vec![parent_id];
     while let Some(current) = stack.pop() {
-        if let Some(kids) = children_of.get(&current) {
-            for &kid in kids {
+        let start = children_of.partition_point(|&(p, _)| p < current);
+        for &(p, kid) in children_of.iter().skip(start) {
+            if p == current {
                 stack.push(kid);
                 to_cancel.push(kid);
+            } else {
+                break;
             }
         }
     }
