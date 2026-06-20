@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{header, Client};
@@ -189,7 +191,8 @@ pub fn humanize_time(iso: &str) -> String {
 
 pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> Result<()> {
     let status = resp.status();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let text = resp.text().await.unwrap_or_default();
+    let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
 
     if status.is_success() {
         println!("{}", serde_json::to_string_pretty(&body)?);
@@ -206,24 +209,21 @@ pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> R
 fn build_client(api_key: Option<&str>, tenant_id: Option<&str>) -> Result<Client> {
     let mut headers = header::HeaderMap::new();
     if let Some(k) = api_key.filter(|s| !s.is_empty()) {
-        match header::HeaderValue::from_str(k) {
-            Ok(v) => {
-                let mut v = v;
-                v.set_sensitive(true);
-                headers.insert("x-api-key", v);
-            }
-            Err(e) => eprintln!("warning: invalid --api-key value, header not sent: {e}"),
-        }
+        let mut v = header::HeaderValue::from_str(k)
+            .map_err(|e| anyhow::anyhow!("invalid --api-key value: {e}"))?;
+        v.set_sensitive(true);
+        headers.insert("x-api-key", v);
     }
     if let Some(t) = tenant_id.filter(|s| !s.is_empty()) {
-        match header::HeaderValue::from_str(t) {
-            Ok(v) => {
-                headers.insert("x-tenant-id", v);
-            }
-            Err(e) => eprintln!("warning: invalid --tenant-id value, header not sent: {e}"),
-        }
+        let v = header::HeaderValue::from_str(t)
+            .map_err(|e| anyhow::anyhow!("invalid --tenant-id value: {e}"))?;
+        headers.insert("x-tenant-id", v);
     }
-    Ok(Client::builder().default_headers(headers).build()?)
+    Ok(Client::builder()
+        .default_headers(headers)
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?)
 }
 
 #[tokio::main]

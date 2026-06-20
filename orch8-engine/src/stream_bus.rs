@@ -15,16 +15,18 @@
 //!   by design — the full accumulated text always lands in the step's durable
 //!   output.
 //! - Channels are dropped when their last subscriber disconnects: a publish
-//!   that finds no receivers removes the entry, and every subscribe sweeps
-//!   entries whose receiver count reached zero.
+//!   that finds no receivers removes the entry, every subscribe sweeps
+//!   entries whose receiver count reached zero, and the [`Subscription`] token
+//!   removes the entry on Drop when it is the last receiver.
 //!
 //! The bus lives in `orch8-engine` (not the API crate) because handlers are
 //! the producers; engine-only deployments (e.g. mobile) compile it unchanged
 //! and simply never subscribe, so it stays inert.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, OnceLock};
 
+use dashmap::DashMap;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -48,44 +50,79 @@ pub enum StreamEvent {
     },
 }
 
+/// A subscription token for a single instance stream. Derefs to the underlying
+/// [`broadcast::Receiver`] so callers can `recv().await` directly, and removes
+/// the channel from the bus on Drop when it was the last subscriber.
+pub struct Subscription {
+    instance_id: InstanceId,
+    bus: StreamBus,
+    receiver: Option<broadcast::Receiver<StreamEvent>>,
+}
+
+impl Deref for Subscription {
+    type Target = broadcast::Receiver<StreamEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        self.receiver.as_ref().expect("subscription receiver present")
+    }
+}
+
+impl DerefMut for Subscription {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.receiver.as_mut().expect("subscription receiver present")
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // Drop the inner receiver first so receiver_count decreases.
+        drop(self.receiver.take());
+        if let Some(tx) = self.bus.channels.get(&self.instance_id) {
+            if tx.receiver_count() == 0 {
+                // Release the shard guard before removing to avoid deadlocking
+                // the DashMap shard.
+                drop(tx);
+                self.bus.channels.remove(&self.instance_id);
+            }
+        }
+    }
+}
+
 /// Registry of per-instance broadcast channels. See the module docs for the
 /// lifecycle (lazy creation, capacity bound, drop-on-last-unsubscribe).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct StreamBus {
-    channels: Mutex<HashMap<InstanceId, broadcast::Sender<StreamEvent>>>,
+    channels: Arc<DashMap<InstanceId, broadcast::Sender<StreamEvent>>>,
 }
 
 impl StreamBus {
-    /// Lock the registry, recovering from a poisoned lock (the registry holds
-    /// only channel handles, so a panicked holder cannot leave it logically
-    /// inconsistent).
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<InstanceId, broadcast::Sender<StreamEvent>>> {
-        self.channels.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Subscribe to live events for `instance_id`, creating the channel if it
     /// does not exist yet. Also sweeps channels whose subscribers are all gone
     /// (cheap GC keyed to the rare subscribe path).
-    pub fn subscribe(&self, instance_id: InstanceId) -> broadcast::Receiver<StreamEvent> {
-        let mut map = self.lock();
-        map.retain(|_, tx| tx.receiver_count() > 0);
-        map.entry(instance_id)
+    pub fn subscribe(&self, instance_id: InstanceId) -> Subscription {
+        self.channels.retain(|_, tx| tx.receiver_count() > 0);
+        let receiver = self
+            .channels
+            .entry(instance_id)
             .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
-            .subscribe()
+            .subscribe();
+        Subscription {
+            instance_id,
+            bus: self.clone(),
+            receiver: Some(receiver),
+        }
     }
 
     /// Publish an event to subscribers of `instance_id`. A no-op when nobody
     /// is subscribed; if the last subscriber has gone away, the channel is
     /// dropped here.
     pub fn publish(&self, instance_id: InstanceId, event: StreamEvent) {
-        let mut map = self.lock();
-        if let Some(tx) = map.get(&instance_id) {
+        if let Some(tx) = self.channels.get(&instance_id) {
             if tx.send(event).is_err() {
-                // No live receivers — drop the channel so the map can't grow
-                // with stale entries between subscribes.
-                map.remove(&instance_id);
+                // No live receivers — drop the ref before removing to avoid
+                // deadlocking the shard.
+                drop(tx);
+                self.channels.remove(&instance_id);
             }
         }
     }
@@ -93,9 +130,15 @@ impl StreamBus {
     /// `true` when at least one subscriber is listening for `instance_id`.
     #[must_use]
     pub fn has_subscribers(&self, instance_id: InstanceId) -> bool {
-        self.lock()
+        self.channels
             .get(&instance_id)
             .is_some_and(|tx| tx.receiver_count() > 0)
+    }
+
+    /// Exposed for tests that need to assert on channel lifecycle.
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.channels.is_empty()
     }
 }
 
@@ -146,7 +189,7 @@ mod tests {
         assert!(!bus.has_subscribers(id));
         // The next publish observes zero receivers and removes the entry.
         bus.publish(id, delta("b", "x"));
-        assert!(bus.lock().get(&id).is_none(), "stale channel removed");
+        assert!(bus.is_empty(), "stale channel removed");
     }
 
     #[tokio::test]
@@ -170,5 +213,33 @@ mod tests {
             json,
             serde_json::json!({"type": "llm_delta", "block_id": "step-1", "delta": "hi"})
         );
+    }
+
+    #[tokio::test]
+    async fn subscription_drop_removes_channel_when_last_receiver() {
+        let bus = StreamBus::default();
+        let id = InstanceId::new();
+        let rx = bus.subscribe(id);
+        assert!(bus.has_subscribers(id));
+        drop(rx);
+        assert!(
+            !bus.has_subscribers(id),
+            "subscription Drop must decrement receiver count"
+        );
+        assert!(bus.is_empty(), "last subscriber Drop must remove the channel");
+    }
+
+    #[tokio::test]
+    async fn shared_subscription_keeps_channel_until_all_dropped() {
+        let bus = StreamBus::default();
+        let id = InstanceId::new();
+        let rx1 = bus.subscribe(id);
+        let rx2 = bus.subscribe(id);
+        assert!(bus.has_subscribers(id));
+        drop(rx1);
+        assert!(bus.has_subscribers(id), "second subscriber keeps channel alive");
+        drop(rx2);
+        assert!(!bus.has_subscribers(id));
+        assert!(bus.is_empty());
     }
 }

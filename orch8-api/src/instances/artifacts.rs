@@ -127,9 +127,18 @@ pub async fn get_artifact_bytes(
         .map_err(|e| ApiError::from_storage(e, "artifact"))?
         .ok_or_else(not_found)?;
 
-    let content_type = q
-        .content_type
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let content_type = match q.content_type {
+        Some(ref ct) if !ct.trim().is_empty() => {
+            // Validate the caller-supplied value so we do not panic on invalid
+            // header bytes or enable response-header injection.
+            axum::http::HeaderValue::from_str(ct)
+                .map_err(|_| ApiError::InvalidArgument("invalid content_type".into()))?
+                .to_str()
+                .map_err(|_| ApiError::InvalidArgument("invalid content_type".into()))?
+                .to_string()
+        }
+        _ => "application/octet-stream".to_string(),
+    };
     Ok((
         StatusCode::OK,
         [(header::CONTENT_TYPE, content_type)],

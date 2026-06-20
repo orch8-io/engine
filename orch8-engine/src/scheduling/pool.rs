@@ -32,16 +32,21 @@ pub fn select_resource(
             PoolAssignment::Assigned(available[idx].resource_key.clone())
         }
         RotationStrategy::Weighted => {
-            let total_weight: u32 = available.iter().map(|r| r.weight).sum();
+            let total_weight: u128 = available
+                .iter()
+                .map(|r| u128::from(r.weight))
+                .try_fold(0u128, u128::checked_add)
+                .unwrap_or(0);
             if total_weight == 0 {
                 return PoolAssignment::Empty;
             }
             let mut pick = rand::rng().random_range(0..total_weight);
             for r in &available {
-                if pick < r.weight {
+                let weight = u128::from(r.weight);
+                if pick < weight {
                     return PoolAssignment::Assigned(r.resource_key.clone());
                 }
-                pick -= r.weight;
+                pick -= weight;
             }
             // Fallback (shouldn't reach, but avoid panic)
             available.first().map_or(PoolAssignment::Empty, |r| {

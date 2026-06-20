@@ -15,6 +15,8 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::api_keys::require_admin;
+use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
 use crate::AppState;
 
@@ -48,8 +50,10 @@ pub struct RedeliverResponse {
 )]
 pub(crate) async fn list_outbox(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     Query(q): Query<ListOutboxQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&admin)?;
     let limit = q.limit.clamp(1, 1000);
     let entries = state
         .storage
@@ -69,8 +73,10 @@ pub(crate) async fn list_outbox(
 )]
 pub(crate) async fn redeliver_outbox(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&admin)?;
     let entry = state
         .storage
         .get_webhook_outbox(id)
@@ -104,8 +110,10 @@ pub(crate) async fn redeliver_outbox(
 )]
 pub(crate) async fn discard_outbox(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&admin)?;
     state
         .storage
         .delete_webhook_outbox(id)

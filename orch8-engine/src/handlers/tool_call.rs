@@ -99,8 +99,15 @@ pub async fn handle_tool_call(ctx: StepContext) -> Result<Value, StepError> {
         client.put(url)
     } else if method.eq_ignore_ascii_case("PATCH") {
         client.patch(url)
-    } else {
+    } else if method.eq_ignore_ascii_case("POST") {
         client.post(url)
+    } else if method.eq_ignore_ascii_case("DELETE") {
+        client.delete(url)
+    } else {
+        return Err(StepError::Permanent {
+            message: format!("unsupported HTTP method: {method}"),
+            details: None,
+        });
     };
     req = req.timeout(timeout);
 

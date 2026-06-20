@@ -83,6 +83,22 @@ pub(super) async fn create_batch(
     let mut count = 0u64;
 
     for chunk in instances.chunks(500) {
+        // Pre-serialize JSON values outside the closure so failures propagate.
+        let rows: Vec<_> = chunk
+            .iter()
+            .map(|inst| {
+                Ok::<_, StorageError>({
+                    let context = serde_json::to_value(&inst.context)?;
+                    let budget = inst
+                        .budget
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()?;
+                    (context, budget)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut qb = sqlx::QueryBuilder::new(
             r"INSERT INTO task_instances
                 (id, sequence_id, tenant_id, namespace, state, next_fire_at,
@@ -91,9 +107,7 @@ pub(super) async fn create_batch(
                  session_id, parent_instance_id, budget,
                  created_at, updated_at) ",
         );
-        qb.push_values(chunk, |mut b, inst| {
-            let context = serde_json::to_value(&inst.context)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::default()));
+        qb.push_values(chunk.iter().zip(rows.iter()), |mut b, (inst, (context, budget))| {
             b.push_bind(inst.id.into_uuid())
                 .push_bind(inst.sequence_id.into_uuid())
                 .push_bind(inst.tenant_id.as_str())
@@ -112,11 +126,7 @@ pub(super) async fn create_batch(
                     inst.parent_instance_id
                         .map(orch8_types::InstanceId::into_uuid),
                 )
-                .push_bind(
-                    inst.budget
-                        .as_ref()
-                        .and_then(|b| serde_json::to_value(b).ok()),
-                )
+                .push_bind(budget.as_ref())
                 .push_bind(inst.created_at)
                 .push_bind(inst.updated_at);
         });

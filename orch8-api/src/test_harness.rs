@@ -85,14 +85,21 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
     };
 
-    // Attach tenant middleware (require_tenant = false) so `X-Tenant-Id`
-    // gets parsed into a `TenantContext` extension when present but its
-    // absence is not a 400. This matches the default server config.
+    // Attach auth + tenant middleware. API-key auth is disabled for the
+    // harness (root_key_digest = None), which marks every request as admin so
+    // operator endpoints that require `OptionalAdmin` remain testable. The
+    // tenant middleware still parses `X-Tenant-Id` when present without
+    // requiring it.
     // Mount health/info routes the same way `orch8-server` does: outside the
     // auth/tenant layers. `build_router` no longer includes them (see note
     // there), so the harness adds them explicitly to exercise /info and
     // /health/* in the e2e suite.
+    let storage_for_auth = storage.clone();
     let app: Router = build_router(state.clone())
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let storage = storage_for_auth.clone();
+            async move { crate::auth::api_key_middleware(storage, None, req, next).await }
+        }))
         .layer(axum::middleware::from_fn(|req, next| async move {
             crate::auth::tenant_middleware(false, req, next).await
         }))

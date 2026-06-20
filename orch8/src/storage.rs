@@ -12,14 +12,55 @@ use crate::error::Error;
 /// Construct with [`Storage::sqlite`], [`Storage::sqlite_in_memory`] or
 /// [`Storage::postgres`]. The connection is opened — and the schema applied —
 /// when [`crate::EngineBuilder::build`] runs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Storage(pub(crate) StorageKind);
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for Storage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            StorageKind::SqliteFile(path) => f.debug_tuple("SqliteFile").field(path).finish(),
+            StorageKind::SqliteInMemory => f.write_str("SqliteInMemory"),
+            StorageKind::Postgres(url) => {
+                f.write_str("Postgres(")?;
+                f.write_str(&redacted_connection_url(url))?;
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) enum StorageKind {
     SqliteFile(PathBuf),
     SqliteInMemory,
     Postgres(String),
+}
+
+impl std::fmt::Debug for StorageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageKind::SqliteFile(path) => f.debug_tuple("SqliteFile").field(path).finish(),
+            StorageKind::SqliteInMemory => f.write_str("SqliteInMemory"),
+            StorageKind::Postgres(url) => {
+                f.write_str("Postgres(")?;
+                f.write_str(&redacted_connection_url(url))?;
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+/// Strip password from a Postgres connection URL for logging/Debug output.
+fn redacted_connection_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() {
+                let _ = parsed.set_password(None);
+            }
+            parsed.to_string()
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
 }
 
 impl Storage {
@@ -61,5 +102,26 @@ impl Storage {
                 Ok(Arc::new(storage))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_debug_redacts_password() {
+        let storage = Storage::postgres("postgres://user:secret@host/db");
+        let debug = format!("{storage:?}");
+        assert!(!debug.contains("secret"), "password must not appear in Debug: {debug}");
+        assert!(debug.contains("user@host"), "user/host should still appear: {debug}");
+    }
+
+    #[test]
+    fn sqlite_debug_does_not_leak_path() {
+        // Sqlite path is not a secret, but we verify Debug is well-formed.
+        let storage = Storage::sqlite("/tmp/orch8.db");
+        let debug = format!("{storage:?}");
+        assert!(debug.contains("/tmp/orch8.db"), "path should appear: {debug}");
     }
 }

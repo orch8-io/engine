@@ -13,8 +13,16 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::ids::{Namespace, TenantId};
+use orch8_types::ids::Namespace;
 use orch8_types::sequence::SequenceDefinition;
+
+/// Redact query parameters from a URL so sync logs never leak auth tokens
+/// when `SyncAuth::UrlToken` is in use.
+fn redacted_url(url: &str) -> String {
+    url.split_once('?')
+        .map_or(url, |(base, _)| base)
+        .to_string()
+}
 
 use crate::error::{MobileError, SyncError};
 use crate::storage::MobileStorage;
@@ -173,7 +181,8 @@ impl SyncOrchestrator {
             match req.send().await {
                 Ok(resp) if resp.status().is_server_error() && attempt < max_retries => {
                     let status = resp.status();
-                    warn!(attempt, %status, %url, "retryable HTTP error");
+                    let display_url = redacted_url(url);
+                    warn!(attempt, %status, %display_url, "retryable HTTP error");
                     tokio::time::sleep(delay).await;
                     // Jitter: multiply by 1.5-2.5x
                     delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
@@ -181,7 +190,8 @@ impl SyncOrchestrator {
                 }
                 Ok(resp) => return Ok(resp),
                 Err(e) if attempt < max_retries && e.is_timeout() => {
-                    warn!(attempt, %url, "request timeout, retrying");
+                    let display_url = redacted_url(url);
+                    warn!(attempt, %display_url, "request timeout, retrying");
                     tokio::time::sleep(delay).await;
                     delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
                     last_err = Some(e.to_string());
@@ -597,7 +607,7 @@ impl SyncOrchestrator {
     async fn list_local_sequences(
         &self,
     ) -> Result<HashMap<String, SequenceDefinition>, MobileError> {
-        let tenant = TenantId::new("mobile").expect("valid tenant");
+        let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let seqs = self
             .backend
@@ -614,7 +624,7 @@ impl SyncOrchestrator {
     }
 
     async fn remove_local_sequence(&self, name: &str) -> Result<(), MobileError> {
-        let tenant = TenantId::new("mobile").expect("valid tenant");
+        let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let seq = self
             .backend
@@ -635,7 +645,7 @@ impl SyncOrchestrator {
     }
 
     async fn upsert_sequence(&self, seq: &SequenceDefinition) -> Result<(), MobileError> {
-        let tenant = TenantId::new("mobile").expect("valid tenant");
+        let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         if let Ok(Some(existing)) = self
             .backend
@@ -666,7 +676,7 @@ impl SyncOrchestrator {
         if self.max_stored_sequences == 0 {
             return Ok(());
         }
-        let tenant = TenantId::new("mobile").expect("valid tenant");
+        let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
         let seqs = self
             .backend

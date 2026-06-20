@@ -9,9 +9,12 @@ use chrono::Utc;
 use serde::Deserialize;
 use utoipa::ToSchema;
 
+use orch8_types::ids::TenantId;
 use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
 
+use crate::auth::{enforce_tenant_access, enforce_tenant_create, OptionalTenant};
 use crate::error::ApiError;
+use crate::security::validate_public_url;
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -49,19 +52,26 @@ pub(crate) struct ListDispatchQuery {
 )]
 pub(crate) async fn set_dispatch(
     State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
     Json(req): Json<SetDispatchRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(req.tenant_id))?;
+
     if req.queue_name.trim().is_empty() {
         return Err(ApiError::InvalidArgument("queue_name is required".into()));
     }
-    if req.mode == DispatchMode::Push && req.push_url.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(ApiError::InvalidArgument(
-            "push mode requires a non-empty push_url".into(),
-        ));
+    if req.mode == DispatchMode::Push {
+        let url = req
+            .push_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| ApiError::InvalidArgument("push mode requires a push_url".into()))?;
+        validate_public_url(url).map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
     }
+
     let now = Utc::now();
     let cfg = QueueDispatchConfig {
-        tenant_id: req.tenant_id,
+        tenant_id: tenant_id.as_str().to_string(),
         queue_name: req.queue_name,
         mode: req.mode,
         push_url: req.push_url,
@@ -86,13 +96,20 @@ pub(crate) async fn set_dispatch(
 )]
 pub(crate) async fn list_dispatch(
     State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
     Query(q): Query<ListDispatchQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let configs = state
+    let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref())
+        .ok_or_else(|| ApiError::InvalidArgument("tenant_id is required".into()))?;
+    let mut configs = state
         .storage
-        .list_queue_dispatch(q.tenant_id.as_deref())
+        .list_queue_dispatch(Some(scoped.as_str()))
         .await
         .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?;
+    // Secrets are write-only: never return them in list responses.
+    for cfg in &mut configs {
+        cfg.secret = None;
+    }
     Ok(Json(configs))
 }
 
@@ -105,8 +122,14 @@ pub(crate) async fn list_dispatch(
 )]
 pub(crate) async fn delete_dispatch(
     State(state): State<AppState>,
+    tenant_ctx: OptionalTenant,
     Path((tenant_id, queue_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    enforce_tenant_access(
+        &tenant_ctx,
+        &TenantId::unchecked(tenant_id.clone()),
+        "queue_dispatch",
+    )?;
     state
         .storage
         .delete_queue_dispatch(&tenant_id, &queue_name)

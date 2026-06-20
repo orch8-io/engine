@@ -21,7 +21,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use orch8_engine::stream_bus::{stream_bus, StreamEvent};
+use orch8_engine::stream_bus::{stream_bus, StreamEvent, Subscription};
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 
@@ -44,7 +44,7 @@ const fn default_poll_ms() -> u64 {
 /// caller guards the select arm with `delta_rx.is_some()`, so this branch is
 /// then never polled.
 async fn next_delta(
-    rx: Option<&mut broadcast::Receiver<StreamEvent>>,
+    rx: Option<&mut Subscription>,
 ) -> Result<StreamEvent, broadcast::error::RecvError> {
     match rx {
         Some(rx) => rx.recv().await,

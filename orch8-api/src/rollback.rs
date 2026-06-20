@@ -6,8 +6,9 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{scoped_tenant_id, OptionalTenant};
+use crate::auth::{enforce_tenant_access, enforce_tenant_create, scoped_tenant_id, OptionalTenant};
 use crate::error::ApiError;
+use crate::security::validate_public_url;
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -88,25 +89,14 @@ pub(crate) async fn create_policy(
     }
 
     if let Some(ref url) = req.webhook_url {
-        let parsed = url::Url::parse(url)
-            .map_err(|_| ApiError::InvalidArgument("webhook_url is not a valid URL".into()))?;
-        match parsed.scheme() {
-            "http" | "https" => {}
-            _ => {
-                return Err(ApiError::InvalidArgument(
-                    "webhook_url must use http or https scheme".into(),
-                ))
-            }
-        }
-        if parsed.host_str().is_none() {
-            return Err(ApiError::InvalidArgument(
-                "webhook_url must have a host".into(),
-            ));
-        }
+        validate_public_url(url).map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
     }
 
-    let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
-        .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
+    let tenant_id = enforce_tenant_create(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(req.tenant_id.as_deref().unwrap_or("")),
+    )?;
+    let tenant = tenant_id.as_str().to_string();
 
     state
         .storage
@@ -146,7 +136,13 @@ pub(crate) async fn get_policy(
         .get_rollback_policy(&tenant, &sequence_name)
         .await
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
-        .ok_or_else(|| ApiError::Internal(format!("Policy not found for {sequence_name}")))?;
+        .ok_or_else(|| ApiError::NotFound(format!("rollback_policy {sequence_name}")))?;
+
+    enforce_tenant_access(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(policy.tenant_id.clone()),
+        "rollback_policy",
+    )?;
 
     Ok(Json(policy.into()))
 }
@@ -178,6 +174,13 @@ pub(crate) async fn delete_policy(
 ) -> Result<StatusCode, ApiError> {
     let tenant = scoped_tenant_id(&tenant_ctx, params.get("tenant_id").map(String::as_str))
         .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
+
+    // Verify the caller may touch this tenant before mutating.
+    enforce_tenant_access(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(tenant.clone()),
+        "rollback_policy",
+    )?;
 
     state
         .storage

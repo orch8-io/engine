@@ -46,6 +46,10 @@ pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
 
 uniffi::setup_scaffolding!();
 
+pub(crate) fn mobile_tenant_id() -> TenantId {
+    TenantId::new("mobile").expect("\"mobile\" is a valid tenant id")
+}
+
 /// Result of a single tick execution, returned to the host app.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct TickResult {
@@ -479,7 +483,7 @@ impl MobileEngine {
             let seq: SequenceDefinition = serde_json::from_str(&json)?;
 
             {
-                let tenant = TenantId::new("mobile").expect("valid tenant");
+                let tenant = mobile_tenant_id();
                 let ns = Namespace::new("default");
                 let existing = self
                     .storage
@@ -590,7 +594,7 @@ impl MobileEngine {
     /// List all sequences stored locally.
     pub fn loaded_sequences(&self) -> Result<Vec<SequenceInfo>, MobileError> {
         self.run_with_timeout(async {
-            let tenant = TenantId::new("mobile").expect("valid tenant");
+            let tenant = mobile_tenant_id();
             let ns = Namespace::new("default");
             let seqs = self
                 .storage

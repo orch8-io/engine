@@ -1,6 +1,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
+
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,17 @@ use crate::metrics;
 /// the config is used to sign redeliveries.
 static OUTBOX_STORAGE: OnceLock<Arc<dyn StorageBackend>> = OnceLock::new();
 static OUTBOX_CONFIG: OnceLock<WebhookConfig> = OnceLock::new();
+
+/// Bound the number of in-flight webhook dispatches so a burst of events cannot
+/// exhaust the Tokio runtime or open an unbounded number of outbound sockets.
+/// The limit is per-event fan-out: each `emit()` acquires one permit per URL.
+static WEBHOOK_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+const DEFAULT_WEBHOOK_CONCURRENCY: usize = 64;
+
+fn webhook_semaphore() -> &'static Arc<Semaphore> {
+    WEBHOOK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_WEBHOOK_CONCURRENCY)))
+}
 
 /// Wire the webhook outbox. Exhausted deliveries park via `storage`; `config`
 /// signs redeliveries. Idempotent — only the first call takes effect.
@@ -81,6 +94,8 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
         "emitting webhook event"
     );
 
+    let semaphore = webhook_semaphore().clone();
+
     for url in &config.urls {
         let url = url.clone();
         let event = event.clone();
@@ -90,8 +105,16 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
         // signing path takes `Option<&str>`.
         let secret = config.secret.as_ref().map(|s| s.expose().to_string());
         let cancel = cancel.clone();
+        let permit = semaphore.clone().acquire_owned();
 
         tokio::spawn(async move {
+            let Ok(_permit) = permit.await else {
+                warn!(url = %url, "webhook semaphore closed; dropping dispatch");
+                return;
+            };
+            if cancel.is_cancelled() {
+                return;
+            }
             send_with_retry(
                 &url,
                 &event,
@@ -343,6 +366,35 @@ mod tests {
         };
         // Should not panic or spawn tasks.
         emit(&config, &event, &CancellationToken::new());
+    }
+
+    #[tokio::test]
+    async fn emit_does_not_exhaust_runtime_under_large_fanout() {
+        // Many URLs should still only acquire a bounded number of concurrent
+        // permits; the test completes without timing out or spawning thousands
+        // of simultaneous requests.
+        let (url, counter, _bodies) = start_mock_server(|_| 200).await;
+        let urls: Vec<String> = (0..500).map(|_| url.clone()).collect();
+        let config = WebhookConfig {
+            urls,
+            timeout_secs: 2,
+            max_retries: 0,
+            secret: None,
+        };
+        let event = instance_event("test", InstanceId::new(), serde_json::json!({}));
+        emit(&config, &event, &CancellationToken::new());
+
+        for _ in 0..200 {
+            if counter.load(Ordering::SeqCst) >= 500 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            500,
+            "all 500 dispatches should complete"
+        );
     }
 
     #[test]
