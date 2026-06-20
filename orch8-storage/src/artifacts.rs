@@ -192,7 +192,7 @@ impl ObjectArtifactStore {
             let meta = meta.map_err(map_err)?;
             out.push(ArtifactMeta {
                 key: meta.location.to_string(),
-                size: meta.size as u64,
+                size: meta.size,
             });
         }
         Ok(out)
