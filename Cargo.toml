@@ -48,14 +48,14 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 
 # OpenTelemetry trace export (OTLP).
-opentelemetry = "0.29"
-opentelemetry_sdk = "0.29"
-opentelemetry-otlp = { version = "0.29", features = ["grpc-tonic"] }
-tracing-opentelemetry = "0.30"
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.33"
 
 # API
 axum = "0.8"
-tonic = "0.12"
+tonic = "0.13"
 prost = "0.13"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
