@@ -2903,7 +2903,7 @@ dependencies = [
  "hex",
  "hmac",
  "orch8-types",
- "rand 0.8.6",
+ "rand_core 0.6.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2912,7 +2912,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -2920,7 +2919,6 @@ name = "orch8-push"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64",
  "chrono",
  "jsonwebtoken",
  "reqwest 0.12.28",
