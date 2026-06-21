@@ -62,6 +62,9 @@ pub struct Subscription {
 impl Deref for Subscription {
     type Target = broadcast::Receiver<StreamEvent>;
 
+    // The receiver is `Some` for the entire lifetime of a `Subscription`;
+    // `Drop` is the only code that takes it, and `Drop` does not deref.
+    #[allow(clippy::expect_used)]
     fn deref(&self) -> &Self::Target {
         self.receiver
             .as_ref()
@@ -70,6 +73,8 @@ impl Deref for Subscription {
 }
 
 impl DerefMut for Subscription {
+    // Same invariant as `Deref` above.
+    #[allow(clippy::expect_used)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.receiver
             .as_mut()

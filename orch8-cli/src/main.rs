@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt::Write as _, time::Duration};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -189,6 +189,55 @@ pub fn humanize_time(iso: &str) -> String {
     }
 }
 
+pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    print!("{}", format_table(headers, rows));
+}
+
+pub fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let widths: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(idx, header)| {
+            rows.iter()
+                .filter_map(|row| row.get(idx))
+                .map(String::len)
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        })
+        .collect();
+
+    let mut output = String::new();
+    write_table_row(&mut output, headers.iter().copied(), &widths);
+    write_table_separator(&mut output, &widths);
+    for row in rows {
+        write_table_row(&mut output, row.iter().map(String::as_str), &widths);
+    }
+    output
+}
+
+fn write_table_row<'a>(
+    output: &mut String,
+    cells: impl IntoIterator<Item = &'a str>,
+    widths: &[usize],
+) {
+    let mut first = true;
+    for (cell, width) in cells.into_iter().zip(widths.iter().copied()) {
+        if first {
+            first = false;
+        } else {
+            output.push_str("  ");
+        }
+        let _ = write!(output, "{cell:<width$}");
+    }
+    output.push('\n');
+}
+
+fn write_table_separator(output: &mut String, widths: &[usize]) {
+    let cells: Vec<String> = widths.iter().map(|width| "-".repeat(*width)).collect();
+    write_table_row(output, cells.iter().map(String::as_str), widths);
+}
+
 pub async fn print_response(resp: reqwest::Response, _format: OutputFormat) -> Result<()> {
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -275,7 +324,7 @@ async fn main() -> Result<()> {
         Commands::Templates(cmd) => commands::templates::run(cmd)?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..) | Commands::Migrate { .. } | Commands::Completions { .. } => {
-            unreachable!()
+            anyhow::bail!("internal error: command should have been handled before dispatch")
         }
     }
 
@@ -354,6 +403,18 @@ mod tests {
         }
         // Unknown state passes through.
         assert_eq!(colorize_state("unknown"), "unknown");
+    }
+
+    #[test]
+    fn format_table_aligns_columns() {
+        let rows = vec![
+            vec!["a".to_string(), "long".to_string()],
+            vec!["wide".to_string(), "b".to_string()],
+        ];
+        assert_eq!(
+            format_table(&["id", "name"], &rows),
+            "id    name\n----  ----\na     long\nwide  b   \n"
+        );
     }
 
     #[test]

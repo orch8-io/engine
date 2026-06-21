@@ -258,7 +258,10 @@ async fn apply_batch_action(
                 BatchAction::Signal => {
                     SignalType::Custom(req.signal_type.clone().unwrap_or_default())
                 }
-                BatchAction::Retry => unreachable!(),
+                BatchAction::Retry => {
+                    tracing::error!("Retry reached non-retry batch arm");
+                    return Err(());
+                }
             };
             let signal = Signal {
                 id: Uuid::now_v7(),

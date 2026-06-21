@@ -72,20 +72,29 @@ impl ManualClock {
 
     /// Move the clock forward (or backward, for negative durations) by `delta`.
     pub fn advance(&self, delta: Duration) {
-        let mut now = self.now.write().expect("ManualClock lock poisoned");
+        let mut now = self
+            .now
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *now += delta;
     }
 
     /// Jump the clock to an absolute instant.
     pub fn set(&self, to: DateTime<Utc>) {
-        let mut now = self.now.write().expect("ManualClock lock poisoned");
+        let mut now = self
+            .now
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         *now = to;
     }
 }
 
 impl Clock for ManualClock {
     fn now(&self) -> DateTime<Utc> {
-        *self.now.read().expect("ManualClock lock poisoned")
+        *self
+            .now
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

@@ -11,6 +11,8 @@ pub struct PushNotifier {
 
 impl PushNotifier {
     pub fn new(fcm_token: Option<String>, apns_token: Option<String>) -> Self {
+        // The builder only uses constants, so failure is a programming error.
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()

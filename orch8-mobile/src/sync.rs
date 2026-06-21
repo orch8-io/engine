@@ -140,6 +140,8 @@ impl SyncOrchestrator {
         sdk_version: String,
         max_stored_sequences: u32,
     ) -> Self {
+        // The builder only uses constants, so failure is a programming error.
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()

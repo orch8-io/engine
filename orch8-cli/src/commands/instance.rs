@@ -2,10 +2,9 @@ use anyhow::Result;
 use clap::Subcommand;
 use reqwest::Client;
 use serde_json::Value;
-use tabled::{Table, Tabled};
 use uuid::Uuid;
 
-use crate::{colorize_state, humanize_time, print_response, val_str, OutputFormat};
+use crate::{colorize_state, humanize_time, print_response, print_table, val_str, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum InstanceCmd {
@@ -74,17 +73,6 @@ pub enum InstanceCmd {
         #[arg(long)]
         states: Option<String>,
     },
-}
-
-#[derive(Tabled)]
-struct InstanceRow {
-    id: String,
-    state: String,
-    tenant: String,
-    namespace: String,
-    priority: String,
-    next_fire: String,
-    updated: String,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -188,19 +176,32 @@ pub async fn run(
                         if arr.is_empty() {
                             println!("No instances found.");
                         } else {
-                            let rows: Vec<InstanceRow> = arr
+                            let rows: Vec<Vec<String>> = arr
                                 .iter()
-                                .map(|v| InstanceRow {
-                                    id: val_str(v, "id"),
-                                    state: colorize_state(&val_str(v, "state")),
-                                    tenant: val_str(v, "tenant_id"),
-                                    namespace: val_str(v, "namespace"),
-                                    priority: val_str(v, "priority"),
-                                    next_fire: humanize_time(&val_str(v, "next_fire_at")),
-                                    updated: humanize_time(&val_str(v, "updated_at")),
+                                .map(|v| {
+                                    vec![
+                                        val_str(v, "id"),
+                                        colorize_state(&val_str(v, "state")),
+                                        val_str(v, "tenant_id"),
+                                        val_str(v, "namespace"),
+                                        val_str(v, "priority"),
+                                        humanize_time(&val_str(v, "next_fire_at")),
+                                        humanize_time(&val_str(v, "updated_at")),
+                                    ]
                                 })
                                 .collect();
-                            println!("{}", Table::new(rows));
+                            print_table(
+                                &[
+                                    "id",
+                                    "state",
+                                    "tenant",
+                                    "namespace",
+                                    "priority",
+                                    "next_fire",
+                                    "updated",
+                                ],
+                                &rows,
+                            );
                             if body.get("has_more") == Some(&Value::Bool(true)) {
                                 println!(
                                     "(more results available — increase --limit or add filters)"

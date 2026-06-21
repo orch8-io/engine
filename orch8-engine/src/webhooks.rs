@@ -289,8 +289,8 @@ fn to_hex(bytes: &[u8]) -> String {
 /// hex-encoded. Binding the timestamp into the signed string means a captured
 /// body can't be replayed under a different time.
 pub(crate) fn sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .unwrap_or_else(|_| unreachable!("HmacSha256 accepts keys of any length"));
     mac.update(timestamp.to_string().as_bytes());
     mac.update(b".");
     mac.update(body);

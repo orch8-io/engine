@@ -53,6 +53,8 @@ pub struct TelemetryManager {
 #[allow(dead_code)]
 impl TelemetryManager {
     pub fn new(storage: Arc<MobileStorage>, enabled: bool, device_ctx: DeviceContext) -> Self {
+        // The builder only uses constants, so failure is a programming error.
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

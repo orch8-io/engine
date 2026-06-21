@@ -53,11 +53,16 @@ struct Cli {
 // which panics on a current-thread runtime. Do not switch to
 // `flavor = "current_thread"` without removing that dependency.
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Load configuration: TOML file (optional) -> env vars -> defaults.
-    let config = load_config(&cli.config)?;
+    // This is synchronous filesystem I/O; run it off the async runtime thread.
+    let config_path = cli.config.clone();
+    let config = tokio::task::spawn_blocking(move || load_config(&config_path))
+        .await
+        .context("config loader panicked")??;
     if let Err(errors) = config.validate() {
         return Err(anyhow::anyhow!(
             "configuration invalid: {}",
@@ -80,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     orch8_engine::step_logs::init_step_log_sink(std::sync::Arc::clone(&storage));
 
     // Install Prometheus metrics recorder.
-    let metrics_state = init_prometheus();
+    let metrics_state = init_prometheus()?;
 
     // Graceful shutdown token. Shared with HTTP, gRPC, engine, and any long-lived
     // request handlers (SSE streams) via `AppState`.
@@ -127,8 +132,8 @@ async fn main() -> anyhow::Result<()> {
         shutdown_token.clone(),
         root_key_digest,
         require_tenant,
-    );
-    spawn_signal_handler(shutdown_token.clone());
+    )?;
+    spawn_signal_handler(shutdown_token.clone())?;
 
     // Circuit-breaker routes are merged separately (they need AppState with
     // the registry). Nest under /api/v1 and also keep at root for backward
@@ -354,7 +359,12 @@ fn build_artifact_store(config: &EngineConfig) -> anyhow::Result<Option<Arc<Obje
 }
 
 async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBackend>> {
-    let artifacts = build_artifact_store(config)?;
+    // Artifact store construction may touch the local filesystem; keep it off
+    // the async runtime thread.
+    let artifact_config = config.clone();
+    let artifacts = tokio::task::spawn_blocking(move || build_artifact_store(&artifact_config))
+        .await
+        .context("artifact store builder panicked")??;
     if config.database.backend == "sqlite" {
         let url = config.database.url.expose();
         let mut sqlite = if url == "sqlite::memory:" || url.is_empty() {
@@ -455,21 +465,29 @@ fn wrap_encryption(
     )))
 }
 
-fn init_prometheus() -> MetricsState {
+fn init_prometheus() -> anyhow::Result<MetricsState> {
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = prometheus_handle.handle();
-    metrics::set_global_recorder(prometheus_handle).expect("failed to install Prometheus recorder");
-    MetricsState { handle }
+    metrics::set_global_recorder(prometheus_handle)
+        .context("failed to install Prometheus recorder")?;
+    Ok(MetricsState { handle })
 }
 
-fn spawn_signal_handler(shutdown: CancellationToken) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+fn spawn_signal_handler(
+    shutdown: CancellationToken,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    #[cfg(unix)]
+    let (mut sigint, mut sigterm) = {
+        let sigint = tokio::signal::unix::signal(SignalKind::interrupt())
+            .context("failed to install SIGINT handler")?;
+        let sigterm = tokio::signal::unix::signal(SignalKind::terminate())
+            .context("failed to install SIGTERM handler")?;
+        (sigint, sigterm)
+    };
+
+    let handle = tokio::spawn(async move {
         #[cfg(unix)]
         {
-            let mut sigint =
-                tokio::signal::unix::signal(SignalKind::interrupt()).expect("SIGINT handler");
-            let mut sigterm =
-                tokio::signal::unix::signal(SignalKind::terminate()).expect("SIGTERM handler");
             tokio::select! {
                 _ = sigint.recv() => tracing::info!("Received SIGINT"),
                 _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
@@ -485,7 +503,8 @@ fn spawn_signal_handler(shutdown: CancellationToken) -> tokio::task::JoinHandle<
             }
         }
         shutdown.cancel();
-    })
+    });
+    Ok(handle)
 }
 
 fn spawn_grpc_server(
@@ -494,18 +513,18 @@ fn spawn_grpc_server(
     shutdown: CancellationToken,
     root_key_digest: Option<[u8; 32]>,
     require_tenant: bool,
-) -> tokio::task::JoinHandle<()> {
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let grpc_addr: std::net::SocketAddr = config
         .api
         .grpc_addr
         .parse()
-        .expect("Invalid gRPC listen address");
+        .context("Invalid gRPC listen address")?;
 
     let grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
     let grpc_interceptor =
         orch8_grpc::auth::auth_interceptor(Some(storage), root_key_digest, require_tenant);
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()
             .add_service(Orch8ServiceServer::with_interceptor(
@@ -519,7 +538,8 @@ fn spawn_grpc_server(
         {
             tracing::error!(error = %e, "gRPC server error");
         }
-    })
+    });
+    Ok(handle)
 }
 
 fn spawn_engine(

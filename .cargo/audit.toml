@@ -1,0 +1,10 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: sqlx 0.8.6 unconditionally pulls in sqlx-mysql (its
+    # Cargo.toml marks sqlx-mysql as non-optional even though the upstream
+    # feature is optional). The engine uses PostgreSQL and SQLite only; the
+    # MySQL driver is never instantiated at runtime, so the timing side-channel
+    # is not exploitable here. Removing this ignore requires migrating to sqlx
+    # 0.9+.
+    "RUSTSEC-2023-0071",
+]

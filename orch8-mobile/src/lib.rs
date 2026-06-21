@@ -47,6 +47,8 @@ pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
 uniffi::setup_scaffolding!();
 
 pub(crate) fn mobile_tenant_id() -> TenantId {
+    // "mobile" is a static, known-valid tenant identifier.
+    #[allow(clippy::expect_used)]
     TenantId::new("mobile").expect("\"mobile\" is a valid tenant id")
 }
 

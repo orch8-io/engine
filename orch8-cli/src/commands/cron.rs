@@ -2,10 +2,9 @@ use anyhow::Result;
 use clap::Subcommand;
 use reqwest::Client;
 use serde_json::Value;
-use tabled::{Table, Tabled};
 use uuid::Uuid;
 
-use crate::{humanize_time, print_response, val_str, OutputFormat};
+use crate::{humanize_time, print_response, print_table, val_str, OutputFormat};
 
 #[derive(Subcommand)]
 pub enum CronCmd {
@@ -18,15 +17,6 @@ pub enum CronCmd {
     Get { id: Uuid },
     /// Delete a cron schedule.
     Delete { id: Uuid },
-}
-
-#[derive(Tabled)]
-struct CronRow {
-    id: String,
-    tenant: String,
-    expression: String,
-    enabled: String,
-    next_fire: String,
 }
 
 pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat) -> Result<()> {
@@ -52,17 +42,22 @@ pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat
                         if arr.is_empty() {
                             println!("No cron schedules found.");
                         } else {
-                            let rows: Vec<CronRow> = arr
+                            let rows: Vec<Vec<String>> = arr
                                 .iter()
-                                .map(|v| CronRow {
-                                    id: val_str(v, "id"),
-                                    tenant: val_str(v, "tenant_id"),
-                                    expression: val_str(v, "cron_expr"),
-                                    enabled: val_str(v, "enabled"),
-                                    next_fire: humanize_time(&val_str(v, "next_fire_at")),
+                                .map(|v| {
+                                    vec![
+                                        val_str(v, "id"),
+                                        val_str(v, "tenant_id"),
+                                        val_str(v, "cron_expr"),
+                                        val_str(v, "enabled"),
+                                        humanize_time(&val_str(v, "next_fire_at")),
+                                    ]
                                 })
                                 .collect();
-                            println!("{}", Table::new(rows));
+                            print_table(
+                                &["id", "tenant", "expression", "enabled", "next_fire"],
+                                &rows,
+                            );
                         }
                     } else {
                         println!("{}", serde_json::to_string_pretty(&body)?);

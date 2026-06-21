@@ -65,6 +65,8 @@ impl SyncReporter {
         api_key: String,
         tick_interval_ms: u64,
     ) -> Self {
+        // The builder only uses constants, so failure is a programming error.
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()

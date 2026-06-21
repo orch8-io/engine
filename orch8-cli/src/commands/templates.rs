@@ -1,8 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
-use tabled::{Table, Tabled};
 
-use crate::templates;
+use crate::{print_table, templates};
 
 /// Subcommands for browsing the built-in template gallery.
 #[derive(Subcommand)]
@@ -16,23 +15,14 @@ pub enum TemplatesCmd {
     },
 }
 
-#[derive(Tabled)]
-struct TemplateRow {
-    name: &'static str,
-    description: &'static str,
-}
-
 pub fn run(cmd: TemplatesCmd) -> Result<()> {
     match cmd {
         TemplatesCmd::List => {
-            let rows: Vec<TemplateRow> = templates::TEMPLATES
+            let rows: Vec<Vec<String>> = templates::TEMPLATES
                 .iter()
-                .map(|t| TemplateRow {
-                    name: t.name,
-                    description: t.description,
-                })
+                .map(|t| vec![t.name.to_string(), t.description.to_string()])
                 .collect();
-            println!("{}", Table::new(rows));
+            print_table(&["name", "description"], &rows);
         }
         TemplatesCmd::Show { name } => {
             let template = templates::find(&name)?;

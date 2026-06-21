@@ -2376,6 +2376,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    static WARNING_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
     #[derive(Debug, Clone)]
     struct CapturedWarning {
         message: String,
@@ -2421,6 +2423,7 @@ mod tests {
 
     fn capture_warnings<F: FnOnce()>(f: F) -> Vec<CapturedWarning> {
         use tracing_subscriber::layer::SubscriberExt;
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap();
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let layer = WarningCapture {
             warnings: Arc::clone(&warnings),

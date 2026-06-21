@@ -92,11 +92,11 @@ pub fn auth_interceptor(
             .and_then(|v| v.to_str().ok());
 
         // 1. Root key check (sync, constant-time).
-        let root_ok = provided.is_some()
-            && orch8_types::auth::verify_secret_against_digest(
-                provided.unwrap_or(""),
-                expected_digest.as_ref().unwrap(),
-            );
+        let root_ok = if let (Some(provided), Some(digest)) = (provided, expected_digest.as_ref()) {
+            orch8_types::auth::verify_secret_against_digest(provided, digest)
+        } else {
+            false
+        };
 
         if root_ok {
             stamp_tenant(&mut req, require_tenant)?;

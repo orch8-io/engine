@@ -58,6 +58,8 @@ impl S3CdnBackend {
         access_key: String,
         secret_key: String,
     ) -> Self {
+        // The builder only uses constants, so failure is a programming error.
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -88,11 +90,9 @@ impl S3CdnBackend {
         headers: &mut reqwest::header::HeaderMap,
         payload_hash: &str,
     ) -> Result<(), CdnError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch");
-        let date_stamp = format_date(now.as_secs());
-        let amz_date = format_amz_date(now.as_secs());
+        let timestamp = signing_timestamp(SystemTime::now())?;
+        let date_stamp = format_date(timestamp);
+        let amz_date = format_amz_date(timestamp);
 
         headers.insert(
             "x-amz-date",
@@ -263,6 +263,12 @@ fn format_date(timestamp: u64) -> String {
     dt.format("%Y%m%d").to_string()
 }
 
+fn signing_timestamp(now: SystemTime) -> Result<u64, CdnError> {
+    now.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| CdnError::Upload("system clock is before UNIX epoch".to_string()))
+}
+
 fn format_amz_date(timestamp: u64) -> String {
     let secs = i64::try_from(timestamp).unwrap_or(i64::MAX);
     let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_else(chrono::Utc::now);
@@ -270,7 +276,8 @@ fn format_amz_date(timestamp: u64) -> String {
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(key)
+        .unwrap_or_else(|_| unreachable!("HmacSha256 accepts keys of any length"));
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -359,5 +366,21 @@ mod tests {
         let key1 = get_signing_key("secret", "20260101", "us-east-1", "s3");
         let key2 = get_signing_key("secret", "20260101", "us-east-1", "s3");
         assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn signing_timestamp_rejects_pre_epoch_clock() {
+        let before_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let err = signing_timestamp(before_epoch).unwrap_err();
+        assert!(matches!(err, CdnError::Upload(message) if message.contains("before UNIX epoch")));
+    }
+
+    #[test]
+    fn signing_timestamp_accepts_epoch_and_later() {
+        assert_eq!(signing_timestamp(UNIX_EPOCH).unwrap(), 0);
+        assert_eq!(
+            signing_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(42)).unwrap(),
+            42
+        );
     }
 }
