@@ -570,6 +570,11 @@ impl<'a> Parser<'a> {
             return if let Some(n) = to_f64(&val) {
                 Cow::Owned(serde_json::json!(-n))
             } else {
+                #[cfg(test)]
+                record_unary_arithmetic_warning(
+                    "expression arithmetic: non-numeric operand in negation",
+                    val.as_ref(),
+                );
                 warn!(
                     value = %val.as_ref(),
                     "expression arithmetic: non-numeric operand in negation"
@@ -1006,6 +1011,63 @@ fn to_f64(v: &serde_json::Value) -> Option<f64> {
     }
 }
 
+#[cfg(test)]
+mod test_warning_capture {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[derive(Debug, Clone)]
+    pub(super) struct CapturedWarning {
+        pub(super) message: String,
+        pub(super) fields: HashMap<String, String>,
+    }
+
+    thread_local! {
+        static WARNINGS: RefCell<Option<Vec<CapturedWarning>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn capture<F: FnOnce()>(f: F) -> Vec<CapturedWarning> {
+        WARNINGS.with(|warnings| {
+            *warnings.borrow_mut() = Some(Vec::new());
+        });
+        f();
+        WARNINGS.with(|warnings| warnings.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn record(message: &'static str, fields: &[(&'static str, String)]) {
+        WARNINGS.with(|warnings| {
+            let mut borrowed = warnings.borrow_mut();
+            let Some(warnings) = borrowed.as_mut() else {
+                return;
+            };
+            warnings.push(CapturedWarning {
+                message: message.to_string(),
+                fields: fields
+                    .iter()
+                    .map(|(key, value)| ((*key).to_string(), value.clone()))
+                    .collect(),
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_arithmetic_warning(
+    message: &'static str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+) {
+    test_warning_capture::record(
+        message,
+        &[("left", left.to_string()), ("right", right.to_string())],
+    );
+}
+
+#[cfg(test)]
+fn record_unary_arithmetic_warning(message: &'static str, value: &serde_json::Value) {
+    test_warning_capture::record(message, &[("value", value.to_string())]);
+}
+
 fn json_add(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     // String concatenation if either side is a string.
     if let (serde_json::Value::String(a), serde_json::Value::String(b)) = (a, b) {
@@ -1014,6 +1076,12 @@ fn json_add(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
         serde_json::json!(a + b)
     } else {
+        #[cfg(test)]
+        record_arithmetic_warning(
+            "expression arithmetic: non-numeric operand in addition",
+            a,
+            b,
+        );
         warn!(
             left = %a,
             right = %b,
@@ -1027,6 +1095,12 @@ fn json_sub(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
         serde_json::json!(a - b)
     } else {
+        #[cfg(test)]
+        record_arithmetic_warning(
+            "expression arithmetic: non-numeric operand in subtraction",
+            a,
+            b,
+        );
         warn!(
             left = %a,
             right = %b,
@@ -1040,6 +1114,12 @@ fn json_mul(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
         serde_json::json!(a * b)
     } else {
+        #[cfg(test)]
+        record_arithmetic_warning(
+            "expression arithmetic: non-numeric operand in multiplication",
+            a,
+            b,
+        );
         warn!(
             left = %a,
             right = %b,
@@ -1054,12 +1134,20 @@ fn json_div(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
         (Some(a), Some(b)) if b != 0.0 => serde_json::json!(a / b),
         _ => {
             if to_f64(a).is_some() && (to_f64(b) == Some(0.0)) {
+                #[cfg(test)]
+                record_arithmetic_warning("expression arithmetic: division by zero", a, b);
                 warn!(
                     left = %a,
                     right = %b,
                     "expression arithmetic: division by zero"
                 );
             } else {
+                #[cfg(test)]
+                record_arithmetic_warning(
+                    "expression arithmetic: non-numeric operand in division",
+                    a,
+                    b,
+                );
                 warn!(
                     left = %a,
                     right = %b,
@@ -2373,65 +2461,11 @@ mod tests {
     // Warning-capture test infrastructure
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-
-    static WARNING_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
-
-    #[derive(Debug, Clone)]
-    struct CapturedWarning {
-        message: String,
-        fields: HashMap<String, String>,
-    }
-
-    struct WarningCapture {
-        warnings: Arc<Mutex<Vec<CapturedWarning>>>,
-    }
-
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                let mut collector = FieldCollector::default();
-                event.record(&mut collector);
-                self.warnings.lock().unwrap().push(CapturedWarning {
-                    message: collector.fields.remove("message").unwrap_or_default(),
-                    fields: collector.fields,
-                });
-            }
-        }
-    }
-
-    #[derive(Default)]
-    struct FieldCollector {
-        fields: HashMap<String, String>,
-    }
-
-    impl tracing::field::Visit for FieldCollector {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.fields
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-    }
+    use super::test_warning_capture::CapturedWarning;
 
     fn capture_warnings<F: FnOnce()>(f: F) -> Vec<CapturedWarning> {
-        use tracing_subscriber::layer::SubscriberExt;
-        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap();
-        let warnings = Arc::new(Mutex::new(Vec::new()));
-        let layer = WarningCapture {
-            warnings: Arc::clone(&warnings),
-        };
-        let subscriber = tracing_subscriber::registry().with(layer);
-        tracing::subscriber::with_default(subscriber, f);
-        let all = warnings.lock().unwrap().clone();
-        all.into_iter()
+        test_warning_capture::capture(f)
+            .into_iter()
             .filter(|w| w.message.contains("expression arithmetic"))
             .collect()
     }
