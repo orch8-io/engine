@@ -34,11 +34,16 @@ RUN mkdir -p orch8-types/src && echo "" > orch8-types/src/lib.rs \
 COPY proto/ proto/
 COPY orch8-grpc/build.rs orch8-grpc/build.rs
 
+# dashboard/ is excluded via .dockerignore (not needed at runtime),
+# but RustEmbed in orch8-cli requires the folder to exist at compile time.
+RUN mkdir -p dashboard/dist
+
 # Build dependencies only (cached unless Cargo.toml/lock changes).
 RUN cargo build --release --bin orch8-server --bin orch8 2>/dev/null || true
 
 # Copy real source and rebuild.
 COPY . .
+RUN mkdir -p dashboard/dist
 # Touch all source files so cargo knows they changed.
 RUN find orch8-*/src -name "*.rs" -exec touch {} + \
     && cargo build --release --bin orch8-server --bin orch8
