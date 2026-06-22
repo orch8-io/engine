@@ -27,6 +27,15 @@ describe("Cluster Nodes", () => {
     assert.ok(node.status, "node should have a status");
   });
 
+  it("should accept drain for non-existent node (idempotent)", async () => {
+    const fakeId = "00000000-0000-0000-0000-000000000000";
+    // Drain is idempotent — returns success even for unknown nodes.
+    const res = await client.drainClusterNode(fakeId);
+    assert.ok(res !== undefined || res === undefined);
+  });
+
+  // Must run last: draining the real node triggers server shutdown via
+  // the heartbeat drain-check loop, making subsequent requests fail.
   it("should drain a node without error", async () => {
     const nodes = await client.listClusterNodes();
     assert.ok(nodes.length >= 1);
@@ -35,13 +44,6 @@ describe("Cluster Nodes", () => {
     // Drain should succeed (no-op if single node).
     const res = await client.drainClusterNode(nodeId);
     // 200 OK with empty body is fine.
-    assert.ok(res !== undefined || res === undefined);
-  });
-
-  it("should accept drain for non-existent node (idempotent)", async () => {
-    const fakeId = "00000000-0000-0000-0000-000000000000";
-    // Drain is idempotent — returns success even for unknown nodes.
-    const res = await client.drainClusterNode(fakeId);
     assert.ok(res !== undefined || res === undefined);
   });
 });
