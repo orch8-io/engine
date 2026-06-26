@@ -56,3 +56,7 @@
 ## 2025-10-30 - [Avoid HashMap Allocation in Tree Indexing]
 **Learning:** In the `cancel_subtree` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<ParentId, Vec<ChildId>>` to index the tree for a BFS traversal introduces massive hashing and memory allocation overhead on the cancellation hot path, resulting in O(N²) overall cost for deep trees when combining the allocation and iteration per node.
 **Action:** Replace dynamic parent-to-children index maps (`HashMap<ParentId, Vec<ChildId>>`) with a flat `Vec<(ParentId, ChildId)>` sorted by parent ID. This allows using `.partition_point()` to perform O(log N) zero-allocation lookups for children on every visited node.
+
+## 2025-10-31 - [Zero-Allocation In-Place Vector Filtering]
+**Learning:** In the `enforce_concurrency_limits` hot path within `orch8-engine/src/scheduler.rs`, filtering elements from a `Vec` into a new `Vec` via `into_iter().enumerate().filter(...).collect()` forces unnecessary reallocation of the underlying buffer. Using `retain` avoids this reallocation by filtering the `Vec` in-place, keeping memory consumption stable during heavy scheduling loads.
+**Action:** When filtering a vector that you already own on a hot path, always use `.retain()` instead of collecting into a new vector to avoid unnecessary memory allocations.
