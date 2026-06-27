@@ -939,11 +939,14 @@ fn is_inside_decided_race(
                 if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
                     if matches!(parent_block, BlockDefinition::Race(_)) {
                         let my_branch = curr.branch_index;
-                        let sibling_completed =
-                            children_of(tree, parent_id, None).into_iter().any(|c| {
-                                c.branch_index != my_branch
-                                    && matches!(c.state, NodeState::Completed)
-                            });
+                        // Iterate directly over the tree to find children rather than using
+                        // `children_of(...).into_iter()` to avoid allocating an intermediate Vec
+                        // and take full advantage of `.any()`'s short-circuiting behavior.
+                        let sibling_completed = tree.iter().any(|c| {
+                            c.parent_id == Some(parent_id)
+                                && c.branch_index != my_branch
+                                && matches!(c.state, NodeState::Completed)
+                        });
                         if sibling_completed {
                             return true;
                         }
@@ -976,15 +979,17 @@ fn has_racing_composite_sibling(
                 if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
                     if matches!(parent_block, BlockDefinition::Race(_)) {
                         let my_branch = curr.branch_index;
-                        let sibling_composite_running =
-                            children_of(tree, parent_id, None).into_iter().any(|c| {
-                                c.branch_index != my_branch
-                                    && c.state == NodeState::Running
-                                    && block_map
-                                        .get(&c.block_id)
-                                        .copied()
-                                        .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
-                            });
+                        // Avoid `children_of(...).into_iter()` here as well to prevent intermediate
+                        // Vec allocations, allowing `.any()` to evaluate lazily and short-circuit.
+                        let sibling_composite_running = tree.iter().any(|c| {
+                            c.parent_id == Some(parent_id)
+                                && c.branch_index != my_branch
+                                && c.state == NodeState::Running
+                                && block_map
+                                    .get(&c.block_id)
+                                    .copied()
+                                    .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+                        });
                         if sibling_composite_running {
                             return true;
                         }
