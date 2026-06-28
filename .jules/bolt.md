@@ -56,3 +56,7 @@
 ## 2025-10-30 - [Avoid HashMap Allocation in Tree Indexing]
 **Learning:** In the `cancel_subtree` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<ParentId, Vec<ChildId>>` to index the tree for a BFS traversal introduces massive hashing and memory allocation overhead on the cancellation hot path, resulting in O(N²) overall cost for deep trees when combining the allocation and iteration per node.
 **Action:** Replace dynamic parent-to-children index maps (`HashMap<ParentId, Vec<ChildId>>`) with a flat `Vec<(ParentId, ChildId)>` sorted by parent ID. This allows using `.partition_point()` to perform O(log N) zero-allocation lookups for children on every visited node.
+
+## 2024-06-28 - Avoid Deep String Allocation Overhead on Output Compaction
+**Learning:** `collect_body_block_ids` in `orch8-engine/src/evaluator.rs` was accepting a mutable `std::collections::HashSet<BlockId>`, resulting in deep heap allocation clones for every `BlockId` on the hot output compaction execution path.
+**Action:** Replaced `HashSet` with `Vec<&'a BlockId>`, utilizing borrowed references combined with `.sort_unstable()` and `.dedup()` to perform zero-allocation tracking. Search changed to `vec.binary_search()`.
