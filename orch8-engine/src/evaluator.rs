@@ -282,12 +282,12 @@ fn build_nodes(
 /// Collect every block id reachable inside `blocks` (the block itself plus all
 /// descendants), mirroring `build_nodes`' recursion. Used to scope output
 /// compaction to a loop/foreach body.
-fn collect_body_block_ids(
-    blocks: &[BlockDefinition],
-    out: &mut std::collections::HashSet<BlockId>,
+fn collect_body_block_ids<'a>(
+    blocks: &'a [BlockDefinition],
+    out: &mut Vec<&'a BlockId>,
 ) {
     for block in blocks {
-        out.insert(block_meta(block).0.clone());
+        out.push(block_meta(block).0);
         match block {
             BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
             BlockDefinition::Parallel(p) => {
@@ -341,16 +341,18 @@ pub(crate) async fn compact_iteration_outputs(
     if retain == 0 {
         return Ok(0);
     }
-    let mut block_ids: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+    let mut block_ids: Vec<&BlockId> = Vec::new();
     collect_body_block_ids(body, &mut block_ids);
     if block_ids.is_empty() {
         return Ok(0);
     }
+    block_ids.sort_unstable();
+    block_ids.dedup();
 
     let all = storage.get_all_outputs(instance_id).await?;
     let mut by_block: HashMap<&BlockId, Vec<&orch8_types::output::BlockOutput>> = HashMap::new();
     for o in &all {
-        if block_ids.contains(&o.block_id) {
+        if block_ids.binary_search(&&o.block_id).is_ok() {
             by_block.entry(&o.block_id).or_default().push(o);
         }
     }
