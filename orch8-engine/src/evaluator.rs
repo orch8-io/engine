@@ -282,10 +282,7 @@ fn build_nodes(
 /// Collect every block id reachable inside `blocks` (the block itself plus all
 /// descendants), mirroring `build_nodes`' recursion. Used to scope output
 /// compaction to a loop/foreach body.
-fn collect_body_block_ids<'a>(
-    blocks: &'a [BlockDefinition],
-    out: &mut Vec<&'a BlockId>,
-) {
+fn collect_body_block_ids<'a>(blocks: &'a [BlockDefinition], out: &mut Vec<&'a BlockId>) {
     for block in blocks {
         out.push(block_meta(block).0);
         match block {
