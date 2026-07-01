@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::Zeroize;
 
 /// A wrapper for sensitive strings that redacts the value in Debug and Serialize output.
 /// Use `.expose()` to access the inner value when you actually need it.
@@ -88,14 +89,11 @@ impl PartialEq for SecretString {
 impl Eq for SecretString {}
 
 impl Drop for SecretString {
-    #[allow(unsafe_code)]
     fn drop(&mut self) {
-        // SAFETY: zero the backing buffer so secrets don't linger in freed memory.
-        // `write_volatile` prevents the compiler from eliding the writes.
-        let v = unsafe { self.0.as_mut_vec() };
-        for b in v.iter_mut() {
-            unsafe { std::ptr::write_volatile(std::ptr::from_mut::<u8>(b), 0) };
-        }
+        // Zero the backing buffer so secrets don't linger in freed memory.
+        // `zeroize` uses volatile writes internally, preventing the compiler
+        // from eliding them.
+        self.0.zeroize();
     }
 }
 

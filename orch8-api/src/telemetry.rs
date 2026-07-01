@@ -290,7 +290,9 @@ async fn check_rollback(
             if let Err(e) = publisher.publish_manifest(vec![], removed, vec![]).await {
                 warn!(error = %e, "failed to regenerate manifest during rollback");
             }
-            let _ = state.storage.release_manifest_lock(tenant_id).await;
+            if let Err(e) = state.storage.release_manifest_lock(tenant_id).await {
+                warn!(error = %e, "failed to release manifest lock during rollback");
+            }
         }
     }
 

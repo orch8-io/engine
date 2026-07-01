@@ -693,8 +693,15 @@ fn init_workflows(dir: &str, engine: &Engine) -> DirWatch {
                 );
                 let engine = engine.clone();
                 let def = loaded.definition.clone();
+                let path_display = path.display().to_string();
                 tokio::spawn(async move {
-                    let _ = engine.upsert_sequence(def).await;
+                    if let Err(e) = engine.upsert_sequence(def).await {
+                        eprintln!(
+                            "{} failed to load workflow {} ({e:#})",
+                            "warning:".yellow().bold(),
+                            path_display,
+                        );
+                    }
                 });
             }
             Err(e) => {

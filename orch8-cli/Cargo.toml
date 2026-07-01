@@ -34,7 +34,7 @@ sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migr
 rust-embed = { version = "8", features = ["include-exclude"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

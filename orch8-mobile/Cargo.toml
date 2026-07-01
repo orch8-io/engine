@@ -31,7 +31,7 @@ uniffi = { version = "0.29", features = ["build"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [[bin]]
 name = "uniffi-bindgen"

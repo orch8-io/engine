@@ -49,7 +49,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 # wat is already in the dep tree via wasmtime (with default features); declaring
 # it explicitly here lets the tests use it without enabling extra features.
 wat = "1"
-tempfile = "3"
+tempfile.workspace = true
 # Construct a `reqwest::Response` from a known body in `read_body_capped`
 # tests. reqwest 0.12 uses http 1.x, so this unifies with reqwest's http.
 http = "1"

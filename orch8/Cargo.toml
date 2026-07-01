@@ -24,7 +24,7 @@ url = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 serde = { workspace = true }
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
