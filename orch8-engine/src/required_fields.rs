@@ -448,9 +448,10 @@ mod tests {
                 },
             ],
         };
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
-            BlockDefinition::ABSplit(Box::new(ab)),
-        ]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::ABSplit(
+                Box::new(ab),
+            )]));
         assert_eq!(
             rft.fields_for(&BlockId::new("control-s")),
             Some(&["ctrl".into()][..])
@@ -478,9 +479,10 @@ mod tests {
             }],
             default: None,
         };
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
-            BlockDefinition::Router(Box::new(router)),
-        ]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Router(
+                Box::new(router),
+            )]));
         assert_eq!(
             rft.fields_for(&BlockId::new("route-s")),
             Some(&["r".into()][..])
@@ -509,9 +511,10 @@ mod tests {
             routes: vec![],
             default: Some(vec![BlockDefinition::Step(default_step)]),
         };
-        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
-            BlockDefinition::Router(Box::new(router)),
-        ]));
+        let rft =
+            RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Router(
+                Box::new(router),
+            )]));
         assert_eq!(
             rft.fields_for(&BlockId::new("default-s")),
             Some(&["d".into()][..])

@@ -765,8 +765,15 @@ mod tests {
             h.join().unwrap();
         }
         let state = cb.get(&t, "h").unwrap();
-        assert_eq!(state.failure_count, 1000, "no failure increments lost under concurrent access");
-        assert_eq!(state.state, BreakerState::Closed, "threshold (1_000_000) never reached");
+        assert_eq!(
+            state.failure_count, 1000,
+            "no failure increments lost under concurrent access"
+        );
+        assert_eq!(
+            state.state,
+            BreakerState::Closed,
+            "threshold (1_000_000) never reached"
+        );
     }
 
     #[test]

@@ -399,8 +399,7 @@ fn apply_pipe_filter_with_args(
 fn parse_literal_value(s: &str) -> serde_json::Value {
     let s = s.trim();
     if s.len() >= 2
-        && ((s.starts_with('\'') && s.ends_with('\''))
-            || (s.starts_with('"') && s.ends_with('"')))
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
     {
         return serde_json::Value::String(s[1..s.len() - 1].to_string());
     }
@@ -526,8 +525,7 @@ fn parse_replace_args(
 fn unquote(s: &str) -> String {
     let s = s.trim();
     if s.len() >= 2
-        && ((s.starts_with('\'') && s.ends_with('\''))
-            || (s.starts_with('"') && s.ends_with('"')))
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
     {
         s[1..s.len() - 1].to_string()
     } else {
@@ -1660,7 +1658,11 @@ mod tests {
             ..Default::default()
         };
         // Only asserting this doesn't panic; the exact Ok/Err outcome isn't load-bearing.
-        let _ = resolve(&json!("{{ data.missing | default(') | zzz' }}"), &ctx, &json!({}));
+        let _ = resolve(
+            &json!("{{ data.missing | default(') | zzz' }}"),
+            &ctx,
+            &json!({}),
+        );
     }
 
     #[test]
