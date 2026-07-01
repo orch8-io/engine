@@ -538,6 +538,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_timezone_falls_back_to_utc_instead_of_none() {
+        // Documented contract: an unparseable IANA timezone name must not
+        // make the schedule stop firing — it silently degrades to UTC.
+        let mut schedule = mk_schedule("0 * * * * * *");
+        schedule.timezone = "Not/A_Real_Zone".into();
+        let next = calculate_next_fire(&schedule);
+        assert!(
+            next.is_some(),
+            "invalid timezone must fall back to UTC, not disable the schedule"
+        );
+    }
+
+    #[test]
+    fn empty_and_whitespace_only_cron_expr_rejected() {
+        assert!(validate_cron_expr("   ").is_err());
+        assert!(calculate_next_fire(&mk_schedule("")).is_none());
+        assert!(calculate_next_fire(&mk_schedule("   ")).is_none());
+    }
+
+    #[test]
     fn calculate_next_fire_daily_at_midnight() {
         use chrono::Timelike;
         // Every day at 00:00:00 — next fire must be at a midnight in UTC.

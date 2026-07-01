@@ -899,6 +899,7 @@ async fn process_waiting_deadlines(
 /// under the step's block id. Errors are **swallowed** — the instance is
 /// already terminal and cleanup must never resurrect, wedge, or re-fail it.
 /// Non-step blocks are skipped with a warning (v1 supports step hooks only).
+#[allow(clippy::too_many_lines)]
 async fn run_cleanup_hooks(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
@@ -916,15 +917,6 @@ async fn run_cleanup_hooks(
             );
             continue;
         };
-        let Some(handler) = handlers.get(&step.handler) else {
-            warn!(
-                instance_id = %instance.id,
-                hook,
-                handler = %step.handler,
-                "cleanup handler not registered — skipping"
-            );
-            continue;
-        };
         let ctx = crate::handlers::StepContext {
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
@@ -935,7 +927,61 @@ async fn run_cleanup_hooks(
             storage: Arc::clone(storage),
             wait_for_input: None,
         };
-        match handler(ctx).await {
+        let result = if let Some(handler) = handlers.get(&step.handler) {
+            handler(ctx).await
+        } else if crate::handlers::activepieces::is_ap_handler(&step.handler) {
+            let handler_name = step.handler.clone();
+            crate::handlers::activepieces::handle_ap(ctx, &handler_name).await
+        } else if crate::handlers::grpc_plugin::is_grpc_handler(&step.handler) {
+            let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
+                storage.as_ref(),
+                &step.handler,
+                orch8_types::plugin::PluginType::Grpc,
+            )
+            .await
+            else {
+                warn!(
+                    instance_id = %instance.id,
+                    hook,
+                    handler = %step.handler,
+                    "cleanup gRPC plugin not registered — skipping"
+                );
+                continue;
+            };
+            let mut ctx = ctx;
+            ctx.params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
+            crate::handlers::grpc_plugin::handle_grpc_plugin(ctx).await
+        } else if let Some(plugin_name) =
+            crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
+                .then(|| crate::handlers::wasm_plugin::parse_plugin_name(&step.handler))
+                .flatten()
+        {
+            let Some(wasm_path) = crate::handlers::step_dispatch::resolve_plugin_source(
+                storage.as_ref(),
+                plugin_name,
+                orch8_types::plugin::PluginType::Wasm,
+            )
+            .await
+            else {
+                warn!(
+                    instance_id = %instance.id,
+                    hook,
+                    plugin = %plugin_name,
+                    "cleanup wasm plugin not registered — skipping"
+                );
+                continue;
+            };
+            crate::handlers::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await
+        } else {
+            warn!(
+                instance_id = %instance.id,
+                hook,
+                handler = %step.handler,
+                "cleanup handler not registered — skipping"
+            );
+            continue;
+        };
+        match result {
             Ok(output) => {
                 let output_size = u32::try_from(serde_json::to_vec(&output).map_or(0, |v| v.len()))
                     .unwrap_or(u32::MAX);

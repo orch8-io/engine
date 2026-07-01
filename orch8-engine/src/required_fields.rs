@@ -107,6 +107,9 @@ fn visit_blocks(blocks: &[BlockDefinition], out: &mut HashMap<BlockId, Option<Ve
                 for route in &r.routes {
                     visit_blocks(&route.blocks, out);
                 }
+                if let Some(default) = &r.default {
+                    visit_blocks(default, out);
+                }
             }
             BlockDefinition::TryCatch(tc) => {
                 visit_blocks(&tc.try_block, out);
@@ -382,6 +385,136 @@ mod tests {
         assert_eq!(
             rft.fields_for(&BlockId::new("finally-s")),
             Some(&["c".into()][..])
+        );
+    }
+
+    #[test]
+    fn rft_recurses_into_race_branches() {
+        use orch8_types::sequence::RaceDef;
+        let step_a = step_def(
+            "ra",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["m".into()],
+            })),
+        );
+        let step_b = step_def(
+            "rb",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["n".into()],
+            })),
+        );
+        let race = RaceDef {
+            id: BlockId::new("race"),
+            branches: vec![
+                vec![BlockDefinition::Step(step_a)],
+                vec![BlockDefinition::Step(step_b)],
+            ],
+            semantics: orch8_types::sequence::RaceSemantics::default(),
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![BlockDefinition::Race(
+            Box::new(race),
+        )]));
+        assert_eq!(rft.fields_for(&BlockId::new("ra")), Some(&["m".into()][..]));
+        assert_eq!(rft.fields_for(&BlockId::new("rb")), Some(&["n".into()][..]));
+    }
+
+    #[test]
+    fn rft_recurses_into_ab_split_variants() {
+        use orch8_types::sequence::{ABSplitDef, ABVariant};
+        let control_step = step_def(
+            "control-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["ctrl".into()],
+            })),
+        );
+        let variant_step = step_def(
+            "variant-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["var".into()],
+            })),
+        );
+        let ab = ABSplitDef {
+            id: BlockId::new("ab"),
+            variants: vec![
+                ABVariant {
+                    name: "control".into(),
+                    weight: 70,
+                    blocks: vec![BlockDefinition::Step(control_step)],
+                },
+                ABVariant {
+                    name: "variant_a".into(),
+                    weight: 30,
+                    blocks: vec![BlockDefinition::Step(variant_step)],
+                },
+            ],
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::ABSplit(Box::new(ab)),
+        ]));
+        assert_eq!(
+            rft.fields_for(&BlockId::new("control-s")),
+            Some(&["ctrl".into()][..])
+        );
+        assert_eq!(
+            rft.fields_for(&BlockId::new("variant-s")),
+            Some(&["var".into()][..])
+        );
+    }
+
+    #[test]
+    fn rft_recurses_into_router_routes() {
+        use orch8_types::sequence::{Route, RouterDef};
+        let route_step = step_def(
+            "route-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["r".into()],
+            })),
+        );
+        let router = RouterDef {
+            id: BlockId::new("router"),
+            routes: vec![Route {
+                condition: "true".into(),
+                blocks: vec![BlockDefinition::Step(route_step)],
+            }],
+            default: None,
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::Router(Box::new(router)),
+        ]));
+        assert_eq!(
+            rft.fields_for(&BlockId::new("route-s")),
+            Some(&["r".into()][..])
+        );
+    }
+
+    /// Regression test: `visit_blocks` for `BlockDefinition::Router` used to
+    /// only walk `r.routes`, never `r.default`. A step that only lives in the
+    /// router's default branch was therefore absent from the RFT entirely,
+    /// so `fields_for` returned `None` for it even though it declared a
+    /// selective `Fields` access — the scheduler's preload optimization
+    /// silently degraded to a full-context fetch for every step reachable
+    /// only via a router's default branch. Fixed by also recursing into
+    /// `r.default`, matching every other composite block type.
+    #[test]
+    fn rft_recurses_into_router_default_branch() {
+        use orch8_types::sequence::RouterDef;
+        let default_step = step_def(
+            "default-s",
+            Some(access_with(FieldAccess::Fields {
+                fields: vec!["d".into()],
+            })),
+        );
+        let router = RouterDef {
+            id: BlockId::new("router"),
+            routes: vec![],
+            default: Some(vec![BlockDefinition::Step(default_step)]),
+        };
+        let rft = RequiredFieldTree::from_sequence(&seq_with_blocks(vec![
+            BlockDefinition::Router(Box::new(router)),
+        ]));
+        assert_eq!(
+            rft.fields_for(&BlockId::new("default-s")),
+            Some(&["d".into()][..])
         );
     }
 

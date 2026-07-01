@@ -13,12 +13,16 @@
 //! Inactive/absent keys are never cached (no negative caching), so a *failed*
 //! auth always reflects current database state.
 //!
-//! Revocation is **immediate**: `revoke_api_key` calls [`invalidate`] inside the
-//! same operation that flips the `revoked` flag, evicting the cache entry. The
-//! TTL therefore only bounds staleness for *time-based expiry* (a key passing
-//! its `expires_at` while cached) — a benign window, since expiry is not an
-//! urgent operator action — and acts as a backstop against any path that
-//! mutates a key without going through `revoke_api_key`.
+//! This cache is **process-local** (a `static OnceLock`, not shared storage).
+//! Revocation is immediate *on the node that handles the revoke*: `revoke_api_key`
+//! calls [`invalidate`] inside the same operation that flips the `revoked`
+//! flag, evicting that node's cache entry. In a single-node deployment this is
+//! a true immediate-revocation guarantee. In a multi-node/clustered deployment,
+//! peer nodes keep serving the stale cached record from memory until their own
+//! copy naturally expires — so cluster-wide revocation is only bounded by
+//! `CACHE_TTL` (30s), not instantaneous. Treat that window as the real SLA for
+//! incident response (e.g. compromised-key revocation) until cross-node
+//! invalidation (e.g. Postgres `LISTEN`/`NOTIFY` or a shared cache) is added.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -32,8 +36,10 @@ use orch8_types::error::StorageError;
 use crate::StorageBackend;
 
 /// How long an authenticated key record stays cached. Revocation is evicted
-/// eagerly (see [`invalidate`]), so this only bounds staleness for time-based
-/// expiry and serves as a safety backstop.
+/// eagerly on the local node (see [`invalidate`]), so on a single node this
+/// only bounds staleness for time-based expiry. Across a cluster it is also
+/// the upper bound on how long a *revoked* key keeps authenticating on peer
+/// nodes — see the module-level doc.
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Ceiling on distinct cached hashes, so a flood of unique (e.g. bogus) keys

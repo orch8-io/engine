@@ -691,4 +691,89 @@ mod tests {
     fn self_modify_is_not_tracked() {
         assert!(!is_breaker_tracked("self_modify"));
     }
+
+    #[test]
+    fn zero_threshold_trips_on_first_failure() {
+        // Edge case: a threshold of 0 means "no tolerance" — the very first
+        // failure must open the circuit immediately.
+        let cb = CircuitBreakerRegistry::new(0, 30);
+        let t = tid("t");
+        cb.record_failure(&t, "h");
+        assert!(cb.check(&t, "h").is_err());
+        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::Open);
+    }
+
+    #[test]
+    fn zero_cooldown_transitions_straight_to_half_open_on_next_check() {
+        let cb = CircuitBreakerRegistry::new(1, 0);
+        let t = tid("t");
+        cb.record_failure(&t, "h");
+        // Cooldown is 0s, so the very next check should immediately probe.
+        assert!(cb.check(&t, "h").is_ok());
+        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::HalfOpen);
+    }
+
+    #[test]
+    fn half_open_failure_reopens_circuit() {
+        // A failure while HalfOpen (probe fails) must re-open the breaker,
+        // not leave it stuck HalfOpen or silently close it. (Cooldown is 0
+        // here, so a *subsequent* check immediately re-probes to HalfOpen
+        // again — that's a separate, already-covered semantic; this test
+        // only asserts the failure-while-HalfOpen transition itself.)
+        let cb = CircuitBreakerRegistry::new(1, 0);
+        let t = tid("t");
+        cb.record_failure(&t, "h");
+        cb.check(&t, "h").unwrap();
+        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::HalfOpen);
+        cb.record_failure(&t, "h");
+        assert_eq!(cb.get(&t, "h").unwrap().state, BreakerState::Open);
+        assert_eq!(cb.get(&t, "h").unwrap().failure_count, 2);
+    }
+
+    #[test]
+    fn empty_handler_and_tenant_names_do_not_panic() {
+        // Boundary: empty strings are valid (if unusual) keys — must not
+        // panic or collide with a "real" empty default state.
+        let cb = CircuitBreakerRegistry::new(1, 30);
+        let t = tid("");
+        cb.record_failure(&t, "");
+        assert!(cb.check(&t, "").is_err());
+        assert!(cb.check(&tid("other"), "").is_ok());
+    }
+
+    #[test]
+    fn concurrent_record_failure_never_exceeds_or_undercounts_threshold() {
+        // Concurrency edge case: many threads racing record_failure on the
+        // same (tenant, handler) key must not lose updates (DashMap entry
+        // API should serialize the read-modify-write) or panic.
+        use std::sync::Arc;
+        use std::thread;
+
+        let cb = Arc::new(CircuitBreakerRegistry::new(1_000_000, 30));
+        let t = tid("concurrent");
+        let mut handles = Vec::new();
+        for _ in 0..50 {
+            let cb = Arc::clone(&cb);
+            let t = t.clone();
+            handles.push(thread::spawn(move || {
+                for _ in 0..20 {
+                    cb.record_failure(&t, "h");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let state = cb.get(&t, "h").unwrap();
+        assert_eq!(state.failure_count, 1000, "no failure increments lost under concurrent access");
+        assert_eq!(state.state, BreakerState::Closed, "threshold (1_000_000) never reached");
+    }
+
+    #[test]
+    fn is_breaker_tracked_empty_handler_name_is_tracked() {
+        // Boundary: an empty handler name isn't in the exclusion list, so it
+        // must default to tracked (fail-safe: unknown handlers get breaker
+        // protection rather than silently bypassing it).
+        assert!(is_breaker_tracked(""));
+    }
 }

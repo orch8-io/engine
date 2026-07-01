@@ -150,3 +150,71 @@ async fn on_cancel_cleanup_runs_on_signal_cancel() {
         .unwrap();
     assert!(out.is_some(), "on_cancel cleanup step should have run");
 }
+
+/// Regression test: `run_cleanup_hooks` used to resolve handlers via
+/// `HandlerRegistry::get()` only, which never contains `wasm://`/`grpc://`/
+/// `ap://` plugin handlers (those are dispatched via a separate path in
+/// `handlers/step_block.rs`). A cleanup step using a real, registered plugin
+/// handler would silently no-op instead of running. This drives an actual
+/// WASM plugin through `on_failure` and asserts its output was persisted,
+/// proving the cleanup hook didn't just log-and-skip it.
+#[tokio::test]
+async fn on_failure_cleanup_runs_for_registered_wasm_plugin_handler() {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Minimal WASM module: always returns a fixed JSON output, proving the
+    // module was actually invoked (as opposed to the handler being skipped).
+    const ECHO_WAT: &str = r#"
+        (module
+          (memory (export "memory") 1)
+          (data (i32.const 1024) "{\"cleaned_by\":\"wasm\"}")
+          (func (export "alloc") (param $size i32) (result i32)
+            i32.const 0)
+          (func (export "handle") (param $ptr i32) (param $len i32) (result i64)
+            i64.const 4398046511125)  ;; (1024 << 32) | 21
+        )
+    "#;
+    let bytes = wat::parse_str(ECHO_WAT).expect("valid WAT");
+    let mut tmp = NamedTempFile::with_suffix(".wasm").expect("tempfile");
+    tmp.write_all(&bytes).expect("write wasm bytes");
+    tmp.flush().expect("flush");
+
+    let storage = storage().await;
+    storage
+        .create_plugin(&orch8_types::plugin::PluginDef {
+            name: "cleanup-echo".into(),
+            plugin_type: orch8_types::plugin::PluginType::Wasm,
+            source: tmp.path().to_str().unwrap().to_string(),
+            tenant_id: String::new(),
+            enabled: true,
+            config: json!({}),
+            description: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+
+    let handlers = Arc::new(registry_with_cleanup());
+
+    let mut seq = mk_sequence(vec![mk_step("work", "boom")]);
+    seq.on_failure = Some(vec![mk_step("cleanup", "wasm://cleanup-echo")]);
+    storage.create_sequence(&seq).await.unwrap();
+
+    let inst = mk_instance_scheduled(seq.id, json!({}));
+    storage.create_instance(&inst).await.unwrap();
+
+    let final_state = run_until_terminal(&storage, &handlers, inst.id).await;
+    assert_eq!(final_state, InstanceState::Failed);
+
+    let out = storage
+        .get_block_output(inst.id, &BlockId::new("cleanup"))
+        .await
+        .unwrap();
+    assert!(
+        out.is_some(),
+        "on_failure cleanup should have dispatched the registered wasm:// plugin handler, not skipped it"
+    );
+    assert_eq!(out.unwrap().output["cleaned_by"], "wasm");
+}
