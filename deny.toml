@@ -1,9 +1,5 @@
 [advisories]
-ignore = [
-    # proc-macro-error2 is unmaintained (no vulnerability); pulled in via
-    # tabled -> tabled_derive in orch8-cli. Remove once tabled drops it.
-    "RUSTSEC-2026-0173",
-]
+ignore = []
 
 [licenses]
 allow = [
