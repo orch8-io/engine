@@ -398,7 +398,10 @@ fn apply_pipe_filter_with_args(
 
 fn parse_literal_value(s: &str) -> serde_json::Value {
     let s = s.trim();
-    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('"') && s.ends_with('"')))
+    {
         return serde_json::Value::String(s[1..s.len() - 1].to_string());
     }
     if let Ok(n) = s.parse::<f64>() {
@@ -522,7 +525,10 @@ fn parse_replace_args(
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\''))
+            || (s.starts_with('"') && s.ends_with('"')))
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -1642,6 +1648,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, json!("fallback"));
+    }
+
+    #[test]
+    fn filter_default_with_lone_unmatched_quote_does_not_panic() {
+        // A single unmatched quote char as the default() arg used to panic
+        // in parse_literal_value's slice (s.len() - 1 underflow).
+        let ctx = ExecutionContext {
+            data: json!({}),
+            config: json!({}),
+            ..Default::default()
+        };
+        // Only asserting this doesn't panic; the exact Ok/Err outcome isn't load-bearing.
+        let _ = resolve(&json!("{{ data.missing | default(') | zzz' }}"), &ctx, &json!({}));
     }
 
     #[test]

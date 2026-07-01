@@ -602,7 +602,14 @@ fn check_refs_in_str(
                     ),
                 });
             }
-            search = &search[pos + prefix.len() + ref_id.len().max(1)..];
+            let advance = if ref_id.is_empty() {
+                // No identifier chars followed the prefix; skip past the next
+                // char (which may be multi-byte) so we stay on a char boundary.
+                after.chars().next().map_or(0, char::len_utf8)
+            } else {
+                ref_id.len()
+            };
+            search = &after[advance..];
         }
     }
 }
@@ -1400,6 +1407,18 @@ mod tests {
                 .any(|w| w.message.contains("no block with id `ghost`")),
             "should warn about missing outputs ref: {w:?}"
         );
+    }
+
+    #[test]
+    fn ref_prefix_followed_by_multibyte_char_does_not_panic() {
+        // "steps." followed directly by a non-identifier multi-byte char
+        // (em dash) used to panic on a non-char-boundary slice.
+        let seq = sample_seq(vec![make_step(
+            "s1",
+            "log",
+            json!({"message": "steps.\u{2014}rest of string"}),
+        )]);
+        let _ = lint_sequence(&seq);
     }
 
     #[test]
