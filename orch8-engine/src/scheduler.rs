@@ -639,6 +639,9 @@ async fn enforce_concurrency_limits(
     // the allocation and hashing overhead of building a HashSet for
     // exclusion checking on the execution hot path.
     deferred_indices.sort_unstable();
+    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+    // during the `binary_search` filtering phase, improving hot path performance.
+    deferred_indices.dedup();
     let kept = instances
         .into_iter()
         .enumerate()
