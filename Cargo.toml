@@ -56,6 +56,7 @@ tracing-opentelemetry = "0.33"
 # API
 axum = "0.8"
 tonic = "0.13"
+tonic-build = "0.13"
 prost = "0.13"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
@@ -72,6 +73,10 @@ utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # Encryption
+# Pinned to 0.10: 0.11 renames/relocates the AeadCore::generate_nonce /
+# aead::OsRng convenience API used in orch8-types/src/encryption.rs. No
+# advisory forces the move, so we don't take on a crypto-code migration for a
+# version-number bump alone. Revisit together, deliberately, if ever needed.
 aes-gcm = "0.10"
 base64 = "0.22"
 
@@ -85,7 +90,7 @@ url = "2"
 jsonschema = { version = "0.46", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
-object_store = { version = "0.12", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 futures = "0.3"
 bytes = "1"
 
@@ -98,8 +103,10 @@ cron = "0.17"
 moka = { version = "0.12", features = ["future", "sync"] }
 subtle = "2"
 zeroize = "1"
-sha2 = "0.10"
-hmac = "0.12"
+sha2 = "0.11"
+hmac = "0.13"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 tikv-jemallocator = "0.6"
 async-nats = "0.49"
 notify = { version = "8", features = ["serde"] }

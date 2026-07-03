@@ -70,7 +70,7 @@ impl SequencePublisher {
 
         let json = manifest::canonical_json(seq)
             .map_err(|e| PublishError::Serialization(e.to_string()))?;
-        let hash = format!("{:x}", Sha256::digest(&json));
+        let hash = hex::encode(Sha256::digest(&json));
         let signature = signing_key.sign(json.as_bytes());
         let sig_b64 = BASE64.encode(signature.to_bytes());
 

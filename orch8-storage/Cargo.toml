@@ -28,7 +28,7 @@ compression = ["dep:zstd"]
 
 [dev-dependencies]
 tokio = { workspace = true }
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion.workspace = true
 
 [[bench]]
 name = "storage_bench"

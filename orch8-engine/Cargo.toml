@@ -44,7 +44,7 @@ wasm = ["dep:wasmtime"]
 
 [dev-dependencies]
 tokio = { workspace = true }
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion.workspace = true
 # Build tiny wasm modules from WAT text for wasm_plugin.rs execution-path tests.
 # wat is already in the dep tree via wasmtime (with default features); declaring
 # it explicitly here lets the tests use it without enabling extra features.

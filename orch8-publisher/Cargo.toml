@@ -7,7 +7,7 @@ edition.workspace = true
 [dependencies]
 orch8-types = { path = "../orch8-types" }
 reqwest = { workspace = true }
-ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -17,7 +17,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 hex = "0.4"
-hmac = "0.12"
+hmac.workspace = true
 async-trait = { workspace = true }
 
 [dev-dependencies]

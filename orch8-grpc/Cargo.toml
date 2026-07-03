@@ -21,7 +21,7 @@ async-trait.workspace = true
 tokio-stream = "0.1"
 
 [build-dependencies]
-tonic-build = "0.13"
+tonic-build.workspace = true
 
 [package.metadata.cargo-machete]
 ignored = ["async-trait", "prost"]

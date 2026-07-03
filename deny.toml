@@ -1,5 +1,17 @@
 [advisories]
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0194/0195: quadratic attribute scan and unbounded
+    # namespace-declaration allocation, both in quick-xml's low-level
+    # NsReader/Attributes API. Pulled in transitively via
+    # object_store -> quick-xml, which object_store's own Cargo.toml pins to
+    # "^0.40.1" (last fixed in 0.41.0). object_store only calls the
+    # high-level `quick_xml::de::from_reader` serde API to parse S3 XML
+    # responses (not NsReader/Attributes), so neither advisory's code path is
+    # reachable here. Remove once object_store bumps its quick-xml
+    # requirement past 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 allow = [

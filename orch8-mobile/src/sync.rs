@@ -24,6 +24,16 @@ fn redacted_url(url: &str) -> String {
         .to_string()
 }
 
+/// Lowercase hex-encode bytes without pulling in the `hex` crate.
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 use crate::error::{MobileError, SyncError};
 use crate::storage::MobileStorage;
 
@@ -404,7 +414,7 @@ impl SyncOrchestrator {
                 }
             };
 
-            let computed_hash = format!("{:x}", Sha256::digest(&seq_json));
+            let computed_hash = to_hex(&Sha256::digest(&seq_json));
             if computed_hash != entry.sha256 {
                 warn!(
                     name = %entry.name,

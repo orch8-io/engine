@@ -1,10 +1,11 @@
 //! Criterion benchmarks for engine hot paths: expression processing, template
 //! resolution, externalized-marker preload.
 
+use std::hint::black_box;
 use std::sync::Arc;
 
 use chrono::Utc;
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use serde_json::json;
 use tokio::runtime::Runtime;
 

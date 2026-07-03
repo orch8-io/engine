@@ -446,12 +446,22 @@ fn split_filter_args(s: &str) -> Vec<&str> {
     parts
 }
 
+/// Lowercase hex-encode bytes without pulling in the `hex` crate.
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
 fn hash_string(s: &str, algo: &str) -> Result<String, EngineError> {
     use sha2::Digest;
     match algo {
         "sha256" => {
             let result = sha2::Sha256::digest(s.as_bytes());
-            Ok(format!("{result:x}"))
+            Ok(to_hex(&result))
         }
         _ => Err(EngineError::TemplateError(format!(
             "unsupported hash algorithm: {algo}"
