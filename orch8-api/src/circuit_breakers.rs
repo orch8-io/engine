@@ -50,16 +50,18 @@ pub fn routes() -> Router<crate::AppState> {
 async fn list_all_breakers(
     State(state): State<crate::AppState>,
     tenant_ctx: OptionalTenant,
+    admin_ctx: crate::auth::OptionalAdmin,
 ) -> impl IntoResponse {
     let Some(ref registry) = state.circuit_breakers else {
         return Json(Vec::new());
     };
-    // Only callers scoped to a tenant may list breakers. Without a tenant
-    // header we cannot determine which breakers belong to the caller, so
-    // we return an empty list rather than leaking cross-tenant state.
-    if let Some(axum::Extension(ctx)) = tenant_ctx {
+
+    if admin_ctx.is_some() {
+        return Json(registry.list_all());
+    } else if let Some(axum::Extension(ctx)) = tenant_ctx {
         return Json(registry.list_for_tenant(&ctx.tenant_id));
     }
+
     Json(Vec::new())
 }
 
