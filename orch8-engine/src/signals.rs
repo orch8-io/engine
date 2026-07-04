@@ -265,6 +265,9 @@ async fn cancel_scoped(
         .map(|n| n.id)
         .collect();
     scope_node_ids.sort_unstable();
+    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+    // during the `binary_search` filtering phase, improving hot path performance.
+    scope_node_ids.dedup();
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 

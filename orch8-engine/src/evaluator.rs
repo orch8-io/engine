@@ -158,6 +158,9 @@ pub async fn ensure_execution_tree(
         let mut existing_block_ids: Vec<&str> =
             existing.iter().map(|n| n.block_id.as_str()).collect();
         existing_block_ids.sort_unstable();
+        // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+        // during the `binary_search` filtering phase, improving hot path performance.
+        existing_block_ids.dedup();
         let mut new_nodes = Vec::with_capacity(blocks.len());
         for block in blocks {
             let (bid, _) = block_meta(block);
@@ -1257,6 +1260,9 @@ pub async fn cancel_subtree(
 
     // Sort for O(log N) lookup without allocating a HashSet.
     to_cancel.sort_unstable();
+    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+    // during the `binary_search` filtering phase, improving hot path performance.
+    to_cancel.dedup();
 
     // Mark every descendant as Cancelled FIRST so a crash between here and the
     // worker-task cancellation below leaves nodes in a safe terminal state
