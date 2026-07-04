@@ -376,7 +376,7 @@ pub async fn execute_step_node(
             tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params: resolved_params,
-            context: step_context,
+            context: Arc::new(step_context),
             attempt,
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
@@ -407,7 +407,7 @@ pub async fn execute_step_node(
             tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params,
-            context: step_context,
+            context: Arc::new(step_context),
             attempt,
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
@@ -447,7 +447,7 @@ pub async fn execute_step_node(
             tenant_id: instance.tenant_id.clone(),
             block_id: step_def.id.clone(),
             params: resolved_params,
-            context: step_context,
+            context: Arc::new(step_context),
             attempt,
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
@@ -1177,7 +1177,7 @@ mod tests {
         registry.register("cap", move |ctx| {
             let cap = Arc::clone(&captured_clone);
             async move {
-                *cap.lock().unwrap() = Some(ctx.context.clone());
+                *cap.lock().unwrap() = Some((*ctx.context).clone());
                 Ok(serde_json::json!({}))
             }
         });

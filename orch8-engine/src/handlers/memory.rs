@@ -705,7 +705,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -745,7 +745,7 @@ mod net_tests {
         let mut ctx =
             mk_ctx(json!({ "input": "hello", "base_url": "http://127.0.0.1:1", "api_key": "k" }))
                 .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_embed(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["embedding"], json!([]));
@@ -755,7 +755,7 @@ mod net_tests {
     #[tokio::test]
     async fn dry_run_memory_store_does_not_persist() {
         let mut ctx = mk_ctx(json!({ "text": "remember me", "key": "k1" })).await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let storage = ctx.storage.clone();
         let instance_id = ctx.instance_id;
         let out = handle_memory_store(ctx).await.unwrap();
@@ -773,7 +773,7 @@ mod net_tests {
     async fn dry_run_memory_search_returns_empty() {
         let mut ctx =
             mk_ctx(json!({ "query": "anything", "base_url": "http://127.0.0.1:1" })).await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_memory_search(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["results"], json!([]));
@@ -792,7 +792,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params: Value::Null,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,

@@ -718,12 +718,12 @@ mod tests {
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
             params: json!({ "provider": "openai", "model": "gpt-4o", "api_key": "k", "base_url": base }),
-            context: orch8_types::context::ExecutionContext::default(),
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
         };
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_llm_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "llm_call");
@@ -745,7 +745,7 @@ mod tests {
             tenant_id: orch8_types::ids::TenantId::unchecked("t1"),
             block_id: orch8_types::ids::BlockId::new("b"),
             params: json!({}),
-            context: orch8_types::context::ExecutionContext::default(),
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,
@@ -958,7 +958,7 @@ mod tests {
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
             params,
-            context: orch8_types::context::ExecutionContext::default(),
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -1176,7 +1176,7 @@ mod tests {
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             block_id: orch8_types::ids::BlockId::new("b"),
             params,
-            context: orch8_types::context::ExecutionContext::default(),
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(storage),
             wait_for_input: None,
@@ -1466,7 +1466,7 @@ mod tests {
             "response_schema": name_schema(),
         }))
         .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
 
         let out = handle_llm_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);

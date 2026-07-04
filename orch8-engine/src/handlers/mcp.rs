@@ -819,7 +819,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -846,7 +846,7 @@ mod net_tests {
             "url": "http://127.0.0.1:1/mcp", "tool_name": "echo", "arguments": {}
         }))
         .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_mcp_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["tool_name"], "echo");

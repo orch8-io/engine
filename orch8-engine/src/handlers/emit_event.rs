@@ -291,7 +291,7 @@ mod tests {
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("emit"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,
@@ -384,7 +384,7 @@ mod tests {
             storage_dyn,
             json!({ "trigger_slug": "on-order", "data": { "x": 1 } }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_emit_event(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "emit_event");
@@ -401,7 +401,7 @@ mod tests {
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         let mut ctx = mk_ctx(&caller, storage_dyn, json!({ "trigger_slug": "nope" }));
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(matches!(
             handle_emit_event(ctx).await.unwrap_err(),
             StepError::Permanent { .. }

@@ -97,7 +97,7 @@ mod tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("self_mod"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,
@@ -122,7 +122,7 @@ mod tests {
         // before short-circuiting (validate-then-skip).
         let blocks = json!([valid_step_block(), valid_step_block()]);
         let mut ctx = mk_ctx(json!({ "blocks": blocks }), s);
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_self_modify(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "self_modify");
@@ -137,7 +137,7 @@ mod tests {
         // validate-then-skip: a dry-run must still surface a bad block config.
         let s = make_storage().await;
         let mut ctx = mk_ctx(json!({ "blocks": [{ "not": "a block" }] }), s);
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(matches!(
             handle_self_modify(ctx).await.unwrap_err(),
             StepError::Permanent { .. }

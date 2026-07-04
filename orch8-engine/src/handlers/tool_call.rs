@@ -384,7 +384,7 @@ mod tests {
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("t"),
             params: json!({"tool_name": "search"}),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -650,7 +650,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,
@@ -669,7 +669,7 @@ mod net_tests {
             "arguments": { "q": "rust" }
         }))
         .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_tool_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "tool_call");

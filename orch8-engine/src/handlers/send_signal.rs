@@ -146,7 +146,7 @@ mod tests {
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("s"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,
@@ -222,7 +222,7 @@ mod tests {
             storage_dyn.clone(),
             json!({ "instance_id": target.id.to_string(), "signal_type": "cancel" }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_send_signal(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "send_signal");
@@ -249,7 +249,7 @@ mod tests {
             storage_dyn,
             json!({ "instance_id": InstanceId::new().to_string(), "signal_type": "cancel" }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(matches!(
             handle_send_signal(ctx).await.unwrap_err(),
             StepError::Permanent { .. }

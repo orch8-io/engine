@@ -171,7 +171,7 @@ mod tests {
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("q"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,

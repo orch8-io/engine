@@ -1302,7 +1302,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,
@@ -1334,7 +1334,7 @@ mod net_tests {
         // No LLM mock spawned — a real loop would fail. Ok proves the skip.
         let (mut ctx, _s, _i) =
             mk_ctx(json!({ "messages": [{ "role": "user", "content": "hi" }] })).await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_agent(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["iterations"], 0);
