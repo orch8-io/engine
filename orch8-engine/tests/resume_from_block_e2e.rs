@@ -7,8 +7,8 @@
 //! to completion. Verifies the patched context unblocks the failing step and
 //! that the already-completed first step is NOT re-executed.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chrono::Utc;
 use serde_json::json;

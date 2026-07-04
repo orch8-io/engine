@@ -350,15 +350,15 @@ pub(super) fn apply_filter_sql<'q>(
         qb.push(" AND sequence_id=");
         qb.push_bind(sid.to_string());
     }
-    if let Some(ref states) = filter.states {
-        if !states.is_empty() {
-            qb.push(" AND state IN (");
-            let mut separated = qb.separated(",");
-            for state in states {
-                separated.push_bind(state.to_string());
-            }
-            separated.push_unseparated(")");
+    if let Some(ref states) = filter.states
+        && !states.is_empty()
+    {
+        qb.push(" AND state IN (");
+        let mut separated = qb.separated(",");
+        for state in states {
+            separated.push_bind(state.to_string());
         }
+        separated.push_unseparated(")");
     }
     if let Some(serde_json::Value::Object(map)) = &filter.metadata_filter {
         // SQLite fallback for the Postgres `metadata @> {...}` containment

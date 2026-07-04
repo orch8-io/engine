@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use object_store::{path::Path, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use uuid::Uuid;
 
 use orch8_types::artifact::{ArtifactMeta, ArtifactRef};

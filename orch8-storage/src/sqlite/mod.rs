@@ -58,8 +58,8 @@ mod workers;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
@@ -195,15 +195,15 @@ impl SqliteStorage {
                 .await?
                 .flatten();
 
-        if let Some(existing) = max_version {
-            if existing > current {
-                tracing::warn!(
-                    db_version = existing,
-                    binary_version = current,
-                    "sqlite schema: database was previously migrated past this binary's \
-                     bundled schema version — this binary may be an older build"
-                );
-            }
+        if let Some(existing) = max_version
+            && existing > current
+        {
+            tracing::warn!(
+                db_version = existing,
+                binary_version = current,
+                "sqlite schema: database was previously migrated past this binary's \
+                 bundled schema version — this binary may be an older build"
+            );
         }
 
         // `INSERT OR IGNORE` so repeated boots at the same version don't
@@ -1820,7 +1820,7 @@ impl crate::AdminStore for SqliteStorage {
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
         let mut query = String::from(
-            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1"
+            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1",
         );
         if tenant_id.is_some() {
             query.push_str(" AND tenant_id = ?");
@@ -2966,11 +2966,13 @@ mod tests {
 
         // Window outside the events → empty.
         let future = Utc::now() + Duration::days(2);
-        assert!(storage
-            .query_usage("t1", future, future + Duration::hours(1))
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            storage
+                .query_usage("t1", future, future + Duration::hours(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -3778,11 +3780,13 @@ mod tests {
             .unwrap();
 
         // Verify child rows exist
-        assert!(!storage
-            .get_execution_tree(inst.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            !storage
+                .get_execution_tree(inst.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(storage.get_worker_task(wt_id).await.unwrap().is_some());
 
         // Delete instance via raw SQL (no trait method exists)
@@ -3793,17 +3797,21 @@ mod tests {
             .unwrap();
 
         // All child rows must be cascade-deleted
-        assert!(storage
-            .get_execution_tree(inst.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            storage
+                .get_execution_tree(inst.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(storage.get_worker_task(wt_id).await.unwrap().is_none());
-        assert!(storage
-            .get_pending_signals(inst.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            storage
+                .get_pending_signals(inst.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // -- Rollback policy tests --
@@ -3875,11 +3883,13 @@ mod tests {
 
         // Delete
         storage.delete_rollback_policy(tenant, seq).await.unwrap();
-        assert!(storage
-            .get_rollback_policy(tenant, seq)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            storage
+                .get_rollback_policy(tenant, seq)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

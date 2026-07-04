@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use orch8_api::test_harness::spawn_test_server;
-use orch8_engine::stream_bus::{stream_bus, StreamEvent};
+use orch8_engine::stream_bus::{StreamEvent, stream_bus};
 use orch8_types::ids::InstanceId;
 use reqwest::StatusCode;
 use serde_json::json;

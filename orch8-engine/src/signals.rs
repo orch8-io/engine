@@ -62,20 +62,15 @@ async fn process_signals_inner(
         );
 
         // Interceptor: on_signal
-        if let Some(seq) = sequence_def {
-            if let Some(ref interceptors) = seq.interceptors {
-                let signal_info = serde_json::json!({
-                    "signal_type": signal.signal_type.to_string(),
-                    "payload": signal.payload,
-                });
-                crate::interceptors::emit_on_signal(
-                    storage,
-                    interceptors,
-                    instance_id,
-                    &signal_info,
-                )
+        if let Some(seq) = sequence_def
+            && let Some(ref interceptors) = seq.interceptors
+        {
+            let signal_info = serde_json::json!({
+                "signal_type": signal.signal_type.to_string(),
+                "payload": signal.payload,
+            });
+            crate::interceptors::emit_on_signal(storage, interceptors, instance_id, &signal_info)
                 .await;
-            }
         }
 
         // Lift `(signal_type, payload)` into a typed variant once. Decode
@@ -403,7 +398,7 @@ fn is_descendant_of_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, SignalStore};
+    use orch8_storage::{ExecutionTreeStore, InstanceStore, SignalStore, sqlite::SqliteStorage};
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{Namespace, SequenceId, TenantId};
     use orch8_types::instance::{Priority, TaskInstance};

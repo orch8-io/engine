@@ -5,7 +5,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use chrono::Utc;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use serde_json::json;
 use tokio::runtime::Runtime;
 

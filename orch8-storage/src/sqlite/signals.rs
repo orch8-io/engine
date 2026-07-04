@@ -7,8 +7,8 @@ use orch8_types::ids::*;
 use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
-use super::helpers::{row_to_signal, ts};
 use super::SqliteStorage;
+use super::helpers::{row_to_signal, ts};
 
 /// Issue `ROLLBACK` on a pooled connection, swallowing any error. Used on
 /// failure paths inside `enqueue_if_active` where the caller's real error is
@@ -23,8 +23,7 @@ async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.
-const SIGNAL_INSERT_SQL: &str =
-    "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at) \
+const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at) \
      VALUES (?1,?2,?3,?4,0,?5)";
 
 /// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.

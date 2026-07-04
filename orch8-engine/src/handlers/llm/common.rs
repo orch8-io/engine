@@ -303,6 +303,7 @@ pub(super) const fn permanent(message: String) -> StepError {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     fn safe_truncate_ascii_within_limit() {
@@ -472,26 +473,49 @@ mod tests {
         ));
     }
 
+    // These three tests read/write process environment variables via
+    // `resolve_api_key`. `std::env::set_var`/`remove_var` require `unsafe`
+    // since they can race with concurrent env access on another thread
+    // (libc's `environ` isn't safe to mutate concurrently). `#[serial]`
+    // (same key across all three) makes them mutually exclusive so no two
+    // ever touch the environment at the same time; that's what makes the
+    // `unsafe` blocks below actually sound, not just quieted.
     #[test]
+    #[serial(llm_common_env)]
     fn resolve_api_key_prefers_direct_param_over_env() {
         let params = json!({"api_key": "direct-param-key"});
-        std::env::set_var("OPENAI_API_KEY", "env-sourced-key");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(llm_common_env)] — no other test
+        // touches the environment concurrently with this one.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "env-sourced-key");
+        }
         let key = resolve_api_key(&params, "openai").expect("direct param must resolve");
         assert_eq!(key, "direct-param-key");
     }
 
     #[test]
+    #[serial(llm_common_env)]
     fn resolve_api_key_from_explicit_env_var_param() {
         // A legitimate (non-engine) provider key var name passes the guard.
         let var = "MY_TEST_LLM_API_KEY_EXPLICIT";
-        std::env::set_var(var, "from-explicit-env");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(llm_common_env)].
+        unsafe {
+            std::env::set_var(var, "from-explicit-env");
+        }
         let params = json!({"api_key_env": var});
         let key = resolve_api_key(&params, "openai").unwrap();
         assert_eq!(key, "from-explicit-env");
-        std::env::remove_var(var);
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(llm_common_env)].
+        unsafe {
+            std::env::remove_var(var);
+        }
     }
 
     #[test]
+    #[serial(llm_common_env)]
     fn resolve_api_key_returns_permanent_error_when_nothing_set() {
         // An allowed-but-unset var name exercises the missing-env-var path.
         let params = json!({"api_key_env": "MY_TEST_LLM_KEY_NONE_UNSET_VAR"});

@@ -112,7 +112,7 @@ mod sse;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Default model for the OpenAI-compatible provider. Override at runtime
 /// with `ORCH8_LLM_DEFAULT_MODEL_OPENAI`.
@@ -410,11 +410,11 @@ async fn call_provider_with_schema(
     // Nudge OpenAI-compatible providers toward raw JSON output, unless the
     // step already chose a response_format. Anthropic has no equivalent —
     // prompt + repair handle it.
-    if provider != "anthropic" {
-        if let Some(obj) = work.as_object_mut() {
-            obj.entry("response_format")
-                .or_insert_with(|| json!({"type": "json_object"}));
-        }
+    if provider != "anthropic"
+        && let Some(obj) = work.as_object_mut()
+    {
+        obj.entry("response_format")
+            .or_insert_with(|| json!({"type": "json_object"}));
     }
 
     let max = compiled.max_repair_attempts;
@@ -862,10 +862,10 @@ mod tests {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            if header_end.is_none() {
-                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_end = Some(pos + 4);
-                }
+            if header_end.is_none()
+                && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(pos + 4);
             }
             if let Some(end) = header_end {
                 let headers = std::str::from_utf8(&buf[..end]).unwrap_or("");
@@ -904,10 +904,10 @@ mod tests {
                     break;
                 };
                 let raw = read_http_request(&mut stream).await;
-                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..]) {
-                        requests_srv.lock().await.push(v);
-                    }
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n")
+                    && let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..])
+                {
+                    requests_srv.lock().await.push(v);
                 }
                 let body = queue.lock().await.pop_front().unwrap_or_else(
                     || json!({"error": {"message": "mock response queue exhausted"}}),
@@ -1152,8 +1152,8 @@ mod tests {
 
     // --- multimodal image content (artifact store → provider wire shape) ---
 
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use orch8_storage::artifacts::ObjectArtifactStore;
 
     /// Storage with an in-memory artifact backend, for image-resolution tests.
@@ -1500,10 +1500,10 @@ mod tests {
                     break;
                 };
                 let raw = read_http_request(&mut stream).await;
-                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..]) {
-                        requests_srv.lock().await.push(v);
-                    }
+                if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n")
+                    && let Ok(v) = serde_json::from_slice::<Value>(&raw[pos + 4..])
+                {
+                    requests_srv.lock().await.push(v);
                 }
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
@@ -1891,7 +1891,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_publishes_llm_deltas_to_bus() {
-        use crate::stream_bus::{stream_bus, StreamEvent};
+        use crate::stream_bus::{StreamEvent, stream_bus};
 
         let (base, _) = start_sse_mock(openai_hello_stream(), false).await;
         let ctx = test_ctx(stream_params(&base)).await;

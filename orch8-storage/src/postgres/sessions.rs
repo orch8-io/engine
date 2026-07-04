@@ -4,8 +4,8 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 use orch8_types::instance::TaskInstance;
 
-use super::rows::{InstanceRow, SessionRow};
 use super::PostgresStorage;
+use super::rows::{InstanceRow, SessionRow};
 
 pub(super) async fn create(
     store: &PostgresStorage,

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use orch8_storage::artifacts::ObjectArtifactStore;
-use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::ids::BlockId;
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
@@ -64,8 +64,8 @@ async fn put_then_get_roundtrip_via_templated_ref() {
 
 #[tokio::test]
 async fn put_base64_then_get_base64_roundtrip() {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
 
     let raw = b"\x00\x10\x20\xff bytes";
     let b64 = STANDARD.encode(raw);
@@ -174,8 +174,8 @@ async fn get_unknown_encoding_fails_instance() {
 
 #[tokio::test]
 async fn get_non_utf8_as_utf8_fails_instance() {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     let state = run_to_state(vec![
         mk_step_with_params(
             "put",

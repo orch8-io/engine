@@ -15,9 +15,9 @@ use orch8_types::worker_filter::WorkerTaskFilter;
 
 use orch8_types::execution::NodeState;
 
+use crate::AppState;
 use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
-use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -503,10 +503,10 @@ pub(crate) async fn list_workers(
         std::collections::BTreeMap::new();
     for reg in registrations {
         // Tenant-scoped callers see their own workers plus unscoped ones.
-        if let Some(ref tid) = scoped {
-            if reg.tenant_id.as_deref().is_some_and(|t| t != tid.as_str()) {
-                continue;
-            }
+        if let Some(ref tid) = scoped
+            && reg.tenant_id.as_deref().is_some_and(|t| t != tid.as_str())
+        {
+            continue;
         }
         let entry = by_worker
             .entry(reg.worker_id.clone())
@@ -522,10 +522,10 @@ pub(crate) async fn list_workers(
         if !entry.handlers.contains(&reg.handler_name) {
             entry.handlers.push(reg.handler_name);
         }
-        if let Some(queue) = reg.queue_name {
-            if !entry.queues.contains(&queue) {
-                entry.queues.push(queue);
-            }
+        if let Some(queue) = reg.queue_name
+            && !entry.queues.contains(&queue)
+        {
+            entry.queues.push(queue);
         }
         // Registrations arrive newest-first, so the first version wins.
         if entry.version.is_none() {
@@ -717,10 +717,9 @@ pub(crate) async fn complete_task(
         // dependency did succeed, and withholding the signal would leave
         // a spurious failure in the breaker window.
         if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
+            && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
         {
-            if orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name) {
-                cb.record_success(tenant, &task.handler_name);
-            }
+            cb.record_success(tenant, &task.handler_name);
         }
         return Ok(StatusCode::OK);
     }
@@ -835,10 +834,10 @@ pub(crate) async fn complete_task(
     // Roll external-worker success into the same breaker registry the
     // in-process step-exec path uses. Skip-listed handlers (pure control-flow
     // built-ins) bypass bookkeeping — they have no external dep to break.
-    if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref()) {
-        if orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name) {
-            cb.record_success(tenant, &task.handler_name);
-        }
+    if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
+        && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
+    {
+        cb.record_success(tenant, &task.handler_name);
     }
 
     Ok(StatusCode::OK)
@@ -917,23 +916,21 @@ pub(crate) async fn fail_task(
     // failed, cancelled), accept the failure report but skip state mutation.
     // Without this, a late worker failure can resurrect or overwrite a terminal
     // instance — the same race that `complete_task` guards against.
-    if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await {
-        if inst.state.is_terminal() || inst.state == InstanceState::Paused {
-            tracing::info!(
-                instance_id = %task.instance_id,
-                state = %inst.state,
-                block_id = %task.block_id,
-                "external worker failure arrived for terminal/paused instance — task accepted, transition skipped"
-            );
-            if let (Some(cb), Some(tenant)) =
-                (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
-            {
-                if orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name) {
-                    cb.record_failure(tenant, &task.handler_name);
-                }
-            }
-            return Ok(StatusCode::OK);
+    if let Ok(Some(inst)) = state.storage.get_instance(task.instance_id).await
+        && (inst.state.is_terminal() || inst.state == InstanceState::Paused)
+    {
+        tracing::info!(
+            instance_id = %task.instance_id,
+            state = %inst.state,
+            block_id = %task.block_id,
+            "external worker failure arrived for terminal/paused instance — task accepted, transition skipped"
+        );
+        if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
+            && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
+        {
+            cb.record_failure(tenant, &task.handler_name);
         }
+        return Ok(StatusCode::OK);
     }
 
     let tree = state
@@ -1147,10 +1144,10 @@ pub(crate) async fn fail_task(
     // both retryable and non-retryable) to mirror in-process step-exec, which
     // records a failure on every Err arm. Control-flow built-ins stay
     // skip-listed.
-    if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref()) {
-        if orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name) {
-            cb.record_failure(tenant, &task.handler_name);
-        }
+    if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
+        && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
+    {
+        cb.record_failure(tenant, &task.handler_name);
     }
 
     Ok(StatusCode::OK)

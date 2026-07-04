@@ -2,8 +2,8 @@ use uuid::Uuid;
 
 use orch8_types::error::StorageError;
 
-use super::rows::ClusterNodeRow;
 use super::PostgresStorage;
+use super::rows::ClusterNodeRow;
 
 pub(super) async fn register(
     store: &PostgresStorage,

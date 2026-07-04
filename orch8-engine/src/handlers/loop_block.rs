@@ -156,18 +156,17 @@ pub async fn execute_loop(
         }
 
         // break_on: evaluate after body completion; exit loop on match.
-        if let Some(ref break_expr) = loop_def.break_on {
-            if crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
-            {
-                debug!(
-                    instance_id = %instance.id,
-                    block_id = %loop_def.id,
-                    iteration,
-                    "loop break_on condition met; completing"
-                );
-                evaluator::complete_node(storage, node.id).await?;
-                return Ok(true);
-            }
+        if let Some(ref break_expr) = loop_def.break_on
+            && crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
+        {
+            debug!(
+                instance_id = %instance.id,
+                block_id = %loop_def.id,
+                iteration,
+                "loop break_on condition met; completing"
+            );
+            evaluator::complete_node(storage, node.id).await?;
+            return Ok(true);
         }
 
         let next_iteration = iteration.saturating_add(1);
@@ -324,8 +323,8 @@ mod tests {
     use super::*;
     use crate::expression::{evaluate_condition, is_truthy};
     use orch8_storage::{
-        sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore,
-        WorkerStore,
+        ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore, WorkerStore,
+        sqlite::SqliteStorage,
     };
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
@@ -487,11 +486,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s
-            .get_block_output(inst, &inner.block_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_block_output(inst, &inner.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -521,11 +521,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s
-            .get_block_output(inst, &inner.block_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_block_output(inst, &inner.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -672,16 +673,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s
-            .get_block_output(inst, &l2.block_id)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(s
-            .get_block_output(inst, &l3.block_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_block_output(inst, &l2.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.get_block_output(inst, &l3.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -707,11 +710,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s
-            .get_block_output(inst, &lp_b.block_id)
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            s.get_block_output(inst, &lp_b.block_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -736,11 +740,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s
-            .get_block_output(inst, &inner.block_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_block_output(inst, &inner.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ----- handler behavior tests (H1, H3, H4 — H2 lives in for_each.rs) -----
@@ -880,11 +885,12 @@ mod tests {
         );
 
         // Step output preserved.
-        assert!(s
-            .get_block_output(inst_id, &BlockId::new("body"))
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            s.get_block_output(inst_id, &BlockId::new("body"))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -1020,10 +1026,11 @@ mod tests {
         let after = s.get_execution_tree(inst_id).await.unwrap();
         let lp_after = after.iter().find(|n| n.block_id.as_str() == "lp").unwrap();
         assert_eq!(lp_after.state, NodeState::Failed);
-        assert!(s
-            .get_block_output(inst_id, &BlockId::new("lp"))
-            .await
-            .unwrap()
-            .is_some());
+        assert!(
+            s.get_block_output(inst_id, &BlockId::new("lp"))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 }

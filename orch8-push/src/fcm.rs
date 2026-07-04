@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -76,10 +76,10 @@ impl FcmProvider {
     async fn get_or_refresh_token(&self) -> Result<String, PushError> {
         {
             let cached = self.cached_token.lock().await;
-            if let Some(ref ct) = *cached {
-                if ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL {
-                    return Ok(ct.token.clone());
-                }
+            if let Some(ref ct) = *cached
+                && ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL
+            {
+                return Ok(ct.token.clone());
             }
         }
 

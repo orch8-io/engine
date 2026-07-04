@@ -49,6 +49,7 @@ tracing-opentelemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test.workspace = true
 
 [features]
 default = ["otlp"]

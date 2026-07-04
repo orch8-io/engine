@@ -86,13 +86,13 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         // Drop the inner receiver first so receiver_count decreases.
         drop(self.receiver.take());
-        if let Some(tx) = self.bus.channels.get(&self.instance_id) {
-            if tx.receiver_count() == 0 {
-                // Release the shard guard before removing to avoid deadlocking
-                // the DashMap shard.
-                drop(tx);
-                self.bus.channels.remove(&self.instance_id);
-            }
+        if let Some(tx) = self.bus.channels.get(&self.instance_id)
+            && tx.receiver_count() == 0
+        {
+            // Release the shard guard before removing to avoid deadlocking
+            // the DashMap shard.
+            drop(tx);
+            self.bus.channels.remove(&self.instance_id);
         }
     }
 }
@@ -126,13 +126,13 @@ impl StreamBus {
     /// is subscribed; if the last subscriber has gone away, the channel is
     /// dropped here.
     pub fn publish(&self, instance_id: InstanceId, event: StreamEvent) {
-        if let Some(tx) = self.channels.get(&instance_id) {
-            if tx.send(event).is_err() {
-                // No live receivers — drop the ref before removing to avoid
-                // deadlocking the shard.
-                drop(tx);
-                self.channels.remove(&instance_id);
-            }
+        if let Some(tx) = self.channels.get(&instance_id)
+            && tx.send(event).is_err()
+        {
+            // No live receivers — drop the ref before removing to avoid
+            // deadlocking the shard.
+            drop(tx);
+            self.channels.remove(&instance_id);
         }
     }
 

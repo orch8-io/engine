@@ -161,8 +161,8 @@ impl SequenceCache {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use orch8_storage::sqlite::SqliteStorage;
     use orch8_storage::SequenceStore;
+    use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::ids::{BlockId, Namespace, SequenceId, TenantId};
     use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus, StepDef};
     use serde_json::json;

@@ -15,10 +15,10 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::api_keys::require_admin;
 use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
-use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

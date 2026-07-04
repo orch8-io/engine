@@ -16,7 +16,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.6.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.93"
 license = "BUSL-1.1"
 
@@ -113,6 +113,7 @@ notify = { version = "8", features = ["serde"] }
 wasmtime = "45"
 dashmap = "6"
 tempfile = "3"
+serial_test = "3"
 
 # Speed up debug builds: keep our own crates cheap to compile (opt-level 0)
 # but build 3rd-party deps at opt-level 1. Big win for sqlx, tokio, axum

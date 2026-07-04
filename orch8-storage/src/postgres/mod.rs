@@ -1642,7 +1642,7 @@ impl crate::AdminStore for PostgresStorage {
     ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
         use std::fmt::Write;
         let mut query = String::from(
-            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1"
+            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1",
         );
         let mut param_idx = 1u32;
         if tenant_id.is_some() {

@@ -10,8 +10,8 @@ use orch8_types::sequence::BlockDefinition;
 
 use super::{complete_node, fail_node};
 use crate::error::EngineError;
-use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
+use crate::handlers::param_resolve::OutputsSnapshot;
 
 /// Build a spawned child's [`ExecutionContext`](orch8_types::context::ExecutionContext)
 /// from its parent, seeded with the child's `input` and inheriting execution-mode
@@ -85,10 +85,10 @@ pub(super) async fn dispatch_block(
             // so concurrent context mutations made during step execution (e.g.
             // check_human_input's merge_context_data) are not clobbered, and
             // two steps completing in the same tick can't lose an increment.
-            if matches!(result, Ok(true)) {
-                if let Err(e) = storage.increment_total_steps(instance.id).await {
-                    tracing::warn!(instance_id = %instance.id, error = %e, "failed to update step counter");
-                }
+            if matches!(result, Ok(true))
+                && let Err(e) = storage.increment_total_steps(instance.id).await
+            {
+                tracing::warn!(instance_id = %instance.id, error = %e, "failed to update step counter");
             }
             result
         }

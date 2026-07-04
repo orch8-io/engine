@@ -161,7 +161,7 @@ pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
 
     async fn create_instances_batch(&self, instances: &[TaskInstance])
-        -> Result<u64, StorageError>;
+    -> Result<u64, StorageError>;
 
     /// Persist a new instance while externalizing large `context.data` fields.
     ///
@@ -485,7 +485,7 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// Find all instances that were `Running` when the engine crashed
     /// and reset them to `Scheduled` for re-execution.
     async fn recover_stale_instances(&self, stale_threshold: Duration)
-        -> Result<u64, StorageError>;
+    -> Result<u64, StorageError>;
 
     // === Sub-Sequences ===
 
@@ -1034,7 +1034,7 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Reset stale claimed tasks (no heartbeat within threshold) back to pending.
     async fn reap_stale_worker_tasks(&self, stale_threshold: Duration)
-        -> Result<u64, StorageError>;
+    -> Result<u64, StorageError>;
 
     /// Fail worker tasks whose `timeout_ms` has elapsed since `created_at`.
     /// Returns the number of tasks expired.
@@ -1415,7 +1415,7 @@ pub trait AdminStore: Send + Sync + 'static {
 
     /// Insert or replace the poll cursor/state for a polling trigger.
     async fn upsert_trigger_poll_state(&self, state: &TriggerPollState)
-        -> Result<(), StorageError>;
+    -> Result<(), StorageError>;
 
     // === Credentials ===
 

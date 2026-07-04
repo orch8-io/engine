@@ -22,8 +22,8 @@ use orch8::{
     SharedClock, Storage,
 };
 
-use crate::commands::dev::{block_handlers, next_advance_target};
 use crate::OutputFormat;
+use crate::commands::dev::{block_handlers, next_advance_target};
 
 #[derive(Subcommand)]
 pub enum TestCmd {

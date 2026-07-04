@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use moka::future::Cache;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, info};
 
 use orch8_types::error::StepError;
@@ -417,15 +417,15 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
             orch8_types::instance::InstanceState::Running,
         )
         .await;
-        if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
-            if let Some(n) = tree.iter().find(|n| {
+        if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await
+            && let Some(n) = tree.iter().find(|n| {
                 n.block_id == ctx.block_id && n.state == orch8_types::execution::NodeState::Running
-            }) {
-                let _ = ctx
-                    .storage
-                    .update_node_state(n.id, orch8_types::execution::NodeState::Pending)
-                    .await;
-            }
+            })
+        {
+            let _ = ctx
+                .storage
+                .update_node_state(n.id, orch8_types::execution::NodeState::Pending)
+                .await;
         }
         return Some(Err(StepError::Retryable {
             message: "sleep paused by signal".into(),
@@ -909,14 +909,14 @@ mod tests {
         // Public hosts (domain or public IP) are allowed.
         assert!(allow("https://api.example.com/x"));
         assert!(allow("http://93.184.216.34/x")); // example.com public IP
-                                                  // Internal / metadata / loopback IP literals are blocked.
+        // Internal / metadata / loopback IP literals are blocked.
         assert!(!allow("http://169.254.169.254/latest/meta-data/")); // cloud metadata
         assert!(!allow("http://127.0.0.1/")); // loopback
         assert!(!allow("http://10.0.0.5/")); // private
         assert!(!allow("http://192.168.1.1/")); // private
         assert!(!allow("http://[::1]/")); // ipv6 loopback
         assert!(!allow("http://[fc00::1]/")); // ipv6 ULA
-                                              // Non-http(s) schemes are blocked (file://, gopher://, etc.).
+        // Non-http(s) schemes are blocked (file://, gopher://, etc.).
         assert!(!allow("file:///etc/passwd"));
         assert!(!allow("gopher://10.0.0.1/"));
     }

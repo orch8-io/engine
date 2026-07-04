@@ -6,8 +6,8 @@ use uuid::Uuid;
 use orch8_types::cluster::ClusterNode;
 use orch8_types::error::StorageError;
 
-use super::helpers::{row_to_cluster_node, ts};
 use super::SqliteStorage;
+use super::helpers::{row_to_cluster_node, ts};
 
 pub(super) async fn register(
     storage: &SqliteStorage,

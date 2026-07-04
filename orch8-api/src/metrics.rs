@@ -1,7 +1,7 @@
+use axum::Router;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 /// Metrics-specific state (separate from `AppState` to avoid circular deps).

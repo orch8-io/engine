@@ -2,8 +2,8 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::sequence::SequenceDefinition;
 
-use super::rows::SequenceRow;
 use super::PostgresStorage;
+use super::rows::SequenceRow;
 
 pub(super) async fn create(
     store: &PostgresStorage,

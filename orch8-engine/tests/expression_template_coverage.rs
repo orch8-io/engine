@@ -850,7 +850,9 @@ fn tmpl_82_deeply_nested_output_second_element() {
 fn tmpl_83_nested_output_inline() {
     let ctx = sample_ctx();
     let out = sample_outputs();
-    let input = json!("User: {{outputs.fetch_data.response.body.users.0.name}}, Status: {{outputs.fetch_data.response.status_code}}");
+    let input = json!(
+        "User: {{outputs.fetch_data.response.body.users.0.name}}, Status: {{outputs.fetch_data.response.status_code}}"
+    );
     let result = resolve(&input, &ctx, &out).unwrap();
     assert_eq!(result, json!("User: Bob, Status: 200"));
 }

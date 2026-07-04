@@ -8,8 +8,8 @@ use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, SequenceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 
-use super::rows::InstanceRow;
 use super::PostgresStorage;
+use super::rows::InstanceRow;
 
 /// Canonical `task_instances` INSERT statement. Kept as a single string so
 /// that adding a column requires editing exactly one place per backend. All
@@ -276,7 +276,7 @@ async fn filter_by_concurrency_pg(
 ) -> Result<Vec<TaskInstance>, StorageError> {
     let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
-        if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
+        if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed.entry(key.as_str()).or_default().push(idx);
         }
     }
@@ -675,7 +675,7 @@ async fn insert_externalized_row(
     ref_key: &str,
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
+    use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress};
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
@@ -926,13 +926,13 @@ fn apply_instance_filter<'a>(
     if let Some(ref sid) = filter.sequence_id {
         qb.push(" AND sequence_id = ").push_bind(sid.into_uuid());
     }
-    if let Some(ref states) = filter.states {
-        if !states.is_empty() {
-            let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
-            qb.push(" AND state = ANY(")
-                .push_bind(state_strings)
-                .push(")");
-        }
+    if let Some(ref states) = filter.states
+        && !states.is_empty()
+    {
+        let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
+        qb.push(" AND state = ANY(")
+            .push_bind(state_strings)
+            .push(")");
     }
     if let Some(ref meta) = filter.metadata_filter {
         qb.push(" AND metadata @> ").push_bind(meta);

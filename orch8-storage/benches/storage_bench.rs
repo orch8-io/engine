@@ -1,7 +1,7 @@
 //! Criterion benchmarks for `StorageBackend` hot paths.
 
 use chrono::{Duration, Utc};
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use serde_json::json;
 use uuid::Uuid;
 

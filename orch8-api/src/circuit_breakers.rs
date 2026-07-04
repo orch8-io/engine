@@ -4,7 +4,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use crate::auth::{enforce_tenant_access, OptionalTenant};
+use crate::auth::{OptionalTenant, enforce_tenant_access};
 use crate::error::ApiError;
 
 use orch8_types::ids::TenantId;

@@ -4,8 +4,8 @@ use uuid::Uuid;
 use orch8_types::error::StorageError;
 use orch8_types::worker::WorkerTask;
 
-use super::rows::WorkerTaskRow;
 use super::PostgresStorage;
+use super::rows::WorkerTaskRow;
 
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
@@ -399,13 +399,13 @@ fn apply_worker_task_filter<'a>(
             .push_bind(tid.as_str())
             .push(")");
     }
-    if let Some(ref states) = filter.states {
-        if !states.is_empty() {
-            let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
-            qb.push(" AND state = ANY(")
-                .push_bind(state_strings)
-                .push(")");
-        }
+    if let Some(ref states) = filter.states
+        && !states.is_empty()
+    {
+        let state_strings: Vec<String> = states.iter().map(ToString::to_string).collect();
+        qb.push(" AND state = ANY(")
+            .push_bind(state_strings)
+            .push(")");
     }
     if let Some(ref handler) = filter.handler_name {
         qb.push(" AND handler_name = ").push_bind(handler);

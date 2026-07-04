@@ -17,16 +17,16 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use orch8_api::metrics::MetricsState;
 use orch8_api::openapi::ApiDoc;
-use orch8_api::{build_router, AppState, API_V1_PREFIX};
+use orch8_api::{API_V1_PREFIX, AppState, build_router};
+use orch8_engine::Engine;
 use orch8_engine::circuit_breaker::CircuitBreakerRegistry;
 use orch8_engine::handlers::HandlerRegistry;
-use orch8_engine::Engine;
-use orch8_grpc::service::Orch8GrpcService;
 use orch8_grpc::Orch8ServiceServer;
+use orch8_grpc::service::Orch8GrpcService;
+use orch8_storage::StorageBackend;
 use orch8_storage::artifacts::{ObjectArtifactStore, S3Config};
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::StorageBackend;
 use orch8_types::config::EngineConfig;
 
 mod telemetry;
@@ -651,10 +651,10 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_ALLOW_HTTP") {
         config.artifacts.s3_allow_http = val == "true" || val == "1";
     }
-    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_RETENTION_SECS") {
-        if let Ok(secs) = val.parse::<u64>() {
-            config.engine.artifact_retention_secs = secs;
-        }
+    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_RETENTION_SECS")
+        && let Ok(secs) = val.parse::<u64>()
+    {
+        config.engine.artifact_retention_secs = secs;
     }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
         config.database.backend = val;
@@ -662,10 +662,10 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(url) = std::env::var("ORCH8_DATABASE_URL") {
         config.database.url = url.into();
     }
-    if let Ok(val) = std::env::var("ORCH8_DATABASE_MAX_CONNECTIONS") {
-        if let Ok(n) = val.parse() {
-            config.database.max_connections = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_DATABASE_MAX_CONNECTIONS")
+        && let Ok(n) = val.parse()
+    {
+        config.database.max_connections = n;
     }
     if let Ok(val) = std::env::var("ORCH8_LOG_LEVEL") {
         config.logging.level = val;
@@ -688,59 +688,59 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;
     }
-    if let Ok(val) = std::env::var("ORCH8_TICK_INTERVAL_MS") {
-        if let Ok(n) = val.parse() {
-            config.engine.tick_interval_ms = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_TICK_INTERVAL_MS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.tick_interval_ms = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_CRON_TICK_SECS") {
-        if let Ok(n) = val.parse() {
-            config.engine.cron_tick_secs = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_CRON_TICK_SECS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.cron_tick_secs = n;
     }
     // Reaper cadence/threshold overrides. Defaults (tick 30s / stale 60s for
     // worker tasks, 60s / 120s for nodes) are sane for production but make
     // reclamation tests wait minutes; the E2E harness sets these low so the
     // worker-reaper suites run in seconds.
-    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_TICK_SECS") {
-        if let Ok(n) = val.parse() {
-            config.engine.worker_reaper_tick_secs = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_TICK_SECS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.worker_reaper_tick_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_STALE_SECS") {
-        if let Ok(n) = val.parse() {
-            config.engine.worker_reaper_stale_secs = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_STALE_SECS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.worker_reaper_stale_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_TICK_SECS") {
-        if let Ok(n) = val.parse() {
-            config.engine.node_reaper_tick_secs = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_TICK_SECS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.node_reaper_tick_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_STALE_SECS") {
-        if let Ok(n) = val.parse() {
-            config.engine.node_reaper_stale_secs = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_STALE_SECS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.node_reaper_stale_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_BATCH_SIZE") {
-        if let Ok(n) = val.parse() {
-            config.engine.batch_size = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_BATCH_SIZE")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.batch_size = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_MAX_INSTANCES_PER_TENANT") {
-        if let Ok(n) = val.parse() {
-            config.engine.max_instances_per_tenant = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_MAX_INSTANCES_PER_TENANT")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.max_instances_per_tenant = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_STEPS") {
-        if let Ok(n) = val.parse() {
-            config.engine.max_concurrent_steps = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_STEPS")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.max_concurrent_steps = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_EXTERNALIZE_THRESHOLD") {
-        if let Ok(n) = val.parse() {
-            config.engine.externalize_output_threshold = n;
-        }
+    if let Ok(val) = std::env::var("ORCH8_EXTERNALIZE_THRESHOLD")
+        && let Ok(n) = val.parse()
+    {
+        config.engine.externalize_output_threshold = n;
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
         config.engine.webhooks.urls = val.split(',').map(|s| s.trim().to_string()).collect();
@@ -755,10 +755,9 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10).
     if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_REQUESTS")
         .or_else(|_| std::env::var("ORCH8_RATE_LIMIT_RPS"))
+        && let Ok(n) = val.parse()
     {
-        if let Ok(n) = val.parse() {
-            config.api.max_concurrent_requests = n;
-        }
+        config.api.max_concurrent_requests = n;
     }
     if let Ok(val) = std::env::var("ORCH8_REQUIRE_TENANT_HEADER") {
         config.api.require_tenant_header = val == "true" || val == "1";
@@ -766,10 +765,10 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_RUN_MIGRATIONS") {
         config.database.run_migrations = val == "true" || val == "1";
     }
-    if let Ok(val) = std::env::var("ORCH8_DATABASE_SEARCH_PATH") {
-        if !val.is_empty() {
-            config.database.search_path = Some(val);
-        }
+    if let Ok(val) = std::env::var("ORCH8_DATABASE_SEARCH_PATH")
+        && !val.is_empty()
+    {
+        config.database.search_path = Some(val);
     }
 }
 
@@ -868,8 +867,8 @@ fn print_startup_banner(config: &EngineConfig, insecure: bool) {
 }
 
 fn build_cors_layer(origins: &str) -> CorsLayer {
-    use http::header::{HeaderName, AUTHORIZATION, CONTENT_TYPE};
     use http::Method;
+    use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName};
 
     let layer = CorsLayer::new()
         .allow_methods([
@@ -911,24 +910,38 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Endpoint set/unset env parsing in ONE test: `std::env` is process-global
     /// and tests run in parallel, so splitting these into separate tests would
-    /// race on the same variables.
+    /// race on the same variables. `#[serial(otlp_env)]` additionally excludes
+    /// any other test in this binary that might touch the environment
+    /// concurrently — that's what makes the `unsafe` blocks below sound
+    /// (`set_var`/`remove_var` require `unsafe` because concurrent access to
+    /// the process environment from another thread is genuinely unsound).
     #[test]
+    #[serial(otlp_env)]
     fn apply_env_overrides_telemetry_endpoint_set_and_unset() {
-        // Unset: defaults survive — export stays disabled.
-        std::env::remove_var("ORCH8_OTLP_ENDPOINT");
-        std::env::remove_var("ORCH8_OTLP_PROTOCOL");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            // Unset: defaults survive — export stays disabled.
+            std::env::remove_var("ORCH8_OTLP_ENDPOINT");
+            std::env::remove_var("ORCH8_OTLP_PROTOCOL");
+        }
         let mut config = EngineConfig::default();
         apply_env_overrides(&mut config);
         assert!(config.telemetry.otlp_endpoint.is_empty());
         assert_eq!(config.telemetry.otlp_protocol, "grpc");
         assert!(!config.telemetry.otlp_enabled());
 
-        // Set: env wins over the (default) config values.
-        std::env::set_var("ORCH8_OTLP_ENDPOINT", "http://collector:4317");
-        std::env::set_var("ORCH8_OTLP_PROTOCOL", "grpc");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            // Set: env wins over the (default) config values.
+            std::env::set_var("ORCH8_OTLP_ENDPOINT", "http://collector:4317");
+            std::env::set_var("ORCH8_OTLP_PROTOCOL", "grpc");
+        }
         let mut config = EngineConfig::default();
         apply_env_overrides(&mut config);
         assert_eq!(config.telemetry.otlp_endpoint, "http://collector:4317");
@@ -936,8 +949,12 @@ mod tests {
         assert!(config.telemetry.otlp_enabled());
         assert!(config.validate().is_ok());
 
-        std::env::remove_var("ORCH8_OTLP_ENDPOINT");
-        std::env::remove_var("ORCH8_OTLP_PROTOCOL");
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            std::env::remove_var("ORCH8_OTLP_ENDPOINT");
+            std::env::remove_var("ORCH8_OTLP_PROTOCOL");
+        }
     }
 
     #[test]

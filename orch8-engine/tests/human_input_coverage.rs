@@ -20,7 +20,7 @@ use serde_json::json;
 use orch8_engine::scheduler::check_human_input;
 use orch8_engine::signals::process_signals;
 use orch8_storage::{
-    sqlite::SqliteStorage, InstanceStore, OutputStore, SequenceStore, SignalStore,
+    InstanceStore, OutputStore, SequenceStore, SignalStore, sqlite::SqliteStorage,
 };
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
@@ -280,11 +280,13 @@ async fn malformed_payload_keeps_block_waiting_and_marks_delivered() {
         .expect("check_human_input ok");
     assert!(deferred);
 
-    assert!(storage
-        .get_block_output(instance.id, &step.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(instance.id, &step.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert!(refreshed.context.data.get("decision").is_none());
     let pending = storage.get_pending_signals(instance.id).await.unwrap();
@@ -327,11 +329,13 @@ async fn default_yes_no_rejects_maybe() {
         .expect("check_human_input ok");
     assert!(deferred, "default yes/no must reject `maybe`");
 
-    assert!(storage
-        .get_block_output(instance.id, &step.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(instance.id, &step.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert!(refreshed.context.data.get("ask").is_none());
     let pending = storage.get_pending_signals(instance.id).await.unwrap();

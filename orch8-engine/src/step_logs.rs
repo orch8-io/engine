@@ -13,9 +13,9 @@ use chrono::Utc;
 use tracing::field::{Field, Visit};
 use tracing::span::Attributes;
 use tracing::{Event, Id, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 use orch8_storage::StorageBackend;
 use orch8_types::ids::{BlockId, InstanceId};

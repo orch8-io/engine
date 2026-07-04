@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use orch8_engine::step_logs::{init_step_log_sink, StepLogLayer};
-use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+use orch8_engine::step_logs::{StepLogLayer, init_step_log_sink};
+use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::ids::InstanceId;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -45,12 +45,14 @@ async fn captures_handler_logs_scoped_to_step_span() {
         let logs = storage.list_step_logs(instance_id).await.unwrap();
         if logs.len() >= 2 {
             assert!(logs.iter().all(|l| l.block_id == "step_a"));
-            assert!(logs
-                .iter()
-                .any(|l| l.message.contains("handler started") && l.level == "info"));
-            assert!(logs
-                .iter()
-                .any(|l| l.message.contains("something noteworthy") && l.level == "warn"));
+            assert!(
+                logs.iter()
+                    .any(|l| l.message.contains("handler started") && l.level == "info")
+            );
+            assert!(
+                logs.iter()
+                    .any(|l| l.message.contains("something noteworthy") && l.level == "warn")
+            );
             assert_eq!(logs.len(), 2, "the out-of-span event must not be captured");
             return;
         }

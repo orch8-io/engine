@@ -216,7 +216,7 @@ pub async fn apply_self_modify(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::{sqlite::SqliteStorage, InstanceStore};
+    use orch8_storage::{InstanceStore, sqlite::SqliteStorage};
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};

@@ -6,8 +6,8 @@ use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
 
-use super::rows::BlockOutputRow;
 use super::PostgresStorage;
+use super::rows::BlockOutputRow;
 
 /// Append a new `block_outputs` row.
 ///

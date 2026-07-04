@@ -54,15 +54,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::signal::SignalType;
 
+use crate::AppState;
 use crate::auth::OptionalTenant;
 use crate::error::ApiError;
-use crate::AppState;
 
 /// Protocol version advertised when the client requests one we don't know.
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -605,10 +605,12 @@ mod tests {
         let ok = tool_ok(&json!({ "id": 1 }));
         assert_eq!(ok["isError"], false);
         assert_eq!(ok["content"][0]["type"], "text");
-        assert!(ok["content"][0]["text"]
-            .as_str()
-            .expect("text content")
-            .contains("\"id\": 1"));
+        assert!(
+            ok["content"][0]["text"]
+                .as_str()
+                .expect("text content")
+                .contains("\"id\": 1")
+        );
 
         let err = tool_err("not found: instance x");
         assert_eq!(err["isError"], true);
@@ -618,12 +620,16 @@ mod tests {
     #[test]
     fn arg_helpers_report_missing_and_invalid() {
         let args = json!({ "instance_id": "not-a-uuid", "signal": "pause" });
-        assert!(arg_uuid(&args, "instance_id")
-            .expect_err("invalid uuid")
-            .contains("invalid instance_id"));
-        assert!(arg_str(&args, "missing")
-            .expect_err("missing key")
-            .contains("missing required argument"));
+        assert!(
+            arg_uuid(&args, "instance_id")
+                .expect_err("invalid uuid")
+                .contains("invalid instance_id")
+        );
+        assert!(
+            arg_str(&args, "missing")
+                .expect_err("missing key")
+                .contains("missing required argument")
+        );
         assert_eq!(arg_str(&args, "signal").expect("present"), "pause");
     }
 }

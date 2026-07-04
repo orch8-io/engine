@@ -5,18 +5,18 @@
 //! scoped: the instance the artifact belongs to must be owned by the caller
 //! (when a tenant header is present), mirroring `get_instance`.
 
-use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use orch8_types::ids::InstanceId;
 
+use crate::AppState;
 use crate::auth::TenantContext;
 use crate::error::ApiError;
-use crate::AppState;
 
 /// Verify the instance exists and (when a tenant header is present) is owned by
 /// the caller. Returns the same opaque `NotFound` for both "missing" and
@@ -33,10 +33,10 @@ async fn require_owned_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(&not_found)?;
-    if let Some(ctx) = tenant {
-        if inst.tenant_id != ctx.tenant_id {
-            return Err(not_found());
-        }
+    if let Some(ctx) = tenant
+        && inst.tenant_id != ctx.tenant_id
+    {
+        return Err(not_found());
     }
     Ok(())
 }

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use owo_colors::OwoColorize;
 use serde_json::Value;
@@ -292,10 +292,10 @@ impl DirWatch {
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json") {
-                    if let Some(sig) = FileWatch::stat(&path) {
-                        self.signatures.insert(path, sig);
-                    }
+                if path.extension().is_some_and(|e| e == "json")
+                    && let Some(sig) = FileWatch::stat(&path)
+                {
+                    self.signatures.insert(path, sig);
                 }
             }
         }
@@ -310,13 +310,13 @@ impl DirWatch {
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|e| e == "json") {
-                    if let Some(sig) = FileWatch::stat(&path) {
-                        if self.signatures.get(&path) != Some(&sig) {
-                            changed.push(path.clone());
-                        }
-                        current.insert(path, sig);
+                if path.extension().is_some_and(|e| e == "json")
+                    && let Some(sig) = FileWatch::stat(&path)
+                {
+                    if self.signatures.get(&path) != Some(&sig) {
+                        changed.push(path.clone());
                     }
+                    current.insert(path, sig);
                 }
             }
         }
@@ -491,22 +491,21 @@ impl DevSession {
         }
 
         if tick.steps_executed == 0 && tick.instances_advanced == 0 {
-            if let Some(clock) = &self.manual_clock {
-                if let Some(target) =
+            if let Some(clock) = &self.manual_clock
+                && let Some(target) =
                     next_advance_target(instance.state, instance.next_fire_at, clock.now())
-                {
-                    // One second of slack past the deferral, mirroring the
-                    // engine's virtual-time tests.
-                    let jump = target + chrono::Duration::seconds(1);
-                    clock.set(jump);
-                    println!(
-                        "{} {} clock advanced to {}",
-                        stamp(),
-                        "⏩".cyan(),
-                        jump.format("%Y-%m-%d %H:%M:%S UTC").to_string().cyan(),
-                    );
-                    return Ok(StepOutcome::Advanced);
-                }
+            {
+                // One second of slack past the deferral, mirroring the
+                // engine's virtual-time tests.
+                let jump = target + chrono::Duration::seconds(1);
+                clock.set(jump);
+                println!(
+                    "{} {} clock advanced to {}",
+                    stamp(),
+                    "⏩".cyan(),
+                    jump.format("%Y-%m-%d %H:%M:%S UTC").to_string().cyan(),
+                );
+                return Ok(StepOutcome::Advanced);
             }
             if !self.stall_hinted && self.last_progress.elapsed() >= STALL_HINT_AFTER {
                 self.stall_hinted = true;

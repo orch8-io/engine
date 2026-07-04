@@ -4,7 +4,7 @@
 //! Extracted from per-handler copies of the same logic so each handler body
 //! stays focused on its own behaviour.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::warn;
 use uuid::Uuid;
 

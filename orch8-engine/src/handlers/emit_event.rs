@@ -20,13 +20,13 @@
 //! finding #2 — a crash mid-operation cannot leave a dedupe row pointing at
 //! a non-existent child.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use orch8_storage::{DedupeScope, EmitDedupeOutcome};
 use orch8_types::{error::StepError, ids::InstanceId};
 
-use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 use super::StepContext;
+use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 
 /// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
 /// we parse exactly twice (match on string, then build `DedupeScope` once we
@@ -201,7 +201,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use orch8_storage::{
-        sqlite::SqliteStorage, AdminStore, InstanceStore, SequenceStore, StorageBackend,
+        AdminStore, InstanceStore, SequenceStore, StorageBackend, sqlite::SqliteStorage,
     };
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},

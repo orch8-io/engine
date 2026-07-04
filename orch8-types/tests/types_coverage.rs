@@ -9,7 +9,7 @@ use orch8_types::config::{
     EngineConfig, ExternalizationMode, SchedulerConfig, SecretString, WebhookConfig,
 };
 use orch8_types::context::{
-    AuditEntry, ExecutionContext, RuntimeContext, DEFAULT_MAX_CONTEXT_BYTES,
+    AuditEntry, DEFAULT_MAX_CONTEXT_BYTES, ExecutionContext, RuntimeContext,
 };
 use orch8_types::sequence::{
     BlockDefinition, HumanChoice, HumanInputDef, RetryPolicy, SequenceDefinition, SequenceStatus,

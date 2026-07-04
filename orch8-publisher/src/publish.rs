@@ -1,6 +1,6 @@
 //! Sequence publishing: serialize → hash → sign → upload to CDN.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::Signer;
 use sha2::{Digest, Sha256};
 use tracing::info;
@@ -286,9 +286,11 @@ mod tests {
         assert_eq!(entry.version, 2);
         assert_eq!(entry.signing_key_id, "key1");
         assert!(entry.url.starts_with("/t1/sequences/"));
-        assert!(std::path::Path::new(&entry.url)
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json")));
+        assert!(
+            std::path::Path::new(&entry.url)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        );
     }
 
     #[tokio::test]
@@ -472,8 +474,8 @@ mod tests {
     fn new_rejects_empty_tenant_id() {
         let cdn = Box::new(MemoryCdnBackend::new());
         let key = SigningKey::generate(&mut OsRng);
-        let gen = ManifestGenerator::new(key, "k".to_string());
-        let result = SequencePublisher::new(cdn, gen, String::new(), "k".to_string());
+        let r#gen = ManifestGenerator::new(key, "k".to_string());
+        let result = SequencePublisher::new(cdn, r#gen, String::new(), "k".to_string());
         let Err(err) = result else {
             panic!("expected empty tenant_id to be rejected");
         };
@@ -485,8 +487,8 @@ mod tests {
         let key = SigningKey::generate(&mut OsRng);
         for bad in ["a/b", "a\\\\b", "../tenant", ".."] {
             let cdn = Box::new(MemoryCdnBackend::new());
-            let gen = ManifestGenerator::new(key.clone(), "k".to_string());
-            let result = SequencePublisher::new(cdn, gen, bad.to_string(), "k".to_string());
+            let r#gen = ManifestGenerator::new(key.clone(), "k".to_string());
+            let result = SequencePublisher::new(cdn, r#gen, bad.to_string(), "k".to_string());
             let Err(err) = result else {
                 panic!("expected rejection for tenant_id {bad}");
             };

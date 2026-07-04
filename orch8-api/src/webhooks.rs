@@ -17,17 +17,17 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{DefaultBodyLimit, Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::Router;
 use moka::future::Cache;
 
 use orch8_types::trigger::TriggerType;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 /// Maximum skew permitted between the caller's `x-trigger-timestamp` and
 /// the server clock. Matches the default window most `SaaS` webhook senders
@@ -211,7 +211,7 @@ pub(crate) async fn public_webhook(
 
 #[cfg(test)]
 mod tests {
-    use super::{timestamp_within_window, MAX_FUTURE_SKEW_SECS, REPLAY_WINDOW_SECS};
+    use super::{MAX_FUTURE_SKEW_SECS, REPLAY_WINDOW_SECS, timestamp_within_window};
     use orch8_types::config::SecretString;
 
     #[test]

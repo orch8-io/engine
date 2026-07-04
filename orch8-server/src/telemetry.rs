@@ -17,10 +17,10 @@
 use orch8_types::config::TelemetryConfig;
 
 #[cfg(feature = "otlp")]
-pub use enabled::{init, OtelGuard};
+pub use enabled::{OtelGuard, init};
 
 #[cfg(not(feature = "otlp"))]
-pub use disabled::{init, OtelGuard};
+pub use disabled::{OtelGuard, init};
 
 #[cfg(feature = "otlp")]
 mod enabled {

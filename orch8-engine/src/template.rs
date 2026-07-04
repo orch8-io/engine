@@ -203,12 +203,12 @@ fn resolve_path(
             break;
         }
         if is_template_path(seg) {
-            if let Some(v) = try_resolve_single(seg, context, outputs, state)? {
-                if !v.is_null() {
-                    base_value = v;
-                    filter_start = i + 1;
-                    break;
-                }
+            if let Some(v) = try_resolve_single(seg, context, outputs, state)?
+                && !v.is_null()
+            {
+                base_value = v;
+                filter_start = i + 1;
+                break;
             }
         } else {
             base_value = serde_json::Value::String(seg.to_string());
@@ -282,14 +282,12 @@ fn apply_pipe_filter(
         ));
     }
     match filter {
-        "upper" => Ok(serde_json::json!(value
-            .as_str()
-            .unwrap_or("")
-            .to_uppercase())),
-        "lower" => Ok(serde_json::json!(value
-            .as_str()
-            .unwrap_or("")
-            .to_lowercase())),
+        "upper" => Ok(serde_json::json!(
+            value.as_str().unwrap_or("").to_uppercase()
+        )),
+        "lower" => Ok(serde_json::json!(
+            value.as_str().unwrap_or("").to_lowercase()
+        )),
         "trim" => Ok(serde_json::json!(value.as_str().unwrap_or("").trim())),
         "abs" => Ok(serde_json::json!(value.as_f64().unwrap_or(0.0).abs())),
         "url_encode" => Ok(serde_json::json!(url_encode_str(
@@ -308,10 +306,10 @@ fn apply_pipe_filter(
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(s)
                 .map_err(|e| EngineError::TemplateError(format!("base64_decode: {e}")))?;
-            Ok(serde_json::json!(String::from_utf8(decoded)
-                .unwrap_or_else(
-                    |e| String::from_utf8_lossy(e.as_bytes()).into_owned()
-                )))
+            Ok(serde_json::json!(
+                String::from_utf8(decoded)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+            ))
         }
         _ => apply_pipe_filter_with_args(filter, value),
     }
@@ -920,14 +918,14 @@ fn validate_template_expr(
                     message: format!("unknown template root `{seg}`"),
                 });
             }
-            if let Some((func, _)) = parse_function_call(seg) {
-                if !is_known_template_function(func) {
-                    warnings.push(TemplateWarning {
-                        block_id: block_id.to_string(),
-                        field: field.to_string(),
-                        message: format!("unknown template function `{func}()`"),
-                    });
-                }
+            if let Some((func, _)) = parse_function_call(seg)
+                && !is_known_template_function(func)
+            {
+                warnings.push(TemplateWarning {
+                    block_id: block_id.to_string(),
+                    field: field.to_string(),
+                    message: format!("unknown template function `{func}()`"),
+                });
             }
         } else if is_pipe_filter(seg) {
             // valid filter — nothing to warn about
@@ -963,7 +961,7 @@ mod tests {
     use super::*;
     use orch8_types::ids::BlockId;
     use orch8_types::sequence::SequenceStatus;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn test_context() -> ExecutionContext {
         ExecutionContext {
@@ -1532,7 +1530,9 @@ mod tests {
             "prompts": {"tpl": "Q: {{question}} P: {{price}}"},
             "market": {"q": "Will X happen?", "p": "0.65"}
         });
-        let input = json!("{{ steps.prompts.tpl | replace('{{question}}', steps.market.q) | replace('{{price}}', steps.market.p) }}");
+        let input = json!(
+            "{{ steps.prompts.tpl | replace('{{question}}', steps.market.q) | replace('{{price}}', steps.market.p) }}"
+        );
         let result = resolve(&input, &ctx, &outputs).unwrap();
         assert_eq!(result, json!("Q: Will X happen? P: 0.65"));
     }

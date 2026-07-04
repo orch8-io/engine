@@ -5,8 +5,8 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 use orch8_types::queue_routing::QueueRoutingRule;
 
-use super::helpers::{parse_ts, ts};
 use super::SqliteStorage;
+use super::helpers::{parse_ts, ts};
 
 fn row_to_rule(row: &sqlx::sqlite::SqliteRow) -> Result<QueueRoutingRule, StorageError> {
     Ok(QueueRoutingRule {

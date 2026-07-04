@@ -13,9 +13,9 @@ use orch8_types::sequence::StepDef;
 use crate::error::EngineError;
 use crate::evaluator;
 use crate::externalized;
+use crate::handlers::HandlerRegistry;
 use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::step::StepExecParams;
-use crate::handlers::HandlerRegistry;
 
 use super::step_dispatch::{
     dispatch_plugin, dispatch_step_to_external_worker, resolve_plugin_source,
@@ -293,15 +293,15 @@ pub async fn execute_step_node(
             // notifier (and approvals API) can identify it. Stamp only on the
             // first entry — re-stamping on every evaluator pass would reset
             // the wait_for_input timeout baseline used by the deadline sweep.
-            if let Some(mut inst) = storage.get_instance(instance.id).await? {
-                if inst.context.runtime.current_step.as_ref() != Some(&step_def.id) {
-                    inst.context.runtime.current_step = Some(step_def.id.clone());
-                    inst.context.runtime.current_step_started_at =
-                        Some(node.started_at.unwrap_or_else(chrono::Utc::now));
-                    storage
-                        .update_instance_context(instance.id, &inst.context)
-                        .await?;
-                }
+            if let Some(mut inst) = storage.get_instance(instance.id).await?
+                && inst.context.runtime.current_step.as_ref() != Some(&step_def.id)
+            {
+                inst.context.runtime.current_step = Some(step_def.id.clone());
+                inst.context.runtime.current_step_started_at =
+                    Some(node.started_at.unwrap_or_else(chrono::Utc::now));
+                storage
+                    .update_instance_context(instance.id, &inst.context)
+                    .await?;
             }
             // No signal yet — set node to Waiting so the instance transitions
             // to Waiting state and process_signalled_instances can wake it.
@@ -419,43 +419,43 @@ pub async fn execute_step_node(
     }
 
     // If the handler is a WASM plugin, resolve via the plugin registry then dispatch.
-    if super::wasm_plugin::is_wasm_handler(&step_def.handler) {
-        if let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler) {
-            // SECURITY: WASM source MUST come from the plugin registry — which
-            // is the only place an operator has curated and validated the
-            // filesystem path. Previously this code fell back to the raw
-            // handler string (`plugin_name`) when the registry had no entry,
-            // turning `wasm://../../etc/passwd` or `wasm:///abs/path/evil.wasm`
-            // into a direct `Module::from_file` call — arbitrary-file-read /
-            // arbitrary-code-execute surface for anyone who can submit a
-            // sequence definition. Fail closed: no registry row → fail the
-            // node with a permanent error.
-            let Some(wasm_path) =
-                resolve_plugin_source(storage.as_ref(), plugin_name, PluginType::Wasm).await
-            else {
-                tracing::warn!(
-                    instance_id = %instance.id,
-                    plugin = %plugin_name,
-                    "wasm plugin not registered; failing node (raw-path fallback is disabled)"
-                );
-                evaluator::fail_node(storage.as_ref(), node.id).await?;
-                return Ok(false);
-            };
-            let ctx = super::StepContext {
-                instance_id: instance.id,
-                tenant_id: instance.tenant_id.clone(),
-                block_id: step_def.id.clone(),
-                params: resolved_params,
-                context: step_context,
-                attempt,
-                storage: Arc::clone(storage),
-                wait_for_input: step_def.wait_for_input.clone(),
-            };
-            return dispatch_plugin(storage.as_ref(), node, attempt, || {
-                super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
-            })
-            .await;
-        }
+    if super::wasm_plugin::is_wasm_handler(&step_def.handler)
+        && let Some(plugin_name) = super::wasm_plugin::parse_plugin_name(&step_def.handler)
+    {
+        // SECURITY: WASM source MUST come from the plugin registry — which
+        // is the only place an operator has curated and validated the
+        // filesystem path. Previously this code fell back to the raw
+        // handler string (`plugin_name`) when the registry had no entry,
+        // turning `wasm://../../etc/passwd` or `wasm:///abs/path/evil.wasm`
+        // into a direct `Module::from_file` call — arbitrary-file-read /
+        // arbitrary-code-execute surface for anyone who can submit a
+        // sequence definition. Fail closed: no registry row → fail the
+        // node with a permanent error.
+        let Some(wasm_path) =
+            resolve_plugin_source(storage.as_ref(), plugin_name, PluginType::Wasm).await
+        else {
+            tracing::warn!(
+                instance_id = %instance.id,
+                plugin = %plugin_name,
+                "wasm plugin not registered; failing node (raw-path fallback is disabled)"
+            );
+            evaluator::fail_node(storage.as_ref(), node.id).await?;
+            return Ok(false);
+        };
+        let ctx = super::StepContext {
+            instance_id: instance.id,
+            tenant_id: instance.tenant_id.clone(),
+            block_id: step_def.id.clone(),
+            params: resolved_params,
+            context: step_context,
+            attempt,
+            storage: Arc::clone(storage),
+            wait_for_input: step_def.wait_for_input.clone(),
+        };
+        return dispatch_plugin(storage.as_ref(), node, attempt, || {
+            super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
+        })
+        .await;
     }
 
     // If the handler is not registered in-process, dispatch to external worker queue.
@@ -489,10 +489,8 @@ pub async fn execute_step_node(
 
     match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
         Ok(output) => {
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_success(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_success(&instance.tenant_id, &step_def.handler);
             }
             // Check for self-modify output: inject blocks into the instance.
             // Shared helper keeps block-injection semantics identical to the
@@ -516,10 +514,8 @@ pub async fn execute_step_node(
             ref message,
             ..
         }) => {
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_failure(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             // Previously this arm left the node Running and returned Ok,
             // which caused the evaluator's `find_running_step` to re-pick
@@ -626,20 +622,16 @@ pub async fn execute_step_node(
         Err(EngineError::StepFailed {
             retryable: false, ..
         }) => {
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_failure(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             // Permanent failure - mark node as failed
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Ok(false)
         }
         Err(e) => {
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_failure(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Err(e)
@@ -651,7 +643,7 @@ pub async fn execute_step_node(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::{sqlite::SqliteStorage, InstanceStore, ResourceStore};
+    use orch8_storage::{InstanceStore, ResourceStore, sqlite::SqliteStorage};
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 

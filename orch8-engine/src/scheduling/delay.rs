@@ -51,14 +51,14 @@ fn collect_holidays(
         }
     }
 
-    if let Some(config) = context_config {
-        if let Some(arr) = config.get("holidays").and_then(|v| v.as_array()) {
-            for val in arr {
-                if let Some(s) = val.as_str() {
-                    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                        dates.push(d);
-                    }
-                }
+    if let Some(config) = context_config
+        && let Some(arr) = config.get("holidays").and_then(|v| v.as_array())
+    {
+        for val in arr {
+            if let Some(s) = val.as_str()
+                && let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            {
+                dates.push(d);
             }
         }
     }

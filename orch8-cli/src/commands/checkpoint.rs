@@ -3,7 +3,7 @@ use clap::Subcommand;
 use reqwest::Client;
 use uuid::Uuid;
 
-use crate::{print_response, OutputFormat};
+use crate::{OutputFormat, print_response};
 
 #[derive(Subcommand)]
 pub enum CheckpointCmd {

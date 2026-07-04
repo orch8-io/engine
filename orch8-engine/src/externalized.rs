@@ -61,10 +61,10 @@ pub async fn resolve_context_markers(
         return Ok(ctx);
     };
     for (_key, value) in obj.iter_mut() {
-        if let Some(ref_key) = extract_ref_key(value) {
-            if let Some(resolved) = storage.get_externalized_state(ref_key).await? {
-                *value = resolved;
-            }
+        if let Some(ref_key) = extract_ref_key(value)
+            && let Some(resolved) = storage.get_externalized_state(ref_key).await?
+        {
+            *value = resolved;
         }
     }
     Ok(ctx)

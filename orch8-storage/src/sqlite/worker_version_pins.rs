@@ -3,8 +3,8 @@ use sqlx::Row;
 use orch8_types::error::StorageError;
 use orch8_types::worker::WorkerVersionPin;
 
-use super::helpers::{parse_ts, ts};
 use super::SqliteStorage;
+use super::helpers::{parse_ts, ts};
 
 fn row_to_pin(row: &sqlx::sqlite::SqliteRow) -> Result<WorkerVersionPin, StorageError> {
     Ok(WorkerVersionPin {

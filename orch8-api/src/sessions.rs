@@ -10,8 +10,8 @@ use uuid::Uuid;
 use orch8_types::ids::TenantId;
 use orch8_types::session::{Session, SessionState};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

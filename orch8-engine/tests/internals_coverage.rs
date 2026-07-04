@@ -11,13 +11,13 @@ use tokio_util::sync::CancellationToken;
 
 use orch8_engine::credentials::resolve_in_value;
 use orch8_engine::cron::{calculate_next_fire, validate_cron_expr};
-use orch8_engine::gc::{run_gc_loop, run_gc_loop_with_ttl, GC_BATCH_LIMIT, GC_DEFAULT_INTERVAL};
+use orch8_engine::gc::{GC_BATCH_LIMIT, GC_DEFAULT_INTERVAL, run_gc_loop, run_gc_loop_with_ttl};
 use orch8_engine::handlers::builtin::register_builtins;
 use orch8_engine::handlers::{HandlerRegistry, StepContext};
 use orch8_engine::interceptors;
 use orch8_engine::recovery::recover_stale_instances;
 use orch8_engine::sequence_cache::SequenceCache;
-use orch8_engine::webhooks::{self, instance_event, WebhookEvent};
+use orch8_engine::webhooks::{self, WebhookEvent, instance_event};
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{AdminStore, InstanceStore, OutputStore, SequenceStore, StorageBackend};
 use orch8_types::config::SecretString;
@@ -888,11 +888,13 @@ async fn interceptor_47_before_step_noop() {
         &BlockId::new("s"),
     )
     .await;
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -909,16 +911,20 @@ async fn interceptor_48_distinct_block_ids() {
     };
     interceptors::emit_before_step(&storage, &def, iid, &BlockId::new("a")).await;
     interceptors::emit_before_step(&storage, &def, iid, &BlockId::new("b")).await;
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:before:a"))
-        .await
-        .unwrap()
-        .is_some());
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:before:b"))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:before:a"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:before:b"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1001,16 +1007,20 @@ async fn interceptor_52_after_only() {
     };
     interceptors::emit_before_step(&storage, &def, iid, &BlockId::new("s")).await;
     interceptors::emit_after_step(&storage, &def, iid, &BlockId::new("s")).await;
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
-        .await
-        .unwrap()
-        .is_none());
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:after:s"))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:after:s"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -1201,16 +1211,20 @@ async fn interceptor_60_all_noop() {
     interceptors::emit_on_signal(&storage, &def, iid, &json!({})).await;
     interceptors::emit_on_complete(&storage, &def, iid).await;
     interceptors::emit_on_failure(&storage, &def, iid).await;
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
-        .await
-        .unwrap()
-        .is_none());
-    assert!(storage
-        .get_block_output(iid, &BlockId::new("_interceptor:on_complete"))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:before:s"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_block_output(iid, &BlockId::new("_interceptor:on_complete"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ================================================================

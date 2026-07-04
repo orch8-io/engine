@@ -1,8 +1,8 @@
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 
-use super::rows::AuditLogRow;
 use super::PostgresStorage;
+use super::rows::AuditLogRow;
 
 pub(super) async fn append(
     store: &PostgresStorage,

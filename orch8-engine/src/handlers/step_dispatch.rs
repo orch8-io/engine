@@ -273,8 +273,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use orch8_storage::{
-        sqlite::SqliteStorage, AdminStore, ExecutionTreeStore, InstanceStore, OutputStore,
-        WorkerStore,
+        AdminStore, ExecutionTreeStore, InstanceStore, OutputStore, WorkerStore,
+        sqlite::SqliteStorage,
     };
     use orch8_types::execution::{BlockType, ExecutionNode};
     use orch8_types::ids::*;

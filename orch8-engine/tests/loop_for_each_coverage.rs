@@ -12,13 +12,13 @@ use chrono::Utc;
 use serde_json::json;
 
 use orch8_engine::evaluator;
+use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::handlers::for_each::execute_for_each;
 use orch8_engine::handlers::loop_block::execute_loop;
 use orch8_engine::handlers::param_resolve::OutputsSnapshot;
-use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::{
-    sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore,
-    SequenceStore,
+    ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, SequenceStore,
+    sqlite::SqliteStorage,
 };
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::execution::{ExecutionNode, NodeState};
@@ -225,11 +225,13 @@ async fn loop_first_tick_activates_body() {
     assert_eq!(find_by_block(&tree, "body").state, NodeState::Running);
     // No iteration marker yet — one is only persisted after the body
     // goes terminal on a subsequent tick.
-    assert!(storage
-        .get_block_output(instance.id, &BlockId::new("lp"))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(instance.id, &BlockId::new("lp"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 // #150 — body completion increments the iteration marker.

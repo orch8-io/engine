@@ -4,8 +4,8 @@ use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::ids::{ExecutionNodeId, InstanceId};
 
-use super::rows::ExecutionNodeRow;
 use super::PostgresStorage;
+use super::rows::ExecutionNodeRow;
 
 pub(super) async fn create_node(
     store: &PostgresStorage,

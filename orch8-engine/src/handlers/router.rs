@@ -10,8 +10,8 @@ use orch8_types::sequence::RouterDef;
 use crate::error::EngineError;
 use crate::evaluator;
 use crate::externalized;
-use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
+use crate::handlers::param_resolve::OutputsSnapshot;
 
 /// Execute a router block: evaluate conditions and execute the matching branch.
 /// Non-matching branches are skipped. Returns `true` if more work.
@@ -139,12 +139,12 @@ fn select_branch(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod tests {
-    use super::{is_marker_present, select_branch, OutputsSnapshot};
+    use super::{OutputsSnapshot, is_marker_present, select_branch};
     use crate::expression::evaluate_condition;
     use crate::externalized;
     use chrono::Utc;
     use orch8_storage::{
-        sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore,
+        ExecutionTreeStore, InstanceStore, OutputStore, ResourceStore, sqlite::SqliteStorage,
     };
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};

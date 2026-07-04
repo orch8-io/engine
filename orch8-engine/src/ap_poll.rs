@@ -49,7 +49,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -489,10 +489,12 @@ mod tests {
         assert!(parse_config(&json!({"piece": "p", "trigger": "t", "interval_secs": 0})).is_err());
         assert!(parse_config(&json!({"piece": "p", "trigger": "t", "interval_secs": -5})).is_err());
         assert!(parse_config(&json!({"piece": "p", "trigger": "t", "cron": "nonsense"})).is_err());
-        assert!(parse_config(
-            &json!({"piece": "p", "trigger": "t", "cron": "* * * * *", "interval_secs": 5})
-        )
-        .is_err());
+        assert!(
+            parse_config(
+                &json!({"piece": "p", "trigger": "t", "cron": "* * * * *", "interval_secs": 5})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -552,10 +554,10 @@ mod tests {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            if header_end.is_none() {
-                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_end = Some(pos + 4);
-                }
+            if header_end.is_none()
+                && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(pos + 4);
             }
             if let Some(end) = header_end {
                 let headers = std::str::from_utf8(&buf[..end]).unwrap_or("");
@@ -604,10 +606,10 @@ mod tests {
                     .cloned()
                     .unwrap_or((500, "{}".into()));
                 let req = read_request(&mut stream).await;
-                if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n") {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&req[pos + 4..]) {
-                        bodies_srv.lock().await.push(v);
-                    }
+                if let Some(pos) = req.windows(4).position(|w| w == b"\r\n\r\n")
+                    && let Ok(v) = serde_json::from_slice::<Value>(&req[pos + 4..])
+                {
+                    bodies_srv.lock().await.push(v);
                 }
                 let reason = if status == 200 { "OK" } else { "Error" };
                 let resp = format!(
@@ -973,11 +975,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let state = state.expect("invalid config must be recorded as poll failure");
-        assert!(state
-            .last_error
-            .as_deref()
-            .unwrap()
-            .contains("invalid config"));
+        assert!(
+            state
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("invalid config")
+        );
 
         cancel.cancel();
         handle.await.unwrap();

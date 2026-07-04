@@ -21,12 +21,12 @@ use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use orch8_engine::stream_bus::{stream_bus, StreamEvent, Subscription};
+use orch8_engine::stream_bus::{StreamEvent, Subscription, stream_bus};
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[derive(Deserialize)]
 pub(crate) struct StreamQuery {

@@ -1443,12 +1443,16 @@ async fn t56_all_signal_types_persist_correctly() {
     assert!(pending.iter().any(|s| s.signal_type == SignalType::Pause));
     assert!(pending.iter().any(|s| s.signal_type == SignalType::Resume));
     assert!(pending.iter().any(|s| s.signal_type == SignalType::Cancel));
-    assert!(pending
-        .iter()
-        .any(|s| s.signal_type == SignalType::Custom("webhook_received".into())));
-    assert!(pending
-        .iter()
-        .any(|s| s.signal_type == SignalType::UpdateContext));
+    assert!(
+        pending
+            .iter()
+            .any(|s| s.signal_type == SignalType::Custom("webhook_received".into()))
+    );
+    assert!(
+        pending
+            .iter()
+            .any(|s| s.signal_type == SignalType::UpdateContext)
+    );
 
     // Verify payload roundtripped for custom and update signals
     let custom_fetched = pending

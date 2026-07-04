@@ -1,9 +1,9 @@
 //! Checkpoint save/list/latest/prune handlers.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use serde::Deserialize;
 use utoipa::ToSchema;
@@ -12,8 +12,8 @@ use uuid::Uuid;
 use orch8_types::ids::InstanceId;
 
 use super::types::CountResponse;
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[derive(Deserialize, ToSchema)]
 pub struct SaveCheckpointRequest {

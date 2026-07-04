@@ -394,12 +394,13 @@ async fn credential_refresh_token_encrypted_at_rest() {
     // At-rest: both fields encrypted.
     let raw = inner.get_credential("google-oauth").await.unwrap().unwrap();
     assert!(raw.value.expose().starts_with("enc:v1:"));
-    assert!(raw
-        .refresh_token
-        .as_ref()
-        .unwrap()
-        .expose()
-        .starts_with("enc:v1:"));
+    assert!(
+        raw.refresh_token
+            .as_ref()
+            .unwrap()
+            .expose()
+            .starts_with("enc:v1:")
+    );
 }
 
 /// `list_credentials` decrypts all returned credentials.

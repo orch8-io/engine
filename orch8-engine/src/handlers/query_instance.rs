@@ -22,13 +22,13 @@
 //!   is the identifier callers use to reason about workflow position.
 
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use orch8_types::error::StepError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 
-use super::util::{map_storage_err, parse_instance_id};
 use super::StepContext;
+use super::util::{map_storage_err, parse_instance_id};
 
 /// Node states that count as "done" for the purpose of `current_node`
 /// derivation.
@@ -102,7 +102,7 @@ pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, Ste
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::{sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, StorageBackend};
+    use orch8_storage::{ExecutionTreeStore, InstanceStore, StorageBackend, sqlite::SqliteStorage};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
         execution::{BlockType, ExecutionNode, NodeState},

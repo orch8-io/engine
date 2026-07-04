@@ -11,10 +11,10 @@ use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
+use crate::AppState;
 use crate::auth::TenantContext;
 use crate::error::ApiError;
 use crate::model_pricing;
-use crate::AppState;
 
 /// Round a USD amount to 6 decimal places for stable API output.
 fn round6(v: f64) -> f64 {

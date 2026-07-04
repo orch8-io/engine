@@ -60,10 +60,10 @@ pub fn enforce_tenant_access(
     resource_tenant_id: &TenantId,
     entity_label: &str,
 ) -> Result<(), ApiError> {
-    if let Some(axum::Extension(ctx)) = tenant_ctx {
-        if *resource_tenant_id != ctx.tenant_id {
-            return Err(ApiError::NotFound(entity_label.to_string()));
-        }
+    if let Some(axum::Extension(ctx)) = tenant_ctx
+        && *resource_tenant_id != ctx.tenant_id
+    {
+        return Err(ApiError::NotFound(entity_label.to_string()));
     }
     Ok(())
 }
@@ -142,10 +142,10 @@ pub async fn api_key_middleware(
                 .headers()
                 .get("x-tenant-id")
                 .and_then(|v| v.to_str().ok())
+                && !hdr.is_empty()
+                && hdr != record.tenant_id
             {
-                if !hdr.is_empty() && hdr != record.tenant_id {
-                    return Err(StatusCode::FORBIDDEN);
-                }
+                return Err(StatusCode::FORBIDDEN);
             }
             request.extensions_mut().insert(TenantContext {
                 tenant_id: TenantId::unchecked(record.tenant_id.clone()),

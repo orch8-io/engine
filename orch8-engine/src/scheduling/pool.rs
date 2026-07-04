@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
-use rand::prelude::IndexedRandom;
 use rand::Rng;
+use rand::prelude::IndexedRandom;
 
 use orch8_types::pool::{PoolAssignment, PoolResource, RotationStrategy};
 
@@ -156,10 +156,9 @@ mod tests {
         for _ in 0..1000 {
             if let PoolAssignment::Assigned(k) =
                 select_resource(&resources, RotationStrategy::Weighted, &mut idx, today())
+                && k.into_string() == "heavy"
             {
-                if k.into_string() == "heavy" {
-                    heavy_count += 1;
-                }
+                heavy_count += 1;
             }
         }
         // Heavy should get ~99% of assignments

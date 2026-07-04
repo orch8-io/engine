@@ -8,7 +8,7 @@
 //!
 //! Returns: `{ "injected_count": N, "position": P }`
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use orch8_types::error::StepError;
 

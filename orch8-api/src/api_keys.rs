@@ -9,19 +9,19 @@
 //! The plaintext secret is returned **once**, in the create response. It is
 //! never stored (only its SHA-256 hash is) and is unrecoverable afterwards.
 
+use axum::Router;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use orch8_types::ids::TenantId;
 
+use crate::AppState;
 use crate::auth::OptionalAdmin;
 use crate::error::ApiError;
-use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

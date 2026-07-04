@@ -175,10 +175,10 @@ impl MobileNotifier {
                 .ok()
                 .and_then(|seq| {
                     seq.blocks.iter().find_map(|b| {
-                        if let orch8_types::sequence::BlockDefinition::Step(s) = b {
-                            if s.id == *step_id {
-                                return Some(s.handler.clone());
-                            }
+                        if let orch8_types::sequence::BlockDefinition::Step(s) = b
+                            && s.id == *step_id
+                        {
+                            return Some(s.handler.clone());
                         }
                         None
                     })

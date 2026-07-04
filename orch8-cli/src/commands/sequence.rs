@@ -5,7 +5,7 @@ use clap::Subcommand;
 use reqwest::Client;
 use uuid::Uuid;
 
-use crate::{print_response, OutputFormat};
+use crate::{OutputFormat, print_response};
 
 #[derive(Subcommand)]
 pub enum SequenceCmd {
@@ -59,10 +59,10 @@ fn content_fingerprint(v: &serde_json::Value) -> serde_json::Value {
         "on_failure",
         "on_cancel",
     ] {
-        if let Some(val) = v.get(key) {
-            if !val.is_null() {
-                obj.insert(key.to_string(), val.clone());
-            }
+        if let Some(val) = v.get(key)
+            && !val.is_null()
+        {
+            obj.insert(key.to_string(), val.clone());
         }
     }
     serde_json::Value::Object(obj)

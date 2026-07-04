@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::debug;
 
 use orch8_types::error::StepError;
@@ -371,7 +371,7 @@ fn interpret_tool_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;
@@ -571,7 +571,7 @@ mod net_tests {
     use tokio::net::TcpListener;
 
     use orch8_storage::artifacts::ObjectArtifactStore;
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
 

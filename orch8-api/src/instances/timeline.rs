@@ -12,9 +12,9 @@
 //! retries and crash markers, unlike `GET /instances/{id}/outputs` which
 //! strips them.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -24,8 +24,8 @@ use orch8_types::context::ExecutionContext;
 use orch8_types::ids::{InstanceId, SequenceId};
 use orch8_types::instance::InstanceState;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 /// Default page size for timeline entries. Outputs can be large, so the
 /// endpoint never returns the unbounded history in one response.
