@@ -285,9 +285,26 @@ async fn filter_by_concurrency_pg(
         return Ok(candidates);
     }
 
+    // Take a per-key advisory lock (scoped to this transaction; released
+    // automatically on commit/rollback) *before* counting running instances.
+    // Without this, two nodes claiming disjoint scheduled instances that
+    // share a `concurrency_key` can each read the same "N already running"
+    // count inside their own transaction and both admit up to `max_concurrency`
+    // slots' worth, overshooting the cap (e.g. max=5, 3 running, two nodes
+    // each see 2 free slots and admit 2 → 7 running). Keys are locked in
+    // sorted order so two transactions contending for an overlapping key set
+    // always acquire locks in the same relative order, ruling out deadlock.
+    let mut keys: Vec<&str> = keyed.keys().copied().collect();
+    keys.sort_unstable();
+    for key in &keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(*key)
+            .execute(&mut **tx)
+            .await?;
+    }
+
     // Batch-fetch running counts for all concurrency keys in a single query
     // instead of N separate COUNT queries (one per key).
-    let keys: Vec<&str> = keyed.keys().copied().collect();
     let rows = sqlx::query(
         "SELECT concurrency_key, COUNT(*) as cnt FROM task_instances \
          WHERE concurrency_key = ANY($1) AND state = 'running' \

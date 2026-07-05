@@ -300,7 +300,7 @@ CREATE INDEX idx_rate_limits_key ON rate_limits (tenant_id, resource_key);
 
 **Idempotency key**: Prevent duplicate instance creation. Same key returns existing instance.
 
-**Rate limiting**: Per-resource sliding window. Overages are deferred (not failed).
+**Rate limiting**: Per-resource fixed window (not sliding — a burst can admit up to 2x `max_count` across a window boundary). Overages are deferred (not failed).
 
 ---
 

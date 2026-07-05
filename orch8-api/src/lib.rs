@@ -80,6 +80,12 @@ pub struct AppState {
     /// Names of handlers the engine executes in-process. Served by
     /// `GET /handlers` alongside externally-registered handler names.
     pub builtin_handlers: Arc<Vec<String>>,
+    /// Liveness flag for the engine tick loop. Starts `true`; the engine task
+    /// flips it to `false` if `run()` exits (error or clean stop). `/health/ready`
+    /// reports 503 when it is `false` so a load balancer stops routing traffic to
+    /// a server whose scheduler has died — otherwise the process would keep
+    /// answering HTTP while executing nothing.
+    pub engine_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Compute the built-in handler name list for [`AppState::builtin_handlers`].

@@ -35,15 +35,30 @@ pub(super) async fn create(
 
 pub(super) async fn get(
     store: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
     id: &str,
 ) -> Result<Option<CredentialDef>, StorageError> {
-    let row: Option<CredentialRow> = sqlx::query_as(
-        r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-          FROM credentials WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(&store.pool)
-    .await?;
+    let row: Option<CredentialRow> = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials WHERE id = ?1 AND (tenant_id = ?2 OR tenant_id = '')",
+            )
+            .bind(id)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials WHERE id = ?1",
+            )
+            .bind(id)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(CredentialRow::into_credential).transpose()
 }
 

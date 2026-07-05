@@ -49,8 +49,8 @@ impl crate::MobileSyncStore for PostgresStorage {
             String,
         )> = sqlx::query_as(
             "SELECT device_id, tenant_id, push_token, platform, app_version, active,
-                        to_char(last_sync_at, 'YYYY-MM-DD HH24:MI:SS') as last_sync_at,
-                        to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS') as registered_at
+                        to_char(last_sync_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as last_sync_at,
+                        to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as registered_at
                  FROM mobile_devices WHERE device_id = $1",
         )
         .bind(device_id)
@@ -108,8 +108,8 @@ impl crate::MobileSyncStore for PostgresStorage {
         )> = if let Some(tid) = tenant_id {
             sqlx::query_as(
                 "SELECT device_id, tenant_id, push_token, platform, app_version, active,
-                        to_char(last_sync_at, 'YYYY-MM-DD HH24:MI:SS'),
-                        to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS')
+                        to_char(last_sync_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                        to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
                  FROM mobile_devices WHERE tenant_id = $1
                  ORDER BY registered_at DESC LIMIT $2",
             )
@@ -121,8 +121,8 @@ impl crate::MobileSyncStore for PostgresStorage {
         } else {
             sqlx::query_as(
                 "SELECT device_id, tenant_id, push_token, platform, app_version, active,
-                        to_char(last_sync_at, 'YYYY-MM-DD HH24:MI:SS'),
-                        to_char(registered_at, 'YYYY-MM-DD HH24:MI:SS')
+                        to_char(last_sync_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                        to_char(registered_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
                  FROM mobile_devices
                  ORDER BY registered_at DESC LIMIT $1",
             )
@@ -215,7 +215,7 @@ impl crate::MobileSyncStore for PostgresStorage {
         limit: u32,
     ) -> Result<Vec<crate::MobileInstanceStatus>, StorageError> {
         let mut sql = String::from(
-            "SELECT s.device_id, s.instance_id, s.sequence_name, s.state, s.current_step, s.handler, s.context_summary, s.steps, to_char(s.updated_at, 'YYYY-MM-DD HH24:MI:SS') as updated_at
+            "SELECT s.device_id, s.instance_id, s.sequence_name, s.state, s.current_step, s.handler, s.context_summary, s.steps, to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as updated_at
              FROM mobile_instance_status s",
         );
         let mut conditions = Vec::new();
@@ -328,8 +328,8 @@ impl crate::MobileSyncStore for PostgresStorage {
         let row: Option<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, String, Option<String>, String, Option<String>)> =
             sqlx::query_as(
                 "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution,
-                        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
-                        to_char(resolved_at, 'YYYY-MM-DD HH24:MI:SS')
+                        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                        to_char(resolved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
                  FROM mobile_approval_requests WHERE id = $1",
             )
             .bind(id)
@@ -404,8 +404,8 @@ impl crate::MobileSyncStore for PostgresStorage {
     ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
         let mut sql = String::from(
             "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution,
-                    to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
-                    to_char(resolved_at, 'YYYY-MM-DD HH24:MI:SS')
+                    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                    to_char(resolved_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
              FROM mobile_approval_requests WHERE TRUE",
         );
         let mut param_idx: u32 = 1;
@@ -534,8 +534,8 @@ impl crate::MobileSyncStore for PostgresStorage {
     ) -> Result<Vec<crate::MobileCommand>, StorageError> {
         let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
             "SELECT id, device_id, command_type, payload,
-                    to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
-                    to_char(acked_at, 'YYYY-MM-DD HH24:MI:SS')
+                    to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),
+                    to_char(acked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')
              FROM mobile_commands
              WHERE device_id = $1 AND acked_at IS NULL
              ORDER BY created_at ASC LIMIT $2",

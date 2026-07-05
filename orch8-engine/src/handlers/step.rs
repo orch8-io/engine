@@ -65,6 +65,12 @@ pub async fn execute_step_dry(
         && let Some(existing) = storage
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
+        // The in-progress sentinel now carries the real attempt number, so it
+        // could falsely match the memoization check below — but it is NOT a
+        // real output. Skip it so a crashed-mid-step block re-executes rather
+        // than returning the sentinel as a cached result.
+        && existing.output_ref.as_deref()
+            != Some(crate::handlers::param_resolve::IN_PROGRESS_SENTINEL)
     {
         // Ref#4: attempts past i16::MAX can no longer be represented in
         // the block_outputs.attempt column. Refuse to memoize rather than
@@ -235,6 +241,12 @@ pub async fn execute_step(
         && let Some(existing) = storage
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
+        // The in-progress sentinel now carries the real attempt number, so it
+        // could falsely match the memoization check below — but it is NOT a
+        // real output. Skip it so a crashed-mid-step block re-executes rather
+        // than returning the sentinel as a cached result.
+        && existing.output_ref.as_deref()
+            != Some(crate::handlers::param_resolve::IN_PROGRESS_SENTINEL)
     {
         // Ref#4: attempts past i16::MAX can no longer be represented in
         // the block_outputs.attempt column. Refuse to memoize rather than

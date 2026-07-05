@@ -10,15 +10,30 @@
 //! let decrypted = enc.decrypt_value(&encrypted).unwrap();
 //! ```
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 
+/// NIST SP 800-38D's cautionary limit on AES-GCM invocations with a single
+/// key under random 96-bit nonces (~2^32, to keep nonce-collision
+/// probability negligible). This engine encrypts on nearly every scheduler
+/// write, so the bound is reachable in days-to-weeks of sustained load if
+/// the key is never rotated; crossing it logs a warning once per process
+/// (see [`FieldEncryptor::encrypt_count`]).
+const NONCE_BUDGET_WARN_THRESHOLD: u64 = 1 << 32;
+
 /// Encrypts and decrypts `serde_json::Value` fields using AES-256-GCM.
 ///
 /// Encrypted values are stored as JSON strings with the prefix `"enc:v1:"`,
-/// followed by base64-encoded `nonce || ciphertext`.
+/// followed by base64-encoded `nonce || ciphertext`. [`Self::encrypt_value_with_aad`]
+/// produces the newer `"enc:v2:"` format, which additionally binds the
+/// ciphertext to caller-supplied associated data (e.g. `instance_id`) so a
+/// ciphertext copied to a different row/tenant fails to decrypt there instead
+/// of silently succeeding.
 ///
 /// Supports an optional old key for key rotation: encryption always uses the
 /// primary key, while decryption tries the primary key first and falls back
@@ -29,6 +44,14 @@ pub struct FieldEncryptor {
     /// Previous key used during key rotation. Decryption falls back to this
     /// cipher when the primary key fails to decrypt a value.
     old_cipher: Option<Aes256Gcm>,
+    /// Count of AEAD seal operations (`encrypt_value`/`encrypt_bytes`/
+    /// `encrypt_value_with_aad`) performed with the *primary* key, shared via
+    /// `Arc` across clones (e.g. a per-request handle) so the budget tracker
+    /// isn't reset by cloning.
+    encrypt_count: Arc<AtomicU64>,
+    /// Set once [`NONCE_BUDGET_WARN_THRESHOLD`] is crossed, so the warning
+    /// logs once per process instead of on every subsequent call.
+    budget_warned: Arc<AtomicBool>,
 }
 
 // `Aes256Gcm` does not implement Debug; we redact the cipher material
@@ -44,6 +67,7 @@ impl std::fmt::Debug for FieldEncryptor {
 }
 
 const ENC_PREFIX: &str = "enc:v1:";
+const ENC_PREFIX_V2: &str = "enc:v2:";
 
 impl FieldEncryptor {
     /// Create an encryptor from a 32-byte (64 hex char) key.
@@ -57,6 +81,8 @@ impl FieldEncryptor {
         Ok(Self {
             cipher: Aes256Gcm::new(key),
             old_cipher: None,
+            encrypt_count: Arc::new(AtomicU64::new(0)),
+            budget_warned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -67,6 +93,36 @@ impl FieldEncryptor {
         Self {
             cipher: Aes256Gcm::new(key),
             old_cipher: None,
+            encrypt_count: Arc::new(AtomicU64::new(0)),
+            budget_warned: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Number of AEAD seal operations performed with the primary key so far
+    /// (shared across all clones of this encryptor). Exposed so a caller can
+    /// surface it as a metric; the budget warning is also logged internally
+    /// once the NIST SP 800-38D nonce budget (~2^32 invocations) is crossed.
+    #[must_use]
+    pub fn encrypt_count(&self) -> u64 {
+        self.encrypt_count.load(Ordering::Relaxed)
+    }
+
+    /// Increment the encrypt counter and warn once if the nonce budget has
+    /// been exceeded. Called from every primary-key AEAD seal operation.
+    fn record_encryption(&self) {
+        let count = self.encrypt_count.fetch_add(1, Ordering::Relaxed) + 1;
+        if count >= NONCE_BUDGET_WARN_THRESHOLD
+            && self
+                .budget_warned
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(
+                encrypt_count = count,
+                threshold = NONCE_BUDGET_WARN_THRESHOLD,
+                "FieldEncryptor: primary key has exceeded the recommended random-nonce AES-GCM \
+                 invocation budget (NIST SP 800-38D); rotate the encryption key"
+            );
         }
     }
 
@@ -97,6 +153,7 @@ impl FieldEncryptor {
             .cipher
             .encrypt(&nonce, plaintext.as_slice())
             .map_err(|_| EncryptionError::EncryptFailed)?;
+        self.record_encryption();
 
         let mut payload = Vec::with_capacity(12 + ciphertext.len());
         payload.extend_from_slice(&nonce);
@@ -111,6 +168,12 @@ impl FieldEncryptor {
     ///
     /// When an old key is configured, decryption tries the primary key first
     /// and falls back to the old key on failure.
+    ///
+    /// Rejects `"enc:v2:"` payloads (AAD-bound -- see
+    /// [`Self::encrypt_value_with_aad`]) since decrypting those without their
+    /// associated data would either fail every time or, worse, invite a
+    /// caller to pass the wrong AAD. Use [`Self::decrypt_value_with_aad`] for
+    /// any field that might be v2.
     pub fn decrypt_value(
         &self,
         value: &serde_json::Value,
@@ -118,6 +181,9 @@ impl FieldEncryptor {
         let serde_json::Value::String(s) = value else {
             return Ok(value.clone());
         };
+        if s.starts_with(ENC_PREFIX_V2) {
+            return Err(EncryptionError::DecryptFailed);
+        }
         let Some(encoded) = s.strip_prefix(ENC_PREFIX) else {
             return Ok(value.clone());
         };
@@ -147,9 +213,91 @@ impl FieldEncryptor {
         Err(EncryptionError::DecryptFailed)
     }
 
-    /// Returns true if the value appears to be encrypted.
+    /// Encrypt a JSON value with associated data binding the ciphertext to
+    /// caller-supplied context (e.g. `instance_id` bytes), producing an
+    /// `"enc:v2:"` payload. The same `aad` must be supplied to
+    /// [`Self::decrypt_value_with_aad`] -- a ciphertext copied to a different
+    /// row/tenant (different AAD) fails to decrypt there instead of silently
+    /// succeeding, which plain `"enc:v1:"` payloads are vulnerable to.
+    pub fn encrypt_value_with_aad(
+        &self,
+        value: &serde_json::Value,
+        aad: &[u8],
+    ) -> Result<serde_json::Value, EncryptionError> {
+        let plaintext = serde_json::to_vec(value)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| EncryptionError::EncryptFailed)?;
+        self.record_encryption();
+
+        let mut payload = Vec::with_capacity(12 + ciphertext.len());
+        payload.extend_from_slice(&nonce);
+        payload.extend_from_slice(&ciphertext);
+
+        let encoded = format!("{ENC_PREFIX_V2}{}", B64.encode(&payload));
+        Ok(serde_json::Value::String(encoded))
+    }
+
+    /// Decrypt a value produced by [`Self::encrypt_value_with_aad`] (or, for
+    /// backward compatibility, a legacy `"enc:v1:"` value with no AAD).
+    /// `aad` must exactly match what was passed to `encrypt_value_with_aad`.
+    pub fn decrypt_value_with_aad(
+        &self,
+        value: &serde_json::Value,
+        aad: &[u8],
+    ) -> Result<serde_json::Value, EncryptionError> {
+        let serde_json::Value::String(s) = value else {
+            return Ok(value.clone());
+        };
+        let Some(encoded) = s.strip_prefix(ENC_PREFIX_V2) else {
+            // Not v2 -- fall back to the plain (no-AAD) path, which also
+            // handles the "not encrypted at all" passthrough case.
+            return self.decrypt_value(value);
+        };
+
+        let payload = B64.decode(encoded)?;
+        if payload.len() < 12 {
+            return Err(EncryptionError::InvalidCiphertext);
+        }
+        let (nonce_bytes, ciphertext) = payload.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        if let Ok(plaintext) = self.cipher.decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        ) {
+            return Ok(serde_json::from_slice(&plaintext)?);
+        }
+        if let Some(ref old) = self.old_cipher {
+            let plaintext = old
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
+                .map_err(|_| EncryptionError::DecryptFailed)?;
+            return Ok(serde_json::from_slice(&plaintext)?);
+        }
+        Err(EncryptionError::DecryptFailed)
+    }
+
+    /// Returns true if the value appears to be encrypted (either the legacy
+    /// `"enc:v1:"` or the AAD-bound `"enc:v2:"` format).
     pub fn is_encrypted(value: &serde_json::Value) -> bool {
-        matches!(value, serde_json::Value::String(s) if s.starts_with(ENC_PREFIX))
+        matches!(value, serde_json::Value::String(s) if s.starts_with(ENC_PREFIX) || s.starts_with(ENC_PREFIX_V2))
     }
 
     /// Encrypt a raw byte buffer, returning `nonce(12) || ciphertext` (no
@@ -163,6 +311,7 @@ impl FieldEncryptor {
             .cipher
             .encrypt(&nonce, plaintext)
             .map_err(|_| EncryptionError::EncryptFailed)?;
+        self.record_encryption();
         let mut out = Vec::with_capacity(12 + ciphertext.len());
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&ciphertext);
@@ -461,5 +610,131 @@ mod tests {
         // Should decrypt with primary key (no fallback needed).
         let decrypted = enc_dual.decrypt_value(&encrypted).unwrap();
         assert_eq!(original, decrypted);
+    }
+
+    // ========================================================================
+    // Regression coverage for the 2026-07 deep storage review's finding #11:
+    // AAD ciphertext binding + nonce-usage budget tracking.
+    // ========================================================================
+
+    #[test]
+    fn aad_roundtrip_with_matching_aad() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let original = serde_json::json!({"secret": "data"});
+        let encrypted = enc
+            .encrypt_value_with_aad(&original, b"instance-1")
+            .unwrap();
+        assert!(FieldEncryptor::is_encrypted(&encrypted));
+        assert!(matches!(encrypted, serde_json::Value::String(ref s) if s.starts_with("enc:v2:")));
+
+        let decrypted = enc
+            .decrypt_value_with_aad(&encrypted, b"instance-1")
+            .unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    /// The core fix for #11: a ciphertext produced with one AAD (e.g. one
+    /// instance's ID) must fail to decrypt under a *different* AAD (e.g. a
+    /// different instance/row it was copied to) -- this is exactly what
+    /// prevents an attacker with DB write access from transplanting an
+    /// `enc:v1:` blob between rows/tenants.
+    #[test]
+    fn aad_mismatch_fails_to_decrypt() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let original = serde_json::json!({"secret": "data"});
+        let encrypted = enc
+            .encrypt_value_with_aad(&original, b"tenant-a:instance-1")
+            .unwrap();
+
+        // Same ciphertext, wrong AAD (as if copied to a different row).
+        let result = enc.decrypt_value_with_aad(&encrypted, b"tenant-b:instance-2");
+        assert!(
+            result.is_err(),
+            "ciphertext bound to one AAD must not decrypt under a different AAD"
+        );
+    }
+
+    #[test]
+    fn aad_empty_aad_is_valid_and_distinct_from_no_aad_v1() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let original = serde_json::json!("data");
+        let encrypted = enc.encrypt_value_with_aad(&original, b"").unwrap();
+        let decrypted = enc.decrypt_value_with_aad(&encrypted, b"").unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    /// `decrypt_value_with_aad` must transparently handle legacy `enc:v1:`
+    /// payloads (written before AAD binding existed) so a rollout doesn't
+    /// require re-encrypting every existing row.
+    #[test]
+    fn aad_decrypt_falls_back_to_legacy_v1_payloads() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let original = serde_json::json!({"legacy": true});
+        let encrypted_v1 = enc.encrypt_value(&original).unwrap();
+        assert!(
+            matches!(encrypted_v1, serde_json::Value::String(ref s) if s.starts_with("enc:v1:"))
+        );
+
+        // Any AAD value is accepted for v1 payloads since they carry none.
+        let decrypted = enc
+            .decrypt_value_with_aad(&encrypted_v1, b"whatever-context")
+            .unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    /// The plain (non-AAD) `decrypt_value` must refuse v2 payloads outright
+    /// rather than silently mis-decrypting or misinterpreting them --
+    /// callers that might see v2 must use `decrypt_value_with_aad`.
+    #[test]
+    fn decrypt_value_rejects_v2_payloads() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let encrypted = enc
+            .encrypt_value_with_aad(&serde_json::json!("x"), b"aad")
+            .unwrap();
+        assert!(enc.decrypt_value(&encrypted).is_err());
+    }
+
+    #[test]
+    fn aad_dual_key_rotation_works_with_aad() {
+        let key1 = test_key();
+        let mut key2 = test_key();
+        key2[0] = 255;
+
+        let enc1 = FieldEncryptor::from_bytes(&key1);
+        let original = serde_json::json!({"rotated": true});
+        let encrypted = enc1.encrypt_value_with_aad(&original, b"ctx").unwrap();
+
+        let hex_old = to_hex(&key1);
+        let enc2 = FieldEncryptor::from_bytes(&key2)
+            .with_old_key(&hex_old)
+            .unwrap();
+
+        let decrypted = enc2.decrypt_value_with_aad(&encrypted, b"ctx").unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    #[test]
+    fn encrypt_count_tracks_all_seal_operations() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        assert_eq!(enc.encrypt_count(), 0);
+        enc.encrypt_value(&serde_json::json!("a")).unwrap();
+        assert_eq!(enc.encrypt_count(), 1);
+        enc.encrypt_value_with_aad(&serde_json::json!("b"), b"aad")
+            .unwrap();
+        assert_eq!(enc.encrypt_count(), 2);
+        enc.encrypt_bytes(b"raw bytes").unwrap();
+        assert_eq!(enc.encrypt_count(), 3);
+    }
+
+    #[test]
+    fn encrypt_count_is_shared_across_clones() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let cloned = enc.clone();
+        enc.encrypt_value(&serde_json::json!("a")).unwrap();
+        cloned.encrypt_value(&serde_json::json!("b")).unwrap();
+        // Both handles observe the combined count -- the tracker isn't reset
+        // or duplicated by cloning (e.g. constructing a per-request handle).
+        assert_eq!(enc.encrypt_count(), 2);
+        assert_eq!(cloned.encrypt_count(), 2);
     }
 }

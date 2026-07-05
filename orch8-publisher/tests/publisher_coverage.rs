@@ -311,10 +311,16 @@ fn test_15_signature_verifies_with_removed_entries() {
 // --- 16-20: Manifest version and generated_at ---
 
 #[test]
-fn test_16_manifest_version_is_one() {
+fn test_16_manifest_version_is_monotonic_timestamp() {
     let key = test_key();
     let signed = generate_manifest(&key, vec![], vec![], vec![]);
-    assert_eq!(signed.body.manifest_version, 1);
+    // Version is now a monotonic epoch-millis stamp (replay protection), not a
+    // hardcoded 1. It must equal generated_at and be a positive, recent value.
+    assert_eq!(
+        signed.body.manifest_version,
+        signed.body.generated_at.timestamp_millis()
+    );
+    assert!(signed.body.manifest_version > 0);
 }
 
 #[test]
@@ -331,7 +337,10 @@ fn test_17_generated_at_is_recent() {
 fn test_18_manifest_version_in_canonical_json() {
     let key = test_key();
     let signed = generate_manifest(&key, vec![], vec![], vec![]);
-    assert!(signed.canonical_json.contains("\"manifest_version\":1"));
+    assert!(signed.canonical_json.contains(&format!(
+        "\"manifest_version\":{}",
+        signed.body.manifest_version
+    )));
 }
 
 #[test]
@@ -351,7 +360,7 @@ fn test_20_manifest_body_deserializes_correctly() {
         vec![],
     );
     let parsed: ManifestBody = serde_json::from_str(&signed.canonical_json).unwrap();
-    assert_eq!(parsed.manifest_version, 1);
+    assert_eq!(parsed.manifest_version, signed.body.manifest_version);
     assert_eq!(parsed.sequences.len(), 1);
 }
 

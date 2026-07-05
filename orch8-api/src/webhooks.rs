@@ -99,9 +99,13 @@ pub(crate) async fn public_webhook(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, ApiError> {
+    // Unscoped: this is the public, unauthenticated webhook endpoint --
+    // resolving *which* tenant owns `slug` is this lookup's job, since the
+    // caller has no tenant context to scope by. The `x-trigger-secret` /
+    // trigger-type checks below are the real authorization boundary here.
     let trigger = state
         .storage
-        .get_trigger(&slug)
+        .get_trigger(None, &slug)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook '{slug}'")))?;

@@ -300,6 +300,11 @@ impl MobileEngine {
         let sync_reporter = if config.sync_url.is_empty() {
             None
         } else {
+            // The sync channel carries server→device commands (approve/cancel/
+            // start). It is authenticated by transport only, so plaintext http
+            // would let a MITM inject commands. Require https up front and fail
+            // engine construction rather than silently downgrading trust.
+            crate::validate_https_url(&config.sync_url)?;
             let reporter = Arc::new(sync_reporter::SyncReporter::new(
                 sqlite.pool().clone(),
                 config.sync_url.clone(),

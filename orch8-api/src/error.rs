@@ -54,8 +54,13 @@ impl ApiError {
                 Self::AlreadyExists(format!("{e} {id} is in a terminal state"))
             }
             // Connection drops and transient external-backend (object store)
-            // failures are both 503 — retryable, not a server bug.
-            StorageError::Connection(msg) | StorageError::Backend(msg) => Self::Unavailable(msg),
+            // failures are both 503 — retryable, not a server bug. The raw
+            // driver/DSN text can name hosts, schemas, and topology, so it is
+            // logged server-side and the client sees only a generic message.
+            StorageError::Connection(msg) | StorageError::Backend(msg) => {
+                tracing::warn!(entity, detail = %msg, "storage backend unavailable");
+                Self::Unavailable("storage backend temporarily unavailable".into())
+            }
             StorageError::PoolExhausted => Self::Unavailable("pool exhausted".into()),
             other => Self::Internal(format!("{entity}: {other}")),
         }

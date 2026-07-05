@@ -102,11 +102,16 @@ async fn main() -> anyhow::Result<()> {
     // worker-task HTTP handlers (`/workers/tasks/{id}/complete` and `/fail`)
     // can roll external-worker success/failure into the same registry the
     // scheduler and inspection API share.
+    // Shared engine-liveness flag: `/health/ready` reads it, the engine task
+    // clears it on exit so the server stops reporting ready if the scheduler dies.
+    let engine_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     let app_state = build_app_state(
         storage.clone(),
         &config,
         shutdown_token.clone(),
         cb_registry.clone(),
+        engine_ready.clone(),
     );
     let cors = build_cors_layer(&config.api.cors_origins);
     let require_tenant = config.api.require_tenant_header;
@@ -145,20 +150,26 @@ async fn main() -> anyhow::Result<()> {
     let mut app = build_router(app_state.clone())
         .nest(API_V1_PREFIX, cb_routes.clone())
         .merge(cb_routes)
+        // Metrics and Swagger UI must carry the same API key as the rest of the
+        // management surface. A tower `.layer()` only wraps routes registered
+        // *before* it, so these are merged here — ABOVE the auth layers — to be
+        // covered by them. (Previously they were merged below the layers and
+        // were therefore publicly reachable despite the comment claiming
+        // otherwise.) A Prometheus scraper / docs viewer must now present
+        // `x-api-key` (and, when ORCH8_REQUIRE_TENANT_HEADER is set, an
+        // `x-tenant-id`).
+        .merge(orch8_api::metrics::routes().with_state(metrics_state))
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::tenant_middleware(require_tenant, req, next)
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(auth_storage.clone(), root_key_digest, req, next)
         }))
-        // Metrics and Swagger UI are mounted *after* auth so they are not
-        // publicly reachable. Internal scraping / docs access should carry
-        // the same API key as the rest of the management surface.
-        .merge(orch8_api::metrics::routes().with_state(metrics_state))
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        // Health probes + inbound webhooks stay public: merged *after* the auth
+        // layers so k8s/LB liveness checks and third-party webhook callers keep
+        // working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
         .merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()))
-        // Health probes live outside the auth layer so k8s/LB liveness checks
-        // keep working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
         .merge(orch8_api::health::routes().with_state(app_state))
         .layer(axum::middleware::from_fn(
             orch8_api::request_id::request_id_middleware,
@@ -199,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         &config,
         shutdown_token.clone(),
         cb_registry.clone(),
+        engine_ready.clone(),
     );
 
     tracing::info!("Engine ready");
@@ -227,6 +239,7 @@ fn build_app_state(
     config: &EngineConfig,
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> AppState {
     let mobile_sync_enabled =
         std::env::var("ORCH8_MOBILE_SYNC_ENABLED").is_ok_and(|v| v == "true" || v == "1");
@@ -250,6 +263,7 @@ fn build_app_state(
         push_provider,
         mobile_sync_enabled,
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
+        engine_ready,
     }
 }
 
@@ -547,6 +561,7 @@ fn spawn_engine(
     config: &EngineConfig,
     shutdown: CancellationToken,
     cb_registry: Arc<CircuitBreakerRegistry>,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     let mut handlers = HandlerRegistry::new();
     orch8_engine::handlers::builtin::register_builtins(&mut handlers);
@@ -558,7 +573,12 @@ fn spawn_engine(
     let engine = Engine::new(storage, config.engine.clone(), handlers, shutdown);
 
     tokio::spawn(async move {
-        if let Err(e) = engine.run().await {
+        let result = engine.run().await;
+        // The tick loop has exited. Whether by error or clean stop, the
+        // scheduler is no longer executing work — clear the readiness flag so
+        // `/health/ready` returns 503 and the load balancer drains this node.
+        engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Err(e) = result {
             tracing::error!(error = %e, "Engine tick loop exited with error");
         }
     })

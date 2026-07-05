@@ -29,15 +29,30 @@ pub(super) async fn create(store: &SqliteStorage, plugin: &PluginDef) -> Result<
 
 pub(super) async fn get(
     store: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
     name: &str,
 ) -> Result<Option<PluginDef>, StorageError> {
-    let row: Option<PluginRow> = sqlx::query_as(
-        r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-          FROM plugins WHERE name = ?1",
-    )
-    .bind(name)
-    .fetch_optional(&store.pool)
-    .await?;
+    let row: Option<PluginRow> = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as(
+                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+                  FROM plugins WHERE name = ?1 AND (tenant_id = ?2 OR tenant_id = '')",
+            )
+            .bind(name)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+                  FROM plugins WHERE name = ?1",
+            )
+            .bind(name)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(PluginRow::into_plugin).transpose()
 }
 

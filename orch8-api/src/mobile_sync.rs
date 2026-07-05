@@ -110,6 +110,26 @@ async fn handle_sync(
 
     let storage = &state.storage;
 
+    // Verify the caller owns the target device BEFORE touching any
+    // device-scoped state. Without this a tenant-A key could pull tenant-B's
+    // pending command queue — whose `step_result` payloads carry resolved
+    // credentials — and ack/delete B's commands. Same fall-open convention as
+    // `create_command`: an empty tenant (insecure mode / root key without
+    // X-Tenant-Id) skips the scope check.
+    if !tenant_id.is_empty() {
+        let device = storage
+            .get_mobile_device(&req.device_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?;
+        let owned = device.is_some_and(|d| d.tenant_id == tenant_id);
+        if !owned {
+            return Err(ApiError::NotFound(format!(
+                "device {} not found",
+                req.device_id
+            )));
+        }
+    }
+
     for update in &req.status_updates {
         let status = MobileInstanceStatus {
             device_id: req.device_id.clone(),
@@ -294,6 +314,27 @@ async fn register_device(
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
         .unwrap_or_default();
+
+    // `register_mobile_device` upserts on the `device_id` primary key, so
+    // without an owner check tenant A could re-register tenant B's device_id
+    // and hijack its push token / notification stream. Reject when the id is
+    // already claimed by a different tenant. Fall open only in insecure/root
+    // mode (empty tenant), matching the rest of this module.
+    if !tenant_id.is_empty() {
+        let existing = state
+            .storage
+            .get_mobile_device(&req.device_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?;
+        if let Some(existing) = existing
+            && existing.tenant_id != tenant_id
+        {
+            return Err(ApiError::Conflict(format!(
+                "device {} is already registered to another tenant",
+                req.device_id
+            )));
+        }
+    }
 
     let device = MobileDevice {
         device_id: req.device_id.clone(),

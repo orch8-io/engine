@@ -1224,6 +1224,81 @@ async fn rate_limit_check_and_exceed() {
     assert!(matches!(check, RateLimitCheck::Exceeded { .. }));
 }
 
+/// Regression test for the deep storage review's rate-limit finding: an
+/// error partway through `check_rate_limit`'s transaction body must roll
+/// back before the connection returns to the pool, or the `in_memory()`
+/// single-connection pool wedges permanently (every subsequent raw `BEGIN`
+/// fails with "cannot start a transaction within a transaction"). We force
+/// the error deterministically by corrupting `window_start` to an
+/// unparseable timestamp so the fallback `SELECT` + `parse_ts` path fails
+/// after the `UPDATE` has already run (i.e. the exact point that used to
+/// leak an open transaction).
+#[tokio::test]
+async fn check_rate_limit_rolls_back_on_error_instead_of_wedging_pool() {
+    let s = store().await;
+    let now = Utc::now();
+    let tenant = TenantId::unchecked("t_rl_err");
+    let key = ResourceKey::new("api:endpoint");
+
+    // Already at the limit, so `check_rate_limit`'s UPDATE won't match and
+    // it falls through to the SELECT + parse_ts path.
+    let rl = RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 1,
+        window_seconds: 60,
+        current_count: 1,
+        window_start: now,
+    };
+    s.upsert_rate_limit(&rl).await.unwrap();
+
+    // Corrupt window_start via raw SQL so `parse_ts` fails inside the
+    // transaction, forcing the error path.
+    sqlx::query("UPDATE rate_limits SET window_start = 'not-a-timestamp' WHERE tenant_id=?1 AND resource_key=?2")
+        .bind(tenant.as_str())
+        .bind(key.as_str())
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        s.check_rate_limit(&tenant, &key, now),
+    )
+    .await
+    .expect("check_rate_limit must not hang");
+    assert!(
+        result.is_err(),
+        "corrupted timestamp must surface as an error"
+    );
+
+    // If the failed call above leaked an open transaction, this next call
+    // (on the same single-connection in-memory pool) would hang or fail
+    // with "cannot start a transaction within a transaction".
+    let tenant2 = TenantId::unchecked("t_rl_after");
+    let key2 = ResourceKey::new("api:endpoint2");
+    s.upsert_rate_limit(&RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant2.clone(),
+        resource_key: key2.clone(),
+        max_count: 3,
+        window_seconds: 60,
+        current_count: 0,
+        window_start: now,
+    })
+    .await
+    .unwrap();
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        s.check_rate_limit(&tenant2, &key2, now),
+    )
+    .await
+    .expect("pool must not be wedged after a rolled-back transaction")
+    .unwrap();
+    assert!(matches!(recovered, RateLimitCheck::Allowed));
+}
+
 // ===========================================================================
 // Block Outputs
 // ===========================================================================
@@ -3782,7 +3857,7 @@ async fn delete_trigger_removes_poll_state() {
     .unwrap();
 
     s.delete_trigger("poll-trig").await.unwrap();
-    assert!(s.get_trigger("poll-trig").await.unwrap().is_none());
+    assert!(s.get_trigger(None, "poll-trig").await.unwrap().is_none());
     assert!(
         s.get_trigger_poll_state("poll-trig")
             .await
@@ -3814,7 +3889,120 @@ async fn trigger_round_trips_activepieces_poll_type() {
     .await
     .unwrap();
 
-    let got = s.get_trigger("ap-type").await.unwrap().unwrap();
+    let got = s.get_trigger(None, "ap-type").await.unwrap().unwrap();
     assert_eq!(got.trigger_type, TriggerType::ActivepiecesPoll);
     assert_eq!(got.config["piece"], "typeform");
+}
+
+/// Regression test for the deep storage review's tenant-isolation finding:
+/// `get_trigger` scoped to a tenant must not return another tenant's trigger
+/// by slug, even though `slug` is a globally unique primary key. Unlike
+/// credentials/plugins, triggers have no "global" sentinel -- scoping is
+/// strict.
+#[tokio::test]
+async fn get_trigger_is_tenant_scoped() {
+    use orch8_types::trigger::{TriggerDef, TriggerType};
+
+    let s = store().await;
+    let now = Utc::now();
+    s.create_trigger(&TriggerDef {
+        slug: "shared-slug".into(),
+        sequence_name: "seq".into(),
+        version: None,
+        tenant_id: TenantId::unchecked("tenant_a"),
+        namespace: "default".into(),
+        enabled: true,
+        secret: None,
+        trigger_type: TriggerType::Webhook,
+        config: json!({}),
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    // Owning tenant can fetch it.
+    let owned = s
+        .get_trigger(Some(&TenantId::unchecked("tenant_a")), "shared-slug")
+        .await
+        .unwrap();
+    assert!(owned.is_some());
+
+    // A different tenant must not be able to fetch it by slug.
+    let cross_tenant = s
+        .get_trigger(Some(&TenantId::unchecked("tenant_b")), "shared-slug")
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_none(),
+        "trigger scoped to tenant_a must not be readable by tenant_b"
+    );
+
+    // Unscoped (`None`) lookup -- used by the public webhook endpoint to
+    // resolve the owning tenant -- must still see it.
+    let unscoped = s.get_trigger(None, "shared-slug").await.unwrap();
+    assert!(unscoped.is_some());
+}
+
+/// Regression test for the deep storage review's tenant-isolation finding:
+/// `get_plugin` scoped to a tenant must not return another tenant's plugin
+/// by name, but a plugin explicitly marked global (empty `tenant_id`) must
+/// remain visible to every tenant's scoped lookup.
+#[tokio::test]
+async fn get_plugin_is_tenant_scoped() {
+    use orch8_types::plugin::{PluginDef, PluginType};
+
+    let s = store().await;
+    let now = Utc::now();
+    s.create_plugin(&PluginDef {
+        name: "tenant-a-plugin".into(),
+        plugin_type: PluginType::Wasm,
+        source: "/path/to/plugin.wasm".into(),
+        tenant_id: "tenant_a".into(),
+        enabled: true,
+        config: json!({}),
+        description: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let owned = s
+        .get_plugin(Some(&TenantId::unchecked("tenant_a")), "tenant-a-plugin")
+        .await
+        .unwrap();
+    assert!(owned.is_some());
+
+    let cross_tenant = s
+        .get_plugin(Some(&TenantId::unchecked("tenant_b")), "tenant-a-plugin")
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_none(),
+        "plugin scoped to tenant_a must not be readable by tenant_b"
+    );
+
+    s.create_plugin(&PluginDef {
+        name: "global-plugin".into(),
+        plugin_type: PluginType::Wasm,
+        source: "/path/to/global.wasm".into(),
+        tenant_id: String::new(),
+        enabled: true,
+        config: json!({}),
+        description: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let global_via_tenant_b = s
+        .get_plugin(Some(&TenantId::unchecked("tenant_b")), "global-plugin")
+        .await
+        .unwrap();
+    assert!(
+        global_via_tenant_b.is_some(),
+        "global plugin must be visible to any tenant"
+    );
 }

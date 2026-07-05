@@ -68,6 +68,9 @@ impl DevServer {
             push_provider: Arc::new(orch8_push::NoopPushProvider),
             mobile_sync_enabled: false,
             builtin_handlers: Arc::new(orch8_api::builtin_handler_names()),
+            // Dev server runs the engine in-process for the lifetime of the
+            // command; report ready unconditionally.
+            engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
 
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());

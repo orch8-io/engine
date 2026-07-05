@@ -12,40 +12,46 @@ pub(super) async fn check_rate_limit(
     resource_key: &ResourceKey,
     now: DateTime<Utc>,
 ) -> Result<RateLimitCheck, StorageError> {
-    // Atomic check-and-increment using a single UPDATE … RETURNING.
+    // Single round-trip, genuinely atomic check-and-increment.
     //
-    // The UPDATE handles two cases in one statement:
-    //   1. Window expired  → reset current_count to 1 and start a new window.
-    //   2. Window still active and under limit → increment current_count.
-    //
-    // If the WHERE clause matches no rows (either no rate-limit row exists,
-    // or the limit is already reached within the active window) the UPDATE
-    // returns nothing, and we fall through to distinguish the two sub-cases
-    // with a cheap SELECT.
-    let row = sqlx::query_as::<_, AtomicResult>(
+    // `current_state` locks the row (`FOR UPDATE`) and evaluates
+    // `window_expired`/`current_count`/`max_count` against the *pre-update*
+    // values; the `UPDATE ... FROM` then writes the new counters computed
+    // from that same locked snapshot, and `RETURNING` reports exactly the
+    // values the decision was based on. Earlier this was two statements (an
+    // UPDATE, then -- only on a zero-row match -- a separate SELECT to
+    // compute `retry_after`), which raced: a concurrent writer could reset
+    // the window between the two statements, so `retry_after` could reflect
+    // a window this call never actually saw. Locking + deciding + writing in
+    // one statement removes that window entirely.
+    let row = sqlx::query_as::<_, CheckResult>(
         r"
-        UPDATE rate_limits
+        WITH current_state AS (
+            SELECT
+                tenant_id, resource_key, current_count, max_count,
+                window_start, window_seconds,
+                (window_start + make_interval(secs => window_seconds::double precision) <= $3)
+                    AS window_expired
+            FROM rate_limits
+            WHERE tenant_id = $1 AND resource_key = $2
+            FOR UPDATE
+        )
+        UPDATE rate_limits r
         SET
             current_count = CASE
-                WHEN window_start + make_interval(secs => window_seconds::double precision) <= $3
-                    THEN 1
-                ELSE current_count + 1
+                WHEN cs.window_expired THEN 1
+                WHEN cs.current_count < cs.max_count THEN cs.current_count + 1
+                ELSE cs.current_count
             END,
             window_start = CASE
-                WHEN window_start + make_interval(secs => window_seconds::double precision) <= $3
-                    THEN $3
-                ELSE window_start
+                WHEN cs.window_expired THEN $3
+                ELSE cs.window_start
             END
-        WHERE tenant_id = $1
-          AND resource_key = $2
-          AND (
-                -- window expired (always allow reset)
-                window_start + make_interval(secs => window_seconds::double precision) <= $3
-                OR
-                -- window active and still under limit
-                current_count < max_count
-              )
-        RETURNING window_start, window_seconds
+        FROM current_state cs
+        WHERE r.tenant_id = cs.tenant_id AND r.resource_key = cs.resource_key
+        RETURNING
+            cs.window_expired, cs.current_count, cs.max_count,
+            cs.window_start, cs.window_seconds
         ",
     )
     .bind(tenant_id.as_str())
@@ -54,26 +60,13 @@ pub(super) async fn check_rate_limit(
     .fetch_optional(&store.pool)
     .await?;
 
-    if row.is_some() {
-        // The UPDATE matched and incremented — caller is allowed.
-        return Ok(RateLimitCheck::Allowed);
-    }
-
-    // UPDATE matched nothing. Either the row doesn't exist (no limit
-    // configured) or the limit was reached. A simple SELECT tells us which.
-    let info = sqlx::query_as::<_, WindowInfo>(
-        "SELECT window_start, window_seconds FROM rate_limits WHERE tenant_id = $1 AND resource_key = $2",
-    )
-    .bind(tenant_id.as_str())
-    .bind(resource_key.as_str())
-    .fetch_optional(&store.pool)
-    .await?;
-
-    match info {
+    match row {
+        // No row: no rate limit configured for this (tenant, resource) pair.
         None => Ok(RateLimitCheck::Allowed),
-        Some(info) => {
+        Some(r) if r.window_expired || r.current_count < r.max_count => Ok(RateLimitCheck::Allowed),
+        Some(r) => {
             let window_end =
-                info.window_start + chrono::Duration::seconds(i64::from(info.window_seconds));
+                r.window_start + chrono::Duration::seconds(i64::from(r.window_seconds));
             Ok(RateLimitCheck::Exceeded {
                 retry_after: window_end,
             })
@@ -81,18 +74,12 @@ pub(super) async fn check_rate_limit(
     }
 }
 
-/// Minimal row returned from the atomic UPDATE … RETURNING.
+/// Row returned from the atomic lock-decide-write query.
 #[derive(sqlx::FromRow)]
-struct AtomicResult {
-    #[allow(dead_code)]
-    window_start: DateTime<Utc>,
-    #[allow(dead_code)]
-    window_seconds: i32,
-}
-
-/// Used only for the fallback SELECT when the UPDATE matched zero rows.
-#[derive(sqlx::FromRow)]
-struct WindowInfo {
+struct CheckResult {
+    window_expired: bool,
+    current_count: i32,
+    max_count: i32,
     window_start: DateTime<Utc>,
     window_seconds: i32,
 }

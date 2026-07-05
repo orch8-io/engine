@@ -31,15 +31,34 @@ pub(super) async fn create(
 
 pub(super) async fn get(
     store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
     id: &str,
 ) -> Result<Option<CredentialDef>, StorageError> {
-    let row = sqlx::query_as::<_, CredentialRow>(
-        r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
-          FROM credentials WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&store.pool)
-    .await?;
+    // `tenant_id = ''` is the shared/global-credential sentinel (see
+    // `create`'s column default and `list`'s equivalent OR clause).
+    // `tenant_id: None` is an intentionally unscoped lookup for trusted
+    // system contexts not acting on behalf of one tenant.
+    let row = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as::<_, CredentialRow>(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials WHERE id = $1 AND (tenant_id = $2 OR tenant_id = '')",
+            )
+            .bind(id)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, CredentialRow>(
+                r"SELECT id, tenant_id, name, kind, value, expires_at, refresh_url, refresh_token, enabled, description, created_at, updated_at
+                  FROM credentials WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(CredentialRow::into_credential).transpose()
 }
 

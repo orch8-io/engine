@@ -12,11 +12,14 @@
  *   - `orch8-server/src/main.rs` reads `ORCH8_ENCRYPTION_KEY` at startup and
  *     wraps storage in `EncryptingStorage` when the key is non-empty. No
  *     feature flag; presence of a 64-hex-char key is the only gate.
- *   - `orch8-storage/src/encrypting.rs` encrypts only `instance.context.data`
- *     on write and decrypts on read. The ciphertext has the JSON-string
- *     prefix `enc:v1:` (see `orch8-types/src/encryption.rs`).
+ *   - `orch8-storage/src/encrypting.rs` encrypts `instance.context.data` on
+ *     write and decrypts on read, bound via AAD to the owning instance's ID
+ *     (so a ciphertext copied to a different row fails to decrypt there).
+ *     The ciphertext has the JSON-string prefix `enc:v2:` (see
+ *     `orch8-types/src/encryption.rs`; `enc:v1:`, unbound, is still accepted
+ *     on read for rows written before AAD binding was introduced).
  *   - Target column: `task_instances.context` (jsonb) — the `.data` field is
- *     replaced in place with the `enc:v1:...` string.
+ *     replaced in place with the `enc:v2:...` string.
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -90,8 +93,8 @@ describe("Encryption at Rest", () => {
       `plaintext secret must not appear in raw DB row; got: ${raw.slice(0, 200)}...`,
     );
     assert.ok(
-      raw.includes("enc:v1:"),
-      `encrypted context should carry the 'enc:v1:' prefix; got: ${raw.slice(0, 200)}...`,
+      raw.includes("enc:v2:"),
+      `encrypted context should carry the 'enc:v2:' prefix; got: ${raw.slice(0, 200)}...`,
     );
 
     // API path: decrypting storage transparently returns plaintext.

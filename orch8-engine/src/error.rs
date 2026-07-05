@@ -49,6 +49,31 @@ pub enum EngineError {
     ShuttingDown,
 }
 
+impl EngineError {
+    /// `true` when this error is a *transient* storage failure — connection
+    /// loss, connection-pool exhaustion, or a transient external-backend blip
+    /// (e.g. a database failover or object-store throttle).
+    ///
+    /// The scheduler's per-instance safety net uses this to distinguish an
+    /// infrastructure hiccup from a genuine processing failure: a transient
+    /// storage error must **reschedule** the instance (it stays healthy and
+    /// retries on a later tick) rather than transition it to terminal
+    /// `Failed`, which would DLQ an entire claimed batch on a momentary
+    /// database blip. Logic errors (`Query`, `Serialization`, `Conflict`,
+    /// `Unsupported`, …) are NOT transient — retrying them loops forever.
+    #[must_use]
+    pub fn is_transient_storage(&self) -> bool {
+        matches!(
+            self,
+            Self::Storage(
+                StorageError::Connection(_)
+                    | StorageError::PoolExhausted
+                    | StorageError::Backend(_)
+            )
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

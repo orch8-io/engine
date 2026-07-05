@@ -36,10 +36,20 @@ impl EncryptingStorage {
         Self { inner, encryptor }
     }
 
+    /// Associated data binding a `context.data` ciphertext to the instance it
+    /// belongs to: the raw 16 UUID bytes of its `InstanceId`. Passed as AAD
+    /// to AES-GCM so a ciphertext copied to a different row (or a different
+    /// tenant's row, e.g. by an attacker with DB write access) fails to
+    /// decrypt there instead of silently succeeding -- see the deep storage
+    /// review's finding on AES-GCM ciphertext binding.
+    fn instance_aad(id: InstanceId) -> [u8; 16] {
+        *id.into_uuid().as_bytes()
+    }
+
     /// Encrypt `context.data` on a `TaskInstance`, returning a `Cow` so callers
     /// can pass the result straight through when encryption is unnecessary.
     ///
-    /// If `context.data` already carries the `enc:v1:` prefix, the instance is
+    /// If `context.data` already carries an `enc:` prefix, the instance is
     /// returned borrowed (no clone, no re-encryption -- re-encrypting would
     /// produce a layered payload that `decrypt_value` cannot unwrap in a
     /// single pass, silently corrupting round-trips).
@@ -51,47 +61,176 @@ impl EncryptingStorage {
             return Ok(Cow::Borrowed(instance));
         }
         let mut inst = instance.clone();
+        let aad = Self::instance_aad(instance.id);
         inst.context.data = self
             .encryptor
-            .encrypt_value(&inst.context.data)
+            .encrypt_value_with_aad(&inst.context.data, &aad)
             .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
         Ok(Cow::Owned(inst))
     }
 
-    /// Encrypt `context.data` on an `ExecutionContext`. Same guard as
-    /// `encrypt_instance`: already-encrypted payloads short-circuit with a
-    /// borrowed reference.
+    /// Encrypt `context.data` on an `ExecutionContext`, bound to `id` via AAD.
+    /// Same guard as `encrypt_instance`: already-encrypted payloads
+    /// short-circuit with a borrowed reference.
     fn encrypt_context<'a>(
         &self,
+        id: InstanceId,
         context: &'a ExecutionContext,
     ) -> Result<Cow<'a, ExecutionContext>, StorageError> {
         if FieldEncryptor::is_encrypted(&context.data) {
             return Ok(Cow::Borrowed(context));
         }
         let mut ctx = context.clone();
+        let aad = Self::instance_aad(id);
         ctx.data = self
             .encryptor
-            .encrypt_value(&ctx.data)
+            .encrypt_value_with_aad(&ctx.data, &aad)
             .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
         Ok(Cow::Owned(ctx))
     }
 
-    /// Encrypt `context.data` on an `ExecutionContext` in-place, avoiding clones.
-    fn encrypt_context_mut(&self, context: &mut ExecutionContext) -> Result<(), StorageError> {
+    /// Encrypt `context.data` on an `ExecutionContext` in-place (bound to
+    /// `id` via AAD), avoiding clones.
+    fn encrypt_context_mut(
+        &self,
+        id: InstanceId,
+        context: &mut ExecutionContext,
+    ) -> Result<(), StorageError> {
         if !FieldEncryptor::is_encrypted(&context.data) {
+            let aad = Self::instance_aad(id);
             context.data = self
                 .encryptor
-                .encrypt_value(&context.data)
+                .encrypt_value_with_aad(&context.data, &aad)
                 .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+        }
+        Ok(())
+    }
+
+    /// Encrypt an arbitrary JSON value (used for externalized-state payloads,
+    /// which are not part of `context.data` but hold the same class of data
+    /// once a field has been swapped out for a marker). No-op if already
+    /// encrypted, mirroring `encrypt_context`'s double-encryption guard.
+    fn encrypt_json_value(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError> {
+        if FieldEncryptor::is_encrypted(value) {
+            return Ok(value.clone());
+        }
+        self.encryptor
+            .encrypt_value(value)
+            .map_err(|e| StorageError::Query(format!("encryption: {e}")))
+    }
+
+    /// Decrypt an arbitrary JSON value produced by `encrypt_json_value`.
+    /// Returns the input unchanged if it was never encrypted (payloads
+    /// written before encryption was enabled stay readable).
+    fn decrypt_json_value(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, StorageError> {
+        if FieldEncryptor::is_encrypted(value) {
+            return self
+                .encryptor
+                .decrypt_value(value)
+                .map_err(|e| StorageError::Query(format!("encryption: {e}")));
+        }
+        Ok(value.clone())
+    }
+
+    /// Encrypt `BlockOutput.output` -- handler results (LLM responses, HTTP
+    /// bodies, etc.) are the same data class as `context.data`, so they get
+    /// the same at-rest protection. Returns a borrowed `Cow` when the value
+    /// is already encrypted (e.g. a copy/retry of a previously-saved output).
+    fn encrypt_block_output<'a>(
+        &self,
+        output: &'a orch8_types::output::BlockOutput,
+    ) -> Result<Cow<'a, orch8_types::output::BlockOutput>, StorageError> {
+        if FieldEncryptor::is_encrypted(&output.output) {
+            return Ok(Cow::Borrowed(output));
+        }
+        let mut o = output.clone();
+        o.output = self.encrypt_json_value(&o.output)?;
+        Ok(Cow::Owned(o))
+    }
+
+    /// Decrypt `BlockOutput.output` in place after a read.
+    fn decrypt_block_output(
+        &self,
+        output: &mut orch8_types::output::BlockOutput,
+    ) -> Result<(), StorageError> {
+        output.output = self.decrypt_json_value(&output.output)?;
+        Ok(())
+    }
+
+    /// Encrypt `Signal.payload`. Update-context signals carry a full
+    /// `ExecutionContext` snapshot -- the same data class as `context.data`
+    /// -- so the queued payload gets the same protection rather than sitting
+    /// in `signal_inbox` as plaintext until delivery.
+    fn encrypt_signal<'a>(
+        &self,
+        signal: &'a orch8_types::signal::Signal,
+    ) -> Result<Cow<'a, orch8_types::signal::Signal>, StorageError> {
+        if FieldEncryptor::is_encrypted(&signal.payload) {
+            return Ok(Cow::Borrowed(signal));
+        }
+        let mut s = signal.clone();
+        s.payload = self.encrypt_json_value(&s.payload)?;
+        Ok(Cow::Owned(s))
+    }
+
+    /// Decrypt `Signal.payload` in place after a read.
+    fn decrypt_signal(&self, signal: &mut orch8_types::signal::Signal) -> Result<(), StorageError> {
+        signal.payload = self.decrypt_json_value(&signal.payload)?;
+        Ok(())
+    }
+
+    /// Encrypt a `WorkerTask`'s `params`, `context` (a serialized
+    /// `ExecutionContext` snapshot dispatched to external workers) and
+    /// `output` fields. Same data class as `context.data` -- an external
+    /// worker dispatch shouldn't hand a decrypted context snapshot to a
+    /// third-party process while at-rest storage is encrypted.
+    fn encrypt_worker_task<'a>(
+        &self,
+        task: &'a orch8_types::worker::WorkerTask,
+    ) -> Result<Cow<'a, orch8_types::worker::WorkerTask>, StorageError> {
+        if FieldEncryptor::is_encrypted(&task.params)
+            && FieldEncryptor::is_encrypted(&task.context)
+            && task
+                .output
+                .as_ref()
+                .is_none_or(FieldEncryptor::is_encrypted)
+        {
+            return Ok(Cow::Borrowed(task));
+        }
+        let mut t = task.clone();
+        t.params = self.encrypt_json_value(&t.params)?;
+        t.context = self.encrypt_json_value(&t.context)?;
+        if let Some(ref output) = t.output {
+            t.output = Some(self.encrypt_json_value(output)?);
+        }
+        Ok(Cow::Owned(t))
+    }
+
+    /// Decrypt a `WorkerTask`'s `params`, `context` and `output` fields in place.
+    fn decrypt_worker_task(
+        &self,
+        task: &mut orch8_types::worker::WorkerTask,
+    ) -> Result<(), StorageError> {
+        task.params = self.decrypt_json_value(&task.params)?;
+        task.context = self.decrypt_json_value(&task.context)?;
+        if let Some(ref output) = task.output {
+            task.output = Some(self.decrypt_json_value(output)?);
         }
         Ok(())
     }
 
     fn decrypt_instance(&self, instance: &mut TaskInstance) -> Result<(), StorageError> {
         if FieldEncryptor::is_encrypted(&instance.context.data) {
+            let aad = Self::instance_aad(instance.id);
             instance.context.data = self
                 .encryptor
-                .decrypt_value(&instance.context.data)
+                .decrypt_value_with_aad(&instance.context.data, &aad)
                 .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
         }
         Ok(())
@@ -289,8 +428,21 @@ impl crate::SequenceStore for EncryptingStorage {
     ) -> Result<(), StorageError> {
         self.inner.deprecate_sequence(id).await
     }
+    async fn update_sequence_status(
+        &self,
+        id: orch8_types::ids::SequenceId,
+        status: &str,
+    ) -> Result<(), StorageError> {
+        self.inner.update_sequence_status(id, status).await
+    }
     async fn delete_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<(), StorageError> {
         self.inner.delete_sequence(id).await
+    }
+    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        self.inner.acquire_manifest_lock(tenant_id).await
+    }
+    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        self.inner.release_manifest_lock(tenant_id).await
     }
 }
 
@@ -349,9 +501,21 @@ impl crate::InstanceStore for EncryptingStorage {
         id: InstanceId,
         context: &orch8_types::context::ExecutionContext,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_context(context)?;
+        let encrypted = self.encrypt_context(id, context)?;
         self.inner
             .update_instance_context(id, encrypted.as_ref())
+            .await
+    }
+
+    async fn update_instance_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        expected_updated_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_context(id, context)?;
+        self.inner
+            .update_instance_context_cas(id, encrypted.as_ref(), expected_updated_at)
             .await
     }
 
@@ -361,14 +525,24 @@ impl crate::InstanceStore for EncryptingStorage {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        const MAX_ATTEMPTS: u32 = 20;
+        const BASE_BACKOFF_MS: u64 = 5;
+        const MAX_BACKOFF_MS: u64 = 200;
+
         // Pre-allocate the key string outside the CAS loop to avoid
         // redundant heap allocations on each retry.
         let key_owned = key.to_string();
 
         // Encrypted context is a single blob -- read -> decrypt -> merge ->
         // encrypt -> CAS write. Retry on contention (another writer
-        // updated `updated_at` between our read and write).
-        for _ in 0..5 {
+        // updated `updated_at` between our read and write). Each retry
+        // re-decrypts/re-encrypts the whole blob, so under sustained
+        // concurrent writers to the same instance this is markedly more
+        // contention-prone than the plaintext path's single atomic
+        // `jsonb_set`; jittered backoff plus a generous retry bound keeps a
+        // burst of concurrent branch/signal writers from hard-failing the
+        // step instead of just taking a little longer.
+        for attempt in 0..MAX_ATTEMPTS {
             let Some(mut instance) = self.inner.get_instance(id).await? else {
                 return Ok(());
             };
@@ -382,7 +556,7 @@ impl crate::InstanceStore for EncryptingStorage {
                 map.insert(key_owned.clone(), value.clone());
             }
 
-            self.encrypt_context_mut(&mut instance.context)?;
+            self.encrypt_context_mut(id, &mut instance.context)?;
             if self
                 .inner
                 .update_instance_context_cas(id, &instance.context, snapshot_ts)
@@ -390,9 +564,14 @@ impl crate::InstanceStore for EncryptingStorage {
             {
                 return Ok(());
             }
+
+            let backoff_ms =
+                (BASE_BACKOFF_MS.saturating_mul(1u64 << attempt.min(6))).min(MAX_BACKOFF_MS);
+            let jittered_ms = rand::random_range(backoff_ms / 2..=backoff_ms.max(1));
+            tokio::time::sleep(std::time::Duration::from_millis(jittered_ms)).await;
         }
         Err(StorageError::Query(format!(
-            "merge_context_data: CAS contention exceeded retries for instance {id}"
+            "merge_context_data: CAS contention exceeded retries ({MAX_ATTEMPTS}) for instance {id}"
         )))
     }
 
@@ -454,15 +633,49 @@ impl crate::InstanceStore for EncryptingStorage {
         Ok(instances)
     }
 
+    // `create_instance_externalized` / `create_instances_batch_externalized` /
+    // `update_instance_context_externalized` must externalize *before*
+    // encrypting: `externalize_fields` requires `context.data` to still be a
+    // JSON object, but whole-blob encryption collapses it to a single string,
+    // so encrypting first silently disables externalization (oversized
+    // contexts land inline, TOAST-bloating `task_instances` and starving the
+    // GC/size-cap machinery). Doing it in this order also means the
+    // externalized-state payloads pulled out here get encrypted individually
+    // via `batch_save_externalized_state` below, rather than left in plaintext.
+    //
+    // Trade-off: the inner backend's `create_instance_externalized` commits
+    // the instance row and its externalized-state rows in one transaction;
+    // externalizing here means the wrapper issues two separate writes, the
+    // same non-atomic shape the default trait impl in `lib.rs` already
+    // documents as the accepted fallback for backends that don't implement
+    // it natively. Unlike that default, the instance row is written *first*:
+    // `externalized_state.instance_id` has a `FOREIGN KEY ... ON DELETE
+    // CASCADE` (SQLite has `PRAGMA foreign_keys = ON`), so an externalized
+    // row referencing an instance that doesn't exist yet is rejected outright.
     async fn create_instance_externalized(
         &self,
         instance: &TaskInstance,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_instance(instance)?;
-        self.inner
-            .create_instance_externalized(encrypted.as_ref(), threshold_bytes)
-            .await
+        if FieldEncryptor::is_encrypted(&instance.context.data) {
+            // Nothing left to externalize -- pass through untouched.
+            return self
+                .inner
+                .create_instance_externalized(instance, threshold_bytes)
+                .await;
+        }
+        let mut inst_clone = instance.clone();
+        let refs = crate::externalizing::externalize_fields(
+            &mut inst_clone.context.data,
+            &instance.id.into_uuid().to_string(),
+            threshold_bytes,
+        );
+        self.encrypt_context_mut(instance.id, &mut inst_clone.context)?;
+        self.inner.create_instance(&inst_clone).await?;
+        if !refs.is_empty() {
+            crate::InstanceStore::batch_save_externalized_state(self, instance.id, &refs).await?;
+        }
+        Ok(())
     }
 
     async fn create_instances_batch_externalized(
@@ -479,13 +692,34 @@ impl crate::InstanceStore for EncryptingStorage {
                 .create_instances_batch_externalized(instances, threshold_bytes)
                 .await;
         }
-        let encrypted: Vec<TaskInstance> = instances
-            .iter()
-            .map(|i| self.encrypt_instance(i).map(Cow::into_owned))
-            .collect::<Result<_, _>>()?;
-        self.inner
-            .create_instances_batch_externalized(&encrypted, threshold_bytes)
-            .await
+        let mut clones: Vec<TaskInstance> = Vec::with_capacity(instances.len());
+        let mut all_refs: Vec<(InstanceId, Vec<(String, serde_json::Value)>)> = Vec::new();
+        for inst in instances {
+            if FieldEncryptor::is_encrypted(&inst.context.data) {
+                clones.push(inst.clone());
+                continue;
+            }
+            let mut c = inst.clone();
+            let refs = crate::externalizing::externalize_fields(
+                &mut c.context.data,
+                &inst.id.into_uuid().to_string(),
+                threshold_bytes,
+            );
+            self.encrypt_context_mut(inst.id, &mut c.context)?;
+            if !refs.is_empty() {
+                all_refs.push((inst.id, refs));
+            }
+            clones.push(c);
+        }
+        // Instance rows must land before externalized-state rows (FK on
+        // `externalized_state.instance_id`), so persist the batch first and
+        // the refs after -- same ordering constraint as
+        // `create_instance_externalized`.
+        let count = self.inner.create_instances_batch(&clones).await?;
+        for (instance_id, refs) in &all_refs {
+            crate::InstanceStore::batch_save_externalized_state(self, *instance_id, refs).await?;
+        }
+        Ok(count)
     }
 
     async fn update_instance_context_externalized(
@@ -494,10 +728,23 @@ impl crate::InstanceStore for EncryptingStorage {
         context: &orch8_types::context::ExecutionContext,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_context(context)?;
-        self.inner
-            .update_instance_context_externalized(id, encrypted.as_ref(), threshold_bytes)
-            .await
+        if FieldEncryptor::is_encrypted(&context.data) {
+            return self
+                .inner
+                .update_instance_context_externalized(id, context, threshold_bytes)
+                .await;
+        }
+        let mut ctx_clone = context.clone();
+        let refs = crate::externalizing::externalize_fields(
+            &mut ctx_clone.data,
+            &id.into_uuid().to_string(),
+            threshold_bytes,
+        );
+        self.encrypt_context_mut(id, &mut ctx_clone)?;
+        if !refs.is_empty() {
+            crate::InstanceStore::batch_save_externalized_state(self, id, &refs).await?;
+        }
+        self.inner.update_instance_context(id, &ctx_clone).await
     }
 
     async fn create_instance_with_dedupe(
@@ -671,7 +918,11 @@ impl crate::InstanceStore for EncryptingStorage {
         instance_id: InstanceId,
         entries: &[(String, serde_json::Value)],
     ) -> Result<(), StorageError> {
-        crate::InstanceStore::batch_save_externalized_state(&*self.inner, instance_id, entries)
+        let encrypted: Vec<(String, serde_json::Value)> = entries
+            .iter()
+            .map(|(k, v)| self.encrypt_json_value(v).map(|ev| (k.clone(), ev)))
+            .collect::<Result<_, _>>()?;
+        crate::InstanceStore::batch_save_externalized_state(&*self.inner, instance_id, &encrypted)
             .await
     }
 }
@@ -742,14 +993,19 @@ impl crate::OutputStore for EncryptingStorage {
         &self,
         output: &orch8_types::output::BlockOutput,
     ) -> Result<(), StorageError> {
-        self.inner.save_block_output(output).await
+        let encrypted = self.encrypt_block_output(output)?;
+        self.inner.save_block_output(encrypted.as_ref()).await
     }
     async fn get_block_output(
         &self,
         instance_id: InstanceId,
         block_id: &orch8_types::ids::BlockId,
     ) -> Result<Option<orch8_types::output::BlockOutput>, StorageError> {
-        self.inner.get_block_output(instance_id, block_id).await
+        let mut out = self.inner.get_block_output(instance_id, block_id).await?;
+        if let Some(ref mut o) = out {
+            self.decrypt_block_output(o)?;
+        }
+        Ok(out)
     }
     async fn get_block_outputs_batch(
         &self,
@@ -761,22 +1017,35 @@ impl crate::OutputStore for EncryptingStorage {
         >,
         StorageError,
     > {
-        self.inner.get_block_outputs_batch(keys).await
+        let mut out = self.inner.get_block_outputs_batch(keys).await?;
+        for o in out.values_mut() {
+            self.decrypt_block_output(o)?;
+        }
+        Ok(out)
     }
     async fn get_all_outputs(
         &self,
         instance_id: InstanceId,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
-        self.inner.get_all_outputs(instance_id).await
+        let mut out = self.inner.get_all_outputs(instance_id).await?;
+        for o in &mut out {
+            self.decrypt_block_output(o)?;
+        }
+        Ok(out)
     }
     async fn get_outputs_after_created_at(
         &self,
         instance_id: InstanceId,
         after: Option<DateTime<Utc>>,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
-        self.inner
+        let mut out = self
+            .inner
             .get_outputs_after_created_at(instance_id, after)
-            .await
+            .await?;
+        for o in &mut out {
+            self.decrypt_block_output(o)?;
+        }
+        Ok(out)
     }
     async fn get_completed_block_ids(
         &self,
@@ -798,8 +1067,14 @@ impl crate::OutputStore for EncryptingStorage {
         new_state: orch8_types::instance::InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
+        let encrypted_output = self.encrypt_block_output(output)?;
         self.inner
-            .save_output_and_transition(output, instance_id, new_state, next_fire_at)
+            .save_output_and_transition(
+                encrypted_output.as_ref(),
+                instance_id,
+                new_state,
+                next_fire_at,
+            )
             .await
     }
     async fn save_output_merge_context_and_transition(
@@ -810,10 +1085,11 @@ impl crate::OutputStore for EncryptingStorage {
         new_state: orch8_types::instance::InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_context(context)?;
+        let encrypted_output = self.encrypt_block_output(output)?;
+        let encrypted = self.encrypt_context(instance_id, context)?;
         self.inner
             .save_output_merge_context_and_transition(
-                output,
+                encrypted_output.as_ref(),
                 instance_id,
                 encrypted.as_ref(),
                 new_state,
@@ -829,9 +1105,10 @@ impl crate::OutputStore for EncryptingStorage {
         new_state: orch8_types::instance::InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
+        let encrypted_output = self.encrypt_block_output(output)?;
         self.inner
             .save_output_complete_node_and_transition(
-                output,
+                encrypted_output.as_ref(),
                 node_id,
                 instance_id,
                 new_state,
@@ -848,10 +1125,11 @@ impl crate::OutputStore for EncryptingStorage {
         new_state: orch8_types::instance::InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError> {
-        let encrypted = self.encrypt_context(context)?;
+        let encrypted_output = self.encrypt_block_output(output)?;
+        let encrypted = self.encrypt_context(instance_id, context)?;
         self.inner
             .save_output_complete_node_merge_context_and_transition(
-                output,
+                encrypted_output.as_ref(),
                 node_id,
                 instance_id,
                 encrypted.as_ref(),
@@ -894,13 +1172,18 @@ impl crate::OutputStore for EncryptingStorage {
         limit: u32,
         offset: u64,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
-        self.inner
+        let mut out = self
+            .inner
             .get_outputs_page(instance_id, limit, offset)
-            .await
+            .await?;
+        for o in &mut out {
+            self.decrypt_block_output(o)?;
+        }
+        Ok(out)
     }
-    // Pass-through like the other output methods: block outputs are not
-    // field-encrypted, so a row copied verbatim stays consistent with what
-    // `save_block_output` would have written.
+    // Pass-through: this is a raw row copy on the inner backend, so a
+    // ciphertext `output` column is copied verbatim -- consistent with what
+    // `save_block_output` would have written for the destination instance.
     async fn copy_block_outputs(
         &self,
         src: InstanceId,
@@ -921,26 +1204,40 @@ impl crate::SignalStore for EncryptingStorage {
         &self,
         signal: &orch8_types::signal::Signal,
     ) -> Result<(), StorageError> {
-        self.inner.enqueue_signal(signal).await
+        let encrypted = self.encrypt_signal(signal)?;
+        self.inner.enqueue_signal(encrypted.as_ref()).await
     }
     async fn enqueue_signal_if_active(
         &self,
         signal: &orch8_types::signal::Signal,
     ) -> Result<(), StorageError> {
-        self.inner.enqueue_signal_if_active(signal).await
+        let encrypted = self.encrypt_signal(signal)?;
+        self.inner
+            .enqueue_signal_if_active(encrypted.as_ref())
+            .await
     }
     async fn get_pending_signals(
         &self,
         instance_id: InstanceId,
     ) -> Result<Vec<orch8_types::signal::Signal>, StorageError> {
-        self.inner.get_pending_signals(instance_id).await
+        let mut signals = self.inner.get_pending_signals(instance_id).await?;
+        for s in &mut signals {
+            self.decrypt_signal(s)?;
+        }
+        Ok(signals)
     }
     async fn get_pending_signals_batch(
         &self,
         instance_ids: &[InstanceId],
     ) -> Result<std::collections::HashMap<InstanceId, Vec<orch8_types::signal::Signal>>, StorageError>
     {
-        self.inner.get_pending_signals_batch(instance_ids).await
+        let mut batch = self.inner.get_pending_signals_batch(instance_ids).await?;
+        for signals in batch.values_mut() {
+            for s in signals {
+                self.decrypt_signal(s)?;
+            }
+        }
+        Ok(batch)
     }
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError> {
         self.inner.mark_signal_delivered(signal_id).await
@@ -966,13 +1263,18 @@ impl crate::WorkerStore for EncryptingStorage {
         &self,
         task: &orch8_types::worker::WorkerTask,
     ) -> Result<(), StorageError> {
-        self.inner.create_worker_task(task).await
+        let encrypted = self.encrypt_worker_task(task)?;
+        self.inner.create_worker_task(encrypted.as_ref()).await
     }
     async fn get_worker_task(
         &self,
         task_id: Uuid,
     ) -> Result<Option<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner.get_worker_task(task_id).await
+        let mut task = self.inner.get_worker_task(task_id).await?;
+        if let Some(ref mut t) = task {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(task)
     }
     async fn claim_worker_tasks(
         &self,
@@ -980,9 +1282,14 @@ impl crate::WorkerStore for EncryptingStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner
+        let mut tasks = self
+            .inner
             .claim_worker_tasks(handler_name, worker_id, limit)
-            .await
+            .await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
     }
     async fn claim_worker_tasks_for_tenant(
         &self,
@@ -991,9 +1298,14 @@ impl crate::WorkerStore for EncryptingStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner
+        let mut tasks = self
+            .inner
             .claim_worker_tasks_for_tenant(handler_name, worker_id, tenant_id, limit)
-            .await
+            .await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
     }
     async fn complete_worker_task(
         &self,
@@ -1001,8 +1313,9 @@ impl crate::WorkerStore for EncryptingStorage {
         worker_id: &str,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_json_value(output)?;
         self.inner
-            .complete_worker_task(task_id, worker_id, output)
+            .complete_worker_task(task_id, worker_id, &encrypted)
             .await
     }
     async fn fail_worker_task(
@@ -1034,8 +1347,15 @@ impl crate::WorkerStore for EncryptingStorage {
         instance_id: orch8_types::ids::InstanceId,
         fire_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_worker_task(new_task)?;
         self.inner
-            .retry_worker_task(old_task_id, new_task, node_id, instance_id, fire_at)
+            .retry_worker_task(
+                old_task_id,
+                encrypted.as_ref(),
+                node_id,
+                instance_id,
+                fire_at,
+            )
             .await
     }
     async fn reap_stale_worker_tasks(
@@ -1070,7 +1390,11 @@ impl crate::WorkerStore for EncryptingStorage {
         filter: &orch8_types::worker_filter::WorkerTaskFilter,
         pagination: &orch8_types::filter::Pagination,
     ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner.list_worker_tasks(filter, pagination).await
+        let mut tasks = self.inner.list_worker_tasks(filter, pagination).await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
     }
     async fn worker_task_stats(
         &self,
@@ -1085,9 +1409,14 @@ impl crate::WorkerStore for EncryptingStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner
+        let mut tasks = self
+            .inner
             .claim_worker_tasks_from_queue(queue_name, handler_name, worker_id, limit)
-            .await
+            .await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
     }
     async fn claim_worker_tasks_from_queue_for_tenant(
         &self,
@@ -1097,7 +1426,8 @@ impl crate::WorkerStore for EncryptingStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
-        self.inner
+        let mut tasks = self
+            .inner
             .claim_worker_tasks_from_queue_for_tenant(
                 queue_name,
                 handler_name,
@@ -1105,7 +1435,11 @@ impl crate::WorkerStore for EncryptingStorage {
                 tenant_id,
                 limit,
             )
-            .await
+            .await?;
+        for t in &mut tasks {
+            self.decrypt_worker_task(t)?;
+        }
+        Ok(tasks)
     }
 
     async fn upsert_worker_registration(
@@ -1263,14 +1597,27 @@ impl crate::WorkerStore for EncryptingStorage {
             .await
     }
 
+    // Step log messages can echo step input/output (handler errors, template
+    // debug output) -- the same data class as context, so the message text
+    // is encrypted at rest like other secret-bearing string columns.
     async fn append_step_logs(
         &self,
         instance_id: orch8_types::ids::InstanceId,
         block_id: &orch8_types::ids::BlockId,
         entries: &[orch8_types::step_log::StepLogEntry],
     ) -> Result<(), StorageError> {
+        let encrypted: Vec<orch8_types::step_log::StepLogEntry> = entries
+            .iter()
+            .map(|e| {
+                Ok::<_, StorageError>(orch8_types::step_log::StepLogEntry {
+                    ts: e.ts,
+                    level: e.level.clone(),
+                    message: self.encrypt_string_field(&e.message)?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
         self.inner
-            .append_step_logs(instance_id, block_id, entries)
+            .append_step_logs(instance_id, block_id, &encrypted)
             .await
     }
 
@@ -1278,7 +1625,11 @@ impl crate::WorkerStore for EncryptingStorage {
         &self,
         instance_id: orch8_types::ids::InstanceId,
     ) -> Result<Vec<orch8_types::step_log::StepLog>, StorageError> {
-        self.inner.list_step_logs(instance_id).await
+        let mut logs = self.inner.list_step_logs(instance_id).await?;
+        for l in &mut logs {
+            l.message = self.decrypt_string_field(&l.message)?;
+        }
+        Ok(logs)
     }
 }
 
@@ -1427,9 +1778,10 @@ impl crate::AdminStore for EncryptingStorage {
     }
     async fn get_plugin(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
         name: &str,
     ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
-        self.inner.get_plugin(name).await
+        self.inner.get_plugin(tenant_id, name).await
     }
     async fn list_plugins(
         &self,
@@ -1462,9 +1814,10 @@ impl crate::AdminStore for EncryptingStorage {
     }
     async fn get_trigger(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
         slug: &str,
     ) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError> {
-        let mut trigger = self.inner.get_trigger(slug).await?;
+        let mut trigger = self.inner.get_trigger(tenant_id, slug).await?;
         if let Some(t) = trigger.as_mut() {
             self.decrypt_trigger(t)?;
         }
@@ -1516,9 +1869,10 @@ impl crate::AdminStore for EncryptingStorage {
 
     async fn get_credential(
         &self,
+        tenant_id: Option<&orch8_types::ids::TenantId>,
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
-        let mut cred = self.inner.get_credential(id).await?;
+        let mut cred = self.inner.get_credential(tenant_id, id).await?;
         if let Some(ref mut c) = cred {
             self.decrypt_credential(c)?;
         }
@@ -1666,6 +2020,87 @@ impl crate::AdminStore for EncryptingStorage {
         limit: u32,
     ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
         self.inner.list_audit_log_by_tenant(tenant_id, limit).await
+    }
+
+    // --- Rollback policies (pass-through) ---
+    async fn create_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate_threshold: f64,
+        time_window_secs: i32,
+        cooldown_secs: Option<i32>,
+        confirmation_window_secs: Option<i32>,
+        webhook_url: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .create_rollback_policy(
+                tenant_id,
+                sequence_name,
+                error_rate_threshold,
+                time_window_secs,
+                cooldown_secs,
+                confirmation_window_secs,
+                webhook_url,
+            )
+            .await
+    }
+    async fn get_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        self.inner
+            .get_rollback_policy(tenant_id, sequence_name)
+            .await
+    }
+    async fn list_rollback_policies(
+        &self,
+        tenant_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
+        self.inner.list_rollback_policies(tenant_id, limit).await
+    }
+    async fn delete_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .delete_rollback_policy(tenant_id, sequence_name)
+            .await
+    }
+    async fn record_rollback(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate: f64,
+        threshold: f64,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .record_rollback(tenant_id, sequence_name, error_rate, threshold, reason)
+            .await
+    }
+    async fn query_error_rate(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<Option<f64>, StorageError> {
+        self.inner
+            .query_error_rate(tenant_id, sequence_name, window_secs)
+            .await
+    }
+    async fn list_rollback_history(
+        &self,
+        tenant_id: Option<&str>,
+        sequence_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
+        self.inner
+            .list_rollback_history(tenant_id, sequence_name, limit)
+            .await
     }
 
     // --- Health (pass-through) ---
@@ -1859,6 +2294,15 @@ impl crate::ResourceStore for EncryptingStorage {
     ) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError> {
         self.inner.list_artifacts(instance_id).await
     }
+    // Artifact deletion needs no crypto (delete-by-key is opaque), so delegate
+    // straight to the inner backend. Explicit override rather than inheriting
+    // the trait's provided method, to keep decorator coverage exhaustive.
+    async fn delete_instance_artifacts(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<u64, StorageError> {
+        self.inner.delete_instance_artifacts(instance_id).await
+    }
     async fn list_artifact_gc_candidates(
         &self,
         cutoff: chrono::DateTime<chrono::Utc>,
@@ -1871,26 +2315,38 @@ impl crate::ResourceStore for EncryptingStorage {
     }
 
     // --- Instance KV State ---
+    // Holds step-handler-defined state, including the agent step's
+    // `__agent__:{block_id}` conversation-history checkpoint -- same data
+    // class as `context.data`.
     async fn set_instance_kv(
         &self,
         instance_id: InstanceId,
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), StorageError> {
-        self.inner.set_instance_kv(instance_id, key, value).await
+        let encrypted = self.encrypt_json_value(value)?;
+        self.inner
+            .set_instance_kv(instance_id, key, &encrypted)
+            .await
     }
     async fn get_instance_kv(
         &self,
         instance_id: InstanceId,
         key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        self.inner.get_instance_kv(instance_id, key).await
+        match self.inner.get_instance_kv(instance_id, key).await? {
+            Some(v) => Ok(Some(self.decrypt_json_value(&v)?)),
+            None => Ok(None),
+        }
     }
     async fn get_all_instance_kv(
         &self,
         instance_id: InstanceId,
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        self.inner.get_all_instance_kv(instance_id).await
+        let raw = self.inner.get_all_instance_kv(instance_id).await?;
+        raw.into_iter()
+            .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
+            .collect()
     }
     async fn delete_instance_kv(
         &self,
@@ -1901,21 +2357,29 @@ impl crate::ResourceStore for EncryptingStorage {
     }
 
     // --- Externalized State ---
+    // Payloads pulled out of `context.data` by the externalization path carry
+    // the same data class as inline context, so they get the same at-rest
+    // protection here rather than landing in `externalized_state` as
+    // plaintext.
     async fn save_externalized_state(
         &self,
         instance_id: InstanceId,
         ref_key: &str,
         payload: &serde_json::Value,
     ) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_json_value(payload)?;
         self.inner
-            .save_externalized_state(instance_id, ref_key, payload)
+            .save_externalized_state(instance_id, ref_key, &encrypted)
             .await
     }
     async fn get_externalized_state(
         &self,
         ref_key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
-        self.inner.get_externalized_state(ref_key).await
+        match self.inner.get_externalized_state(ref_key).await? {
+            Some(v) => Ok(Some(self.decrypt_json_value(&v)?)),
+            None => Ok(None),
+        }
     }
     async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {
         self.inner.delete_externalized_state(ref_key).await
@@ -1925,14 +2389,21 @@ impl crate::ResourceStore for EncryptingStorage {
         instance_id: InstanceId,
         entries: &[(String, serde_json::Value)],
     ) -> Result<(), StorageError> {
-        crate::ResourceStore::batch_save_externalized_state(&*self.inner, instance_id, entries)
+        let encrypted: Vec<(String, serde_json::Value)> = entries
+            .iter()
+            .map(|(k, v)| self.encrypt_json_value(v).map(|ev| (k.clone(), ev)))
+            .collect::<Result<_, _>>()?;
+        crate::ResourceStore::batch_save_externalized_state(&*self.inner, instance_id, &encrypted)
             .await
     }
     async fn batch_get_externalized_state(
         &self,
         ref_keys: &[String],
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        self.inner.batch_get_externalized_state(ref_keys).await
+        let raw = self.inner.batch_get_externalized_state(ref_keys).await?;
+        raw.into_iter()
+            .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
+            .collect()
     }
     async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError> {
         self.inner.delete_expired_externalized_state(limit).await
@@ -2001,24 +2472,39 @@ impl crate::ResourceStore for EncryptingStorage {
     }
 
     // --- Checkpoints ---
+    // `checkpoint_data` holds a snapshot of execution state including agent
+    // message history -- the same data class as `context.data`.
     async fn save_checkpoint(
         &self,
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<(), StorageError> {
-        self.inner.save_checkpoint(checkpoint).await
+        if FieldEncryptor::is_encrypted(&checkpoint.checkpoint_data) {
+            return self.inner.save_checkpoint(checkpoint).await;
+        }
+        let mut cp = checkpoint.clone();
+        cp.checkpoint_data = self.encrypt_json_value(&cp.checkpoint_data)?;
+        self.inner.save_checkpoint(&cp).await
     }
     async fn get_latest_checkpoint(
         &self,
         instance_id: InstanceId,
     ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError> {
-        self.inner.get_latest_checkpoint(instance_id).await
+        let mut cp = self.inner.get_latest_checkpoint(instance_id).await?;
+        if let Some(ref mut c) = cp {
+            c.checkpoint_data = self.decrypt_json_value(&c.checkpoint_data)?;
+        }
+        Ok(cp)
     }
     async fn list_checkpoints(
         &self,
         instance_id: InstanceId,
         limit: u32,
     ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
-        self.inner.list_checkpoints(instance_id, limit).await
+        let mut cps = self.inner.list_checkpoints(instance_id, limit).await?;
+        for c in &mut cps {
+            c.checkpoint_data = self.decrypt_json_value(&c.checkpoint_data)?;
+        }
+        Ok(cps)
     }
     async fn prune_checkpoints(
         &self,

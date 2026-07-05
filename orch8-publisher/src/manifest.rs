@@ -92,12 +92,20 @@ impl ManifestGenerator {
             public_key: BASE64.encode(self.signing_key.verifying_key().to_bytes()),
         });
 
+        // Derive a monotonic version from the generation time (epoch millis).
+        // Clients reject any manifest whose version is not strictly greater than
+        // the last one applied, so a replayed older manifest — which necessarily
+        // carries an earlier timestamp — is refused. A wall-clock regression
+        // (NTP step back) is the only way to emit a non-increasing version;
+        // that is operationally rare and fails safe (the client keeps the newer
+        // manifest it already has).
+        let generated_at = Utc::now();
         let body = ManifestBody {
             signing_keys,
             sequences,
             removed,
-            manifest_version: 1,
-            generated_at: Utc::now(),
+            manifest_version: generated_at.timestamp_millis(),
+            generated_at,
         };
 
         let canonical_json = canonical_json(&body)?;

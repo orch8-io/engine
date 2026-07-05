@@ -57,6 +57,14 @@ pub struct PostgresStorage {
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
     /// methods return `Unsupported`.
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
+    /// Held connections for in-flight `acquire_manifest_lock` calls, keyed by
+    /// tenant ID. `pg_advisory_lock` is session-scoped -- the same connection
+    /// that acquired it must be the one that unlocks it -- so the connection
+    /// is checked out of the pool and parked here for the lock's lifetime
+    /// rather than returned after a single statement.
+    manifest_locks: tokio::sync::Mutex<
+        std::collections::HashMap<String, sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    >,
 }
 
 impl PostgresStorage {
@@ -85,33 +93,53 @@ impl PostgresStorage {
         min_connections: u32,
         search_path: Option<&str>,
     ) -> Result<Self, StorageError> {
-        let mut pool_opts = sqlx::postgres::PgPoolOptions::new()
+        // Validate the schema name up-front (before moving it into the
+        // after_connect closure) so an injection attempt fails fast.
+        let search_path_value = match search_path {
+            Some(schema) => {
+                if !schema
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Err(StorageError::Connection(format!(
+                        "Invalid search_path schema name: {schema}"
+                    )));
+                }
+                Some(format!("\"{schema}\", public"))
+            }
+            None => None,
+        };
+
+        let pool_opts = sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
             .min_connections(min_connections)
             .acquire_timeout(std::time::Duration::from_secs(10))
-            .idle_timeout(std::time::Duration::from_secs(300));
-
-        if let Some(schema) = search_path {
-            if !schema
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
-                return Err(StorageError::Connection(format!(
-                    "Invalid search_path schema name: {schema}"
-                )));
-            }
-            let search_path_value = format!("\"{schema}\", public");
-            pool_opts = pool_opts.after_connect(move |conn, _meta| {
+            .idle_timeout(std::time::Duration::from_secs(300))
+            // Recycle connections periodically so a connection that survived a
+            // failover (or drifted server-side) can't be pinned forever.
+            .max_lifetime(std::time::Duration::from_secs(1800))
+            // Server-side guards run on EVERY connection, whether or not a
+            // custom search_path is configured: a single hung statement or an
+            // abandoned open transaction must not pin a pool slot indefinitely
+            // and starve the scheduler tick loop.
+            .after_connect(move |conn, _meta| {
                 let search_path_value = search_path_value.clone();
                 Box::pin(async move {
-                    sqlx::query("SELECT set_config('search_path', $1, false)")
-                        .bind(&search_path_value)
+                    sqlx::query("SET statement_timeout = '30s'")
                         .execute(&mut *conn)
                         .await?;
+                    sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    if let Some(sp) = search_path_value {
+                        sqlx::query("SELECT set_config('search_path', $1, false)")
+                            .bind(&sp)
+                            .execute(&mut *conn)
+                            .await?;
+                    }
                     Ok(())
                 })
             });
-        }
 
         let pool = pool_opts
             .connect(database_url)
@@ -121,6 +149,7 @@ impl PostgresStorage {
         Ok(Self {
             pool,
             artifact_store: None,
+            manifest_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -197,6 +226,39 @@ impl crate::SequenceStore for PostgresStorage {
 
     async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
         sequences::delete(self, id).await
+    }
+
+    // `pg_advisory_lock` is session-scoped: only the connection that took it
+    // can release it. Check out a dedicated connection from the pool and
+    // park it in `manifest_locks` for the lock's lifetime -- released back to
+    // the pool on `release_manifest_lock` (or if it's simply dropped, e.g. on
+    // shutdown, Postgres releases session-level advisory locks when the
+    // backend disconnects). Blocks (bounded by the connection's
+    // `statement_timeout`, currently 30s) if another node already holds the
+    // same tenant's lock, giving concurrent manifest publishes real mutual
+    // exclusion instead of racing to interleave partial/duplicate versions.
+    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+            .bind(tenant_id)
+            .execute(&mut *conn)
+            .await?;
+        self.manifest_locks
+            .lock()
+            .await
+            .insert(tenant_id.to_string(), conn);
+        Ok(())
+    }
+
+    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        let held = self.manifest_locks.lock().await.remove(tenant_id);
+        if let Some(mut conn) = held {
+            sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
+                .bind(tenant_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -1204,9 +1266,10 @@ impl crate::AdminStore for PostgresStorage {
 
     async fn get_plugin(
         &self,
+        tenant_id: Option<&TenantId>,
         name: &str,
     ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
-        plugins::get(self, name).await
+        plugins::get(self, tenant_id, name).await
     }
 
     async fn list_plugins(
@@ -1236,9 +1299,10 @@ impl crate::AdminStore for PostgresStorage {
 
     async fn get_trigger(
         &self,
+        tenant_id: Option<&TenantId>,
         slug: &str,
     ) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError> {
-        triggers::get(self, slug).await
+        triggers::get(self, tenant_id, slug).await
     }
 
     async fn list_triggers(
@@ -1283,9 +1347,10 @@ impl crate::AdminStore for PostgresStorage {
 
     async fn get_credential(
         &self,
+        tenant_id: Option<&TenantId>,
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
-        credentials::get(self, id).await
+        credentials::get(self, tenant_id, id).await
     }
 
     async fn list_credentials(

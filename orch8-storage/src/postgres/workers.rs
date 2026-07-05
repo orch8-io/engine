@@ -99,7 +99,7 @@ pub(super) async fn claim_for_tenant(
                 AND ti.tenant_id = $4
               ORDER BY wt.created_at
               LIMIT $3
-              FOR UPDATE SKIP LOCKED
+              FOR UPDATE OF wt SKIP LOCKED
           )
           RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,

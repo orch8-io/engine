@@ -128,7 +128,10 @@ async fn get_plugin(
 ) -> Result<impl IntoResponse, ApiError> {
     let plugin = state
         .storage
-        .get_plugin(&name)
+        .get_plugin(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &name,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
@@ -148,7 +151,10 @@ async fn update_plugin(
 ) -> Result<impl IntoResponse, ApiError> {
     let mut plugin = state
         .storage
-        .get_plugin(&name)
+        .get_plugin(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &name,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;
@@ -188,7 +194,10 @@ async fn delete_plugin(
 ) -> Result<impl IntoResponse, ApiError> {
     let plugin = state
         .storage
-        .get_plugin(&name)
+        .get_plugin(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &name,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?
         .ok_or_else(|| ApiError::NotFound(format!("plugin '{name}'")))?;

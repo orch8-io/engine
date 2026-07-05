@@ -21,14 +21,23 @@ pub(crate) async fn liveness() -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Readiness probe: returns 200 if the database is reachable.
+/// Readiness probe: returns 200 only if the database is reachable AND the
+/// engine tick loop is still running. A dead scheduler with a live DB must not
+/// report ready — otherwise the LB keeps routing to a server that accepts work
+/// but never executes it.
 #[utoipa::path(get, path = "/health/ready", tag = "health",
     responses(
-        (status = 200, description = "Database is reachable"),
-        (status = 503, description = "Database is unreachable"),
+        (status = 200, description = "Database reachable and engine running"),
+        (status = 503, description = "Database unreachable or engine stopped"),
     )
 )]
 pub(crate) async fn readiness(State(state): State<AppState>) -> impl IntoResponse {
+    if !state
+        .engine_ready
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     match state.storage.ping().await {
         Ok(()) => StatusCode::OK,
         Err(_) => StatusCode::SERVICE_UNAVAILABLE,

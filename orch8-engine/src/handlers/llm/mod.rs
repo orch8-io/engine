@@ -149,9 +149,16 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .pool_max_idle_per_host(8)
             .timeout(Duration::from_secs(300))
-            // SSRF: the initial URL is validated by `is_url_safe`, but reqwest
+            // SSRF: filter DNS at connect time so a rebinding resolver can't
+            // swap a vetted public IP for a private one between the pre-flight
+            // `is_url_safe` check and the actual connection (and so redirects to
+            // hostnames that resolve to private IPs are blocked too).
+            .dns_resolver(std::sync::Arc::new(
+                crate::handlers::builtin::SsrfGuardResolver,
+            ))
+            // The initial URL is validated by `is_url_safe`, but reqwest
             // follows redirects by default without re-checking. Re-validate
-            // every hop and refuse redirects to internal/metadata targets.
+            // every hop and refuse redirects to internal/metadata IP literals.
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10 {
                     return attempt.error("too many redirects");

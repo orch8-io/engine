@@ -63,7 +63,7 @@ async fn trigger_secret_encrypted_at_rest_decrypted_on_read() {
 
     // Read through the inner store (no decryption): the secret must NOT be
     // plaintext on disk.
-    let raw = inner.get_trigger("hook").await.unwrap().unwrap();
+    let raw = inner.get_trigger(None, "hook").await.unwrap().unwrap();
     let raw_secret = raw.secret.as_ref().unwrap().expose().to_string();
     assert_ne!(
         raw_secret, "super-secret-hmac",
@@ -75,7 +75,7 @@ async fn trigger_secret_encrypted_at_rest_decrypted_on_read() {
     );
 
     // Read through the wrapper: the original plaintext is recovered.
-    let got = enc.get_trigger("hook").await.unwrap().unwrap();
+    let got = enc.get_trigger(None, "hook").await.unwrap().unwrap();
     assert_eq!(got.secret.as_ref().unwrap().expose(), "super-secret-hmac");
 
     // list_triggers decrypts too.
@@ -93,7 +93,7 @@ async fn trigger_without_secret_roundtrips() {
     enc.create_trigger(&mk_trigger("nosecret", None))
         .await
         .unwrap();
-    let got = enc.get_trigger("nosecret").await.unwrap().unwrap();
+    let got = enc.get_trigger(None, "nosecret").await.unwrap().unwrap();
     assert!(got.secret.is_none());
 }
 

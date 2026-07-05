@@ -1376,7 +1376,18 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn create_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
 
-    async fn get_plugin(&self, name: &str) -> Result<Option<PluginDef>, StorageError>;
+    /// Fetch a plugin by name, scoped to `tenant_id`. `name` is a globally
+    /// unique primary key, but callers must not be able to fetch another
+    /// tenant's plugin by guessing/knowing its name -- passing `Some` here
+    /// means a forgotten ownership check at the API layer fails closed
+    /// (`None`) instead of leaking cross-tenant. `tenant_id: None` is an
+    /// intentionally unscoped lookup for system contexts not acting on
+    /// behalf of any one tenant -- new callers should reach for `Some`.
+    async fn get_plugin(
+        &self,
+        tenant_id: Option<&TenantId>,
+        name: &str,
+    ) -> Result<Option<PluginDef>, StorageError>;
 
     async fn list_plugins(
         &self,
@@ -1391,7 +1402,16 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn create_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
 
-    async fn get_trigger(&self, slug: &str) -> Result<Option<TriggerDef>, StorageError>;
+    /// Fetch a trigger by slug, scoped to `tenant_id` when `Some` (see
+    /// [`Self::get_plugin`] for the rationale and the meaning of `None`).
+    /// The public webhook endpoint legitimately needs `None`: resolving
+    /// *which* tenant owns `slug` is the lookup's job there, not something
+    /// the caller already knows.
+    async fn get_trigger(
+        &self,
+        tenant_id: Option<&TenantId>,
+        slug: &str,
+    ) -> Result<Option<TriggerDef>, StorageError>;
 
     async fn list_triggers(
         &self,
@@ -1424,8 +1444,13 @@ pub trait AdminStore: Send + Sync + 'static {
         credential: &orch8_types::credential::CredentialDef,
     ) -> Result<(), StorageError>;
 
+    /// Fetch a credential by ID, scoped to `tenant_id` when `Some` (see
+    /// [`Self::get_plugin`] for the rationale and the meaning of `None`) --
+    /// a forgotten check at a new API route must not leak another tenant's
+    /// OAuth token.
     async fn get_credential(
         &self,
+        tenant_id: Option<&TenantId>,
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError>;
 

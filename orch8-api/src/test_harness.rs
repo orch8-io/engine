@@ -83,6 +83,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled,
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
+        engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
     // Attach auth + tenant middleware. API-key auth is disabled for the
