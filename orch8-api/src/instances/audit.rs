@@ -1,14 +1,14 @@
 //! Audit log listing for an instance.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use uuid::Uuid;
 
 use orch8_types::ids::InstanceId;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[utoipa::path(
     get,

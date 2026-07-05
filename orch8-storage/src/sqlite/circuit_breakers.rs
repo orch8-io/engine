@@ -11,8 +11,8 @@ use orch8_types::circuit_breaker::{BreakerState, CircuitBreakerState};
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 
-use super::helpers::{parse_ts_opt, ts};
 use super::SqliteStorage;
+use super::helpers::{parse_ts_opt, ts};
 
 pub(super) async fn upsert(
     storage: &SqliteStorage,

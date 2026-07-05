@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use orch8_engine::handlers::HandlerRegistry;
-use orch8_engine::scheduler::{run_tick_loop, tick_once, TickOnceResult};
+use orch8_engine::scheduler::{TickOnceResult, run_tick_loop, tick_once};
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::config::SchedulerConfig;
@@ -216,17 +216,15 @@ impl Engine {
             .await?
             .ok_or_else(|| Error::NotFound(format!("sequence {}", sequence_id.into_uuid())))?;
 
-        if let Some(ref key) = opts.idempotency_key {
-            if !key.is_empty() {
-                if let Some(existing) = self
-                    .inner
-                    .storage
-                    .find_by_idempotency_key(&self.inner.tenant, key)
-                    .await?
-                {
-                    return Ok(existing.id);
-                }
-            }
+        if let Some(ref key) = opts.idempotency_key
+            && !key.is_empty()
+            && let Some(existing) = self
+                .inner
+                .storage
+                .find_by_idempotency_key(&self.inner.tenant, key)
+                .await?
+        {
+            return Ok(existing.id);
         }
 
         let instance = TaskInstance {
@@ -324,14 +322,14 @@ impl Engine {
 
         // Wake a Scheduled instance whose next_fire_at is in the future so
         // the signal is handled promptly (critical for human-input waits).
-        if let Ok(Some(fresh)) = self.inner.storage.get_instance(id).await {
-            if fresh.state == InstanceState::Scheduled {
-                let _ = self
-                    .inner
-                    .storage
-                    .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
-                    .await;
-            }
+        if let Ok(Some(fresh)) = self.inner.storage.get_instance(id).await
+            && fresh.state == InstanceState::Scheduled
+        {
+            let _ = self
+                .inner
+                .storage
+                .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
+                .await;
         }
 
         Ok(())

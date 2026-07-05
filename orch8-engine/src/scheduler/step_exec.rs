@@ -18,7 +18,7 @@ use orch8_types::instance::InstanceState;
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 
-use super::{wake_parent_if_child, StepOutcome};
+use super::{StepOutcome, wake_parent_if_child};
 
 /// Check if a step's SLA deadline has been breached (fast path).
 /// Delegates to the shared `handle_deadline_breach` with `from_state = Running`.
@@ -359,39 +359,38 @@ pub async fn check_human_input_at(
     // allocates a fresh Vec).
     let effective_choices = human_def.effective_choices();
     for signal in &signals {
-        if let orch8_types::signal::SignalType::Custom(name) = &signal.signal_type {
-            if *name == signal_name {
-                // Strict validation: payload must be `{"value": "<string>"}` where
-                // `<string>` is one of `human_def.effective_choices()[].value`.
-                // On malformed/invalid payload we mark the signal delivered (so a
-                // poison message can't replay forever) but keep the block waiting
-                // by falling through to the reschedule branch.
-                let candidate = signal.payload.get("value").and_then(|v| v.as_str());
-                let Some(value) =
-                    candidate.filter(|v| effective_choices.iter().any(|c| c.value == **v))
-                else {
-                    warn!(
-                        instance_id = %instance.id,
-                        block_id = %step_def.id,
-                        payload = %signal.payload,
-                        "human input: payload rejected (missing `value` field or \
-                         not in effective_choices); marking delivered, staying waiting"
-                    );
-                    storage.mark_signal_delivered(signal.id).await?;
-                    continue;
-                };
-
-                // Valid input — canonical output shape and context merge.
-                accept_human_input(storage, instance, step_def, human_def, value.to_string())
-                    .await?;
-                storage.mark_signal_delivered(signal.id).await?;
-                debug!(
+        if let orch8_types::signal::SignalType::Custom(name) = &signal.signal_type
+            && *name == signal_name
+        {
+            // Strict validation: payload must be `{"value": "<string>"}` where
+            // `<string>` is one of `human_def.effective_choices()[].value`.
+            // On malformed/invalid payload we mark the signal delivered (so a
+            // poison message can't replay forever) but keep the block waiting
+            // by falling through to the reschedule branch.
+            let candidate = signal.payload.get("value").and_then(|v| v.as_str());
+            let Some(value) =
+                candidate.filter(|v| effective_choices.iter().any(|c| c.value == **v))
+            else {
+                warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,
-                    "human input accepted"
+                    payload = %signal.payload,
+                    "human input: payload rejected (missing `value` field or \
+                     not in effective_choices); marking delivered, staying waiting"
                 );
-                return Ok(false); // Continue execution
-            }
+                storage.mark_signal_delivered(signal.id).await?;
+                continue;
+            };
+
+            // Valid input — canonical output shape and context merge.
+            accept_human_input(storage, instance, step_def, human_def, value.to_string()).await?;
+            storage.mark_signal_delivered(signal.id).await?;
+            debug!(
+                instance_id = %instance.id,
+                block_id = %step_def.id,
+                "human input accepted"
+            );
+            return Ok(false); // Continue execution
         }
     }
 
@@ -481,26 +480,25 @@ pub(super) async fn execute_step_block(
     let instance_id = instance.id;
 
     // Debug mode: if instance has breakpoints set and this step is in the list, pause.
-    if let Some(breakpoints) = instance.metadata.get("_debug_breakpoints") {
-        if let Some(arr) = breakpoints.as_array() {
-            if arr.iter().any(|v| v.as_str() == Some(step_def.id.as_str())) {
-                debug!(
-                    instance_id = %instance_id,
-                    block_id = %step_def.id,
-                    "debug breakpoint hit, pausing instance"
-                );
-                crate::lifecycle::transition_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    Some(&instance.tenant_id),
-                    InstanceState::Running,
-                    InstanceState::Paused,
-                    None,
-                )
-                .await?;
-                return Ok(StepOutcome::Deferred);
-            }
-        }
+    if let Some(breakpoints) = instance.metadata.get("_debug_breakpoints")
+        && let Some(arr) = breakpoints.as_array()
+        && arr.iter().any(|v| v.as_str() == Some(step_def.id.as_str()))
+    {
+        debug!(
+            instance_id = %instance_id,
+            block_id = %step_def.id,
+            "debug breakpoint hit, pausing instance"
+        );
+        crate::lifecycle::transition_instance(
+            storage.as_ref(),
+            instance_id,
+            Some(&instance.tenant_id),
+            InstanceState::Running,
+            InstanceState::Paused,
+            None,
+        )
+        .await?;
+        return Ok(StepOutcome::Deferred);
     }
 
     if check_step_delay(storage.as_ref(), instance, step_def, clock).await? {
@@ -709,10 +707,8 @@ pub(super) async fn execute_step_block(
             // Handler succeeded — reset the (tenant, handler) breaker. A
             // successful call is the probe that closes a half-open breaker
             // and clears any accumulated failure count.
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_success(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_success(&instance.tenant_id, &step_def.handler);
             }
 
             // Clean up the sentinel now that the real output is persisted.
@@ -775,10 +771,8 @@ pub(super) async fn execute_step_block(
             // count toward tripping the breaker so a consistently-failing
             // dependency eventually protects the workers from burning retries
             // on a hopeless handler.
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_failure(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             // Handler returned cleanly with a retryable error — the side
             // effect either didn't happen or is idempotent. Clear the
@@ -861,10 +855,8 @@ pub(super) async fn execute_step_block(
             // still want to stop hammering it. (Template/credential errors
             // fail earlier and never reach this arm, so they can't poison the
             // breaker.)
-            if breaker_tracked {
-                if let Some(cb) = handlers.circuit_breakers() {
-                    cb.record_failure(&instance.tenant_id, &step_def.handler);
-                }
+            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+                cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             // Keep the sentinel on permanent failure — the handler already
             // executed (side effects may have occurred). If the user later

@@ -12,8 +12,8 @@ use orch8_types::ids::{InstanceId, SequenceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

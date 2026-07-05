@@ -2,8 +2,8 @@ use orch8_types::audit::AuditLogEntry;
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
-use super::helpers::{row_to_audit, ts};
 use super::SqliteStorage;
+use super::helpers::{row_to_audit, ts};
 
 pub(super) async fn append(
     storage: &SqliteStorage,

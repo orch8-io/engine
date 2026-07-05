@@ -200,10 +200,10 @@ async fn get_worker_task_checked(
         .await
         .map_err(storage_err)?
         .ok_or_else(|| Status::not_found("instance not found"))?;
-    if let Some(ref caller) = caller_tenant {
-        if caller != &instance.tenant_id {
-            return Err(Status::not_found("worker_task"));
-        }
+    if let Some(ref caller) = caller_tenant
+        && caller != &instance.tenant_id
+    {
+        return Err(Status::not_found("worker_task"));
     }
     Ok((task, instance))
 }
@@ -274,10 +274,10 @@ fn find_step_block<'a>(
                         return Some(step);
                     }
                 }
-                if let Some(default) = &def.default {
-                    if let Some(step) = find_step_block(default, block_id) {
-                        return Some(step);
-                    }
+                if let Some(default) = &def.default
+                    && let Some(step) = find_step_block(default, block_id)
+                {
+                    return Some(step);
                 }
             }
             BlockDefinition::TryCatch(def) => {
@@ -287,10 +287,10 @@ fn find_step_block<'a>(
                 if let Some(step) = find_step_block(&def.catch_block, block_id) {
                     return Some(step);
                 }
-                if let Some(finally_block) = &def.finally_block {
-                    if let Some(step) = find_step_block(finally_block, block_id) {
-                        return Some(step);
-                    }
+                if let Some(finally_block) = &def.finally_block
+                    && let Some(step) = find_step_block(finally_block, block_id)
+                {
+                    return Some(step);
                 }
             }
             BlockDefinition::ABSplit(def) => {
@@ -412,10 +412,10 @@ impl Orch8Service for Orch8GrpcService {
         // and the HTTP `get_sequence_by_name` handler: the storage query is
         // pre-filtered by tenant, but a future query bug must not let one
         // transport leak a cross-tenant row the other would reject.
-        if let Some(caller) = caller.as_ref() {
-            if caller != &seq.tenant_id {
-                return Err(Status::not_found("sequence not found"));
-            }
+        if let Some(caller) = caller.as_ref()
+            && caller != &seq.tenant_id
+        {
+            return Err(Status::not_found("sequence not found"));
         }
         Ok(Response::new(proto::SequenceResponse {
             definition_json: to_json_string(&seq)?,

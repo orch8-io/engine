@@ -117,7 +117,7 @@ async fn save_interceptor_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, OutputStore};
+    use orch8_storage::{OutputStore, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -372,11 +372,13 @@ mod tests {
         emit_before_step(&storage, &interceptors, instance_id, &step_id).await;
         emit_after_step(&storage, &interceptors, instance_id, &step_id).await;
 
-        assert!(storage
-            .get_block_output(instance_id, &BlockId::new("_interceptor:before:s1"))
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            storage
+                .get_block_output(instance_id, &BlockId::new("_interceptor:before:s1"))
+                .await
+                .unwrap()
+                .is_none()
+        );
         let after = storage
             .get_block_output(instance_id, &BlockId::new("_interceptor:after:s1"))
             .await

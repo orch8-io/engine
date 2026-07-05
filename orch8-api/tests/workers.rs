@@ -334,11 +334,13 @@ async fn poll_registers_worker_even_with_no_tasks() {
     assert_eq!(w["alive"], true);
     assert_eq!(w["version"], "1.2.3");
     assert_eq!(w["in_flight"], 0);
-    assert!(w["handlers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|h| h == "idle_handler"));
+    assert!(
+        w["handlers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h == "idle_handler")
+    );
 }
 
 #[tokio::test]

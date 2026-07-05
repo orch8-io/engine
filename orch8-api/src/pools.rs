@@ -9,8 +9,8 @@ use uuid::Uuid;
 use orch8_types::ids::{ResourceKey, TenantId};
 use orch8_types::pool::{PoolResource, ResourcePool, RotationStrategy};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()

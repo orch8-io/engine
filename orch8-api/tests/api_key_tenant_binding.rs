@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use axum::routing::get;
 use axum::Router;
-use orch8_storage::sqlite::SqliteStorage;
+use axum::routing::get;
 use orch8_storage::StorageBackend;
+use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::api_key;
 
 const ROOT_KEY: &str = "root-admin-key-supersecret";

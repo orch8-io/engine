@@ -6,7 +6,7 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 
 use super::PostgresStorage;
-use crate::compression::{compress, decompress, COMPRESSION_THRESHOLD_BYTES};
+use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress, decompress};
 
 pub(super) async fn save(
     store: &PostgresStorage,

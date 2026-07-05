@@ -1561,11 +1561,12 @@ async fn delete_block_outputs_batch_removes_retry_and_sentinel_markers() {
         .await
         .unwrap();
     assert_eq!(removed, 2);
-    assert!(s
-        .get_block_output(inst, &BlockId::new("s2"))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        s.get_block_output(inst, &BlockId::new("s2"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1602,11 +1603,12 @@ async fn delete_block_outputs_batch_scoped_to_instance() {
         .await
         .unwrap();
     assert_eq!(removed, 1);
-    assert!(s
-        .get_block_output(inst2, &BlockId::new("shared"))
-        .await
-        .unwrap()
-        .is_some());
+    assert!(
+        s.get_block_output(inst2, &BlockId::new("shared"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 // ===========================================================================
@@ -2415,7 +2417,7 @@ async fn update_instance_context_is_full_replacement() {
 
 #[tokio::test]
 async fn update_instance_context_externalized_swaps_markers_and_persists_refs() {
-    use orch8_storage::externalizing::{is_marker, REF_KEY};
+    use orch8_storage::externalizing::{REF_KEY, is_marker};
 
     let s = store().await;
     let seq = make_sequence("t1");
@@ -2482,7 +2484,7 @@ async fn update_instance_context_externalized_threshold_zero_is_passthrough() {
 
 #[tokio::test]
 async fn create_instance_externalized_swaps_markers_and_persists_refs() {
-    use orch8_storage::externalizing::{is_marker, REF_KEY};
+    use orch8_storage::externalizing::{REF_KEY, is_marker};
 
     let s = store().await;
     let seq = make_sequence("t1");
@@ -2530,7 +2532,7 @@ async fn create_instance_externalized_threshold_zero_is_passthrough() {
 
 #[tokio::test]
 async fn create_instances_batch_externalized_externalizes_each_instance_independently() {
-    use orch8_storage::externalizing::{is_marker, REF_KEY};
+    use orch8_storage::externalizing::{REF_KEY, is_marker};
 
     let s = store().await;
     let seq = make_sequence("t1");

@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::auth::{scoped_tenant_id, OptionalTenant};
-use crate::error::ApiError;
 use crate::AppState;
+use crate::auth::{OptionalTenant, scoped_tenant_id};
+use crate::error::ApiError;
 
 const MAX_BATCH_SIZE: usize = 500;
 
@@ -136,10 +136,10 @@ pub(crate) async fn ingest_errors(
     match result {
         Ok(()) => {
             // Trigger auto-rollback check if sequence_name is present.
-            if let Some(ref seq_name) = req.sequence_name {
-                if let Err(e) = check_rollback(&state, &tenant, seq_name).await {
-                    warn!(error = %e, "rollback check failed");
-                }
+            if let Some(ref seq_name) = req.sequence_name
+                && let Err(e) = check_rollback(&state, &tenant, seq_name).await
+            {
+                warn!(error = %e, "rollback check failed");
             }
             Ok(StatusCode::ACCEPTED)
         }

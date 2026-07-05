@@ -123,7 +123,9 @@ impl S3CdnBackend {
             )
         } else {
             (
-                format!("content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"),
+                format!(
+                    "content-type:{content_type}\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+                ),
                 "content-type;host;x-amz-content-sha256;x-amz-date".to_string(),
             )
         };

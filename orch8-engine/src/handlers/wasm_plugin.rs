@@ -13,9 +13,9 @@
 //!
 //! WASM modules are cached by file path to avoid repeated compilation.
 
+use serde_json::Value;
 #[cfg(feature = "wasm")]
 use serde_json::json;
-use serde_json::Value;
 
 use orch8_types::error::StepError;
 

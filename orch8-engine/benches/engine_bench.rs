@@ -5,10 +5,11 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use chrono::Utc;
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use serde_json::json;
 use tokio::runtime::Runtime;
 
+use orch8_engine::handlers::StepContext;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
     ExecutionTreeStore, InstanceStore, ResourceStore, SequenceStore, StorageBackend,
@@ -707,6 +708,55 @@ fn bench_tick_once(c: &mut Criterion) {
     });
 }
 
+/// Build a JSON blob of roughly `target_bytes` by repeating key/value pairs —
+/// approximates real `ExecutionContext.data` shapes (flat map of step outputs).
+fn make_context_data(target_bytes: usize) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let mut size = 0usize;
+    let mut i = 0u32;
+    while size < target_bytes {
+        let key = format!("step_output_{i}");
+        let value = json!({
+            "status": "completed",
+            "output": format!("result payload for step {i} with some representative body text"),
+            "duration_ms": i * 7,
+        });
+        size += key.len() + value.to_string().len();
+        map.insert(key, value);
+        i += 1;
+    }
+    serde_json::Value::Object(map)
+}
+
+fn bench_step_context_clone(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let storage: Arc<dyn StorageBackend> =
+        rt.block_on(async { Arc::new(SqliteStorage::in_memory().await.unwrap()) });
+
+    // 0 (empty), 10KB, 50KB, 256KB (DEFAULT_MAX_CONTEXT_BYTES ceiling) —
+    // spans from a fresh instance up to the largest context the engine allows.
+    for target_bytes in [0usize, 10 * 1024, 50 * 1024, 256 * 1024] {
+        let data = make_context_data(target_bytes);
+        let actual_bytes = data.to_string().len();
+        let ctx = StepContext {
+            instance_id: InstanceId::new(),
+            tenant_id: TenantId::unchecked("bench"),
+            block_id: BlockId::new("b1"),
+            params: json!({"foo": "bar"}),
+            context: Arc::new(ExecutionContext {
+                data,
+                ..ExecutionContext::default()
+            }),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+        c.bench_function(&format!("step_context_clone_{actual_bytes}b"), |b| {
+            b.iter(|| black_box(ctx.clone()));
+        });
+    }
+}
+
 criterion_group!(
     benches,
     bench_expression_processing,
@@ -717,5 +767,6 @@ criterion_group!(
     bench_evaluate_deep_tree,
     bench_scheduler_tick,
     bench_tick_once,
+    bench_step_context_clone,
 );
 criterion_main!(benches);

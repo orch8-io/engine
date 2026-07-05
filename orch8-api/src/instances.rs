@@ -1,8 +1,8 @@
 //! Instance HTTP routes: lifecycle, signals, outputs, bulk ops, checkpoints,
 //! audit, and dynamic step injection.
 
-use axum::routing::{get, patch, post};
 use axum::Router;
+use axum::routing::{get, patch, post};
 
 use crate::AppState;
 

@@ -100,10 +100,10 @@ pub fn evaluate(
 /// `"context.data.x == 1"` or `"{{ context.data.x == 1 }}"`.
 fn strip_template_braces(expr: &str) -> &str {
     let s = expr.trim();
-    if let Some(inner) = s.strip_prefix("{{") {
-        if let Some(inner) = inner.strip_suffix("}}") {
-            return inner.trim();
-        }
+    if let Some(inner) = s.strip_prefix("{{")
+        && let Some(inner) = inner.strip_suffix("}}")
+    {
+        return inner.trim();
     }
     s
 }
@@ -232,11 +232,7 @@ fn tokenize_string(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usi
     }
     let s: String = chars[begin..i].iter().collect();
     tokens.push(Token::String(s));
-    if i < chars.len() {
-        i + 1
-    } else {
-        i
-    }
+    if i < chars.len() { i + 1 } else { i }
 }
 
 fn tokenize_complex(chars: &[char], i: usize, tokens: &mut Vec<Token>) -> usize {
@@ -304,10 +300,10 @@ fn tokenize_number(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usi
         i += 1;
     }
     let num_str: String = chars[start..i].iter().collect();
-    if let Ok(n) = num_str.parse::<f64>() {
-        if n.is_finite() {
-            tokens.push(Token::Number(n));
-        }
+    if let Ok(n) = num_str.parse::<f64>()
+        && n.is_finite()
+    {
+        tokens.push(Token::Number(n));
     }
     i
 }
@@ -819,11 +815,7 @@ impl<'a> Parser<'a> {
                         let mut sorted = a.clone();
                         sorted.sort_by(|a, b| {
                             let cmp = json_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal);
-                            if order == "desc" {
-                                cmp.reverse()
-                            } else {
-                                cmp
-                            }
+                            if order == "desc" { cmp.reverse() } else { cmp }
                         });
                         serde_json::Value::Array(sorted)
                     }
@@ -1004,11 +996,7 @@ fn to_f64(v: &serde_json::Value) -> Option<f64> {
         }
         _ => return None,
     };
-    if f.is_finite() {
-        Some(f)
-    } else {
-        None
-    }
+    if f.is_finite() { Some(f) } else { None }
 }
 
 #[cfg(test)]
@@ -2764,9 +2752,11 @@ mod tests {
             eval_expr("steps.s.a * steps.s.b", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in multiplication"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in multiplication")
+        );
         assert_eq!(
             warnings[0].fields.get("left").map(String::as_str),
             Some("null")
@@ -2801,9 +2791,11 @@ mod tests {
             eval_expr("steps.s.a / steps.s.b", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in division"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in division")
+        );
         assert_eq!(
             warnings[0].fields.get("right").map(String::as_str),
             Some("null")
@@ -2818,9 +2810,11 @@ mod tests {
             eval_expr("steps.s.obj - steps.s.b", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in subtraction"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in subtraction")
+        );
         let left = warnings[0].fields.get("left").unwrap();
         assert!(
             left.contains("price"),
@@ -2836,9 +2830,11 @@ mod tests {
             eval_expr("steps.s.arr * steps.s.b", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in multiplication"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in multiplication")
+        );
         let left = warnings[0].fields.get("left").unwrap();
         assert!(
             left.contains('['),
@@ -2854,9 +2850,11 @@ mod tests {
             eval_expr("-steps.s.val", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in negation"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in negation")
+        );
         assert_eq!(
             warnings[0].fields.get("value").map(String::as_str),
             Some("null")
@@ -2871,9 +2869,11 @@ mod tests {
             eval_expr("-steps.s.obj", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in negation"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in negation")
+        );
         let val = warnings[0].fields.get("value").unwrap();
         assert!(
             val.contains('x'),
@@ -2889,9 +2889,11 @@ mod tests {
             eval_expr("steps.s.a + steps.s.b", &c, &o);
         });
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0]
-            .message
-            .contains("non-numeric operand in addition"));
+        assert!(
+            warnings[0]
+                .message
+                .contains("non-numeric operand in addition")
+        );
         assert!(warnings[0].fields.get("left").unwrap().contains("hello"));
     }
 

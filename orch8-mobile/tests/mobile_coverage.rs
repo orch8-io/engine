@@ -474,10 +474,12 @@ fn sync_05_sync_without_root_key_returns_error() {
     let (engine, _dir) = make_engine(config);
     let result = engine.sync("https://example.com/manifest.json".to_string(), None);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("sync not configured"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("sync not configured")
+    );
 }
 
 #[test]
@@ -489,10 +491,12 @@ fn sync_06_sync_with_invalid_root_key_disables_sync() {
     let (engine, _dir) = make_engine(config);
     let result = engine.sync("https://example.com/manifest.json".to_string(), None);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("sync not configured"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("sync not configured")
+    );
 }
 
 #[test]
@@ -851,10 +855,12 @@ fn lifecycle_04_max_concurrent_instances_enforced() {
     }
     let result = engine.start("flow".to_string(), "{}".to_string(), None);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("max concurrent instances"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("max concurrent instances")
+    );
 }
 
 #[test]

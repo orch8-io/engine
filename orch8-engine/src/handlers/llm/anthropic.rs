@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tracing::{debug, warn};
 
 use orch8_types::error::StepError;
@@ -9,8 +9,8 @@ use super::common::{
     classify_api_error, classify_reqwest_error, extract_system_message, is_json_object_format,
     merge_json_response_fields, permanent, retryable, safe_truncate,
 };
-use super::sse::{next_chunk, stream_idle_timeout, SseParser};
-use super::{anthropic_default_model, http_client, DeltaSink};
+use super::sse::{SseParser, next_chunk, stream_idle_timeout};
+use super::{DeltaSink, anthropic_default_model, http_client};
 
 /// Build the `/messages` request body shared by the streaming and
 /// non-streaming paths (so multimodal message conversion behaves identically).
@@ -107,15 +107,14 @@ pub(super) async fn call_anthropic(
 
     let mut output = normalize_anthropic_response(&resp_body);
 
-    if is_json_object_format(params) {
-        if let Some(content_owned) = output
+    if is_json_object_format(params)
+        && let Some(content_owned) = output
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
             .map(String::from)
-        {
-            merge_json_response_fields(&content_owned, &mut output);
-        }
+    {
+        merge_json_response_fields(&content_owned, &mut output);
     }
 
     Ok(output)
@@ -262,15 +261,14 @@ impl AnthropicStreamAcc {
             "usage": Value::Object(self.usage),
         });
         let mut output = normalize_anthropic_response(&rebuilt);
-        if is_json_object_format(params) {
-            if let Some(content_owned) = output
+        if is_json_object_format(params)
+            && let Some(content_owned) = output
                 .get("message")
                 .and_then(|m| m.get("content"))
                 .and_then(Value::as_str)
                 .map(String::from)
-            {
-                merge_json_response_fields(&content_owned, &mut output);
-            }
+        {
+            merge_json_response_fields(&content_owned, &mut output);
         }
         output
     }

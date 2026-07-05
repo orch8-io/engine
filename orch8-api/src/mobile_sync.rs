@@ -8,8 +8,8 @@ use tracing::{debug, warn};
 
 use orch8_storage::{MobileApprovalRequest, MobileCommand, MobileDevice, MobileInstanceStatus};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -485,16 +485,16 @@ async fn resolve_approval(
         .ok()
         .flatten();
 
-    if let Some(device) = device {
-        if let Some(token) = device.push_token {
-            let push = state.push_provider.clone();
-            let platform = device.platform.clone();
-            tokio::spawn(async move {
-                if let Err(e) = push.send_silent_push(&token, &platform).await {
-                    warn!(device_id = %device.device_id, error = %e, "push notification failed");
-                }
-            });
-        }
+    if let Some(device) = device
+        && let Some(token) = device.push_token
+    {
+        let push = state.push_provider.clone();
+        let platform = device.platform.clone();
+        tokio::spawn(async move {
+            if let Err(e) = push.send_silent_push(&token, &platform).await {
+                warn!(device_id = %device.device_id, error = %e, "push notification failed");
+            }
+        });
     }
 
     debug!(approval_id = %id, device_id = %approval.device_id, "approval resolved");
@@ -603,16 +603,16 @@ async fn create_command(
         .ok()
         .flatten();
 
-    if let Some(device) = device {
-        if let Some(token) = device.push_token {
-            let push = state.push_provider.clone();
-            let platform = device.platform.clone();
-            tokio::spawn(async move {
-                if let Err(e) = push.send_silent_push(&token, &platform).await {
-                    warn!(device_id = %device.device_id, error = %e, "push notification failed");
-                }
-            });
-        }
+    if let Some(device) = device
+        && let Some(token) = device.push_token
+    {
+        let push = state.push_provider.clone();
+        let platform = device.platform.clone();
+        tokio::spawn(async move {
+            if let Err(e) = push.send_silent_push(&token, &platform).await {
+                warn!(device_id = %device.device_id, error = %e, "push notification failed");
+            }
+        });
     }
 
     Ok(StatusCode::CREATED)

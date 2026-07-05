@@ -487,8 +487,8 @@ mod tests {
     // user-supplied response strategy. Keeps these tests dep-free (no
     // wiremock crate needed).
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -504,10 +504,10 @@ mod tests {
                 break;
             }
             buf.extend_from_slice(&tmp[..n]);
-            if header_end.is_none() {
-                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_end = Some(pos + 4);
-                }
+            if header_end.is_none()
+                && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+            {
+                header_end = Some(pos + 4);
             }
             if let Some(end) = header_end {
                 // Parse Content-Length to know how much body to expect.
@@ -592,9 +592,10 @@ mod tests {
             let bodies = bodies.lock().await;
             let raw = std::str::from_utf8(&bodies[0]).unwrap();
             assert!(raw.starts_with("POST /hook HTTP/1.1"), "method+path: {raw}");
-            assert!(raw
-                .to_ascii_lowercase()
-                .contains("content-type: application/json"));
+            assert!(
+                raw.to_ascii_lowercase()
+                    .contains("content-type: application/json")
+            );
             assert!(raw.contains("\"event_type\":\"instance.completed\""));
             assert!(raw.contains("\"k\":\"v\""));
             drop(bodies);

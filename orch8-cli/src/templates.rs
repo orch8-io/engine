@@ -7,7 +7,7 @@
 //! guarantee every entry is valid JSON and that its `blocks` deserialize into
 //! the engine's `BlockDefinition` DSL.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 /// A built-in sequence template shipped with the CLI.
 #[derive(Debug)]

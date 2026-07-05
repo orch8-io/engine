@@ -516,11 +516,13 @@ mod tests {
         assert_eq!(inst.state, InstanceState::Cancelled);
 
         // Dedup should be cleaned up in both memory and storage.
-        assert!(mobile_storage
-            .get_dedup_instance("dk1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            mobile_storage
+                .get_dedup_instance("dk1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -664,11 +666,13 @@ mod tests {
 
         lifecycle.cleanup_dedup(&id).await;
 
-        assert!(mobile_storage
-            .get_dedup_instance("dk1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            mobile_storage
+                .get_dedup_instance("dk1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

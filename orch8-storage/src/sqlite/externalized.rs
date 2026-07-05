@@ -6,9 +6,9 @@ use sqlx::Row;
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
-use super::helpers::ts;
 use super::SqliteStorage;
-use crate::compression::{compress, decompress, COMPRESSION_THRESHOLD_BYTES};
+use super::helpers::ts;
+use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress, decompress};
 
 pub(super) async fn save(
     storage: &SqliteStorage,
@@ -180,7 +180,7 @@ pub(super) async fn batch_get(
     }
 
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN ("
+        "SELECT ref_key, payload, payload_bytes, compression FROM externalized_state WHERE ref_key IN (",
     );
     let mut separated = qb.separated(",");
     for key in ref_keys {

@@ -17,7 +17,7 @@ use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::ExternalizationMode;
 use tokio_util::sync::CancellationToken;
 
-use crate::{build_router, webhooks, AppState};
+use crate::{AppState, build_router, webhooks};
 
 /// A running test server. The listener is bound to `127.0.0.1:0` so tests
 /// can run concurrently without port collisions.

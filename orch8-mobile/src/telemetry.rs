@@ -109,10 +109,10 @@ impl TelemetryManager {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            if let Some(endpoint) = endpoint {
-                if let Err(e) = self.flush(&endpoint).await {
-                    tracing::warn!(error = %e, "auto-flush failed");
-                }
+            if let Some(endpoint) = endpoint
+                && let Err(e) = self.flush(&endpoint).await
+            {
+                tracing::warn!(error = %e, "auto-flush failed");
             }
         }
 

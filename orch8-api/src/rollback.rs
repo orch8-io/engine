@@ -6,10 +6,10 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{enforce_tenant_access, enforce_tenant_create, scoped_tenant_id, OptionalTenant};
+use crate::AppState;
+use crate::auth::{OptionalTenant, enforce_tenant_access, enforce_tenant_create, scoped_tenant_id};
 use crate::error::ApiError;
 use crate::security::validate_public_url;
-use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

@@ -37,7 +37,7 @@
 //! | `notify_url` | string | — | Webhook URL to notify about pending review |
 //! | `notify_headers` | object | `{}` | Extra headers for notification webhook |
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::{debug, warn};
 
 use orch8_types::error::StepError;
@@ -159,7 +159,7 @@ pub async fn handle_human_review(ctx: StepContext) -> Result<Value, StepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;
@@ -179,7 +179,7 @@ mod tests {
                 "instructions": "Check for accuracy",
                 "reviewer": "alice",
             }),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: mk_test_storage().await,
             wait_for_input: None,
@@ -198,7 +198,7 @@ mod tests {
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("r"),
             params: json!({}),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: mk_test_storage().await,
             wait_for_input: None,
@@ -223,7 +223,7 @@ mod tests {
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("r"),
             params: json!({}),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: mk_test_storage().await,
             wait_for_input: Some(human_def),
@@ -263,7 +263,7 @@ mod tests {
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("r"),
             params: json!({}),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: mk_test_storage().await,
             wait_for_input: Some(human_def),

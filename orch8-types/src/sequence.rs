@@ -439,10 +439,10 @@ impl HumanInputDef {
                 }
             }
         }
-        if let Some(s) = &self.store_as {
-            if s.is_empty() {
-                return Err("human_review: `store_as` must be non-empty".into());
-            }
+        if let Some(s) = &self.store_as
+            && s.is_empty()
+        {
+            return Err("human_review: `store_as` must be non-empty".into());
         }
         Ok(())
     }
@@ -1242,10 +1242,12 @@ mod tests {
         assert!(!FieldAccess::Bool(false).allows_any());
         assert!(FieldAccess::Keyword(AccessKeyword::All).allows_any());
         assert!(!FieldAccess::Keyword(AccessKeyword::None).allows_any());
-        assert!(FieldAccess::Fields {
-            fields: vec!["a".into()]
-        }
-        .allows_any());
+        assert!(
+            FieldAccess::Fields {
+                fields: vec!["a".into()]
+            }
+            .allows_any()
+        );
         assert!(!FieldAccess::Fields { fields: vec![] }.allows_any());
     }
 
@@ -1996,9 +1998,10 @@ mod tests {
         }
         let seq = sample_seq(vec![s]);
         let err = seq.validate().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("initial_backoff must be <= retry.max_backoff"));
+        assert!(
+            err.to_string()
+                .contains("initial_backoff must be <= retry.max_backoff")
+        );
     }
 
     #[test]

@@ -88,7 +88,7 @@ pub(super) async fn check_sla_deadlines(
                     tenant_id: instance.tenant_id.clone(),
                     block_id: node.block_id.clone(),
                     params,
-                    context: instance.context.clone(),
+                    context: Arc::new(instance.context.clone()),
                     attempt: 0,
                     storage: Arc::clone(storage),
                     wait_for_input: None,

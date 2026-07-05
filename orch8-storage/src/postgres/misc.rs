@@ -5,8 +5,8 @@ use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
 use orch8_types::worker::WorkerTask;
 
-use super::rows::{InstanceRow, WorkerTaskRow};
 use super::PostgresStorage;
+use super::rows::{InstanceRow, WorkerTaskRow};
 
 // === Idempotency ===
 

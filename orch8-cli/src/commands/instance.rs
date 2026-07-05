@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{colorize_state, humanize_time, print_response, print_table, val_str, OutputFormat};
+use crate::{OutputFormat, colorize_state, humanize_time, print_response, print_table, val_str};
 
 #[derive(Subcommand)]
 pub enum InstanceCmd {

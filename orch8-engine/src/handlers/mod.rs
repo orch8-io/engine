@@ -51,15 +51,17 @@ pub type StepHandler = Box<
 
 /// Context passed to step handlers during execution.
 ///
-/// Cheaply cloneable — the `storage` handle is an `Arc`, and the other fields
-/// are newtype wrappers / JSON / small POD.
+/// Cheaply cloneable — the `storage` handle is an `Arc`, `context` is an
+/// `Arc<ExecutionContext>` (handlers only ever read it; the scheduler is the
+/// sole writer, and does so on its own owned copy), and the remaining fields
+/// are newtype wrappers / small JSON / POD.
 #[derive(Clone)]
 pub struct StepContext {
     pub instance_id: InstanceId,
     pub tenant_id: TenantId,
     pub block_id: BlockId,
     pub params: serde_json::Value,
-    pub context: ExecutionContext,
+    pub context: Arc<ExecutionContext>,
     pub attempt: u32,
     /// Storage handle for handlers that need direct storage access
     /// (e.g. `emit_event`, `send_signal`, `query_instance`). Handlers that
@@ -80,7 +82,7 @@ impl StepContext {
     /// `RuntimeContext`, so it survives checkpoint/replay and is uniform across
     /// every dispatch path.
     #[must_use]
-    pub const fn is_dry_run(&self) -> bool {
+    pub fn is_dry_run(&self) -> bool {
         self.context.runtime.dry_run
     }
 }
@@ -243,7 +245,7 @@ mod tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("step_1"),
             params: serde_json::Value::Null,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -273,7 +275,7 @@ mod tests {
     async fn is_dry_run_reflects_runtime_flag() {
         let mut ctx = mk_ctx(mk_test_storage().await);
         assert!(!ctx.is_dry_run(), "defaults to false");
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(ctx.is_dry_run());
     }
 

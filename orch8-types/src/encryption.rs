@@ -12,8 +12,8 @@
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 
 /// Encrypts and decrypts `serde_json::Value` fields using AES-256-GCM.
 ///

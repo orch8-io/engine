@@ -1,8 +1,8 @@
 //! Bulk operations and DLQ listing.
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
-use axum::Json;
 
 use chrono::Utc;
 use uuid::Uuid;
@@ -16,8 +16,8 @@ use super::types::{
     BatchAction, BatchActionRequest, BatchActionResponse, BulkRescheduleRequest,
     BulkUpdateStateRequest, CountResponse, ListQuery,
 };
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[utoipa::path(patch, path = "/instances/bulk/state", tag = "instances",
     request_body = BulkUpdateStateRequest,

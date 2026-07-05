@@ -9,7 +9,7 @@ use orch8_storage::InstanceStore;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 use reqwest::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// POST one JSON-RPC message; return (status, parsed body or Null when empty).
@@ -469,10 +469,12 @@ async fn unknown_tool_returns_32602() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["error"]["code"], -32602);
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("unknown tool"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool")
+    );
 }
 
 #[tokio::test]
@@ -499,10 +501,12 @@ async fn tenant_isolation_hides_foreign_instances() {
     )
     .await;
     assert_eq!(result["isError"], true);
-    assert!(result["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("not found"));
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 
     // Nor signal it.
     let result = call_tool(

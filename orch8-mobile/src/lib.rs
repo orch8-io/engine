@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use orch8_engine::handlers::HandlerRegistry;
-use orch8_engine::scheduler::{tick_once, TickOnceResult};
+use orch8_engine::scheduler::{TickOnceResult, tick_once};
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::ids::{InstanceId, Namespace, TenantId};

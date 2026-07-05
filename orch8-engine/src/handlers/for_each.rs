@@ -9,8 +9,8 @@ use orch8_types::sequence::ForEachDef;
 
 use crate::error::EngineError;
 use crate::evaluator;
-use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
+use crate::handlers::param_resolve::OutputsSnapshot;
 
 /// Absolute upper bound on `for_each` iterations.
 ///
@@ -312,14 +312,13 @@ async fn bind_item_var(
 /// subsequent steps. The cleanup is best-effort: if the instance was
 /// concurrently deleted or the context is not an object, we silently skip.
 async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId, item_var: &str) {
-    if let Ok(Some(mut inst)) = storage.get_instance(instance_id).await {
-        if let Some(data) = inst.context.data.as_object_mut() {
-            if data.remove(item_var).is_some() {
-                let _ = storage
-                    .update_instance_context(instance_id, &inst.context)
-                    .await;
-            }
-        }
+    if let Ok(Some(mut inst)) = storage.get_instance(instance_id).await
+        && let Some(data) = inst.context.data.as_object_mut()
+        && data.remove(item_var).is_some()
+    {
+        let _ = storage
+            .update_instance_context(instance_id, &inst.context)
+            .await;
     }
 }
 
@@ -457,8 +456,8 @@ mod tests {
     use serde_json::json;
 
     use orch8_storage::{
-        sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore,
-        WorkerStore,
+        ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore, WorkerStore,
+        sqlite::SqliteStorage,
     };
     use orch8_types::context::RuntimeContext;
     use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
@@ -544,9 +543,11 @@ mod tests {
     #[tokio::test]
     async fn resolve_collection_returns_none_when_value_is_not_array() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"users": "not-an-array"})).await;
-        assert!(resolve_collection("users", &inst.context, &s, &inst, &snap)
-            .await
-            .is_none());
+        assert!(
+            resolve_collection("users", &inst.context, &s, &inst, &snap)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -561,9 +562,11 @@ mod tests {
     #[tokio::test]
     async fn resolve_collection_stops_descending_on_non_object() {
         let (s, inst, snap) = mk_resolve_ctx(json!({"a": 42})).await;
-        assert!(resolve_collection("a.b.c", &inst.context, &s, &inst, &snap)
-            .await
-            .is_none());
+        assert!(
+            resolve_collection("a.b.c", &inst.context, &s, &inst, &snap)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -750,11 +753,12 @@ mod tests {
         reset_subtree_to_pending(&s, &tree, inst, outer.id)
             .await
             .unwrap();
-        assert!(s
-            .get_block_output(inst, &inner.block_id)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_block_output(inst, &inner.block_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Regression: `reset_subtree_to_pending` must purge stale `worker_tasks`

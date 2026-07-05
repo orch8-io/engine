@@ -15,7 +15,7 @@
 //! write-txn semantics) and rejects terminal targets itself.
 
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use orch8_types::{
@@ -23,8 +23,8 @@ use orch8_types::{
     signal::{Signal, SignalType},
 };
 
-use super::util::{map_storage_err, parse_instance_id, permanent};
 use super::StepContext;
+use super::util::{map_storage_err, parse_instance_id, permanent};
 
 pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepError> {
     let target_id = parse_instance_id(&ctx.params, "instance_id")?;
@@ -98,7 +98,7 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
 mod tests {
     use super::*;
     use chrono::Utc;
-    use orch8_storage::{sqlite::SqliteStorage, InstanceStore, SignalStore, StorageBackend};
+    use orch8_storage::{InstanceStore, SignalStore, StorageBackend, sqlite::SqliteStorage};
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
         ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId},
@@ -146,7 +146,7 @@ mod tests {
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("s"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,
@@ -222,17 +222,19 @@ mod tests {
             storage_dyn.clone(),
             json!({ "instance_id": target.id.to_string(), "signal_type": "cancel" }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_send_signal(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "send_signal");
         assert!(out["signal_id"].is_null());
         // No signal was actually enqueued on the target.
-        assert!(storage_dyn
-            .get_pending_signals(target.id)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            storage_dyn
+                .get_pending_signals(target.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -247,7 +249,7 @@ mod tests {
             storage_dyn,
             json!({ "instance_id": InstanceId::new().to_string(), "signal_type": "cancel" }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(matches!(
             handle_send_signal(ctx).await.unwrap_err(),
             StepError::Permanent { .. }

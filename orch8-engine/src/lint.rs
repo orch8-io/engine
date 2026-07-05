@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef, BUILTIN_HANDLER_NAMES};
+use orch8_types::sequence::{BUILTIN_HANDLER_NAMES, BlockDefinition, SequenceDefinition, StepDef};
 
 #[derive(Debug, Clone)]
 pub struct LintWarning {
@@ -229,20 +229,20 @@ fn lint_step(s: &StepDef, warnings: &mut Vec<LintWarning>) {
         lint_handler_params(s.id.as_str(), &s.handler, &s.params, warnings);
     }
 
-    if s.deadline.is_some() && s.timeout.is_some() {
-        if let (Some(deadline), Some(timeout)) = (s.deadline, s.timeout) {
-            if timeout > deadline {
-                warnings.push(LintWarning {
-                    block_id: s.id.as_str().to_owned(),
-                    message: format!(
-                        "step timeout ({:.1}s) exceeds deadline ({:.1}s) — step will be \
-                         deadline-breached before timeout fires",
-                        timeout.as_secs_f64(),
-                        deadline.as_secs_f64()
-                    ),
-                });
-            }
-        }
+    if s.deadline.is_some()
+        && s.timeout.is_some()
+        && let (Some(deadline), Some(timeout)) = (s.deadline, s.timeout)
+        && timeout > deadline
+    {
+        warnings.push(LintWarning {
+            block_id: s.id.as_str().to_owned(),
+            message: format!(
+                "step timeout ({:.1}s) exceeds deadline ({:.1}s) — step will be \
+                 deadline-breached before timeout fires",
+                timeout.as_secs_f64(),
+                deadline.as_secs_f64()
+            ),
+        });
     }
 
     if let Some(ref fallback) = s.fallback_handler {
@@ -393,13 +393,13 @@ fn check_required_str(
             });
         }
         Some(v) => {
-            if let Some(s) = v.as_str() {
-                if s.trim().is_empty() {
-                    warnings.push(LintWarning {
-                        block_id: block_id.into(),
-                        message: format!("{handler}: param `{key}` is empty"),
-                    });
-                }
+            if let Some(s) = v.as_str()
+                && s.trim().is_empty()
+            {
+                warnings.push(LintWarning {
+                    block_id: block_id.into(),
+                    message: format!("{handler}: param `{key}` is empty"),
+                });
             }
         }
     }
@@ -722,11 +722,11 @@ fn lint_unreachable_in_list(blocks: &[BlockDefinition], warnings: &mut Vec<LintW
                 message: format!("unreachable — previous block `{fail_id}` uses `fail` handler which always terminates"),
             });
         }
-        if let BlockDefinition::Step(s) = block {
-            if s.handler == "fail" {
-                saw_fail = true;
-                s.id.as_str().clone_into(&mut fail_id);
-            }
+        if let BlockDefinition::Step(s) = block
+            && s.handler == "fail"
+        {
+            saw_fail = true;
+            s.id.as_str().clone_into(&mut fail_id);
         }
     }
 }
@@ -1255,17 +1255,21 @@ mod tests {
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
-        assert!(warnings
-            .iter()
-            .any(|w| w.message.contains("same as primary")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("same as primary"))
+        );
 
         // unknown fallback
         warnings.clear();
         s.fallback_handler = Some("htpt_request".into());
         lint_step(&s, &mut warnings);
-        assert!(warnings
-            .iter()
-            .any(|w| w.message.contains("unknown fallback_handler")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("unknown fallback_handler"))
+        );
     }
 
     #[test]

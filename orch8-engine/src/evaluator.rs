@@ -37,8 +37,8 @@ fn get_node<'a>(index: &NodeIndex<'a>, id: ExecutionNodeId) -> Option<&'a Execut
 }
 
 use crate::error::EngineError;
-use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::HandlerRegistry;
+use crate::handlers::param_resolve::OutputsSnapshot;
 
 /// Result of a single `evaluate()` call, carrying enough state for the caller
 /// to transition the instance without re-reading the tree or instance from DB.
@@ -902,21 +902,21 @@ fn find_running_step<'a>(
         if node.state != NodeState::Running {
             continue;
         }
-        if let Some(block) = block_map.get(&node.block_id).copied() {
-            if let BlockDefinition::Step(step_def) = block {
-                // Skip steps inside a race where another branch already won.
-                if is_inside_decided_race(tree, block_map, node, node_index) {
-                    continue;
-                }
-                // Defer *in-process* steps that race against a composite sibling
-                // branch that hasn't finished yet.
-                if handlers.contains(&step_def.handler)
-                    && has_racing_composite_sibling(tree, block_map, node, node_index)
-                {
-                    continue;
-                }
-                return Some((node, block));
+        if let Some(block) = block_map.get(&node.block_id).copied()
+            && let BlockDefinition::Step(step_def) = block
+        {
+            // Skip steps inside a race where another branch already won.
+            if is_inside_decided_race(tree, block_map, node, node_index) {
+                continue;
             }
+            // Defer *in-process* steps that race against a composite sibling
+            // branch that hasn't finished yet.
+            if handlers.contains(&step_def.handler)
+                && has_racing_composite_sibling(tree, block_map, node, node_index)
+            {
+                continue;
+            }
+            return Some((node, block));
         }
     }
     None
@@ -935,19 +935,16 @@ fn is_inside_decided_race(
     let mut current_node = Some(node);
     while let Some(curr) = current_node {
         if let Some(parent_id) = curr.parent_id {
-            if let Some(parent_node) = get_node(node_index, parent_id) {
-                if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
-                    if matches!(parent_block, BlockDefinition::Race(_)) {
-                        let my_branch = curr.branch_index;
-                        let sibling_completed =
-                            children_of(tree, parent_id, None).into_iter().any(|c| {
-                                c.branch_index != my_branch
-                                    && matches!(c.state, NodeState::Completed)
-                            });
-                        if sibling_completed {
-                            return true;
-                        }
-                    }
+            if let Some(parent_node) = get_node(node_index, parent_id)
+                && let Some(parent_block) = block_map.get(&parent_node.block_id).copied()
+                && matches!(parent_block, BlockDefinition::Race(_))
+            {
+                let my_branch = curr.branch_index;
+                let sibling_completed = children_of(tree, parent_id, None).into_iter().any(|c| {
+                    c.branch_index != my_branch && matches!(c.state, NodeState::Completed)
+                });
+                if sibling_completed {
+                    return true;
                 }
             }
             current_node = get_node(node_index, parent_id);
@@ -972,23 +969,22 @@ fn has_racing_composite_sibling(
     let mut current_node = Some(node);
     while let Some(curr) = current_node {
         if let Some(parent_id) = curr.parent_id {
-            if let Some(parent_node) = get_node(node_index, parent_id) {
-                if let Some(parent_block) = block_map.get(&parent_node.block_id).copied() {
-                    if matches!(parent_block, BlockDefinition::Race(_)) {
-                        let my_branch = curr.branch_index;
-                        let sibling_composite_running =
-                            children_of(tree, parent_id, None).into_iter().any(|c| {
-                                c.branch_index != my_branch
-                                    && c.state == NodeState::Running
-                                    && block_map
-                                        .get(&c.block_id)
-                                        .copied()
-                                        .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
-                            });
-                        if sibling_composite_running {
-                            return true;
-                        }
-                    }
+            if let Some(parent_node) = get_node(node_index, parent_id)
+                && let Some(parent_block) = block_map.get(&parent_node.block_id).copied()
+                && matches!(parent_block, BlockDefinition::Race(_))
+            {
+                let my_branch = curr.branch_index;
+                let sibling_composite_running =
+                    children_of(tree, parent_id, None).into_iter().any(|c| {
+                        c.branch_index != my_branch
+                            && c.state == NodeState::Running
+                            && block_map
+                                .get(&c.block_id)
+                                .copied()
+                                .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+                    });
+                if sibling_composite_running {
+                    return true;
                 }
             }
             current_node = get_node(node_index, parent_id);
@@ -1146,10 +1142,10 @@ pub fn find_block<'a>(
             }
             BlockDefinition::CancellationScope(cs) => Some(&cs.blocks),
         };
-        if let Some(children) = children {
-            if let Some(found) = find_block(children, target_id) {
-                return Some(found);
-            }
+        if let Some(children) = children
+            && let Some(found) = find_block(children, target_id)
+        {
+            return Some(found);
         }
     }
     None

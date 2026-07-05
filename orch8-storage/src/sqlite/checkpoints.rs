@@ -2,8 +2,8 @@ use orch8_types::checkpoint::Checkpoint;
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
-use super::helpers::{row_to_checkpoint, ts};
 use super::SqliteStorage;
+use super::helpers::{row_to_checkpoint, ts};
 
 pub(super) async fn save(storage: &SqliteStorage, cp: &Checkpoint) -> Result<(), StorageError> {
     sqlx::query(

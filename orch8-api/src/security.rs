@@ -40,10 +40,10 @@ pub fn validate_public_url(url: &str) -> Result<(), ApiUrlValidationError> {
     }
 
     // If the host is a literal IP, classify it.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_non_public_ip(ip) {
-            return Err(ApiUrlValidationError::InternalAddress(host));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_non_public_ip(ip)
+    {
+        return Err(ApiUrlValidationError::InternalAddress(host));
     }
 
     Ok(())

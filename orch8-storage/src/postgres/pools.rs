@@ -1,8 +1,8 @@
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 
-use super::rows::{PoolResourceRow, ResourcePoolRow};
 use super::PostgresStorage;
+use super::rows::{PoolResourceRow, ResourcePoolRow};
 
 pub(super) async fn create(
     store: &PostgresStorage,

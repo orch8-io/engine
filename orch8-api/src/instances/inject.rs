@@ -1,16 +1,16 @@
 //! Dynamic step injection.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::Json;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::ids::InstanceId;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[derive(Deserialize, ToSchema)]
 pub struct InjectBlocksRequest {
@@ -165,8 +165,9 @@ mod tests {
     fn validate_injected_blocks_rejects_invalid_block() {
         let val = serde_json::json!([{"UnknownVariant": {}}]);
         let err = validate_injected_blocks(&val).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("blocks[0] is not a valid BlockDefinition"));
+        assert!(
+            err.to_string()
+                .contains("blocks[0] is not a valid BlockDefinition")
+        );
     }
 }

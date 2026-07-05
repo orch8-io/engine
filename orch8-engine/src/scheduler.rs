@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -572,7 +572,7 @@ async fn enforce_concurrency_limits(
     // Collect concurrency keys present in the batch.
     let mut key_instances: HashMap<&str, Vec<usize>> = HashMap::with_capacity(instances.len() / 2);
     for (idx, inst) in instances.iter().enumerate() {
-        if let (Some(ref key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
+        if let (Some(key), Some(_max)) = (&inst.concurrency_key, inst.max_concurrency) {
             key_instances.entry(key.as_str()).or_default().push(idx);
         }
     }
@@ -728,20 +728,15 @@ async fn process_signalled_instances(
             // covers the immediate (unscoped) cancel path that bypasses tree
             // evaluation. (Scoped cancellations complete through the evaluator,
             // whose terminal path runs the same hook.)
-            if current_state != InstanceState::Cancelled {
-                if let Ok(Some(inst)) = storage.get_instance(instance_id).await {
-                    if inst.state == InstanceState::Cancelled {
-                        if let Ok(seq) = sequence_cache
-                            .get_by_id(storage.as_ref(), inst.sequence_id)
-                            .await
-                        {
-                            if let Some(ref blocks) = seq.on_cancel {
-                                run_cleanup_hooks(storage, handlers, &inst, blocks, "on_cancel")
-                                    .await;
-                            }
-                        }
-                    }
-                }
+            if current_state != InstanceState::Cancelled
+                && let Ok(Some(inst)) = storage.get_instance(instance_id).await
+                && inst.state == InstanceState::Cancelled
+                && let Ok(seq) = sequence_cache
+                    .get_by_id(storage.as_ref(), inst.sequence_id)
+                    .await
+                && let Some(ref blocks) = seq.on_cancel
+            {
+                run_cleanup_hooks(storage, handlers, &inst, blocks, "on_cancel").await;
             }
         }
     }
@@ -797,10 +792,10 @@ async fn process_waiting_deadlines(
     let mut deadline_keys = Vec::new();
     for (instance, seq) in &instance_sequences {
         for block in &seq.blocks {
-            if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-                if step_def.deadline.is_some() {
-                    deadline_keys.push((instance.id, &step_def.id));
-                }
+            if let orch8_types::sequence::BlockDefinition::Step(step_def) = block
+                && step_def.deadline.is_some()
+            {
+                deadline_keys.push((instance.id, &step_def.id));
             }
         }
     }
@@ -844,45 +839,45 @@ async fn process_waiting_deadlines(
                 // The flat-path scheduler transitions to Waiting but never
                 // re-polls timeout — we must wake the instance so the next
                 // tick's check_human_input fires the escalation/failure path.
-                if let Some(human_def) = &step_def.wait_for_input {
-                    if let Some(timeout) = human_def.timeout {
-                        // Only the step the instance is actually waiting on may
-                        // wake it. Without this guard, a sequence with several
-                        // wait_for_input steps would compare an earlier step's
-                        // timeout against the current step's start time.
-                        if let Some(current) = &instance.context.runtime.current_step {
-                            if current != &step_def.id {
-                                continue;
-                            }
-                        }
-                        let baseline = instance
-                            .context
-                            .runtime
-                            .current_step_started_at
-                            .or(instance.context.runtime.started_at);
-                        if let Some(started) = baseline {
-                            let elapsed = clock.now() - started;
-                            if elapsed
-                                > chrono::Duration::from_std(timeout)
-                                    .unwrap_or(chrono::Duration::days(365))
-                            {
-                                debug!(
-                                    instance_id = %instance.id,
-                                    block_id = %step_def.id,
-                                    "wait_for_input timeout expired, waking instance"
-                                );
-                                crate::lifecycle::transition_instance(
-                                    storage.as_ref(),
-                                    instance.id,
-                                    Some(&instance.tenant_id),
-                                    InstanceState::Waiting,
-                                    InstanceState::Scheduled,
-                                    Some(clock.now()),
-                                )
-                                .await?;
-                                handled = true;
-                                break;
-                            }
+                if let Some(human_def) = &step_def.wait_for_input
+                    && let Some(timeout) = human_def.timeout
+                {
+                    // Only the step the instance is actually waiting on may
+                    // wake it. Without this guard, a sequence with several
+                    // wait_for_input steps would compare an earlier step's
+                    // timeout against the current step's start time.
+                    if let Some(current) = &instance.context.runtime.current_step
+                        && current != &step_def.id
+                    {
+                        continue;
+                    }
+                    let baseline = instance
+                        .context
+                        .runtime
+                        .current_step_started_at
+                        .or(instance.context.runtime.started_at);
+                    if let Some(started) = baseline {
+                        let elapsed = clock.now() - started;
+                        if elapsed
+                            > chrono::Duration::from_std(timeout)
+                                .unwrap_or(chrono::Duration::days(365))
+                        {
+                            debug!(
+                                instance_id = %instance.id,
+                                block_id = %step_def.id,
+                                "wait_for_input timeout expired, waking instance"
+                            );
+                            crate::lifecycle::transition_instance(
+                                storage.as_ref(),
+                                instance.id,
+                                Some(&instance.tenant_id),
+                                InstanceState::Waiting,
+                                InstanceState::Scheduled,
+                                Some(clock.now()),
+                            )
+                            .await?;
+                            handled = true;
+                            break;
                         }
                     }
                 }
@@ -922,7 +917,7 @@ async fn run_cleanup_hooks(
             tenant_id: instance.tenant_id.clone(),
             block_id: step.id.clone(),
             params: step.params.clone(),
-            context: instance.context.clone(),
+            context: Arc::new(instance.context.clone()),
             attempt: 0,
             storage: Arc::clone(storage),
             wait_for_input: None,
@@ -1095,23 +1090,23 @@ async fn process_sla_breaches(
             }
         }
 
-        if let Some(max_step) = sla.max_step_runtime {
-            if let (Some(step), Some(started)) = (
+        if let Some(max_step) = sla.max_step_runtime
+            && let (Some(step), Some(started)) = (
                 instance.context.runtime.current_step.as_ref(),
                 instance.context.runtime.current_step_started_at,
-            ) {
-                let elapsed = now - started;
-                let limit = chrono::Duration::from_std(max_step).unwrap_or(chrono::TimeDelta::MAX);
-                if elapsed > limit {
-                    candidates.push(Candidate {
-                        idx,
-                        kind: "max_step_runtime",
-                        block_id: BlockId::new(format!("_sla:step:{}", step.as_str())),
-                        elapsed_ms: elapsed.num_milliseconds(),
-                        limit_ms: u64::try_from(max_step.as_millis()).unwrap_or(u64::MAX),
-                        step_id: Some(step.as_str().to_string()),
-                    });
-                }
+            )
+        {
+            let elapsed = now - started;
+            let limit = chrono::Duration::from_std(max_step).unwrap_or(chrono::TimeDelta::MAX);
+            if elapsed > limit {
+                candidates.push(Candidate {
+                    idx,
+                    kind: "max_step_runtime",
+                    block_id: BlockId::new(format!("_sla:step:{}", step.as_str())),
+                    elapsed_ms: elapsed.num_milliseconds(),
+                    limit_ms: u64::try_from(max_step.as_millis()).unwrap_or(u64::MAX),
+                    step_id: Some(step.as_str().to_string()),
+                });
             }
         }
     }
@@ -1261,40 +1256,40 @@ pub(crate) async fn handle_deadline_breach(
     );
 
     // Invoke escalation handler if configured.
-    if let Some(ref escalation) = step_def.on_deadline_breach {
-        if let Some(handler) = handlers.get(&escalation.handler) {
-            let mut params = escalation.params.clone();
-            if let serde_json::Value::Object(ref mut map) = params {
-                map.insert(
-                    "_breach_block_id".into(),
-                    serde_json::json!(step_def.id.as_str()),
-                );
-                map.insert(
-                    "_breach_instance_id".into(),
-                    serde_json::json!(instance_id.into_uuid()),
-                );
-                map.insert(
-                    "_breach_elapsed_ms".into(),
-                    serde_json::json!(elapsed.num_milliseconds()),
-                );
-                map.insert(
-                    "_breach_deadline_ms".into(),
-                    serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
-                );
-            }
-            let step_ctx = crate::handlers::StepContext {
-                instance_id,
-                tenant_id: instance.tenant_id.clone(),
-                block_id: step_def.id.clone(),
-                params,
-                context: instance.context.clone(),
-                attempt: 0,
-                storage: Arc::clone(storage),
-                wait_for_input: None,
-            };
-            if let Err(e) = handler(step_ctx).await {
-                warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
-            }
+    if let Some(ref escalation) = step_def.on_deadline_breach
+        && let Some(handler) = handlers.get(&escalation.handler)
+    {
+        let mut params = escalation.params.clone();
+        if let serde_json::Value::Object(ref mut map) = params {
+            map.insert(
+                "_breach_block_id".into(),
+                serde_json::json!(step_def.id.as_str()),
+            );
+            map.insert(
+                "_breach_instance_id".into(),
+                serde_json::json!(instance_id.into_uuid()),
+            );
+            map.insert(
+                "_breach_elapsed_ms".into(),
+                serde_json::json!(elapsed.num_milliseconds()),
+            );
+            map.insert(
+                "_breach_deadline_ms".into(),
+                serde_json::json!(u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX)),
+            );
+        }
+        let step_ctx = crate::handlers::StepContext {
+            instance_id,
+            tenant_id: instance.tenant_id.clone(),
+            block_id: step_def.id.clone(),
+            params,
+            context: Arc::new(instance.context.clone()),
+            attempt: 0,
+            storage: Arc::clone(storage),
+            wait_for_input: None,
+        };
+        if let Err(e) = handler(step_ctx).await {
+            warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
         }
     }
 
@@ -1475,27 +1470,25 @@ async fn process_instance(
     }
 
     for block in blocks.iter() {
-        if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-            if step_def.deadline.is_some() && !prefetched.completed_block_ids.contains(&step_def.id)
-            {
-                // SLA deadline check: if a previous attempt exists and the deadline has
-                // been breached (wall-clock time since first attempt), fail the instance.
-                let prev = deadline_outputs_ref
-                    .get(&(&instance.id, &step_def.id))
-                    .copied();
-                if step_exec::check_step_deadline(
-                    storage, handlers, &instance, step_def, prev, clock,
-                )
+        if let orch8_types::sequence::BlockDefinition::Step(step_def) = block
+            && step_def.deadline.is_some()
+            && !prefetched.completed_block_ids.contains(&step_def.id)
+        {
+            // SLA deadline check: if a previous attempt exists and the deadline has
+            // been breached (wall-clock time since first attempt), fail the instance.
+            let prev = deadline_outputs_ref
+                .get(&(&instance.id, &step_def.id))
+                .copied();
+            if step_exec::check_step_deadline(storage, handlers, &instance, step_def, prev, clock)
                 .await?
-                {
-                    return Ok(());
-                }
+            {
+                return Ok(());
             }
         }
     }
 
     // Concurrency control: if this instance has a concurrency key, check the limit.
-    if let (Some(ref key), Some(max)) = (&instance.concurrency_key, instance.max_concurrency) {
+    if let (Some(key), Some(max)) = (&instance.concurrency_key, instance.max_concurrency) {
         let position = storage.concurrency_position(instance_id, key).await?;
         if position > i64::from(max) {
             let defer_at = clock.now() + chrono::Duration::seconds(2);
@@ -1767,25 +1760,25 @@ async fn process_instance_tree(
 
     if max_steps_per_instance > 0 {
         let fresh = storage.get_instance(instance_id).await?;
-        if let Some(inst) = fresh {
-            if inst.context.runtime.total_steps_executed > max_steps_per_instance {
-                warn!(
-                    instance_id = %instance_id,
-                    total = inst.context.runtime.total_steps_executed,
-                    max = max_steps_per_instance,
-                    "instance exceeded max_steps_per_instance (tree path), failing"
-                );
-                crate::lifecycle::transition_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    Some(&instance.tenant_id),
-                    InstanceState::Running,
-                    InstanceState::Failed,
-                    None,
-                )
-                .await?;
-                return Ok(());
-            }
+        if let Some(inst) = fresh
+            && inst.context.runtime.total_steps_executed > max_steps_per_instance
+        {
+            warn!(
+                instance_id = %instance_id,
+                total = inst.context.runtime.total_steps_executed,
+                max = max_steps_per_instance,
+                "instance exceeded max_steps_per_instance (tree path), failing"
+            );
+            crate::lifecycle::transition_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                InstanceState::Running,
+                InstanceState::Failed,
+                None,
+            )
+            .await?;
+            return Ok(());
         }
     }
 

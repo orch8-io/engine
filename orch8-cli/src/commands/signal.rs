@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{print_response, OutputFormat};
+use crate::{OutputFormat, print_response};
 
 pub async fn run(
     client: &Client,

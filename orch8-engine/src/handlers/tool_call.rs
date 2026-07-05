@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::debug;
 
 use orch8_types::error::StepError;
@@ -371,7 +371,7 @@ fn interpret_tool_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
     use std::sync::Arc;
@@ -384,7 +384,7 @@ mod tests {
             tenant_id: TenantId::unchecked("T"),
             block_id: BlockId::new("t"),
             params: json!({"tool_name": "search"}),
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -571,7 +571,7 @@ mod net_tests {
     use tokio::net::TcpListener;
 
     use orch8_storage::artifacts::ObjectArtifactStore;
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
@@ -650,7 +650,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,
@@ -669,7 +669,7 @@ mod net_tests {
             "arguments": { "q": "rust" }
         }))
         .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_tool_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "tool_call");

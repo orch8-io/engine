@@ -1,9 +1,9 @@
 //! Instance lifecycle: create, list, get, update state/context, retry, batch create.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -13,11 +13,11 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::BlockDefinition;
 
 use super::types::{
-    parse_states, BatchCreateRequest, CountResponse, CreateInstanceRequest, ListQuery,
-    ResumeFromRequest, UpdateContextRequest, UpdateStateRequest,
+    BatchCreateRequest, CountResponse, CreateInstanceRequest, ListQuery, ResumeFromRequest,
+    UpdateContextRequest, UpdateStateRequest, parse_states,
 };
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 /// Scope an idempotency key by execution mode. Non-empty keys for dry-runs are
 /// prefixed so a real run reusing the same key isn't deduplicated to a prior
@@ -48,10 +48,10 @@ fn build_metadata_filter(
 ) -> Option<serde_json::Value> {
     let mut obj = serde_json::Map::new();
     for (k, v) in raw {
-        if let Some(key) = k.strip_prefix("metadata.") {
-            if !key.is_empty() {
-                obj.insert(key.to_string(), serde_json::Value::String(v.clone()));
-            }
+        if let Some(key) = k.strip_prefix("metadata.")
+            && !key.is_empty()
+        {
+            obj.insert(key.to_string(), serde_json::Value::String(v.clone()));
         }
     }
     if obj.is_empty() {
@@ -144,20 +144,18 @@ pub async fn create_instance(
 
     // Idempotency check: only for non-empty keys (empty keys are not a dedup
     // lookup — they rely on the DB unique constraint).
-    if let Some(ref idem_key) = effective_idem {
-        if !idem_key.is_empty() {
-            if let Some(existing) = state
-                .storage
-                .find_by_idempotency_key(&tenant_id, idem_key)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "instance"))?
-            {
-                return Ok((
-                    StatusCode::OK,
-                    Json(serde_json::json!({ "id": existing.id, "deduplicated": true })),
-                ));
-            }
-        }
+    if let Some(ref idem_key) = effective_idem
+        && !idem_key.is_empty()
+        && let Some(existing) = state
+            .storage
+            .find_by_idempotency_key(&tenant_id, idem_key)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "id": existing.id, "deduplicated": true })),
+        ));
     }
 
     let instance = TaskInstance {
@@ -369,10 +367,10 @@ pub async fn get_instance(
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
     // Enforce tenant isolation: if header-based tenant is set, reject cross-tenant reads.
-    if let Some(axum::Extension(ctx)) = &tenant_ctx {
-        if instance.tenant_id != ctx.tenant_id {
-            return Err(ApiError::NotFound(format!("instance {id}")));
-        }
+    if let Some(axum::Extension(ctx)) = &tenant_ctx
+        && instance.tenant_id != ctx.tenant_id
+    {
+        return Err(ApiError::NotFound(format!("instance {id}")));
     }
 
     Ok(Json(instance))
@@ -401,10 +399,10 @@ pub async fn get_instance_children(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    if let Some(axum::Extension(ctx)) = &tenant_ctx {
-        if parent.tenant_id != ctx.tenant_id {
-            return Err(ApiError::NotFound(format!("instance {id}")));
-        }
+    if let Some(axum::Extension(ctx)) = &tenant_ctx
+        && parent.tenant_id != ctx.tenant_id
+    {
+        return Err(ApiError::NotFound(format!("instance {id}")));
     }
 
     let children = state
@@ -436,10 +434,10 @@ pub async fn get_instance_logs(
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
 
-    if let Some(axum::Extension(ctx)) = &tenant_ctx {
-        if instance.tenant_id != ctx.tenant_id {
-            return Err(ApiError::NotFound(format!("instance {id}")));
-        }
+    if let Some(axum::Extension(ctx)) = &tenant_ctx
+        && instance.tenant_id != ctx.tenant_id
+    {
+        return Err(ApiError::NotFound(format!("instance {id}")));
     }
 
     let logs = state
@@ -560,28 +558,19 @@ pub async fn update_state(
     if matches!(
         req.state,
         InstanceState::Failed | InstanceState::Cancelled | InstanceState::Completed
-    ) {
-        if let Some(parent_id) = instance.parent_instance_id {
-            if let Ok(Some(parent)) = state.storage.get_instance(parent_id).await {
-                if parent.state == InstanceState::Waiting {
-                    if let Err(e) = state
-                        .storage
-                        .update_instance_state(
-                            parent_id,
-                            InstanceState::Scheduled,
-                            Some(Utc::now()),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            parent_id = %parent_id.into_uuid(),
-                            error = %e,
-                            "failed to wake parent instance after child terminal transition"
-                        );
-                    }
-                }
-            }
-        }
+    ) && let Some(parent_id) = instance.parent_instance_id
+        && let Ok(Some(parent)) = state.storage.get_instance(parent_id).await
+        && parent.state == InstanceState::Waiting
+        && let Err(e) = state
+            .storage
+            .update_instance_state(parent_id, InstanceState::Scheduled, Some(Utc::now()))
+            .await
+    {
+        tracing::warn!(
+            parent_id = %parent_id.into_uuid(),
+            error = %e,
+            "failed to wake parent instance after child terminal transition"
+        );
     }
 
     Ok(StatusCode::OK)

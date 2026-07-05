@@ -17,12 +17,12 @@ use orch8_engine::scheduler::tick_once;
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 
+use crate::PowerState;
 use crate::lifecycle::InstanceLifecycleManager;
 use crate::memory;
 use crate::notifier::MobileNotifier;
 use crate::runtime::MobileRuntime;
 use crate::sync_reporter::SyncReporter;
-use crate::PowerState;
 
 /// Manages the tick loop lifecycle: resume, pause, power-state adaptation,
 /// and stale-instance recovery.

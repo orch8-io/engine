@@ -261,11 +261,13 @@ mod tests {
     async fn sync_metadata_roundtrip() {
         let (storage, _dir) = setup().await;
 
-        assert!(storage
-            .get_sync_metadata("last_sync_ts")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            storage
+                .get_sync_metadata("last_sync_ts")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         storage
             .set_sync_metadata("last_sync_ts", "2026-01-01T00:00:00Z")

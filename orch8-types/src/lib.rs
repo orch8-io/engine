@@ -56,7 +56,7 @@ pub mod serde_defaults {
 
 /// Serde helper: serialize/deserialize `std::time::Duration` as milliseconds (u64).
 pub mod serde_duration {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
     use std::time::Duration;
 
     pub fn serialize<S: Serializer>(dur: &Duration, s: S) -> Result<S::Ok, S::Error> {
@@ -113,7 +113,7 @@ pub mod serde_duration {
 
 /// Serde helper: serialize/deserialize `Option<Duration>` as optional milliseconds.
 pub mod serde_duration_opt {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
     use std::time::Duration;
 
     pub fn serialize<S: Serializer>(dur: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use orch8_grpc::proto::orch8_service_client::Orch8ServiceClient;
 use orch8_grpc::proto::{CreateInstanceRequest, CreateSequenceRequest, GetInstanceRequest};
-use orch8_grpc::{service::Orch8GrpcService, Orch8ServiceServer};
+use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
 use orch8_storage::sqlite::SqliteStorage;
 
 /// Spawn the gRPC server on an ephemeral port and return the bound address.

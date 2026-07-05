@@ -20,13 +20,13 @@
 //! finding #2 — a crash mid-operation cannot leave a dedupe row pointing at
 //! a non-existent child.
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use orch8_storage::{DedupeScope, EmitDedupeOutcome};
 use orch8_types::{error::StepError, ids::InstanceId};
 
-use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 use super::StepContext;
+use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 
 /// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
 /// we parse exactly twice (match on string, then build `DedupeScope` once we
@@ -201,7 +201,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use orch8_storage::{
-        sqlite::SqliteStorage, AdminStore, InstanceStore, SequenceStore, StorageBackend,
+        AdminStore, InstanceStore, SequenceStore, StorageBackend, sqlite::SqliteStorage,
     };
     use orch8_types::{
         context::{ExecutionContext, RuntimeContext},
@@ -291,7 +291,7 @@ mod tests {
             tenant_id: caller.tenant_id.clone(),
             block_id: BlockId::new("emit"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 1,
             storage,
             wait_for_input: None,
@@ -384,7 +384,7 @@ mod tests {
             storage_dyn,
             json!({ "trigger_slug": "on-order", "data": { "x": 1 } }),
         );
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_emit_event(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["handler"], "emit_event");
@@ -401,7 +401,7 @@ mod tests {
         let caller = mk_instance("T1", InstanceState::Running);
         storage.create_instance(&caller).await.unwrap();
         let mut ctx = mk_ctx(&caller, storage_dyn, json!({ "trigger_slug": "nope" }));
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         assert!(matches!(
             handle_emit_event(ctx).await.unwrap_err(),
             StepError::Permanent { .. }

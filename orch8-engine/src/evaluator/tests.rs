@@ -566,7 +566,7 @@ fn find_running_step_prefers_step_over_composite() {
 // ------------------------------------------------------------------
 
 use chrono::Utc;
-use orch8_storage::{sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore};
+use orch8_storage::{ExecutionTreeStore, InstanceStore, sqlite::SqliteStorage};
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 

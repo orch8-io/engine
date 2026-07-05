@@ -5,8 +5,8 @@ use orch8_types::cron::CronSchedule;
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 
-use super::rows::CronRow;
 use super::PostgresStorage;
+use super::rows::CronRow;
 
 pub(super) async fn create(store: &PostgresStorage, s: &CronSchedule) -> Result<(), StorageError> {
     sqlx::query(

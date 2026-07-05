@@ -34,7 +34,7 @@
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::debug;
 
 use orch8_types::error::StepError;
@@ -106,7 +106,7 @@ pub async fn handle_mcp_call(ctx: StepContext) -> Result<Value, StepError> {
         other => {
             return Err(permanent(format!(
                 "unknown action: {other:?} (expected \"call\" or \"list\")"
-            )))
+            )));
         }
     };
 
@@ -448,10 +448,10 @@ fn extract_sse_jsonrpc(body: &[u8], expected_id: u64) -> Option<Value> {
         if payload.is_empty() {
             continue;
         }
-        if let Ok(msg) = serde_json::from_str::<Value>(payload) {
-            if let Some(matched) = select_matching(msg, expected_id) {
-                return Some(matched);
-            }
+        if let Ok(msg) = serde_json::from_str::<Value>(payload)
+            && let Some(matched) = select_matching(msg, expected_id)
+        {
+            return Some(matched);
         }
     }
     None
@@ -720,7 +720,7 @@ mod net_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
@@ -819,7 +819,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage,
             wait_for_input: None,
@@ -846,7 +846,7 @@ mod net_tests {
             "url": "http://127.0.0.1:1/mcp", "tool_name": "echo", "arguments": {}
         }))
         .await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_mcp_call(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["tool_name"], "echo");

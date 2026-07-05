@@ -9,8 +9,8 @@
 //! completed-blocks check) while the fork-point block and the tail run again
 //! with the patched context.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::json;
 use tokio_util::sync::CancellationToken;

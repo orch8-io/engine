@@ -459,7 +459,7 @@ async fn run_file_watch_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{sqlite::SqliteStorage, InstanceStore, SequenceStore};
+    use orch8_storage::{InstanceStore, SequenceStore, sqlite::SqliteStorage};
     use orch8_types::ids::SequenceId;
     use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 

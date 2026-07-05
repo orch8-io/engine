@@ -45,7 +45,7 @@
 //! `{ "final": <assistant text | null>, "iterations": N, "stop_reason":
 //! "completed" | "max_iterations", "tool_calls_made": M, "messages": [...] }`
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tracing::debug;
 
 use orch8_types::error::StepError;
@@ -260,15 +260,15 @@ fn make_checkpoint(messages: &[Value], iteration: u64, tool_calls_made: u64) -> 
 /// Restore `(messages, start_iteration, tool_calls_made)` from a checkpoint, or
 /// start fresh from the agent params when there is no valid checkpoint.
 fn restore_checkpoint(checkpoint: Option<Value>, agent_params: &Value) -> (Vec<Value>, u64, u64) {
-    if let Some(cp) = checkpoint {
-        if let Some(messages) = cp.get("messages").and_then(Value::as_array) {
-            let iteration = cp.get("iteration").and_then(Value::as_u64).unwrap_or(0);
-            let tool_calls_made = cp
-                .get("tool_calls_made")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            return (messages.clone(), iteration, tool_calls_made);
-        }
+    if let Some(cp) = checkpoint
+        && let Some(messages) = cp.get("messages").and_then(Value::as_array)
+    {
+        let iteration = cp.get("iteration").and_then(Value::as_u64).unwrap_or(0);
+        let tool_calls_made = cp
+            .get("tool_calls_made")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return (messages.clone(), iteration, tool_calls_made);
     }
     (initial_messages(agent_params), 0, 0)
 }
@@ -443,10 +443,10 @@ fn memory_recall_system_message(results: Option<&Value>) -> Option<Value> {
 
 /// Seed the conversation from `messages` (preferred) or `goal` (shorthand).
 fn initial_messages(agent_params: &Value) -> Vec<Value> {
-    if let Some(arr) = agent_params.get("messages").and_then(Value::as_array) {
-        if !arr.is_empty() {
-            return arr.clone();
-        }
+    if let Some(arr) = agent_params.get("messages").and_then(Value::as_array)
+        && !arr.is_empty()
+    {
+        return arr.clone();
     }
     if let Some(goal) = agent_params.get("goal").and_then(Value::as_str) {
         return vec![json!({ "role": "user", "content": goal })];
@@ -961,10 +961,12 @@ mod tests {
         // The tool observation carries the error text so the model can react.
         let tool_msg = &out["messages"][2];
         assert_eq!(tool_msg["role"], "tool");
-        assert!(tool_msg["content"]
-            .as_str()
-            .unwrap()
-            .contains("tool exploded"));
+        assert!(
+            tool_msg["content"]
+                .as_str()
+                .unwrap()
+                .contains("tool exploded")
+        );
     }
 
     #[tokio::test]
@@ -1216,12 +1218,12 @@ mod tests {
 #[cfg(test)]
 mod net_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+    use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
@@ -1300,7 +1302,7 @@ mod net_tests {
             tenant_id: TenantId::unchecked("t"),
             block_id: BlockId::new("b"),
             params,
-            context: ExecutionContext::default(),
+            context: Arc::new(ExecutionContext::default()),
             attempt: 0,
             storage: Arc::clone(&storage),
             wait_for_input: None,
@@ -1332,7 +1334,7 @@ mod net_tests {
         // No LLM mock spawned — a real loop would fail. Ok proves the skip.
         let (mut ctx, _s, _i) =
             mk_ctx(json!({ "messages": [{ "role": "user", "content": "hi" }] })).await;
-        ctx.context.runtime.dry_run = true;
+        Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
         let out = handle_agent(ctx).await.unwrap();
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["iterations"], 0);
@@ -1471,10 +1473,12 @@ mod net_tests {
         let params = handle_recall(&ctx).await;
         let messages = params.get("messages").and_then(Value::as_array).unwrap();
         assert_eq!(messages[0]["role"], "system");
-        assert!(messages[0]["content"]
-            .as_str()
-            .unwrap()
-            .contains("the sky is blue"));
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("the sky is blue")
+        );
     }
 
     // Small wrapper so the test reads clearly.

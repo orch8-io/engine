@@ -88,7 +88,7 @@ pub async fn execute_race(
 mod tests {
     use super::*;
     use orch8_storage::{
-        sqlite::SqliteStorage, ExecutionTreeStore, InstanceStore, SequenceStore, WorkerStore,
+        ExecutionTreeStore, InstanceStore, SequenceStore, WorkerStore, sqlite::SqliteStorage,
     };
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::execution::BlockType;

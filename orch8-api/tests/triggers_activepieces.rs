@@ -404,7 +404,8 @@ async fn list_includes_poll_triggers() {
         .await
         .unwrap();
     let arr = got.as_array().unwrap();
-    assert!(arr
-        .iter()
-        .any(|t| t["slug"] == "listed-poll" && t["trigger_type"] == "activepieces_poll"));
+    assert!(
+        arr.iter()
+            .any(|t| t["slug"] == "listed-poll" && t["trigger_type"] == "activepieces_poll")
+    );
 }

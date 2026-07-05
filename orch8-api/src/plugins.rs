@@ -5,19 +5,19 @@
 //! registry to find the `.wasm` module path. Similarly, `grpc://` plugins
 //! resolve to a host:port/Service.Method endpoint.
 
+use axum::Router;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use orch8_types::ids::TenantId;
 use orch8_types::plugin::{PluginDef, PluginType};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

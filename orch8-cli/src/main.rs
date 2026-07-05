@@ -2,7 +2,7 @@ use std::{fmt::Write as _, time::Duration};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use reqwest::{header, Client};
+use reqwest::{Client, header};
 use serde_json::Value;
 
 mod commands;

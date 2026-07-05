@@ -28,9 +28,11 @@ async fn request_id_is_truncated_to_bound_header_size() {
         echoed.len()
     );
     // Only safe ASCII chars survive sanitization.
-    assert!(echoed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    assert!(
+        echoed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    );
 }
 
 #[tokio::test]

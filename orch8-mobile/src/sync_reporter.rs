@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
@@ -299,26 +299,26 @@ impl SyncReporter {
             )
             .await;
 
-            if inst.state == InstanceState::Waiting {
-                if let Some(step_id) = current_step {
-                    let wait_info = seq
-                        .as_ref()
-                        .and_then(|s| find_wait_info(&s.blocks, step_id));
+            if inst.state == InstanceState::Waiting
+                && let Some(step_id) = current_step
+            {
+                let wait_info = seq
+                    .as_ref()
+                    .and_then(|s| find_wait_info(&s.blocks, step_id));
 
-                    let (prompt, choices, store_as, timeout) =
-                        wait_info.unwrap_or((None, None, None, None));
+                let (prompt, choices, store_as, timeout) =
+                    wait_info.unwrap_or((None, None, None, None));
 
-                    self.queue_approval(
-                        &id_str,
-                        step_id.as_str(),
-                        seq_name.as_deref(),
-                        prompt.as_deref(),
-                        choices.as_deref(),
-                        store_as.as_deref(),
-                        timeout,
-                    )
-                    .await;
-                }
+                self.queue_approval(
+                    &id_str,
+                    step_id.as_str(),
+                    seq_name.as_deref(),
+                    prompt.as_deref(),
+                    choices.as_deref(),
+                    store_as.as_deref(),
+                    timeout,
+                )
+                .await;
             }
         }
     }
@@ -867,10 +867,10 @@ fn find_handler(
     step_id: &BlockId,
 ) -> Option<String> {
     blocks.iter().find_map(|b| {
-        if let orch8_types::sequence::BlockDefinition::Step(sd) = b {
-            if sd.id == *step_id {
-                return Some(sd.handler.clone());
-            }
+        if let orch8_types::sequence::BlockDefinition::Step(sd) = b
+            && sd.id == *step_id
+        {
+            return Some(sd.handler.clone());
         }
         None
     })
@@ -882,23 +882,23 @@ fn find_wait_info(
     step_id: &BlockId,
 ) -> Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> {
     blocks.iter().find_map(|b| {
-        if let orch8_types::sequence::BlockDefinition::Step(sd) = b {
-            if sd.id == *step_id {
-                return sd.wait_for_input.as_ref().map(|w| {
-                    let choices_json = w
-                        .choices
-                        .as_ref()
-                        .and_then(|c| serde_json::to_string(c).ok());
-                    #[allow(clippy::cast_possible_wrap)]
-                    let timeout_secs = w.timeout.map(|d| d.as_secs() as i64);
-                    (
-                        Some(w.prompt.clone()),
-                        choices_json,
-                        w.store_as.clone(),
-                        timeout_secs,
-                    )
-                });
-            }
+        if let orch8_types::sequence::BlockDefinition::Step(sd) = b
+            && sd.id == *step_id
+        {
+            return sd.wait_for_input.as_ref().map(|w| {
+                let choices_json = w
+                    .choices
+                    .as_ref()
+                    .and_then(|c| serde_json::to_string(c).ok());
+                #[allow(clippy::cast_possible_wrap)]
+                let timeout_secs = w.timeout.map(|d| d.as_secs() as i64);
+                (
+                    Some(w.prompt.clone()),
+                    choices_json,
+                    w.store_as.clone(),
+                    timeout_secs,
+                )
+            });
         }
         None
     })

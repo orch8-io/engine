@@ -7,7 +7,7 @@
 //! as an assistant message plus a corrective user message) and re-calls the
 //! *same* provider, up to `max_repair_attempts` times.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use orch8_types::error::StepError;
 
@@ -286,9 +286,11 @@ mod tests {
 
     #[test]
     fn compile_absent_schema_is_none() {
-        assert!(compile_response_schema(&json!({}))
-            .expect("absent schema is fine")
-            .is_none());
+        assert!(
+            compile_response_schema(&json!({}))
+                .expect("absent schema is fine")
+                .is_none()
+        );
     }
 
     #[test]
@@ -375,10 +377,12 @@ mod tests {
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"], "bad output");
         assert_eq!(msgs[2]["role"], "user");
-        assert!(msgs[2]["content"]
-            .as_str()
-            .unwrap()
-            .contains("- missing field"));
+        assert!(
+            msgs[2]["content"]
+                .as_str()
+                .unwrap()
+                .contains("- missing field")
+        );
     }
 
     #[test]

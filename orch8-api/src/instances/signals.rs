@@ -1,9 +1,9 @@
 //! Signal dispatch for instances.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -12,8 +12,8 @@ use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
 use super::types::SendSignalRequest;
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 #[utoipa::path(post, path = "/instances/{id}/signals", tag = "instances",
     params(("id" = Uuid, Path, description = "Instance ID")),
@@ -86,13 +86,13 @@ pub async fn send_signal(
     // for up to 5s — without this, the signal would sit unprocessed until the
     // deferred fire time. Re-fetch the instance to avoid acting on stale state
     // (it may have transitioned to Running while we were enqueuing the signal).
-    if let Ok(Some(fresh)) = state.storage.get_instance(instance_id).await {
-        if fresh.state == InstanceState::Scheduled {
-            let _ = state
-                .storage
-                .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
-                .await;
-        }
+    if let Ok(Some(fresh)) = state.storage.get_instance(instance_id).await
+        && fresh.state == InstanceState::Scheduled
+    {
+        let _ = state
+            .storage
+            .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+            .await;
     }
 
     Ok((

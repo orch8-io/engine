@@ -1,7 +1,7 @@
 //! Comprehensive tests for orch8-publisher: manifest generation, canonical JSON,
 //! signing/verification, pruning, `ManifestSequence`, and `SequencePublisher`.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{Duration, Utc};
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
@@ -56,8 +56,8 @@ fn generate_manifest(
     removed: Vec<ManifestRemoved>,
     other_keys: Vec<ManifestSigningKey>,
 ) -> SignedManifest {
-    let gen = ManifestGenerator::new(key.clone(), "primary_key".to_string());
-    gen.generate(sequences, removed, other_keys).unwrap()
+    let r#gen = ManifestGenerator::new(key.clone(), "primary_key".to_string());
+    r#gen.generate(sequences, removed, other_keys).unwrap()
 }
 
 fn verify_manifest_signature(signed: &SignedManifest, verifying_key: &VerifyingKey) -> bool {
@@ -687,9 +687,9 @@ fn test_44_canonical_json_is_valid_json() {
 #[test]
 fn test_45_canonical_json_deterministic_for_same_body() {
     let key = test_key();
-    let gen = ManifestGenerator::new(key.clone(), "k".to_string());
+    let r#gen = ManifestGenerator::new(key.clone(), "k".to_string());
     let seq = make_manifest_sequence("stable", 1);
-    let signed1 = gen.generate(vec![seq.clone()], vec![], vec![]).unwrap();
+    let signed1 = r#gen.generate(vec![seq.clone()], vec![], vec![]).unwrap();
     // Deserialize and re-serialize the body to verify determinism
     let body: ManifestBody = serde_json::from_str(&signed1.canonical_json).unwrap();
     let gen2 = ManifestGenerator::new(key.clone(), "k".to_string());
@@ -698,12 +698,12 @@ fn test_45_canonical_json_deterministic_for_same_body() {
     let parsed1: serde_json::Value = serde_json::from_str(&signed1.canonical_json).unwrap();
     let parsed2: serde_json::Value = serde_json::from_str(&signed2.canonical_json).unwrap();
     // Both should have sorted keys
-    if let serde_json::Value::Object(m1) = &parsed1 {
-        if let serde_json::Value::Object(m2) = &parsed2 {
-            let k1: Vec<&String> = m1.keys().collect();
-            let k2: Vec<&String> = m2.keys().collect();
-            assert_eq!(k1, k2, "key order should be the same");
-        }
+    if let serde_json::Value::Object(m1) = &parsed1
+        && let serde_json::Value::Object(m2) = &parsed2
+    {
+        let k1: Vec<&String> = m1.keys().collect();
+        let k2: Vec<&String> = m2.keys().collect();
+        assert_eq!(k1, k2, "key order should be the same");
     }
 }
 
@@ -1042,9 +1042,10 @@ async fn test_93_publisher_publish_sequence_with_mock_cdn() {
     let key = test_key();
     let mock = MockCdn::new();
     let cdn: Box<dyn CdnBackend> = Box::new(mock);
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
-    let publisher = SequencePublisher::new(cdn, gen, "test_tenant".to_string(), "key1".to_string())
-        .expect("valid tenant_id");
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher =
+        SequencePublisher::new(cdn, r#gen, "test_tenant".to_string(), "key1".to_string())
+            .expect("valid tenant_id");
 
     let seq = make_sequence_definition("publish_test", 1);
     let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
@@ -1058,9 +1059,9 @@ async fn test_93_publisher_publish_sequence_with_mock_cdn() {
 async fn test_94_publisher_uploads_to_cdn() {
     let key = test_key();
     let cdn = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
     let publisher =
-        SequencePublisher::new(cdn, gen, "upload_tenant".to_string(), "key1".to_string())
+        SequencePublisher::new(cdn, r#gen, "upload_tenant".to_string(), "key1".to_string())
             .expect("valid tenant_id");
 
     let seq = make_sequence_definition_with_tenant("cdn_test", 2, "upload_tenant");
@@ -1075,8 +1076,8 @@ async fn test_94_publisher_uploads_to_cdn() {
 async fn test_95_publisher_min_sdk_version_applied_to_entry() {
     let key = test_key();
     let cdn = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
-    let publisher = SequencePublisher::new(cdn, gen, "tenant".to_string(), "key1".to_string())
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher = SequencePublisher::new(cdn, r#gen, "tenant".to_string(), "key1".to_string())
         .expect("valid tenant_id")
         .with_min_sdk_version("5.0.0".to_string());
 
@@ -1112,8 +1113,8 @@ async fn test_96_mock_cdn_utility_captures_uploads() {
 async fn test_97_publish_sequence_uploads_json_and_signature() {
     let key = test_key();
     let cdn = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
-    let publisher = SequencePublisher::new(cdn, gen, "t_uploads".to_string(), "key1".to_string())
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher = SequencePublisher::new(cdn, r#gen, "t_uploads".to_string(), "key1".to_string())
         .expect("valid tenant_id");
 
     let seq = make_sequence_definition_with_tenant("upload_check", 1, "t_uploads");
@@ -1127,9 +1128,9 @@ async fn test_97_publish_sequence_uploads_json_and_signature() {
 async fn test_98_publish_manifest_uploads_to_manifest_path() {
     let key = test_key();
     let cdn_box: Box<dyn CdnBackend> = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
     let publisher =
-        SequencePublisher::new(cdn_box, gen, "manifest_t".to_string(), "key1".to_string())
+        SequencePublisher::new(cdn_box, r#gen, "manifest_t".to_string(), "key1".to_string())
             .expect("valid tenant_id");
 
     publisher
@@ -1142,8 +1143,8 @@ async fn test_98_publish_manifest_uploads_to_manifest_path() {
 async fn test_99_publish_manifest_contains_signature_and_json() {
     let key = test_key();
     let cdn = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
-    let publisher = SequencePublisher::new(cdn, gen, "sig_test".to_string(), "key1".to_string())
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher = SequencePublisher::new(cdn, r#gen, "sig_test".to_string(), "key1".to_string())
         .expect("valid tenant_id");
 
     let seq = make_manifest_sequence_with_tenant("included", 1, "sig_test");
@@ -1158,8 +1159,8 @@ async fn test_99_publish_manifest_contains_signature_and_json() {
 async fn test_100_publisher_required_handlers_extracted_from_sequence() {
     let key = test_key();
     let cdn = Box::new(MemoryCdnBackend::new());
-    let gen = ManifestGenerator::new(key.clone(), "key1".to_string());
-    let publisher = SequencePublisher::new(cdn, gen, "handler_t".to_string(), "key1".to_string())
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher = SequencePublisher::new(cdn, r#gen, "handler_t".to_string(), "key1".to_string())
         .expect("valid tenant_id");
 
     let seq = SequenceDefinition {

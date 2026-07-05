@@ -15,8 +15,8 @@ use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, SequenceId};
 use orch8_types::sequence::HumanChoice;
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/approvals", get(list_approvals))
@@ -322,10 +322,10 @@ fn walk_blocks<'a>(
                         break;
                     }
                 }
-                if found.is_none() {
-                    if let Some(default) = r.default.as_ref() {
-                        found = walk_blocks(default, block_id);
-                    }
+                if found.is_none()
+                    && let Some(default) = r.default.as_ref()
+                {
+                    found = walk_blocks(default, block_id);
                 }
                 found
             }
@@ -334,10 +334,10 @@ fn walk_blocks<'a>(
                 if found.is_none() {
                     found = walk_blocks(&t.catch_block, block_id);
                 }
-                if found.is_none() {
-                    if let Some(finally) = t.finally_block.as_ref() {
-                        found = walk_blocks(finally, block_id);
-                    }
+                if found.is_none()
+                    && let Some(finally) = t.finally_block.as_ref()
+                {
+                    found = walk_blocks(finally, block_id);
                 }
                 found
             }

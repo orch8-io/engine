@@ -11,7 +11,7 @@ use serde_json::json;
 
 use orch8_engine::evaluator::{self, EvalOutcome};
 use orch8_engine::handlers::HandlerRegistry;
-use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::error::StepError;
 use orch8_types::execution::NodeState;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
@@ -2187,11 +2187,10 @@ async fn eval_outcome_more_work_has_waiting_true() {
         if let EvalOutcome::MoreWork {
             has_waiting_nodes: w,
         } = outcome
+            && w
         {
-            if w {
-                has_waiting = true;
-                break;
-            }
+            has_waiting = true;
+            break;
         }
     }
     assert!(has_waiting);

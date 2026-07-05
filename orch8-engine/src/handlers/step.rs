@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tracing::{info, warn, Instrument};
+use tracing::{Instrument, info, warn};
 use uuid::Uuid;
 
 use orch8_storage::StorageBackend;
@@ -61,26 +61,25 @@ pub async fn execute_step_dry(
     exec: StepExecParams,
 ) -> Result<BlockOutput, EngineError> {
     // Memoization: if output already exists for this block+attempt, return it.
-    if exec.attempt > 0 {
-        if let Some(existing) = storage
+    if exec.attempt > 0
+        && let Some(existing) = storage
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
-        {
-            // Ref#4: attempts past i16::MAX can no longer be represented in
-            // the block_outputs.attempt column. Refuse to memoize rather than
-            // clamping — a clamp would make every retry past 32 767 collide
-            // against the same row and silently replay a stale output.
-            let matches_memoized = u16::try_from(exec.attempt)
-                .ok()
-                .is_some_and(|a| existing.attempt == a);
-            if matches_memoized {
-                info!(
-                    instance_id = %exec.instance_id,
-                    block_id = %exec.block_id,
-                    "step already executed (memoized), returning cached output"
-                );
-                return Ok(existing);
-            }
+    {
+        // Ref#4: attempts past i16::MAX can no longer be represented in
+        // the block_outputs.attempt column. Refuse to memoize rather than
+        // clamping — a clamp would make every retry past 32 767 collide
+        // against the same row and silently replay a stale output.
+        let matches_memoized = u16::try_from(exec.attempt)
+            .ok()
+            .is_some_and(|a| existing.attempt == a);
+        if matches_memoized {
+            info!(
+                instance_id = %exec.instance_id,
+                block_id = %exec.block_id,
+                "step already executed (memoized), returning cached output"
+            );
+            return Ok(existing);
         }
     }
 
@@ -148,7 +147,7 @@ pub async fn execute_step_dry(
         tenant_id: exec.tenant_id,
         block_id: exec.block_id,
         params: exec.params,
-        context: exec.context,
+        context: Arc::new(exec.context),
         attempt,
         storage: Arc::clone(storage),
         wait_for_input: exec.wait_for_input,
@@ -232,26 +231,25 @@ pub async fn execute_step(
 ) -> Result<serde_json::Value, EngineError> {
     // Memoization: if output already exists for this block+attempt, return it.
     // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
-    if exec.attempt > 0 {
-        if let Some(existing) = storage
+    if exec.attempt > 0
+        && let Some(existing) = storage
             .get_block_output(exec.instance_id, &exec.block_id)
             .await?
-        {
-            // Ref#4: attempts past i16::MAX can no longer be represented in
-            // the block_outputs.attempt column. Refuse to memoize rather than
-            // clamping — a clamp would make every retry past 32 767 collide
-            // against the same row and silently replay a stale output.
-            let matches_memoized = u16::try_from(exec.attempt)
-                .ok()
-                .is_some_and(|a| existing.attempt == a);
-            if matches_memoized {
-                info!(
-                    instance_id = %exec.instance_id,
-                    block_id = %exec.block_id,
-                    "step already executed (memoized), returning cached output"
-                );
-                return Ok(existing.output);
-            }
+    {
+        // Ref#4: attempts past i16::MAX can no longer be represented in
+        // the block_outputs.attempt column. Refuse to memoize rather than
+        // clamping — a clamp would make every retry past 32 767 collide
+        // against the same row and silently replay a stale output.
+        let matches_memoized = u16::try_from(exec.attempt)
+            .ok()
+            .is_some_and(|a| existing.attempt == a);
+        if matches_memoized {
+            info!(
+                instance_id = %exec.instance_id,
+                block_id = %exec.block_id,
+                "step already executed (memoized), returning cached output"
+            );
+            return Ok(existing.output);
         }
     }
 
@@ -319,7 +317,7 @@ pub async fn execute_step(
         tenant_id: exec.tenant_id,
         block_id: exec.block_id,
         params: exec.params,
-        context: exec.context,
+        context: Arc::new(exec.context),
         attempt,
         storage: Arc::clone(storage),
         wait_for_input: exec.wait_for_input,

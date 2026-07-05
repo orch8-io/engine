@@ -1,6 +1,6 @@
 //! Manifest generation and signing.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn manifest_generation_roundtrip() {
-        let gen = ManifestGenerator::new(test_key(), "key1".to_string());
+        let r#gen = ManifestGenerator::new(test_key(), "key1".to_string());
         let seq = ManifestSequence {
             name: "test".to_string(),
             version: 1,
@@ -178,7 +178,7 @@ mod tests {
             required_handlers: vec!["echo".to_string()],
             min_sdk_version: "0.1.0".to_string(),
         };
-        let signed = gen.generate(vec![seq], vec![], vec![]).unwrap();
+        let signed = r#gen.generate(vec![seq], vec![], vec![]).unwrap();
         assert!(!signed.signature_b64.is_empty());
         assert_eq!(signed.body.sequences.len(), 1);
     }
@@ -229,12 +229,12 @@ mod tests {
     #[test]
     fn generate_rejects_generator_key_in_other_keys() {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
-        let gen = ManifestGenerator::new(signing_key, "primary".to_string());
+        let r#gen = ManifestGenerator::new(signing_key, "primary".to_string());
         let other = ManifestSigningKey {
             key_id: "primary".to_string(),
             public_key: "abc".to_string(),
         };
-        let result = gen.generate(vec![], vec![], vec![other]);
+        let result = r#gen.generate(vec![], vec![], vec![other]);
         let Err(err) = result else {
             panic!("expected duplicate generator key to be rejected");
         };
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn generate_rejects_duplicate_other_key_id() {
         let signing_key = SigningKey::from_bytes(&[2u8; 32]);
-        let gen = ManifestGenerator::new(signing_key, "primary".to_string());
+        let r#gen = ManifestGenerator::new(signing_key, "primary".to_string());
         let others = vec![
             ManifestSigningKey {
                 key_id: "k1".to_string(),
@@ -255,7 +255,7 @@ mod tests {
                 public_key: "b".to_string(),
             },
         ];
-        let result = gen.generate(vec![], vec![], others);
+        let result = r#gen.generate(vec![], vec![], others);
         let Err(err) = result else {
             panic!("expected duplicate other key to be rejected");
         };

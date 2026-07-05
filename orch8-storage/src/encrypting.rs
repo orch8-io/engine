@@ -2310,8 +2310,8 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_bytes_are_encrypted_at_rest() {
-        use crate::artifacts::ObjectArtifactStore;
         use crate::ResourceStore;
+        use crate::artifacts::ObjectArtifactStore;
         use std::sync::Arc;
 
         let plain = b"\x89PNG sensitive user document".to_vec();
@@ -2349,8 +2349,8 @@ mod tests {
     async fn pre_encryption_plaintext_artifact_reads_back_unchanged() {
         // B1: a blob written before encryption was enabled (no magic header)
         // must read back as-is through the encrypting wrapper, not error.
-        use crate::artifacts::ObjectArtifactStore;
         use crate::ResourceStore;
+        use crate::artifacts::ObjectArtifactStore;
         use std::sync::Arc;
 
         let plain = b"legacy plaintext blob".to_vec();
@@ -2379,8 +2379,8 @@ mod tests {
     async fn artifacts_enabled_reflects_backend_and_delegates() {
         // B3: artifacts_enabled() must be false without a backend, true with one,
         // and the encrypting wrapper delegates to inner.
-        use crate::artifacts::ObjectArtifactStore;
         use crate::ResourceStore;
+        use crate::artifacts::ObjectArtifactStore;
         use std::sync::Arc;
 
         let no_backend = crate::sqlite::SqliteStorage::in_memory().await.unwrap();

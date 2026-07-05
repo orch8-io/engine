@@ -13,19 +13,19 @@
 //! `GET /triggers/{slug}` additionally returns a `poll_state` field with the
 //! cursor, `last_error`, and `consecutive_failures` bookkeeping.
 
+use axum::Router;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
-use crate::error::ApiError;
 use crate::AppState;
+use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()

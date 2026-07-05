@@ -10,8 +10,8 @@ use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::*;
 use orch8_types::instance::{InstanceState, TaskInstance};
 
-use super::helpers::{apply_filter_sql, row_to_instance, ts};
 use super::SqliteStorage;
+use super::helpers::{apply_filter_sql, row_to_instance, ts};
 
 /// SQL for a full `task_instances` insert. Kept as a single canonical string so
 /// that adding a column requires editing exactly one place per backend. All
@@ -236,7 +236,7 @@ async fn filter_by_concurrency(
     // Group candidates by concurrency_key.
     let mut keyed: HashMap<&str, Vec<usize>> = HashMap::with_capacity(candidates.len() / 2);
     for (idx, inst) in candidates.iter().enumerate() {
-        if let (Some(ref key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
+        if let (Some(key), Some(_)) = (&inst.concurrency_key, inst.max_concurrency) {
             keyed.entry(key.as_str()).or_default().push(idx);
         }
     }
@@ -568,7 +568,7 @@ async fn insert_externalized_row(
     ref_key: &str,
     payload: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    use crate::compression::{compress, COMPRESSION_THRESHOLD_BYTES};
+    use crate::compression::{COMPRESSION_THRESHOLD_BYTES, compress};
     let raw = serde_json::to_vec(payload).map_err(StorageError::Serialization)?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 

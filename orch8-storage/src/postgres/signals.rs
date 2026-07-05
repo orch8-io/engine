@@ -6,8 +6,8 @@ use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
-use super::rows::SignalRow;
 use super::PostgresStorage;
+use super::rows::SignalRow;
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.

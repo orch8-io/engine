@@ -219,10 +219,10 @@ impl CircuitBreakerRegistry {
         // on the DashMap shard, avoiding severe contention on the hot path.
         let search = KeyRef(tenant_id, handler);
         let q: &dyn CircuitKey = &search;
-        if let Some(breaker) = self.breakers.get(q) {
-            if matches!(breaker.state, BreakerState::Closed | BreakerState::HalfOpen) {
-                return Ok(());
-            }
+        if let Some(breaker) = self.breakers.get(q)
+            && matches!(breaker.state, BreakerState::Closed | BreakerState::HalfOpen)
+        {
+            return Ok(());
         }
 
         // Mid path: if the breaker is Open, we acquire a write lock via get_mut
@@ -279,10 +279,11 @@ impl CircuitBreakerRegistry {
         // Fast path: if the breaker is already completely healthy (Closed with 0 failures),
         // we can skip acquiring a write lock entirely. This makes the standard success
         // path effectively free of lock contention.
-        if let Some(breaker) = self.breakers.get(q) {
-            if breaker.state == BreakerState::Closed && breaker.failure_count == 0 {
-                return;
-            }
+        if let Some(breaker) = self.breakers.get(q)
+            && breaker.state == BreakerState::Closed
+            && breaker.failure_count == 0
+        {
+            return;
         }
 
         let mut delete_snapshot = None;

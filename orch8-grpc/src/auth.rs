@@ -133,12 +133,12 @@ pub fn auth_interceptor(
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
 
-                    if let Some(ref tid) = tenant_raw {
-                        if tid != &record.tenant_id {
-                            return Err(Status::permission_denied(
-                                "x-tenant-id does not match key tenant",
-                            ));
-                        }
+                    if let Some(ref tid) = tenant_raw
+                        && tid != &record.tenant_id
+                    {
+                        return Err(Status::permission_denied(
+                            "x-tenant-id does not match key tenant",
+                        ));
                     }
 
                     req.extensions_mut()
@@ -174,10 +174,10 @@ pub fn enforce_tenant_match<T>(
     resource_tenant: &TenantId,
     entity_label: &str,
 ) -> Result<(), Status> {
-    if let Some(caller) = caller_tenant(req) {
-        if caller != resource_tenant {
-            return Err(Status::not_found(entity_label.to_string()));
-        }
+    if let Some(caller) = caller_tenant(req)
+        && caller != resource_tenant
+    {
+        return Err(Status::not_found(entity_label.to_string()));
     }
     Ok(())
 }

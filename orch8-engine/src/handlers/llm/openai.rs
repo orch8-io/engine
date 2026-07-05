@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tracing::{debug, warn};
 
 use orch8_types::error::StepError;
@@ -9,8 +9,8 @@ use super::common::{
     classify_api_error, classify_reqwest_error, is_json_object_format, merge_json_response_fields,
     retryable, safe_truncate,
 };
-use super::sse::{next_chunk, stream_idle_timeout, SseParser};
-use super::{http_client, openai_default_model, DeltaSink};
+use super::sse::{SseParser, next_chunk, stream_idle_timeout};
+use super::{DeltaSink, http_client, openai_default_model};
 
 /// Build the `/chat/completions` request body shared by the streaming and
 /// non-streaming paths (so multimodal message conversion behaves identically).
@@ -114,14 +114,13 @@ pub(super) async fn call_openai_compat(
         "usage": resp_body.get("usage").cloned().unwrap_or_default(),
     });
 
-    if is_json_object_format(params) {
-        if let Some(content_str) = choice
+    if is_json_object_format(params)
+        && let Some(content_str) = choice
             .get("message")
             .and_then(|m| m.get("content"))
             .and_then(Value::as_str)
-        {
-            merge_json_response_fields(content_str, &mut output);
-        }
+    {
+        merge_json_response_fields(content_str, &mut output);
     }
 
     Ok(output)
@@ -163,10 +162,10 @@ impl OpenAiStreamAcc {
             );
             return;
         };
-        if self.model.is_null() {
-            if let Some(model) = chunk.get("model").filter(|m| m.is_string()) {
-                self.model = model.clone();
-            }
+        if self.model.is_null()
+            && let Some(model) = chunk.get("model").filter(|m| m.is_string())
+        {
+            self.model = model.clone();
         }
         // The final chunk (stream_options.include_usage) carries usage with
         // an empty choices array.

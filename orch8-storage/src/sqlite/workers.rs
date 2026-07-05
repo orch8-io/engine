@@ -7,8 +7,8 @@ use uuid::Uuid;
 use orch8_types::error::StorageError;
 use orch8_types::worker::WorkerTask;
 
-use super::helpers::{row_to_worker_task, ts};
 use super::SqliteStorage;
+use super::helpers::{row_to_worker_task, ts};
 
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
@@ -370,15 +370,15 @@ pub(super) async fn list(
         qb.push_bind(tid.as_str());
         qb.push(")");
     }
-    if let Some(ref states) = filter.states {
-        if !states.is_empty() {
-            qb.push(" AND state IN (");
-            let mut separated = qb.separated(",");
-            for state in states {
-                separated.push_bind(state.to_string());
-            }
-            separated.push_unseparated(")");
+    if let Some(ref states) = filter.states
+        && !states.is_empty()
+    {
+        qb.push(" AND state IN (");
+        let mut separated = qb.separated(",");
+        for state in states {
+            separated.push_bind(state.to_string());
         }
+        separated.push_unseparated(")");
     }
     if let Some(ref handler) = filter.handler_name {
         qb.push(" AND handler_name=");

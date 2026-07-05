@@ -4,8 +4,8 @@ use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::step_log::{StepLog, StepLogEntry};
 
-use super::helpers::{parse_ts, ts};
 use super::SqliteStorage;
+use super::helpers::{parse_ts, ts};
 
 pub(super) async fn append(
     storage: &SqliteStorage,

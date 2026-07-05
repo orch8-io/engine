@@ -18,8 +18,8 @@ use chrono::Utc;
 use serde_json::json;
 
 use orch8_engine::evaluator;
-use orch8_engine::handlers::{builtin::register_builtins, HandlerRegistry};
-use orch8_storage::{sqlite::SqliteStorage, StorageBackend};
+use orch8_engine::handlers::{HandlerRegistry, builtin::register_builtins};
+use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -226,16 +226,20 @@ async fn r2_for_each_3_over_loop_0_items_completes_immediately() {
     );
 
     // No markers left.
-    assert!(storage
-        .get_block_output(inst.id, &BlockId::new("fe1"))
-        .await
-        .unwrap()
-        .is_none());
-    assert!(storage
-        .get_block_output(inst.id, &BlockId::new("l1"))
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        storage
+            .get_block_output(inst.id, &BlockId::new("fe1"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_block_output(inst.id, &BlockId::new("l1"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // The root for_each must reach Completed; descendants that were never
     // activated (because the collection was empty) remain Pending — that
