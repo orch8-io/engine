@@ -17,6 +17,7 @@ use orch8_types::instance::InstanceState;
 
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
+use crate::handlers::param_resolve::IN_PROGRESS_SENTINEL;
 
 use super::{StepOutcome, wake_parent_if_child};
 
@@ -674,12 +675,17 @@ pub(super) async fn execute_step_block(
         instance_id,
         block_id: step_def.id.clone(),
         output: serde_json::json!({"_sentinel": true, "_handler": &step_def.handler}),
-        output_ref: Some("__in_progress__".into()),
+        output_ref: Some(IN_PROGRESS_SENTINEL.into()),
         output_size: 0,
-        // Use attempt=u16::MAX so the memoization check in `execute_step_dry`
-        // (which compares existing.attempt == exec.attempt) never matches
-        // the sentinel — a real attempt never reaches u16::MAX.
-        attempt: u16::MAX,
+        // Carry the REAL attempt number. Recovery reads it via
+        // `compute_attempt` to resume the in-flight attempt without inflating
+        // the retry count. The sentinel is disambiguated from a real output by
+        // its `__in_progress__` output_ref (see the memoization guard in
+        // `execute_step_dry` and `compute_attempt`), NOT by a magic attempt
+        // value — the previous `u16::MAX` marker made `compute_attempt` return
+        // `u16::MAX + 1` after a crash, which both re-ran the side-effectful
+        // handler and immediately fast-tracked the step to the DLQ.
+        attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
         created_at: chrono::Utc::now(),
     };
     storage.save_block_output(&sentinel).await?;

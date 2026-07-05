@@ -34,15 +34,30 @@ pub(super) async fn create(
 
 pub(super) async fn get(
     store: &SqliteStorage,
+    tenant_id: Option<&TenantId>,
     slug: &str,
 ) -> Result<Option<TriggerDef>, StorageError> {
-    let row: Option<TriggerRow> = sqlx::query_as(
-        r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
-          FROM triggers WHERE slug = ?1",
-    )
-    .bind(slug)
-    .fetch_optional(&store.pool)
-    .await?;
+    let row: Option<TriggerRow> = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers WHERE slug = ?1 AND tenant_id = ?2",
+            )
+            .bind(slug)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers WHERE slug = ?1",
+            )
+            .bind(slug)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(TriggerRow::into_trigger).transpose()
 }
 

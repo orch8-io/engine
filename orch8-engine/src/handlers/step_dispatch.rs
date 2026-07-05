@@ -237,7 +237,10 @@ pub(crate) async fn resolve_plugin_source(
     name: &str,
     expected_type: PluginType,
 ) -> Option<String> {
-    let plugin = match storage.get_plugin(name).await {
+    // System-context lookup: resolving a handler name to its plugin source is a
+    // dispatch-time concern and plugin names are a global primary key, so this
+    // is an intentionally unscoped (`None`) lookup per `AdminStore::get_plugin`.
+    let plugin = match storage.get_plugin(None, name).await {
         Ok(Some(p)) => p,
         Ok(None) => return None,
         Err(e) => {

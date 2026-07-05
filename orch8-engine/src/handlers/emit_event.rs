@@ -87,7 +87,7 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     let storage = ctx.storage.as_ref();
 
     let trigger = storage
-        .get_trigger(&trigger_slug)
+        .get_trigger(Some(&ctx.tenant_id), &trigger_slug)
         .await
         .map_err(|e| map_storage_err(&e))?
         .ok_or_else(|| permanent(format!("trigger '{trigger_slug}' not found")))?;
@@ -450,10 +450,16 @@ mod tests {
         );
         let err = handle_emit_event(ctx).await.unwrap_err();
         match &err {
+            // `get_trigger` is now scoped to the caller's tenant at the
+            // storage layer (see the deep storage review's tenant-isolation
+            // finding), so a cross-tenant trigger slug fails closed as "not
+            // found" before `check_same_tenant` even runs -- fail-closed at
+            // the storage layer beats a cross-tenant existence check further
+            // up the stack.
             StepError::Permanent { message, .. } => {
                 assert!(
-                    message.contains("cross-tenant"),
-                    "expected 'cross-tenant' in message, got: {message}"
+                    message.contains("not found"),
+                    "expected 'not found' in message, got: {message}"
                 );
             }
             other @ StepError::Retryable { .. } => {

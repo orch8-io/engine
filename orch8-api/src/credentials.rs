@@ -234,7 +234,10 @@ async fn get_credential(
 ) -> Result<impl IntoResponse, ApiError> {
     let credential = state
         .storage
-        .get_credential(&id)
+        .get_credential(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &id,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "credential"))?
         .ok_or_else(|| ApiError::NotFound(format!("credential '{id}'")))?;
@@ -254,7 +257,10 @@ async fn update_credential(
 ) -> Result<impl IntoResponse, ApiError> {
     let mut credential = state
         .storage
-        .get_credential(&id)
+        .get_credential(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &id,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "credential"))?
         .ok_or_else(|| ApiError::NotFound(format!("credential '{id}'")))?;
@@ -306,7 +312,10 @@ async fn delete_credential(
 ) -> Result<impl IntoResponse, ApiError> {
     let credential = state
         .storage
-        .get_credential(&id)
+        .get_credential(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &id,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "credential"))?
         .ok_or_else(|| ApiError::NotFound(format!("credential '{id}'")))?;

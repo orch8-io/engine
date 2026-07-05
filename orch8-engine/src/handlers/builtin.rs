@@ -113,6 +113,49 @@ pub(crate) async fn is_address_safe(addr: &str) -> bool {
     true
 }
 
+/// `true` if a resolved socket address lands in a blocked (private/internal/
+/// metadata) range.
+fn socket_addr_is_blocked(sa: &std::net::SocketAddr) -> bool {
+    match sa.ip() {
+        std::net::IpAddr::V4(v4) => ipv4_is_blocked(v4),
+        std::net::IpAddr::V6(v6) => ipv6_is_blocked(v6),
+    }
+}
+
+/// SSRF-hardening DNS resolver for outbound HTTP clients.
+///
+/// Resolves hostnames via the system resolver but drops any address in a
+/// private/internal/metadata range **before the connection is made**. This
+/// closes the DNS-rebinding TOCTOU that the pre-flight [`is_url_safe`] check
+/// cannot: `is_url_safe` resolves at *check* time, but reqwest re-resolves at
+/// *connect* time, so an attacker-controlled resolver that returns a public IP
+/// for the check and a private IP for the connect would otherwise reach an
+/// internal target. reqwest routes redirect connections through the same
+/// resolver, so this also closes hostname-redirect-to-private-IP vectors that
+/// the literal-only [`redirect_target_allowed`] guard misses.
+///
+/// When all resolved addresses are filtered out, reqwest receives an empty
+/// address set and the connection fails — the intended block.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct SsrfGuardResolver;
+
+impl reqwest::dns::Resolve for SsrfGuardResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // Honour the explicit opt-out: pass every address through unfiltered.
+            let allow_internal = internal_urls_allowed();
+            // Port 0 — reqwest overrides the port on the returned addresses.
+            let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
+            let filtered: Vec<std::net::SocketAddr> = addrs
+                .filter(|sa| allow_internal || !socket_addr_is_blocked(sa))
+                .collect();
+            let iter: reqwest::dns::Addrs = Box::new(filtered.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
 /// Synchronous redirect-hop guard for outbound HTTP clients.
 ///
 /// reqwest follows redirects by default (up to 10) without re-running the

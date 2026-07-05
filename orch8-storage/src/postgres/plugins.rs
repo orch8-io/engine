@@ -29,15 +29,36 @@ pub(super) async fn create(
 
 pub(super) async fn get(
     store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
     name: &str,
 ) -> Result<Option<PluginDef>, StorageError> {
-    let row = sqlx::query_as::<_, PluginRow>(
-        r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-          FROM plugins WHERE name = $1",
-    )
-    .bind(name)
-    .fetch_optional(&store.pool)
-    .await?;
+    // `tenant_id = ''` is the shared/global-plugin sentinel (see `create`'s
+    // column default and `list`'s equivalent OR clause) -- scoping must
+    // admit those alongside the caller's own tenant, not just an exact match.
+    // `tenant_id: None` is an intentionally unscoped lookup (e.g. system
+    // contexts that aren't acting on behalf of any one tenant) -- callers
+    // that already know the tenant must pass `Some`.
+    let row = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as::<_, PluginRow>(
+                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+                  FROM plugins WHERE name = $1 AND (tenant_id = $2 OR tenant_id = '')",
+            )
+            .bind(name)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, PluginRow>(
+                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+                  FROM plugins WHERE name = $1",
+            )
+            .bind(name)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(PluginRow::into_plugin).transpose()
 }
 

@@ -120,8 +120,15 @@ async fn resolve_string(
         });
     }
 
+    // Tenant isolation is enforced by the storage layer itself: a non-empty
+    // `tenant_id` scopes the lookup to that tenant (or the global scope,
+    // empty `tenant_id` on the credential) so a cross-tenant reference
+    // fails closed with "not registered" rather than relying on a
+    // post-fetch check here to catch every caller.
+    let owned_tenant =
+        (!tenant_id.is_empty()).then(|| orch8_types::ids::TenantId::unchecked(tenant_id));
     let credential = storage
-        .get_credential(id)
+        .get_credential(owned_tenant.as_ref(), id)
         .await
         .map_err(|e| StepError::Permanent {
             message: format!("credentials: storage lookup for '{id}' failed: {e}"),
@@ -131,20 +138,6 @@ async fn resolve_string(
         message: format!("credentials: no credential registered with id '{id}'"),
         details: None,
     })?;
-
-    // Tenant isolation — a tenant may only resolve its own credentials or
-    // global ones. Refuse cross-tenant access at the resolver layer.
-    if !tenant_id.is_empty()
-        && !credential.tenant_id.is_empty()
-        && credential.tenant_id != tenant_id
-    {
-        return Err(StepError::Permanent {
-            message: format!(
-                "credentials: credential '{id}' is not accessible from tenant '{tenant_id}'"
-            ),
-            details: None,
-        });
-    }
     if !credential.enabled {
         return Err(StepError::Permanent {
             message: format!("credentials: credential '{id}' is disabled"),

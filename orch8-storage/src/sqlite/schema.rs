@@ -558,9 +558,18 @@ CREATE TABLE IF NOT EXISTS step_logs (
     message     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_step_logs_instance ON step_logs(instance_id, ts);
+
+-- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
+-- advisory-lock primitive, so a real row keyed by tenant_id stands in for
+-- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
+-- presence/absence is the actual lock state.
+CREATE TABLE IF NOT EXISTS manifest_locks (
+    tenant_id TEXT PRIMARY KEY,
+    locked_at TEXT NOT NULL
+);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 19;

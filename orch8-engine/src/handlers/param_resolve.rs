@@ -117,6 +117,13 @@ pub(crate) async fn resolve_templates_in_params(
     crate::template::resolve_with_state(params, context, outputs, state_value.as_ref())
 }
 
+/// `output_ref` marker for the pre-execution sentinel written by the fast-path
+/// scheduler before invoking a side-effectful handler. It is NOT a real output:
+/// `compute_attempt` and the memoization guard in `execute_step_dry` must treat
+/// it specially so a crash mid-step neither replays a bogus output nor inflates
+/// the retry count.
+pub(crate) const IN_PROGRESS_SENTINEL: &str = "__in_progress__";
+
 /// Compute the attempt number for a step from the latest prior
 /// `BlockOutput` for `(instance_id, block_id)`. Returns `0` when no prior
 /// output exists (first attempt).
@@ -130,6 +137,16 @@ pub(crate) async fn compute_attempt(
     block_id: &BlockId,
 ) -> Result<u32, EngineError> {
     match storage.get_block_output(instance_id, block_id).await? {
+        // An `__in_progress__` sentinel is the most-recent row only when a
+        // prior execution of THIS attempt crashed after writing the sentinel
+        // but before persisting the real output. Resume the SAME attempt
+        // (no `+ 1`): the sentinel carries the in-flight attempt number, so we
+        // neither inflate the retry count nor explode to `u16::MAX + 1` (which
+        // previously fast-tracked the step straight to the DLQ). The handler
+        // re-runs at the correct attempt — the engine's at-least-once contract.
+        Some(prev) if prev.output_ref.as_deref() == Some(IN_PROGRESS_SENTINEL) => {
+            Ok(u32::from(prev.attempt))
+        }
         Some(prev) => Ok(u32::from(prev.attempt) + 1),
         None => Ok(0),
     }

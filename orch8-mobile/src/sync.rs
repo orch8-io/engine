@@ -37,6 +37,36 @@ fn to_hex(bytes: &[u8]) -> String {
 use crate::error::{MobileError, SyncError};
 use crate::storage::MobileStorage;
 
+/// Maximum response body size for a manifest or a single sequence download.
+/// Bounds memory so a malicious/misbehaving server can't OOM the device with an
+/// unbounded body. Mirrors `MAX_SEQUENCES_RESPONSE_BYTES` in `lib.rs`.
+const MAX_SYNC_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Read a response body, rejecting it if it exceeds [`MAX_SYNC_RESPONSE_BYTES`].
+/// Checks the advertised `Content-Length` up front (cheap rejection of honest
+/// large bodies) and re-checks the buffered length (catches a lying/absent
+/// header). `what` names the resource for error messages.
+async fn read_body_capped(resp: reqwest::Response, what: &str) -> Result<Vec<u8>, MobileError> {
+    if let Some(len) = resp.content_length()
+        && len > MAX_SYNC_RESPONSE_BYTES
+    {
+        return Err(SyncError::Network {
+            message: format!("{what} too large: {len} bytes exceeds limit"),
+        }
+        .into());
+    }
+    let bytes = resp.bytes().await.map_err(|e| SyncError::Network {
+        message: format!("failed to read {what} body: {e}"),
+    })?;
+    if bytes.len() as u64 > MAX_SYNC_RESPONSE_BYTES {
+        return Err(SyncError::Network {
+            message: format!("{what} too large: {} bytes exceeds limit", bytes.len()),
+        }
+        .into());
+    }
+    Ok(bytes.to_vec())
+}
+
 /// Root of trust: embedded Ed25519 public key for verifying manifest signatures.
 pub struct RootKey {
     pubkey: VerifyingKey,
@@ -245,6 +275,23 @@ impl SyncOrchestrator {
         // 2. Verify manifest signature.
         let manifest: Manifest = self.verify_and_parse_manifest(&manifest_bytes)?;
 
+        // 2a. Reject stale/replayed manifests. A signature only proves the
+        // manifest was authentic at some point — it does not prove freshness.
+        // Without this check an attacker who captured an older validly-signed
+        // manifest could replay it to reinstall sequences that were since
+        // removed (e.g. a withdrawn buggy/exploitable workflow). Enforce a
+        // strictly-increasing manifest_version.
+        if let Some(last_version) = self.get_last_manifest_version().await?
+            && manifest.manifest_version <= last_version
+        {
+            warn!(
+                seen = manifest.manifest_version,
+                last = last_version,
+                "rejecting stale/replayed manifest (version not newer than last applied)"
+            );
+            return Ok(result);
+        }
+
         // 3. Validate signing keys against root key and cache them.
         let mut trusted_keys = self.cache_signing_keys(&manifest).await?;
 
@@ -270,8 +317,10 @@ impl SyncOrchestrator {
         // 6. Evict oldest sequences if over limit.
         self.evict_excess_sequences().await?;
 
-        // 7. Persist sync metadata.
-        self.persist_sync_metadata(maybe_etag).await?;
+        // 7. Persist sync metadata (including the applied manifest version so a
+        // later replay of an older manifest is rejected in step 2a).
+        self.persist_sync_metadata(maybe_etag, Some(manifest.manifest_version))
+            .await?;
 
         info!(
             added = result.added,
@@ -313,6 +362,35 @@ impl SyncOrchestrator {
                     message: e.to_string(),
                 })?;
         }
+
+        // Revoke rotated-out keys: the manifest's signing_keys is the current
+        // authoritative set, so any locally-cached key whose key_id is no longer
+        // present has been rotated out and must stop validating sequences.
+        // Without this, a key compromised after rotation would keep verifying
+        // forever. (The manifest itself is signed by the root key, so its
+        // key-set cannot be forged.)
+        let current: HashSet<&str> = manifest
+            .signing_keys
+            .iter()
+            .map(|k| k.key_id.as_str())
+            .collect();
+        let stored =
+            self.mobile_storage
+                .list_trusted_keys()
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: e.to_string(),
+                })?;
+        for (key_id, _) in stored {
+            if !current.contains(key_id.as_str()) {
+                if let Err(e) = self.mobile_storage.delete_trusted_key(&key_id).await {
+                    warn!(key_id = %key_id, error = %e, "failed to revoke rotated-out signing key");
+                } else {
+                    info!(key_id = %key_id, "revoked rotated-out signing key");
+                }
+            }
+        }
+
         Ok(trusted_keys)
     }
 
@@ -510,8 +588,13 @@ impl SyncOrchestrator {
         Ok((added, updated, skipped, sig_failures))
     }
 
-    /// Persist sync timestamp and optional `ETag` after a successful sync.
-    async fn persist_sync_metadata(&self, etag: Option<String>) -> Result<(), MobileError> {
+    /// Persist sync timestamp, optional `ETag`, and optional applied manifest
+    /// version after a successful sync.
+    async fn persist_sync_metadata(
+        &self,
+        etag: Option<String>,
+        manifest_version: Option<i64>,
+    ) -> Result<(), MobileError> {
         self.mobile_storage
             .set_sync_metadata("last_sync_ts", &Utc::now().to_rfc3339())
             .await
@@ -526,7 +609,36 @@ impl SyncOrchestrator {
                     message: e.to_string(),
                 })?;
         }
+        if let Some(version) = manifest_version {
+            self.mobile_storage
+                .set_sync_metadata("last_manifest_version", &version.to_string())
+                .await
+                .map_err(|e| MobileError::Storage {
+                    message: e.to_string(),
+                })?;
+        }
         Ok(())
+    }
+
+    /// Last successfully-applied manifest version, used to reject replays of
+    /// older signed manifests. Returns `None` before the first sync.
+    async fn get_last_manifest_version(&self) -> Result<Option<i64>, MobileError> {
+        let raw = self
+            .mobile_storage
+            .get_sync_metadata("last_manifest_version")
+            .await
+            .map_err(|e| MobileError::Storage {
+                message: e.to_string(),
+            })?;
+        match raw {
+            Some(s) => s
+                .parse::<i64>()
+                .map(Some)
+                .map_err(|e| MobileError::Storage {
+                    message: format!("bad last_manifest_version: {e}"),
+                }),
+            None => Ok(None),
+        }
     }
 
     async fn fetch_manifest(
@@ -560,10 +672,8 @@ impl SyncOrchestrator {
             .headers()
             .get("etag")
             .and_then(|v| v.to_str().ok().map(String::from));
-        let bytes = response.bytes().await.map_err(|e| SyncError::Network {
-            message: format!("failed to read manifest body: {e}"),
-        })?;
-        Ok((bytes.to_vec(), etag))
+        let bytes = read_body_capped(response, "manifest").await?;
+        Ok((bytes, etag))
     }
 
     fn verify_and_parse_manifest(&self, bytes: &[u8]) -> Result<Manifest, MobileError> {
@@ -610,8 +720,9 @@ impl SyncOrchestrator {
             .into());
         }
 
-        let text = response.text().await.map_err(|e| SyncError::Network {
-            message: format!("failed to read sequence body: {e}"),
+        let bytes = read_body_capped(response, "sequence").await?;
+        let text = String::from_utf8(bytes).map_err(|e| SyncError::Network {
+            message: format!("sequence body is not valid utf-8: {e}"),
         })?;
         Ok(text)
     }
@@ -850,7 +961,7 @@ mod tests {
             50,
         );
 
-        orch.persist_sync_metadata(Some("etag-123".to_string()))
+        orch.persist_sync_metadata(Some("etag-123".to_string()), None)
             .await
             .unwrap();
 
@@ -880,7 +991,7 @@ mod tests {
             50,
         );
 
-        orch.persist_sync_metadata(None).await.unwrap();
+        orch.persist_sync_metadata(None, None).await.unwrap();
 
         let ts = mobile_storage
             .get_sync_metadata("last_sync_ts")

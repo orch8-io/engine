@@ -5,7 +5,7 @@ use ed25519_dalek::Signer;
 use sha2::{Digest, Sha256};
 use tracing::info;
 
-use orch8_types::sequence::SequenceDefinition;
+use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 
 use crate::cdn::{CdnBackend, CdnError};
 use crate::manifest::{self, ManifestGenerator, ManifestSequence, ManifestSigningKey};
@@ -100,17 +100,8 @@ impl SequencePublisher {
             .await
             .map_err(PublishError::Cdn)?;
 
-        let mut required_handlers: Vec<String> = seq
-            .blocks
-            .iter()
-            .filter_map(|b| {
-                if let orch8_types::sequence::BlockDefinition::Step(s) = b {
-                    Some(s.handler.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut required_handlers: Vec<String> = Vec::new();
+        collect_required_handlers(&seq.blocks, &mut required_handlers);
         required_handlers.sort_unstable();
         required_handlers.dedup();
 
@@ -187,6 +178,68 @@ pub enum PublishError {
     Cdn(#[from] CdnError),
     #[error("configuration error: {0}")]
     Config(String),
+}
+
+/// Recursively collect every handler name a sequence can dispatch, descending
+/// into all composite blocks. A non-recursive scan of the top-level blocks
+/// omits handlers nested inside `parallel`/`race`/`loop`/`for_each`/`router`/
+/// `try_catch`/`ab_split`/`cancellation_scope`, so a device that installs the
+/// sequence but lacks a nested handler fails only at runtime. Besides the
+/// step's primary handler this also records its `fallback_handler` and
+/// `on_deadline_breach` escalation handler, both of which the engine can
+/// dispatch.
+fn collect_required_handlers(blocks: &[BlockDefinition], out: &mut Vec<String>) {
+    for block in blocks {
+        match block {
+            BlockDefinition::Step(s) => {
+                out.push(s.handler.clone());
+                if let Some(fb) = &s.fallback_handler {
+                    out.push(fb.clone());
+                }
+                if let Some(esc) = &s.on_deadline_breach {
+                    out.push(esc.handler.clone());
+                }
+            }
+            BlockDefinition::Parallel(p) => {
+                for branch in &p.branches {
+                    collect_required_handlers(branch, out);
+                }
+            }
+            BlockDefinition::Race(r) => {
+                for branch in &r.branches {
+                    collect_required_handlers(branch, out);
+                }
+            }
+            BlockDefinition::Loop(l) => collect_required_handlers(&l.body, out),
+            BlockDefinition::ForEach(fe) => collect_required_handlers(&fe.body, out),
+            BlockDefinition::Router(r) => {
+                for route in &r.routes {
+                    collect_required_handlers(&route.blocks, out);
+                }
+                if let Some(default) = &r.default {
+                    collect_required_handlers(default, out);
+                }
+            }
+            BlockDefinition::TryCatch(tc) => {
+                collect_required_handlers(&tc.try_block, out);
+                collect_required_handlers(&tc.catch_block, out);
+                if let Some(finally) = &tc.finally_block {
+                    collect_required_handlers(finally, out);
+                }
+            }
+            BlockDefinition::ABSplit(ab) => {
+                for variant in &ab.variants {
+                    collect_required_handlers(&variant.blocks, out);
+                }
+            }
+            BlockDefinition::CancellationScope(cs) => {
+                collect_required_handlers(&cs.blocks, out);
+            }
+            // SubSequence dispatches another sequence by name, not a handler,
+            // and that sequence carries its own required_handlers.
+            BlockDefinition::SubSequence(_) => {}
+        }
+    }
 }
 
 #[cfg(test)]

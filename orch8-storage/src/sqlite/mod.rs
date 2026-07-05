@@ -58,6 +58,7 @@ mod workers;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use sqlx::Row;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -77,6 +78,33 @@ use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
 use orch8_types::worker::WorkerTask;
+
+/// One column's shape as reported by `PRAGMA table_info`, used by the additive
+/// column reconcile in [`SqliteStorage::create_tables`].
+struct ColumnDef {
+    name: String,
+    col_type: String,
+    notnull: bool,
+    dflt_value: Option<String>,
+}
+
+/// Read `PRAGMA table_info(<table>)` for `table` on `pool`. `table` must be a
+/// trusted identifier (validated `[A-Za-z0-9_]`) — PRAGMA does not accept bind
+/// parameters, so it is interpolated directly.
+async fn column_defs(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnDef>, StorageError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| ColumnDef {
+            name: r.get::<String, _>("name"),
+            col_type: r.get::<String, _>("type"),
+            notnull: r.get::<i64, _>("notnull") != 0,
+            dflt_value: r.get::<Option<String>, _>("dflt_value"),
+        })
+        .collect())
+}
 
 /// SQLite storage backend. Supports in-memory (testing) and file-backed (standalone).
 pub struct SqliteStorage {
@@ -179,8 +207,127 @@ impl SqliteStorage {
     }
 
     async fn create_tables(&self) -> Result<(), StorageError> {
-        sqlx::query(schema::SCHEMA).execute(&self.pool).await?;
+        // `CREATE TABLE IF NOT EXISTS` creates *new* tables but is a no-op on
+        // tables that already exist — so a DB created by an older binary never
+        // gains columns added since. Phase the bundled schema so an additive
+        // column reconcile can run *between* table creation and index creation:
+        //   1. tables (IF NOT EXISTS — no-op on existing tables)
+        //   2. reconcile: ADD any missing columns (never drop/alter)
+        //   3. indexes — which may reference columns only just added in step 2
+        // Indexes-before-reconcile would fail on an old DB with "no such column".
+        // Strip `--` line comments first: the schema contains `;` inside a
+        // comment (e.g. "PRAGMA foreign_keys ON;"), which would otherwise split
+        // a statement mid-body. The schema has no string literals containing
+        // `--` or `;`, so line-comment stripping + split-on-`;` is safe.
+        let sql: String = schema::SCHEMA
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (table_stmts, index_stmts): (Vec<&str>, Vec<&str>) = sql
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .partition(|s| {
+                let upper = s.to_ascii_uppercase();
+                !upper.contains("CREATE INDEX") && !upper.contains("CREATE UNIQUE INDEX")
+            });
+
+        for stmt in &table_stmts {
+            sqlx::query(stmt).execute(&self.pool).await?;
+        }
+        self.reconcile_columns().await?;
+        for stmt in &index_stmts {
+            if let Err(e) = sqlx::query(stmt).execute(&self.pool).await {
+                // `reconcile_columns` deliberately skips a NOT NULL column
+                // without a schema-level default (e.g. created_at/updated_at,
+                // always supplied by the application, never defaulted) rather
+                // than risk an ALTER TABLE failure on a populated table. An
+                // index referencing that still-missing column can't be
+                // created either -- warn and continue rather than fail boot;
+                // a real migration must backfill the column first.
+                if e.to_string().contains("no such column") {
+                    tracing::warn!(
+                        statement = %stmt,
+                        error = %e,
+                        "sqlite: skipping index on a column reconcile could not add"
+                    );
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
         self.record_schema_version().await?;
+        Ok(())
+    }
+
+    /// Additively reconcile the live DB's columns against the canonical
+    /// [`schema::SCHEMA`]. Safe by construction: it only ever issues
+    /// `ALTER TABLE … ADD COLUMN` for columns that are absent, and skips any
+    /// `NOT NULL` column without a default (SQLite forbids adding those to a
+    /// populated table) rather than risk a failure or data loss. The desired
+    /// column set is derived from the schema itself at runtime — there is no
+    /// hand-maintained migration list to drift out of sync.
+    async fn reconcile_columns(&self) -> Result<(), StorageError> {
+        // Build a throwaway reference DB from the canonical schema so we can
+        // introspect the *intended* shape without hardcoding it.
+        let ref_opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(|e| StorageError::Connection(e.to_string()))?
+            .create_if_missing(true);
+        let ref_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(ref_opts)
+            .await
+            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        sqlx::query(schema::SCHEMA).execute(&ref_pool).await?;
+
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&ref_pool)
+                .await?;
+
+        for table in tables {
+            // `PRAGMA table_info` takes no bind parameters; the table name comes
+            // from our own schema's sqlite_master (never user input), but guard
+            // the identifier defensively all the same.
+            if !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let want = column_defs(&ref_pool, &table).await?;
+            let have = column_defs(&self.pool, &table).await?;
+
+            for col in &want {
+                if have.iter().any(|c| c.name == col.name) {
+                    continue;
+                }
+                // Cannot add a NOT NULL column without a default to a table that
+                // may already hold rows — skip loudly rather than fail boot.
+                if col.notnull && col.dflt_value.is_none() {
+                    tracing::warn!(
+                        table = %table,
+                        column = %col.name,
+                        "sqlite reconcile: cannot add NOT NULL column without default; \
+                         skipping (requires a manual migration)"
+                    );
+                    continue;
+                }
+                let mut ddl = format!(
+                    "ALTER TABLE {} ADD COLUMN {} {}",
+                    table, col.name, col.col_type
+                );
+                if col.notnull {
+                    ddl.push_str(" NOT NULL");
+                }
+                if let Some(ref dflt) = col.dflt_value {
+                    ddl.push_str(" DEFAULT ");
+                    ddl.push_str(dflt);
+                }
+                sqlx::query(&ddl).execute(&self.pool).await?;
+                tracing::info!(table = %table, column = %col.name, "sqlite reconcile: added missing column");
+            }
+        }
+
+        ref_pool.close().await;
         Ok(())
     }
 
@@ -278,6 +425,46 @@ impl crate::SequenceStore for SqliteStorage {
 
     async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
         sequences::delete(self, id).await
+    }
+
+    // SQLite has no advisory-lock primitive, so `manifest_locks` (a real
+    // table, tenant_id as PK) stands in for one. Poll-with-backoff until the
+    // row can be inserted rather than blocking on a DB-level lock -- SQLite's
+    // single-writer model means a long `BEGIN IMMEDIATE` hold here would
+    // stall every other write on the connection, whereas polling only blocks
+    // the caller of this specific method.
+    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        const MAX_ATTEMPTS: u32 = 100;
+        const POLL_INTERVAL_MS: u64 = 50;
+        for attempt in 0..MAX_ATTEMPTS {
+            let result =
+                sqlx::query("INSERT INTO manifest_locks (tenant_id, locked_at) VALUES (?1, ?2)")
+                    .bind(tenant_id)
+                    .bind(helpers::ts(Utc::now()))
+                    .execute(&self.pool)
+                    .await;
+            match result {
+                Ok(_) => return Ok(()),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    if attempt + 1 == MAX_ATTEMPTS {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(StorageError::Query(format!(
+            "acquire_manifest_lock: timed out waiting for tenant {tenant_id}"
+        )))
+    }
+
+    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM manifest_locks WHERE tenant_id = ?1")
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 
@@ -1352,9 +1539,10 @@ impl crate::AdminStore for SqliteStorage {
 
     async fn get_plugin(
         &self,
+        tenant_id: Option<&TenantId>,
         name: &str,
     ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
-        plugins::get(self, name).await
+        plugins::get(self, tenant_id, name).await
     }
 
     async fn list_plugins(
@@ -1386,9 +1574,10 @@ impl crate::AdminStore for SqliteStorage {
 
     async fn get_trigger(
         &self,
+        tenant_id: Option<&TenantId>,
         slug: &str,
     ) -> Result<Option<orch8_types::trigger::TriggerDef>, StorageError> {
-        triggers::get(self, slug).await
+        triggers::get(self, tenant_id, slug).await
     }
 
     async fn list_triggers(
@@ -1435,9 +1624,10 @@ impl crate::AdminStore for SqliteStorage {
 
     async fn get_credential(
         &self,
+        tenant_id: Option<&TenantId>,
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
-        credentials::get(self, id).await
+        credentials::get(self, tenant_id, id).await
     }
 
     async fn list_credentials(
@@ -2910,6 +3100,71 @@ mod tests {
     use orch8_types::context::ExecutionContext;
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
     use orch8_types::sequence::{BlockDefinition, SequenceStatus, StepDef};
+
+    /// Simulates an on-device DB created by an older binary: a `task_instances`
+    /// table missing a column that a later schema added. `reconcile_columns`
+    /// must add it back rather than leaving reads/writes to fail.
+    #[tokio::test]
+    async fn reconcile_adds_missing_columns_from_old_db() {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+
+        // "Old" schema: a task_instances from an earlier binary — it has all
+        // the foundational NOT NULL columns but is missing several later-added
+        // nullable columns (budget, session_id, concurrency_key, …). This is
+        // the real forward-migration case; reconcile must add the nullable ones.
+        sqlx::query(
+            "CREATE TABLE task_instances (
+                id TEXT PRIMARY KEY,
+                sequence_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'scheduled',
+                next_fire_at TEXT,
+                priority INTEGER NOT NULL DEFAULT 1,
+                timezone TEXT NOT NULL DEFAULT 'UTC',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                context TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let storage = SqliteStorage {
+            pool,
+            artifact_store: None,
+        };
+
+        // create_tables: CREATE IF NOT EXISTS is a no-op on the existing table,
+        // so only the reconcile can recover the missing columns.
+        storage.create_tables().await.unwrap();
+
+        let cols = column_defs(&storage.pool, "task_instances").await.unwrap();
+        let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+        for added in [
+            "budget",
+            "session_id",
+            "concurrency_key",
+            "max_concurrency",
+            "idempotency_key",
+            "parent_instance_id",
+        ] {
+            assert!(
+                names.contains(&added),
+                "reconcile should have added the missing `{added}` column, got {names:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn usage_events_record_and_aggregate() {
@@ -4600,5 +4855,58 @@ mod tests {
 
         let beyond = storage.get_outputs_page(src, 2, 5).await.unwrap();
         assert!(beyond.is_empty());
+    }
+
+    /// Regression test for the deep storage review's finding that
+    /// `acquire_manifest_lock`/`release_manifest_lock` were a no-op on every
+    /// backend: two "publishers" racing to hold the same tenant's manifest
+    /// lock must be serialized, not both admitted concurrently.
+    #[tokio::test]
+    async fn manifest_lock_serializes_concurrent_acquires_for_same_tenant() {
+        let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+        storage.acquire_manifest_lock("t1").await.unwrap();
+
+        // A second acquire for the same tenant must not succeed while the
+        // first is still held.
+        let storage2 = std::sync::Arc::clone(&storage);
+        let waiter = tokio::spawn(async move { storage2.acquire_manifest_lock("t1").await });
+
+        // Give the waiter time to attempt (and fail to acquire) a few times.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !waiter.is_finished(),
+            "second acquire must still be blocked while the first lock is held"
+        );
+
+        storage.release_manifest_lock("t1").await.unwrap();
+
+        // Now the waiter must succeed.
+        waiter
+            .await
+            .unwrap()
+            .expect("second acquire must succeed once the first is released");
+
+        // Clean up: release the second acquirer's lock too.
+        storage.release_manifest_lock("t1").await.unwrap();
+    }
+
+    /// A different tenant's lock must not be blocked by another tenant's
+    /// held lock.
+    #[tokio::test]
+    async fn manifest_lock_is_independent_per_tenant() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        storage.acquire_manifest_lock("tenant-a").await.unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            storage.acquire_manifest_lock("tenant-b"),
+        )
+        .await
+        .expect("a different tenant's lock must not block on tenant-a's lock");
+        result.unwrap();
+
+        storage.release_manifest_lock("tenant-a").await.unwrap();
+        storage.release_manifest_lock("tenant-b").await.unwrap();
     }
 }

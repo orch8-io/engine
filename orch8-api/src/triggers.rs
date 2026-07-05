@@ -187,7 +187,10 @@ pub(crate) async fn get_trigger(
 ) -> Result<impl IntoResponse, ApiError> {
     let trigger = state
         .storage
-        .get_trigger(&slug)
+        .get_trigger(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &slug,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
@@ -235,7 +238,10 @@ pub(crate) async fn delete_trigger(
     // Verify it exists first.
     let trigger = state
         .storage
-        .get_trigger(&slug)
+        .get_trigger(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &slug,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;
@@ -275,7 +281,10 @@ pub(crate) async fn fire_trigger(
 ) -> Result<impl IntoResponse, ApiError> {
     let trigger = state
         .storage
-        .get_trigger(&slug)
+        .get_trigger(
+            tenant_ctx.as_ref().map(|axum::Extension(c)| &c.tenant_id),
+            &slug,
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?
         .ok_or_else(|| ApiError::NotFound(format!("trigger '{slug}'")))?;

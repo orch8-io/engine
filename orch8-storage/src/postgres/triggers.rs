@@ -32,15 +32,33 @@ pub(super) async fn create(
 
 pub(super) async fn get(
     store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
     slug: &str,
 ) -> Result<Option<TriggerDef>, StorageError> {
-    let row = sqlx::query_as::<_, TriggerRow>(
-        r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
-          FROM triggers WHERE slug = $1",
-    )
-    .bind(slug)
-    .fetch_optional(&store.pool)
-    .await?;
+    // `tenant_id: None` is an intentionally unscoped lookup -- e.g. the
+    // public webhook endpoint, where resolving *which* tenant owns `slug` is
+    // the lookup's job, not something the caller already knows.
+    let row = match tenant_id {
+        Some(tid) => {
+            sqlx::query_as::<_, TriggerRow>(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers WHERE slug = $1 AND tenant_id = $2",
+            )
+            .bind(slug)
+            .bind(tid.as_str())
+            .fetch_optional(&store.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, TriggerRow>(
+                r"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, secret, trigger_type, config, created_at, updated_at
+                  FROM triggers WHERE slug = $1",
+            )
+            .bind(slug)
+            .fetch_optional(&store.pool)
+            .await?
+        }
+    };
     row.map(TriggerRow::into_trigger).transpose()
 }
 

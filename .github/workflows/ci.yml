@@ -48,6 +48,8 @@ jobs:
       SQLX_OFFLINE: true
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
@@ -65,6 +67,8 @@ jobs:
         run: npm ci --no-audit --no-fund && npm run build
       - name: Format
         run: cargo fmt --check
+      - name: Migration immutability
+        run: ./scripts/check-migration-immutability.sh
       - name: Check
         run: cargo check --workspace
       - name: Clippy (all targets)

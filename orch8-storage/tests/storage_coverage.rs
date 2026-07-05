@@ -1768,7 +1768,11 @@ async fn t76_store_credential_and_retrieve() {
     let cred = make_credential("stripe-prod", "t1");
     s.create_credential(&cred).await.unwrap();
 
-    let fetched = s.get_credential("stripe-prod").await.unwrap().unwrap();
+    let fetched = s
+        .get_credential(None, "stripe-prod")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.id, "stripe-prod");
     assert_eq!(fetched.name, "Credential stripe-prod");
 }
@@ -1801,7 +1805,7 @@ async fn t78_update_credential_value() {
     cred.updated_at = Utc::now();
     s.update_credential(&cred).await.unwrap();
 
-    let fetched = s.get_credential("updatable").await.unwrap().unwrap();
+    let fetched = s.get_credential(None, "updatable").await.unwrap().unwrap();
     assert_eq!(fetched.name, "Updated Credential");
 }
 
@@ -1813,7 +1817,7 @@ async fn t79_delete_credential() {
 
     s.delete_credential("deletable").await.unwrap();
 
-    let fetched = s.get_credential("deletable").await.unwrap();
+    let fetched = s.get_credential(None, "deletable").await.unwrap();
     assert!(fetched.is_none());
 }
 
@@ -1832,6 +1836,46 @@ async fn t80_list_credentials_by_tenant() {
         .await
         .unwrap();
     assert_eq!(results.len(), 3);
+}
+
+/// Regression test for the deep storage review's tenant-isolation finding:
+/// `get_credential` scoped to a tenant must not return another tenant's
+/// credential by ID, even though `id` is a globally unique primary key.
+#[tokio::test]
+async fn t80b_get_credential_is_tenant_scoped() {
+    let s = store().await;
+    let cred = make_credential("shared-id", "tenant_a");
+    s.create_credential(&cred).await.unwrap();
+
+    // Owning tenant can fetch it.
+    let owned = s
+        .get_credential(Some(&TenantId::unchecked("tenant_a")), "shared-id")
+        .await
+        .unwrap();
+    assert!(owned.is_some());
+
+    // A different tenant must not be able to fetch it by ID.
+    let cross_tenant = s
+        .get_credential(Some(&TenantId::unchecked("tenant_b")), "shared-id")
+        .await
+        .unwrap();
+    assert!(
+        cross_tenant.is_none(),
+        "credential scoped to tenant_a must not be readable by tenant_b"
+    );
+
+    // A credential explicitly marked global (empty tenant_id) is visible to
+    // any tenant's scoped lookup.
+    let global = make_credential("global-cred", "");
+    s.create_credential(&global).await.unwrap();
+    let via_tenant_a = s
+        .get_credential(Some(&TenantId::unchecked("tenant_a")), "global-cred")
+        .await
+        .unwrap();
+    assert!(
+        via_tenant_a.is_some(),
+        "global credential must be visible to any tenant"
+    );
 }
 
 // ===========================================================================

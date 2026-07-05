@@ -185,7 +185,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
               AND ti.tenant_id = $5
             ORDER BY wt.created_at ASC
             LIMIT $4
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF wt SKIP LOCKED
         )
         RETURNING *
         ",

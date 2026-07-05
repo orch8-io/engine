@@ -461,6 +461,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
             // silently kill the outer task and leave the instance stuck in
             // Running forever (leaking a semaphore permit).
             let s2 = Arc::clone(&storage);
+            // `clock` is moved into the inner task below; keep a handle in the
+            // outer task for the transient-error reschedule fire time.
+            let clock_outer = clock.clone();
             let result = tokio::spawn(async move {
                 process_instance(
                     &s2,
@@ -480,6 +483,35 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
 
             match result {
                 Ok(Ok(())) => {}
+                Ok(Err(e)) if e.is_transient_storage() => {
+                    // A transient storage failure (connection loss, pool
+                    // exhaustion, DB failover) is NOT a processing failure —
+                    // failing the instance here would DLQ otherwise-healthy
+                    // work on a momentary infrastructure blip. Reschedule it
+                    // back to Scheduled so a later tick retries; the CAS guard
+                    // (Running -> Scheduled) is a no-op if a concurrent writer
+                    // already moved it.
+                    warn!(
+                        instance_id = %instance_id,
+                        error = %e,
+                        "instance processing hit a transient storage error -- rescheduling instead of failing"
+                    );
+                    if let Err(te) = storage
+                        .conditional_update_instance_state(
+                            instance_id,
+                            InstanceState::Running,
+                            InstanceState::Scheduled,
+                            Some(clock_outer.now()),
+                        )
+                        .await
+                    {
+                        error!(
+                            instance_id = %instance_id,
+                            error = %te,
+                            "failed to reschedule instance after transient storage error"
+                        );
+                    }
+                }
                 Ok(Err(e)) => {
                     crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
                     error!(
@@ -744,6 +776,11 @@ async fn process_signalled_instances(
     Ok(())
 }
 
+/// Max pages of Waiting instances swept for deadlines/timeouts per tick. Bounds
+/// per-tick work while still covering a backlog larger than one batch (the old
+/// single-page cap permanently starved instances sorted past `batch_size`).
+const MAX_SWEEP_PAGES: u32 = 64;
+
 /// Check SLA deadlines for instances stuck in `Waiting` state (dispatched to
 /// external workers that never completed). Runs every tick with a bounded
 /// query to avoid overhead when no deadlines are configured.
@@ -763,129 +800,176 @@ async fn process_waiting_deadlines(
         states: Some(vec![InstanceState::Waiting]),
         ..Default::default()
     };
-    let pagination = Pagination {
-        offset: 0,
-        limit: batch_size,
-        sort_ascending: true,
-    };
-    let waiting = storage.list_instances(&filter, &pagination).await?;
-    if waiting.is_empty() {
-        // Nothing to do — skip the per-instance sequence-cache walk that
-        // would otherwise run on every tick of an idle engine.
-        return Ok(());
-    }
-
-    // Build a map from instance -> sequence so we can collect all deadline
-    // block IDs before issuing a single batch query.
-    let mut instance_sequences = Vec::with_capacity(waiting.len());
-    for instance in &waiting {
-        let Ok(seq) = sequence_cache
-            .get_by_id(storage.as_ref(), instance.sequence_id)
-            .await
-        else {
-            continue;
+    // Bounded pagination: sweep up to `MAX_SWEEP_PAGES` pages of Waiting
+    // instances so per-step deadlines and `wait_for_input` timeouts still fire
+    // when the waiting backlog exceeds a single batch. Capping at the first
+    // `batch_size` rows (the old behaviour) permanently starved any due
+    // instance sorted past position `batch_size` — its timeout never fired.
+    // Woken instances leave the Waiting set mid-sweep, so an offset window can
+    // skip a few after wakes; those are picked up on the next tick
+    // (self-correcting, and this sweep runs every tick).
+    let mut offset: u64 = 0;
+    for _page in 0..MAX_SWEEP_PAGES {
+        let pagination = Pagination {
+            offset,
+            limit: batch_size,
+            sort_ascending: true,
         };
-        instance_sequences.push((instance, seq));
-    }
+        let waiting = storage.list_instances(&filter, &pagination).await?;
+        let page_len = waiting.len();
+        if waiting.is_empty() {
+            // Idle / drained — skip the per-instance sequence-cache walk.
+            break;
+        }
 
-    // Collect all (instance_id, block_id) pairs that have a deadline.
-    let mut deadline_keys = Vec::new();
-    for (instance, seq) in &instance_sequences {
-        for block in &seq.blocks {
-            if let orch8_types::sequence::BlockDefinition::Step(step_def) = block
-                && step_def.deadline.is_some()
-            {
-                deadline_keys.push((instance.id, &step_def.id));
+        // Build a map from instance -> sequence so we can collect all deadline
+        // block IDs before issuing a single batch query.
+        let mut instance_sequences = Vec::with_capacity(waiting.len());
+        for instance in &waiting {
+            let Ok(seq) = sequence_cache
+                .get_by_id(storage.as_ref(), instance.sequence_id)
+                .await
+            else {
+                continue;
+            };
+            instance_sequences.push((instance, seq));
+        }
+
+        // Collect all (instance_id, block_id) pairs that have a deadline.
+        let mut deadline_keys = Vec::new();
+        for (instance, seq) in &instance_sequences {
+            for block in &seq.blocks {
+                if let orch8_types::sequence::BlockDefinition::Step(step_def) = block
+                    && step_def.deadline.is_some()
+                {
+                    deadline_keys.push((instance.id, &step_def.id));
+                }
             }
         }
-    }
-    let deadline_outputs = if deadline_keys.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        storage.get_block_outputs_batch(&deadline_keys).await?
-    };
+        let deadline_outputs = if deadline_keys.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            storage.get_block_outputs_batch(&deadline_keys).await?
+        };
 
-    let mut deadline_outputs_ref = std::collections::HashMap::with_capacity(deadline_outputs.len());
-    for (k, v) in &deadline_outputs {
-        deadline_outputs_ref.insert((&k.0, &k.1), v);
-    }
+        let mut deadline_outputs_ref =
+            std::collections::HashMap::with_capacity(deadline_outputs.len());
+        for (k, v) in &deadline_outputs {
+            deadline_outputs_ref.insert((&k.0, &k.1), v);
+        }
 
-    for (instance, seq) in instance_sequences {
-        let mut handled = false;
-        for block in &seq.blocks {
-            if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
-                if step_def.deadline.is_some() {
-                    let prev = deadline_outputs_ref
-                        .get(&(&instance.id, &step_def.id))
-                        .copied();
-                    if check_step_deadline_waiting(
-                        storage,
-                        handlers,
-                        instance,
-                        step_def,
-                        webhook_config,
-                        cancel,
-                        prev,
-                        clock,
-                    )
-                    .await?
-                    {
-                        handled = true;
-                        break; // Instance was failed — no need to check more steps.
-                    }
-                }
-
-                // Check wait_for_input timeout for human-review steps.
-                // The flat-path scheduler transitions to Waiting but never
-                // re-polls timeout — we must wake the instance so the next
-                // tick's check_human_input fires the escalation/failure path.
-                if let Some(human_def) = &step_def.wait_for_input
-                    && let Some(timeout) = human_def.timeout
-                {
-                    // Only the step the instance is actually waiting on may
-                    // wake it. Without this guard, a sequence with several
-                    // wait_for_input steps would compare an earlier step's
-                    // timeout against the current step's start time.
-                    if let Some(current) = &instance.context.runtime.current_step
-                        && current != &step_def.id
-                    {
-                        continue;
-                    }
-                    let baseline = instance
-                        .context
-                        .runtime
-                        .current_step_started_at
-                        .or(instance.context.runtime.started_at);
-                    if let Some(started) = baseline {
-                        let elapsed = clock.now() - started;
-                        if elapsed
-                            > chrono::Duration::from_std(timeout)
-                                .unwrap_or(chrono::Duration::days(365))
+        for (instance, seq) in instance_sequences {
+            let mut handled = false;
+            for block in &seq.blocks {
+                if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
+                    if step_def.deadline.is_some() {
+                        let prev = deadline_outputs_ref
+                            .get(&(&instance.id, &step_def.id))
+                            .copied();
+                        if check_step_deadline_waiting(
+                            storage,
+                            handlers,
+                            instance,
+                            step_def,
+                            webhook_config,
+                            cancel,
+                            prev,
+                            clock,
+                        )
+                        .await?
                         {
-                            debug!(
-                                instance_id = %instance.id,
-                                block_id = %step_def.id,
-                                "wait_for_input timeout expired, waking instance"
-                            );
-                            crate::lifecycle::transition_instance(
-                                storage.as_ref(),
-                                instance.id,
-                                Some(&instance.tenant_id),
-                                InstanceState::Waiting,
-                                InstanceState::Scheduled,
-                                Some(clock.now()),
-                            )
-                            .await?;
                             handled = true;
-                            break;
+                            break; // Instance was failed — no need to check more steps.
+                        }
+                    }
+
+                    // Check wait_for_input timeout for human-review steps.
+                    // The flat-path scheduler transitions to Waiting but never
+                    // re-polls timeout — we must wake the instance so the next
+                    // tick's check_human_input fires the escalation/failure path.
+                    if let Some(human_def) = &step_def.wait_for_input
+                        && let Some(timeout) = human_def.timeout
+                    {
+                        // Only the step the instance is actually waiting on may
+                        // wake it. Without this guard, a sequence with several
+                        // wait_for_input steps would compare an earlier step's
+                        // timeout against the current step's start time.
+                        if let Some(current) = &instance.context.runtime.current_step
+                            && current != &step_def.id
+                        {
+                            continue;
+                        }
+                        let baseline = instance
+                            .context
+                            .runtime
+                            .current_step_started_at
+                            .or(instance.context.runtime.started_at);
+                        if let Some(started) = baseline {
+                            let elapsed = clock.now() - started;
+                            if elapsed
+                                > chrono::Duration::from_std(timeout)
+                                    .unwrap_or(chrono::Duration::days(365))
+                            {
+                                debug!(
+                                    instance_id = %instance.id,
+                                    block_id = %step_def.id,
+                                    "wait_for_input timeout expired, waking instance"
+                                );
+                                crate::lifecycle::transition_instance(
+                                    storage.as_ref(),
+                                    instance.id,
+                                    Some(&instance.tenant_id),
+                                    InstanceState::Waiting,
+                                    InstanceState::Scheduled,
+                                    Some(clock.now()),
+                                )
+                                .await?;
+                                handled = true;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            let _ = handled;
         }
-        let _ = handled;
+
+        // A short page means we reached the end of the Waiting set; otherwise
+        // advance the window to the next page. `MAX_SWEEP_PAGES` bounds the
+        // per-tick work so a pathological backlog can't stall the tick loop.
+        if u32::try_from(page_len).unwrap_or(u32::MAX) < batch_size {
+            break;
+        }
+        offset += u64::from(batch_size);
     }
     Ok(())
+}
+
+/// Max wall-clock time a terminal-cleanup or deadline-escalation hook may run
+/// before it is abandoned. These hooks are dispatched **inline on the scheduler
+/// tick** (the `on_cancel` signal path in [`run_cleanup_hooks`] and the
+/// `on_deadline_breach` sweep in [`check_step_deadline_waiting`]), so a hook
+/// that blocks — e.g. a hung HTTP notify — would otherwise stall ALL scheduling
+/// engine-wide. Bounding each hook caps that blast radius; the hook result is
+/// best-effort and already swallowed on error.
+const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Await a hook handler future with [`HOOK_DISPATCH_TIMEOUT`], mapping an
+/// elapsed timeout to a `Permanent` error so callers treat it exactly like any
+/// other swallowed hook failure.
+async fn dispatch_hook_bounded<F>(
+    fut: F,
+) -> Result<serde_json::Value, orch8_types::error::StepError>
+where
+    F: std::future::Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+{
+    match tokio::time::timeout(HOOK_DISPATCH_TIMEOUT, fut).await {
+        Ok(r) => r,
+        Err(_) => Err(orch8_types::error::StepError::Permanent {
+            message: "cleanup/escalation hook exceeded dispatch timeout".to_string(),
+            details: None,
+        }),
+    }
 }
 
 /// Run a sequence's best-effort cleanup hook (`on_failure` / `on_cancel`) as
@@ -922,11 +1006,14 @@ async fn run_cleanup_hooks(
             storage: Arc::clone(storage),
             wait_for_input: None,
         };
+        // Each handler invocation is bounded by HOOK_DISPATCH_TIMEOUT so a
+        // hung cleanup hook cannot stall the tick loop it runs on.
         let result = if let Some(handler) = handlers.get(&step.handler) {
-            handler(ctx).await
+            dispatch_hook_bounded(handler(ctx)).await
         } else if crate::handlers::activepieces::is_ap_handler(&step.handler) {
             let handler_name = step.handler.clone();
-            crate::handlers::activepieces::handle_ap(ctx, &handler_name).await
+            dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &handler_name))
+                .await
         } else if crate::handlers::grpc_plugin::is_grpc_handler(&step.handler) {
             let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
                 storage.as_ref(),
@@ -945,7 +1032,7 @@ async fn run_cleanup_hooks(
             };
             let mut ctx = ctx;
             ctx.params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
-            crate::handlers::grpc_plugin::handle_grpc_plugin(ctx).await
+            dispatch_hook_bounded(crate::handlers::grpc_plugin::handle_grpc_plugin(ctx)).await
         } else if let Some(plugin_name) =
             crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
                 .then(|| crate::handlers::wasm_plugin::parse_plugin_name(&step.handler))
@@ -966,7 +1053,10 @@ async fn run_cleanup_hooks(
                 );
                 continue;
             };
-            crate::handlers::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await
+            dispatch_hook_bounded(crate::handlers::wasm_plugin::handle_wasm_plugin(
+                ctx, &wasm_path,
+            ))
+            .await
         } else {
             warn!(
                 instance_id = %instance.id,
@@ -1288,7 +1378,9 @@ pub(crate) async fn handle_deadline_breach(
             storage: Arc::clone(storage),
             wait_for_input: None,
         };
-        if let Err(e) = handler(step_ctx).await {
+        // Bounded: this escalation runs inline on the deadline sweep (tick
+        // loop), so a hung escalation handler must not stall scheduling.
+        if let Err(e) = dispatch_hook_bounded(handler(step_ctx)).await {
             warn!(instance_id = %instance_id, error = %e, "SLA escalation handler failed");
         }
     }

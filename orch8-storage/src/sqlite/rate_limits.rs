@@ -23,6 +23,40 @@ pub(super) async fn check_rate_limit(
     let mut conn = storage.pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
+    // Run the fallible body under the open transaction. On ANY error we must
+    // ROLLBACK before returning the connection to the pool — otherwise it is
+    // handed back mid-transaction still holding the RESERVED write lock, which
+    // deadlocks the single-connection in-memory pool permanently.
+    match check_rate_limit_inner(&mut conn, tenant_id, resource_key, now).await {
+        Ok(check) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(check)
+        }
+        Err(e) => {
+            rollback_quiet(&mut conn).await;
+            Err(e)
+        }
+    }
+}
+
+/// Issue `ROLLBACK` on a pooled connection, swallowing any secondary error —
+/// the caller's real error is what matters, and sqlx resets the connection on
+/// return to the pool anyway. Mirrors the pattern in `sqlite/signals.rs`.
+async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
+    if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+        tracing::warn!(error = %e, "check_rate_limit: ROLLBACK failed, connection will be reset");
+    }
+}
+
+/// Fallible body of [`check_rate_limit`], run inside an already-open
+/// `BEGIN IMMEDIATE` transaction. Never commits/rolls back — the caller owns
+/// transaction lifecycle so a single rollback covers every `?` site here.
+async fn check_rate_limit_inner(
+    conn: &mut sqlx::SqliteConnection,
+    tenant_id: &TenantId,
+    resource_key: &ResourceKey,
+    now: DateTime<Utc>,
+) -> Result<RateLimitCheck, StorageError> {
     let now_str = ts(now);
 
     // Atomic UPDATE: reset window if expired, otherwise increment if under limit.
@@ -55,7 +89,6 @@ pub(super) async fn check_rate_limit(
     .await?;
 
     if result.rows_affected() > 0 {
-        sqlx::query("COMMIT").execute(&mut *conn).await?;
         return Ok(RateLimitCheck::Allowed);
     }
 
@@ -66,10 +99,7 @@ pub(super) async fn check_rate_limit(
     .bind(tenant_id.as_str())
     .bind(resource_key.as_str())
     .fetch_optional(&mut *conn)
-    .await
-    ?;
-
-    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    .await?;
 
     match row {
         None => Ok(RateLimitCheck::Allowed),
