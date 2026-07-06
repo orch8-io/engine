@@ -59,3 +59,7 @@
 ## 2026-06-24 - [DashMap Lock Contention & Key Allocation in Cascading Failures]
 **Learning:** When a circuit breaker is already in an `Open` state during a failure storm, simply incrementing the failure count with a write lock via `.get_mut(q)` causes unnecessary `DashMap` contention across the shard. The `failure_count` isn't actively evaluated when the breaker is already `Open` (only the `opened_at` timestamp matters for the `HalfOpen` transition check).
 **Action:** Always implement a fast-path read lock using `.get()` in high-throughput updates to a concurrent `DashMap` when mutations are functionally no-ops (like adding failures to an already open breaker). Return early to completely avoid the write lock.
+
+## 2024-06-28 - Avoid Deep String Allocation Overhead on Output Compaction
+**Learning:** `collect_body_block_ids` in `orch8-engine/src/evaluator.rs` was accepting a mutable `std::collections::HashSet<BlockId>`, resulting in deep heap allocation clones for every `BlockId` on the hot output compaction execution path.
+**Action:** Replaced `HashSet` with `Vec<&'a BlockId>`, utilizing borrowed references combined with `.sort_unstable()` and `.dedup()` to perform zero-allocation tracking. Search changed to `vec.binary_search()`.
