@@ -111,9 +111,9 @@ pub struct WebhookEvent {
 }
 
 /// Send a webhook event to all configured URLs.
-/// Non-blocking: spawns a background task for each URL, tracked via
-/// [`webhook_tasks`] (M-7) so [`wait_for_webhook_tasks`] can await them at
-/// shutdown instead of the runtime abruptly killing an in-flight delivery.
+/// Non-blocking: spawns a background task for each URL, tracked via an
+/// internal `TaskTracker` (M-7) so [`wait_for_webhook_tasks`] can await them
+/// at shutdown instead of the runtime abruptly killing an in-flight delivery.
 /// The `cancel` token allows graceful shutdown to abort in-flight webhook retries.
 pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationToken) {
     if config.urls.is_empty() {
