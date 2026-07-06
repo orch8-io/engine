@@ -75,9 +75,9 @@ max_connections = 64
 
 [engine]
 tick_interval_ms = 100
-max_instances_per_tick = 256
+batch_size = 200
 max_concurrent_steps = 128
-stale_threshold_secs = 300
+stale_instance_threshold_secs = 600
 # encryption_key = ""                      # 64 hex chars for AES-256-GCM
 
 [api]
@@ -163,6 +163,62 @@ fn write_if_absent(path: &Path, content: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M-25: the scaffolded `[engine]` section previously used
+    /// `max_instances_per_tick` and `stale_threshold_secs`, neither of which
+    /// is a real `SchedulerConfig` field name — since the config structs have
+    /// no `deny_unknown_fields`, those keys silently parsed as no-ops and the
+    /// real fields (`batch_size`, `stale_instance_threshold_secs`) quietly
+    /// fell back to their defaults. The scaffold's own example values happen
+    /// to equal those defaults (256 and 300 respectively), so a round-trip
+    /// through the *actual* scaffold can't distinguish "applied via the
+    /// correct field name" from "silently defaulted" — this pins the field
+    /// names directly against non-default values instead.
+    #[test]
+    fn engine_config_field_names_match_scheduler_config() {
+        let toml_str = r"
+            [engine]
+            batch_size = 999
+            stale_instance_threshold_secs = 777
+        ";
+        let cfg: orch8_types::config::EngineConfig =
+            toml::from_str(toml_str).expect("must parse as a valid EngineConfig");
+        assert_eq!(
+            cfg.engine.batch_size, 999,
+            "batch_size is the real SchedulerConfig field name"
+        );
+        assert_eq!(
+            cfg.engine.stale_instance_threshold_secs, 777,
+            "stale_instance_threshold_secs is the real SchedulerConfig field name"
+        );
+    }
+
+    /// The scaffolded `orch8.toml` must parse as a valid `EngineConfig` AND
+    /// its `batch_size`/`stale_instance_threshold_secs` values (deliberately
+    /// chosen to differ from `SchedulerConfig`'s defaults of 256/300) must
+    /// come through as written, not silently fall back to the default —
+    /// this is the actual end-to-end regression guard for the
+    /// `max_instances_per_tick`/`stale_threshold_secs` typo bug.
+    #[test]
+    fn init_scaffolded_toml_engine_fields_take_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        run(dir.path().to_str().unwrap(), "default").unwrap();
+
+        let contents = fs::read_to_string(dir.path().join("orch8.toml")).unwrap();
+        let cfg: orch8_types::config::EngineConfig = toml::from_str(&contents)
+            .expect("scaffolded orch8.toml must parse as a valid EngineConfig");
+
+        assert_eq!(cfg.engine.tick_interval_ms, 100);
+        assert_eq!(cfg.engine.max_concurrent_steps, 128);
+        assert_eq!(
+            cfg.engine.batch_size, 200,
+            "batch_size must take the scaffolded (non-default) value"
+        );
+        assert_eq!(
+            cfg.engine.stale_instance_threshold_secs, 600,
+            "stale_instance_threshold_secs must take the scaffolded (non-default) value"
+        );
+    }
 
     #[test]
     fn init_default_writes_all_scaffolds() {

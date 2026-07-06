@@ -686,6 +686,18 @@ impl SequenceDefinition {
         for block in &self.blocks {
             validate_block(block, &mut seen, 0)?;
         }
+        // `seen` gained exactly one entry per unique block id visited above
+        // (duplicates are rejected by `check_id`), so its size is the total
+        // block count across the whole tree.
+        if seen.len() > MAX_TOTAL_BLOCKS {
+            return Err(SequenceValidationError::InvalidBlock {
+                block_id: "(root)".into(),
+                message: format!(
+                    "sequence has {} blocks, exceeding the maximum of {MAX_TOTAL_BLOCKS}",
+                    seen.len()
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -881,10 +893,31 @@ fn validate_step(
 /// that traverses it.
 const MAX_NESTING_DEPTH: usize = 64;
 
+/// Maximum `Parallel`/`Race` branch count. Unbounded branches let a single
+/// definition fan out tens of thousands of concurrent tasks at dispatch time.
+const MAX_BRANCHES: usize = 256;
+
+/// Maximum `Loop`/`ForEach` `max_iterations`. Without a ceiling,
+/// `u32::MAX` passes validation and the engine happily starts a loop it can
+/// never realistically finish.
+const MAX_ITERATIONS: u32 = 100_000;
+
+/// Maximum total block count across the whole tree (root + nested).
+/// `SequenceDefinition::validate`'s `seen` set already tracks every unique
+/// block id it visits, so its final size is exactly the block count.
+const MAX_TOTAL_BLOCKS: usize = 5_000;
+
 fn depth_err() -> SequenceValidationError {
     block_err(
         "(nested)",
         format!("block nesting exceeds the maximum depth of {MAX_NESTING_DEPTH}"),
+    )
+}
+
+fn iterations_err(id: &BlockId, kind: &str) -> SequenceValidationError {
+    block_err(
+        id.as_str(),
+        format!("{kind} max_iterations must not exceed {MAX_ITERATIONS}"),
     )
 }
 
@@ -900,6 +933,12 @@ fn validate_branches(
         return Err(block_err(
             id.as_str(),
             format!("{label} must have at least one branch"),
+        ));
+    }
+    if branches.len() > MAX_BRANCHES {
+        return Err(block_err(
+            id.as_str(),
+            format!("{label} must not have more than {MAX_BRANCHES} branches"),
         ));
     }
     for branch in branches {
@@ -996,6 +1035,9 @@ fn validate_block(
             if l.max_iterations == 0 {
                 return Err(block_err(l.id.as_str(), "loop max_iterations must be > 0"));
             }
+            if l.max_iterations > MAX_ITERATIONS {
+                return Err(iterations_err(&l.id, "loop"));
+            }
             validate_children(&l.body, seen, child_depth)
         }
 
@@ -1021,6 +1063,9 @@ fn validate_block(
                     fe.id.as_str(),
                     "for_each max_iterations must be > 0",
                 ));
+            }
+            if fe.max_iterations > MAX_ITERATIONS {
+                return Err(iterations_err(&fe.id, "for_each"));
             }
             validate_children(&fe.body, seen, child_depth)
         }
@@ -1168,6 +1213,122 @@ mod tests {
         assert!(
             format!("{err:?}").contains("nesting"),
             "error should mention nesting depth, got: {err:?}"
+        );
+    }
+
+    /// H-5: `max_iterations` had a lower bound (> 0) but no upper bound, so
+    /// `u32::MAX` passed validation for both `Loop` and `ForEach`.
+    #[test]
+    fn validation_rejects_excessive_loop_iterations() {
+        let block = BlockDefinition::Loop(Box::new(LoopDef {
+            id: BlockId::new("loop0"),
+            condition: "true".into(),
+            body: vec![BlockDefinition::Step(Box::new(StepDef {
+                id: BlockId::new("leaf"),
+                handler: "noop".into(),
+                params: serde_json::json!({}),
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
+                queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
+                fallback_handler: None,
+                cache_key: None,
+            }))],
+            max_iterations: u32::MAX,
+            break_on: None,
+            continue_on_error: false,
+            poll_interval: None,
+            retain_iterations: None,
+        }));
+        let err = seq_with(block)
+            .validate()
+            .expect_err("u32::MAX iterations must be rejected");
+        assert!(
+            format!("{err:?}").contains("max_iterations"),
+            "error should mention max_iterations, got: {err:?}"
+        );
+    }
+
+    /// H-5: `Parallel`/`Race` branch count was unbounded.
+    #[test]
+    fn validation_rejects_excessive_branch_count() {
+        let leaf = || {
+            vec![BlockDefinition::Step(Box::new(StepDef {
+                id: BlockId::new(format!("leaf-{}", uuid::Uuid::new_v4())),
+                handler: "noop".into(),
+                params: serde_json::json!({}),
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
+                queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
+                fallback_handler: None,
+                cache_key: None,
+            }))]
+        };
+        let branches: Vec<Vec<BlockDefinition>> = (0..=MAX_BRANCHES).map(|_| leaf()).collect();
+        let block = BlockDefinition::Parallel(Box::new(ParallelDef {
+            id: BlockId::new("p"),
+            branches,
+        }));
+        let err = seq_with(block)
+            .validate()
+            .expect_err("excessive branch count must be rejected");
+        assert!(
+            format!("{err:?}").contains("branches"),
+            "error should mention branches, got: {err:?}"
+        );
+    }
+
+    /// H-5: total block count across the tree had no cap.
+    #[test]
+    fn validation_rejects_excessive_total_block_count() {
+        // Flat, unique-id sibling steps (not nested) so this exercises the
+        // total-block-count cap specifically, without also tripping
+        // MAX_NESTING_DEPTH.
+        let blocks: Vec<BlockDefinition> = (0..(MAX_TOTAL_BLOCKS + 10))
+            .map(|i| {
+                BlockDefinition::Step(Box::new(StepDef {
+                    id: BlockId::new(format!("s{i}")),
+                    handler: "noop".into(),
+                    params: serde_json::json!({}),
+                    delay: None,
+                    retry: None,
+                    timeout: None,
+                    rate_limit_key: None,
+                    send_window: None,
+                    context_access: None,
+                    cancellable: true,
+                    wait_for_input: None,
+                    queue_name: None,
+                    deadline: None,
+                    on_deadline_breach: None,
+                    fallback_handler: None,
+                    cache_key: None,
+                }))
+            })
+            .collect();
+        let mut seq = seq_with(blocks[0].clone());
+        seq.blocks = blocks;
+        let err = seq
+            .validate()
+            .expect_err("excessive total block count must be rejected");
+        assert!(
+            format!("{err:?}").contains("blocks"),
+            "error should mention block count, got: {err:?}"
         );
     }
 

@@ -1986,6 +1986,41 @@ async fn t87_update_credential_value() {
     assert!(v.get("value").is_none());
 }
 
+/// M-3: `update_credential` must reject an SSRF-unsafe `refresh_url` just
+/// like `create_credential` does — an update must not be able to silently
+/// point a credential's refresh target at an internal/link-local address
+/// that creating a fresh credential with the same URL would have rejected.
+#[tokio::test]
+async fn t87b_update_credential_rejects_ssrf_refresh_url() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{}/credentials", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"id":"cred-ssrf-1","name":"Key","kind":"api_key","value":"secret","tenant_id":"t1"}))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .patch(format!("{}/credentials/cred-ssrf-1", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"refresh_url":"http://169.254.169.254/latest/meta-data/"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // The unsafe URL must not have been persisted either.
+    let resp = client
+        .get(format!("{}/credentials/cred-ssrf-1", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(v.get("refresh_url").is_none());
+}
+
 #[tokio::test]
 async fn t88_delete_credential() {
     let srv = spawn_test_server().await;

@@ -360,6 +360,12 @@ impl Orch8Service for Orch8GrpcService {
         // tenant-scoped). Prevents the client from creating a sequence under
         // another tenant by stuffing a foreign tenant_id into the payload.
         seq.tenant_id = enforce_tenant_create(&req, &seq.tenant_id)?;
+        // Structural validation — the HTTP/facade paths reject duplicate
+        // block ids, over-deep nesting, etc. up front; gRPC must match or it
+        // becomes the path of least resistance for storing an invalid
+        // definition the engine then has to reconcile at runtime.
+        seq.validate()
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         self.storage
             .create_sequence(&seq)
             .await

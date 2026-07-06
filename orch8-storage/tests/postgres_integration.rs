@@ -351,3 +351,51 @@ async fn mobile_device_timestamps_are_rfc3339_with_fractional_seconds() {
     );
     assert_eq!(parsed.timezone().local_minus_utc(), 0);
 }
+
+/// C-1: `heartbeat_instance` must renew a `Running` instance's lease
+/// (`updated_at`) so `recover_stale_instances` does not reclaim a step that
+/// is still genuinely executing, and must be a no-op for a terminal
+/// instance (a stray heartbeat racing its own completion must not resurrect
+/// its `updated_at`).
+#[tokio::test]
+async fn heartbeat_instance_renews_lease_on_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+
+    let mut running = mk_instance(&tenant, seq_id, None);
+    running.state = InstanceState::Running;
+    running.updated_at = Utc::now() - chrono::Duration::hours(1);
+    s.create_instance(&running).await.unwrap();
+
+    s.heartbeat_instance(running.id).await.unwrap();
+
+    // Assert on this instance specifically rather than the reaper's global
+    // recovered-count: this integration suite runs against a shared,
+    // non-truncated database, so unrelated leftover stale rows from other
+    // tests could otherwise make the count non-deterministic.
+    s.recover_stale_instances(std::time::Duration::from_secs(300))
+        .await
+        .unwrap();
+    let refreshed = s.get_instance(running.id).await.unwrap().unwrap();
+    assert_eq!(
+        refreshed.state,
+        InstanceState::Running,
+        "a heartbeated instance must not be reclaimed as stale"
+    );
+
+    let mut done = mk_instance(&tenant, seq_id, None);
+    done.state = InstanceState::Completed;
+    done.updated_at = Utc::now() - chrono::Duration::hours(1);
+    s.create_instance(&done).await.unwrap();
+
+    s.heartbeat_instance(done.id).await.unwrap();
+    let refreshed_done = s.get_instance(done.id).await.unwrap().unwrap();
+    assert!(
+        refreshed_done.updated_at < Utc::now() - chrono::Duration::minutes(30),
+        "heartbeat must not touch a non-running/waiting instance"
+    );
+}

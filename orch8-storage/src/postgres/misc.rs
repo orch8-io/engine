@@ -109,6 +109,20 @@ pub(super) async fn recover_stale_instances(
     Ok(result.rows_affected())
 }
 
+pub(super) async fn heartbeat_instance(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        r"UPDATE task_instances SET updated_at = NOW()
+          WHERE id = $1 AND state IN ('running', 'waiting')",
+    )
+    .bind(instance_id.into_uuid())
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
 // === Sub-Sequences ===
 
 pub(super) async fn get_child_instances(

@@ -69,6 +69,11 @@ pub(crate) struct TickContext<'a> {
     /// (claiming, deferrals, deadline/timeout checks). Defaults to the
     /// system clock via `SchedulerConfig::clock`.
     pub clock: &'a SharedClock,
+    /// Same threshold the stale-instance reaper (`recover_stale_instances`)
+    /// uses to reclaim wedged instances. Each claimed instance's processing
+    /// task heartbeats at a fraction of this interval (C-1) so a step that is
+    /// still genuinely executing never looks stale to the reaper.
+    pub stale_instance_threshold_secs: u64,
 }
 
 /// Execute a single scheduling pass: claim due instances, process them, handle
@@ -102,6 +107,7 @@ pub async fn tick_once(
         externalize_threshold: config.externalize_output_threshold,
         counters: Some(Arc::clone(&counters)),
         clock: &config.clock,
+        stale_instance_threshold_secs: config.stale_instance_threshold_secs,
     };
 
     let join_handles = process_tick(&ctx).await?;
@@ -238,6 +244,7 @@ pub async fn run_tick_loop(
                     // The tick loop does not need per-tick counters — pass None.
                     counters: None,
                     clock: &config.clock,
+                    stale_instance_threshold_secs: config.stale_instance_threshold_secs,
                 };
                 match process_tick(&ctx).await {
                     Ok(_join_handles) => {
@@ -433,6 +440,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
         let externalize_threshold = ctx.externalize_threshold;
         let max_steps_per_instance = ctx.max_steps_per_instance;
         let clock = ctx.clock.clone();
+        let stale_instance_threshold_secs = ctx.stale_instance_threshold_secs;
 
         crate::metrics::inc(crate::metrics::INSTANCES_CLAIMED);
 
@@ -455,6 +463,37 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     signals: Vec::new(),
                     completed_block_ids: Vec::new(),
                 });
+
+            // Lease heartbeat (C-1): while this instance's step is genuinely
+            // in flight, periodically touch `updated_at` so
+            // `recover_stale_instances` can tell a slow-but-healthy step
+            // apart from one whose worker actually died, and doesn't
+            // re-dispatch it out from under itself mid-execution. Stopped as
+            // soon as `process_instance` returns, below.
+            let heartbeat_storage = Arc::clone(&storage);
+            let heartbeat_stop = CancellationToken::new();
+            let heartbeat_handle = {
+                let heartbeat_stop = heartbeat_stop.clone();
+                // Tick at a fraction of the reaper's own staleness window so
+                // several heartbeats land comfortably before this instance
+                // could ever look stale.
+                let heartbeat_interval =
+                    Duration::from_secs(std::cmp::max(stale_instance_threshold_secs / 3, 5));
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(heartbeat_interval);
+                    ticker.tick().await; // first tick fires immediately; claiming already set updated_at
+                    loop {
+                        tokio::select! {
+                            () = heartbeat_stop.cancelled() => break,
+                            _ = ticker.tick() => {
+                                if let Err(e) = heartbeat_storage.heartbeat_instance(instance_id).await {
+                                    warn!(instance_id = %instance_id, error = %e, "instance heartbeat failed");
+                                }
+                            }
+                        }
+                    }
+                })
+            };
 
             // Spawn a nested task so we can `.await` its JoinHandle — this
             // catches panics (JoinError::is_panic) that would otherwise
@@ -480,6 +519,9 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                 .await
             })
             .await;
+
+            heartbeat_stop.cancel();
+            let _ = heartbeat_handle.await;
 
             match result {
                 Ok(Ok(())) => {}

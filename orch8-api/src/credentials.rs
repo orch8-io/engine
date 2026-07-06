@@ -283,6 +283,11 @@ async fn update_credential(
         credential.expires_at = Some(expires_at);
     }
     if let Some(refresh_url) = body.refresh_url {
+        // M-3: `create_credential` validates `refresh_url` against the SSRF
+        // guard (no internal/link-local/loopback targets) but the update path
+        // did not, letting an update silently point a credential's refresh at
+        // an internal address that create would have rejected outright.
+        validate_public_url(&refresh_url).map_err(|e| ApiError::InvalidArgument(e.to_string()))?;
         credential.refresh_url = Some(refresh_url);
     }
     if let Some(refresh_token) = body.refresh_token {

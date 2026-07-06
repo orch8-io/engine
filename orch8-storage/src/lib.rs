@@ -487,6 +487,18 @@ pub trait InstanceStore: Send + Sync + 'static {
     async fn recover_stale_instances(&self, stale_threshold: Duration)
     -> Result<u64, StorageError>;
 
+    /// Renew a `Running`/`Waiting` instance's lease by touching `updated_at`.
+    ///
+    /// Called periodically by the scheduler while a step is genuinely
+    /// in-flight (C-1): without it, [`InstanceStore::recover_stale_instances`]
+    /// cannot distinguish a step that is still legitimately executing from
+    /// one whose worker died, and would reclaim (and re-dispatch) a slow but
+    /// healthy step out from under itself once it outlives the stale
+    /// threshold. A no-op if the instance has already left `Running`/
+    /// `Waiting` (e.g. it just completed) — this is a best-effort lease
+    /// renewal, not a state transition.
+    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError>;
+
     // === Sub-Sequences ===
 
     /// Get child instances of a parent.

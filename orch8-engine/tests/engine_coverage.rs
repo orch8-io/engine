@@ -3495,10 +3495,13 @@ async fn signal_cancel_already_completed_ignored() {
     assert_eq!(refreshed.state, InstanceState::Completed);
 }
 
-/// 65. `UpdateContext` signal with config changes.
+/// 65. `UpdateContext` signal only merges `data` -- `config` is documented as
+/// "read-only after initialization" (see `ExecutionContext`), so a signal
+/// payload's `config` must be ignored, not applied (M-6).
 #[tokio::test]
-async fn signal_update_context_with_config_change() {
+async fn signal_update_context_ignores_config_field() {
     let (storage, _seq, inst) = setup(vec![mk_step("s1", "noop")]).await;
+    let before = storage.get_instance(inst.id).await.unwrap().unwrap();
     let update_sig = Signal {
         id: uuid::Uuid::now_v7(),
         instance_id: inst.id,
@@ -3513,7 +3516,10 @@ async fn signal_update_context_with_config_change() {
         .await
         .unwrap();
     let refreshed = storage.get_instance(inst.id).await.unwrap().unwrap();
-    assert_eq!(refreshed.context.config["feature_flag"], true);
+    assert_eq!(
+        refreshed.context.config, before.context.config,
+        "config is read-only after initialization and must not change via update_context"
+    );
 }
 
 /// 66. Custom signal with JSON payload.

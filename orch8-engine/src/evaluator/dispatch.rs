@@ -13,6 +13,16 @@ use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 use crate::handlers::param_resolve::OutputsSnapshot;
 
+/// Metadata key recording how many `SubSequence` spawns deep a child instance
+/// is from its top-level ancestor. Absent (root instance) is depth 0.
+const SUB_SEQUENCE_DEPTH_KEY: &str = "_sub_sequence_depth";
+
+/// Maximum `SubSequence` spawn depth. Without a cap, a definition that spawns
+/// itself (directly, or A→B→A) recurses forever, each level creating a new
+/// instance -- unbounded storage growth and scheduler load with no operator
+/// signal until the database fills up.
+const MAX_SUB_SEQUENCE_DEPTH: u64 = 16;
+
 /// Build a spawned child's [`ExecutionContext`](orch8_types::context::ExecutionContext)
 /// from its parent, seeded with the child's `input` and inheriting execution-mode
 /// invariants from the parent.
@@ -31,6 +41,17 @@ fn child_context_from(
     };
     ctx.runtime.dry_run = parent.runtime.dry_run;
     ctx
+}
+
+/// Read a `SubSequence` parent's spawn depth from its `metadata` (0 if the
+/// key is absent, i.e. this is a root instance) and return the depth a new
+/// child of it would have.
+fn next_sub_sequence_depth(parent_metadata: &serde_json::Value) -> u64 {
+    let parent_depth = parent_metadata
+        .get(SUB_SEQUENCE_DEPTH_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    parent_depth + 1
 }
 
 /// Dispatch a single execution node to the appropriate block handler.
@@ -227,6 +248,21 @@ pub(super) async fn dispatch_block(
                         .await?;
                 }
             } else {
+                // Depth guard: an A→A (or A→B→A) sub-sequence spawn has no
+                // other bound, so cap how many levels deep this instance
+                // already is before minting another child.
+                let child_depth = next_sub_sequence_depth(&instance.metadata);
+                if child_depth > MAX_SUB_SEQUENCE_DEPTH {
+                    return Err(EngineError::StepFailed {
+                        instance_id: instance.id,
+                        block_id: ss_def.id.clone(),
+                        message: format!(
+                            "sub-sequence spawn depth exceeds the maximum of {MAX_SUB_SEQUENCE_DEPTH}"
+                        ),
+                        retryable: false,
+                    });
+                }
+
                 // Create the child instance.
                 let child_seq = storage
                     .get_sequence_by_name(
@@ -255,14 +291,20 @@ pub(super) async fn dispatch_block(
                     next_fire_at: Some(now),
                     priority: instance.priority,
                     timezone: instance.timezone.clone(),
-                    metadata: serde_json::json!({ "_parent_block_id": ss_def.id.as_str() }),
+                    metadata: serde_json::json!({
+                        "_parent_block_id": ss_def.id.as_str(),
+                        SUB_SEQUENCE_DEPTH_KEY: child_depth,
+                    }),
                     context: child_context,
                     concurrency_key: None,
                     max_concurrency: None,
                     idempotency_key: None,
                     session_id: instance.session_id,
                     parent_instance_id: Some(instance.id),
-                    budget: None,
+                    // Propagate the parent's budget so a chain of
+                    // sub-sequences can't escape a configured resource cap by
+                    // spawning children that each start with `None`.
+                    budget: instance.budget.clone(),
                     created_at: now,
                     updated_at: now,
                 };
@@ -278,7 +320,9 @@ pub(super) async fn dispatch_block(
 
 #[cfg(test)]
 mod tests {
-    use super::child_context_from;
+    use super::{
+        MAX_SUB_SEQUENCE_DEPTH, SUB_SEQUENCE_DEPTH_KEY, child_context_from, next_sub_sequence_depth,
+    };
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
 
@@ -294,5 +338,35 @@ mod tests {
         let real_parent = ExecutionContext::default();
         let child = child_context_from(&real_parent, json!({}));
         assert!(!child.runtime.dry_run, "a real parent spawns real children");
+    }
+
+    /// H-4: a root instance (no depth key in metadata) has depth 0, so its
+    /// first `SubSequence` child is depth 1.
+    #[test]
+    fn root_instance_spawns_depth_one_child() {
+        assert_eq!(next_sub_sequence_depth(&json!({})), 1);
+    }
+
+    /// H-4: depth accumulates across a chain of `SubSequence` spawns.
+    #[test]
+    fn depth_increments_across_chain() {
+        let mut metadata = json!({});
+        for expected in 1..=(MAX_SUB_SEQUENCE_DEPTH + 5) {
+            let depth = next_sub_sequence_depth(&metadata);
+            assert_eq!(depth, expected);
+            metadata = json!({ SUB_SEQUENCE_DEPTH_KEY: depth });
+        }
+    }
+
+    /// H-4: a self-recursive (or A→B→A) definition must eventually be
+    /// stopped by the depth cap rather than spawning children forever.
+    #[test]
+    fn depth_eventually_exceeds_cap() {
+        let deep_metadata = json!({ SUB_SEQUENCE_DEPTH_KEY: MAX_SUB_SEQUENCE_DEPTH });
+        let depth = next_sub_sequence_depth(&deep_metadata);
+        assert!(
+            depth > MAX_SUB_SEQUENCE_DEPTH,
+            "depth {depth} should exceed the cap of {MAX_SUB_SEQUENCE_DEPTH}"
+        );
     }
 }

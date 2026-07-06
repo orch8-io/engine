@@ -3070,6 +3070,7 @@ dependencies = [
  "orch8-engine",
  "orch8-storage",
  "orch8-types",
+ "rand 0.9.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

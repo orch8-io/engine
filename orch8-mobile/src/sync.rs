@@ -34,6 +34,29 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Parse a `Retry-After` header in its seconds form (the HTTP-date form is
+/// not supported -- servers rate-limiting an API almost universally send
+/// seconds, and a missing/unparseable header just falls back to our own
+/// computed backoff).
+fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+/// Grow a backoff delay by a genuinely random factor in `[1.5, 2.5)` (M-23).
+/// The previous formula (`1.5 + attempt * 0.5`) was fully determined by the
+/// attempt number alone, so every client that failed at the same moment
+/// (e.g. a shared server outage) would retry in lockstep and re-hammer the
+/// server the instant it recovers -- real jitter decorrelates them.
+fn jittered_backoff(current: Duration) -> Duration {
+    use rand::Rng;
+    let factor = rand::rng().random_range(1.5..2.5);
+    current.mul_f64(factor)
+}
+
 use crate::error::{MobileError, SyncError};
 use crate::storage::MobileStorage;
 
@@ -197,7 +220,9 @@ impl SyncOrchestrator {
     }
 
     /// HTTP GET with exponential backoff and jitter for retryable errors
-    /// (server errors and timeouts).
+    /// (server errors, rate limiting, and timeouts). Honors a `Retry-After`
+    /// response header (seconds form) when the server sends one, rather than
+    /// always falling back to our own guessed backoff (M-23).
     async fn http_get_with_retry(
         &self,
         url: &str,
@@ -221,13 +246,23 @@ impl SyncOrchestrator {
             }
 
             match req.send().await {
-                Ok(resp) if resp.status().is_server_error() && attempt < max_retries => {
+                Ok(resp)
+                    if (resp.status().is_server_error()
+                        || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS)
+                        && attempt < max_retries =>
+                {
                     let status = resp.status();
                     let display_url = redacted_url(url);
-                    warn!(attempt, %status, %display_url, "retryable HTTP error");
-                    tokio::time::sleep(delay).await;
-                    // Jitter: multiply by 1.5-2.5x
-                    delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
+                    let wait = retry_after(&resp).unwrap_or(delay);
+                    warn!(attempt, %status, %display_url, wait_ms = wait.as_millis(), "retryable HTTP error");
+                    tokio::time::sleep(wait).await;
+                    // Real random jitter (M-23): the previous "1.5 +
+                    // attempt*0.5" factor was fully determined by the
+                    // attempt number, so every client that failed at the
+                    // same moment (e.g. a server outage) would retry in
+                    // perfect lockstep and re-hammer the server the instant
+                    // it recovers.
+                    delay = jittered_backoff(delay);
                     last_err = Some(format!("HTTP {status}"));
                 }
                 Ok(resp) => return Ok(resp),
@@ -235,7 +270,7 @@ impl SyncOrchestrator {
                     let display_url = redacted_url(url);
                     warn!(attempt, %display_url, "request timeout, retrying");
                     tokio::time::sleep(delay).await;
-                    delay = delay.mul_f64(1.5 + f64::from(attempt) * 0.5);
+                    delay = jittered_backoff(delay);
                     last_err = Some(e.to_string());
                 }
                 Err(e) => {
@@ -483,6 +518,20 @@ impl SyncOrchestrator {
                 continue;
             }
 
+            // H-15: skip before downloading anything when the local copy is
+            // already current. The manifest already tells us the version, so
+            // downloading the sequence body + detached signature only to
+            // discover we're up to date wastes a device's bandwidth/battery
+            // on every sync for every sequence that hasn't changed — which,
+            // in steady state, is nearly all of them.
+            let existing = local_sequences.get(&entry.name);
+            if let Some(existing_seq) = existing
+                && existing_seq.version >= entry.version
+            {
+                skipped += 1;
+                continue;
+            }
+
             let seq_json = match self.download_sequence(&entry.url, auth).await {
                 Ok(json) => json,
                 Err(e) => {
@@ -571,16 +620,10 @@ impl SyncOrchestrator {
                     message: format!("sequence JSON invalid: {e}"),
                 })?;
 
-            let existing = local_sequences.get(&entry.name);
-            if let Some(existing_seq) = existing {
-                if existing_seq.version >= entry.version {
-                    skipped += 1;
-                    continue;
-                }
-                self.upsert_sequence(&seq).await?;
+            self.upsert_sequence(&seq).await?;
+            if existing.is_some() {
                 updated += 1;
             } else {
-                self.upsert_sequence(&seq).await?;
                 added += 1;
             }
         }
@@ -865,6 +908,34 @@ mod tests {
     use super::*;
     use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::sequence::SequenceStatus;
+
+    /// M-23: the previous "jitter" was `1.5 + attempt * 0.5` — fully
+    /// determined by the attempt number, so every call with the same
+    /// `current` delay produced the exact same result. Real jitter must
+    /// vary across calls.
+    #[test]
+    fn jittered_backoff_is_actually_random() {
+        let base = Duration::from_millis(200);
+        let results: std::collections::HashSet<_> = (0..20)
+            .map(|_| jittered_backoff(base).as_micros())
+            .collect();
+        assert!(
+            results.len() > 1,
+            "20 calls with the same input produced the same output — not random"
+        );
+    }
+
+    #[test]
+    fn jittered_backoff_stays_within_documented_range() {
+        let base = Duration::from_millis(200);
+        for _ in 0..100 {
+            let result = jittered_backoff(base);
+            assert!(
+                result >= base.mul_f64(1.5) && result < base.mul_f64(2.5),
+                "backoff {result:?} outside the documented [1.5x, 2.5x) range"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn version_meets_min_works() {
@@ -1336,5 +1407,231 @@ mod tests {
         assert_eq!(result.removed, 0);
         assert_eq!(result.skipped, 0);
         assert_eq!(result.signature_failures, 0);
+    }
+
+    /// H-15: a sequence whose local copy is already at (or ahead of) the
+    /// manifest's version must be skipped *before* any network request — not
+    /// downloaded (and its detached signature downloaded) only to be
+    /// discarded afterward once the version check finally runs.
+    #[tokio::test]
+    async fn download_and_verify_sequences_skips_before_download_when_up_to_date() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend.clone(),
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        // Local copy already at version 2.
+        let mut existing = make_test_sequence("seq-a", Utc::now());
+        existing.version = 2;
+        backend.create_sequence(&existing).await.unwrap();
+        let local_sequences = orch.list_local_sequences().await.unwrap();
+
+        // A listener that flags whether anything ever connects to it. A
+        // bounded wait lets the test observe "no connection" without hanging
+        // forever if the fix regresses and a download is attempted.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let connected2 = Arc::clone(&connected);
+        let server = tokio::spawn(async move {
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_millis(300), listener.accept()).await
+            {
+                connected2.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+
+        let manifest = Manifest {
+            signing_keys: vec![],
+            sequences: vec![ManifestSequenceEntry {
+                name: "seq-a".to_string(),
+                version: 2, // same as local -> must skip without downloading
+                url: format!("http://127.0.0.1:{port}/seq-a.json"),
+                signing_key_id: "k1".to_string(),
+                sha256: "deadbeef".to_string(),
+                required_handlers: vec![],
+                min_sdk_version: "0.0.0".to_string(),
+            }],
+            removed: vec![],
+            manifest_version: 1,
+            generated_at: Utc::now(),
+        };
+
+        let mut trusted_keys = HashMap::new();
+        let (added, updated, skipped, sig_failures) = orch
+            .download_and_verify_sequences(
+                &manifest,
+                &SyncAuth::UrlToken,
+                &HashSet::new(),
+                &local_sequences,
+                &mut trusted_keys,
+            )
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+
+        assert_eq!(added, 0);
+        assert_eq!(updated, 0);
+        assert_eq!(skipped, 1);
+        assert_eq!(sig_failures, 0);
+        assert!(
+            !connected.load(std::sync::atomic::Ordering::SeqCst),
+            "an up-to-date sequence must not be downloaded"
+        );
+    }
+
+    /// The version check must still allow a genuinely newer manifest entry
+    /// through to download — the skip-before-download fix must not turn into
+    /// a skip-always.
+    #[tokio::test]
+    async fn download_and_verify_sequences_downloads_when_newer_version_available() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend.clone(),
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        // Local copy is behind the manifest's version.
+        let mut existing = make_test_sequence("seq-a", Utc::now());
+        existing.version = 1;
+        backend.create_sequence(&existing).await.unwrap();
+        let local_sequences = orch.list_local_sequences().await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let connected2 = Arc::clone(&connected);
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            // Only one request is expected: the (attempted) sequence
+            // download. Respond with a 404 — this test only cares that the
+            // connection was attempted, not that the full flow succeeds.
+            if let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_millis(300), listener.accept()).await
+            {
+                connected2.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket
+                    .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let manifest = Manifest {
+            signing_keys: vec![],
+            sequences: vec![ManifestSequenceEntry {
+                name: "seq-a".to_string(),
+                version: 2, // newer than local -> must attempt download
+                url: format!("http://127.0.0.1:{port}/seq-a.json"),
+                signing_key_id: "k1".to_string(),
+                sha256: "deadbeef".to_string(),
+                required_handlers: vec![],
+                min_sdk_version: "0.0.0".to_string(),
+            }],
+            removed: vec![],
+            manifest_version: 1,
+            generated_at: Utc::now(),
+        };
+
+        let mut trusted_keys = HashMap::new();
+        let (_added, _updated, skipped, _sig_failures) = orch
+            .download_and_verify_sequences(
+                &manifest,
+                &SyncAuth::UrlToken,
+                &HashSet::new(),
+                &local_sequences,
+                &mut trusted_keys,
+            )
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+
+        assert!(
+            connected.load(std::sync::atomic::Ordering::SeqCst),
+            "a genuinely newer sequence must still be downloaded"
+        );
+        // The download itself fails (mock server returns 404), which is
+        // counted as `skipped` too — but that's the pre-existing
+        // download-failure path, not the skip-before-download check this
+        // test targets. What matters here is that `connected` is true.
+        assert_eq!(skipped, 1);
+    }
+
+    /// M-23: previously a 429 was not retried at all (only 5xx and
+    /// timeouts were), and even where retries did happen the wait time was
+    /// always our own guessed backoff, ignoring any `Retry-After` the server
+    /// sent. This test's mock server returns 429 with `Retry-After: 0` once,
+    /// then 200 — proving both that a 429 now gets retried, and that a
+    /// present `Retry-After` header is honored rather than skipped.
+    #[tokio::test]
+    async fn http_get_with_retry_retries_429_and_honors_retry_after() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for i in 0..2 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
+                let response = if i == 0 {
+                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/manifest");
+        let start = std::time::Instant::now();
+        let resp = orch
+            .http_get_with_retry(&url, &SyncAuth::UrlToken, None)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        // The default computed backoff starts at 200ms; if `Retry-After: 0`
+        // were being ignored, this retry would take at least that long.
+        // Honoring it means the retry fires essentially immediately.
+        assert!(
+            elapsed < Duration::from_millis(150),
+            "retry took {elapsed:?} — Retry-After: 0 was not honored (fell back to computed backoff)"
+        );
+
+        server.await.unwrap();
     }
 }

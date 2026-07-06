@@ -72,6 +72,31 @@ impl EngineError {
             )
         )
     }
+
+    /// Normalize `StepTimeout` into a retryable `StepFailed`, leaving every
+    /// other variant untouched.
+    ///
+    /// A step with `timeout` + `retry` configured used to fail the instance
+    /// permanently on its first timeout: both dispatch paths (the fast-path
+    /// `scheduler::step_exec` and the tree-evaluator's `handlers::step_block`)
+    /// let `StepTimeout` fall through to their generic (non-retryable) error
+    /// arm, bypassing both the retry policy and any surrounding `TryCatch`.
+    /// Calling this right after dispatch means a timeout flows through the
+    /// exact same retryable-failure handling as `StepFailed { retryable: true, .. }` —
+    /// the retry-policy check still decides whether attempts remain, so this
+    /// makes a timeout *eligible* for retry rather than forcing one.
+    #[must_use]
+    pub fn normalize_timeout_as_retryable(self, instance_id: InstanceId) -> Self {
+        match self {
+            Self::StepTimeout { block_id, timeout } => Self::StepFailed {
+                instance_id,
+                message: format!("step timed out after {timeout:?}"),
+                block_id,
+                retryable: true,
+            },
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -176,5 +201,54 @@ mod tests {
             EngineError::InvalidConfig("missing field".into()).to_string(),
             "invalid configuration: missing field",
         );
+    }
+
+    /// H-7: `StepTimeout` used to bypass retry policy and `TryCatch` entirely
+    /// (it fell through to the generic, non-retryable error arm at both
+    /// dispatch sites). It must normalize into a retryable `StepFailed` so
+    /// the existing retry-policy machinery gets a chance to decide.
+    #[test]
+    fn normalize_timeout_as_retryable_converts_step_timeout() {
+        let instance_id = InstanceId::new();
+        let err = EngineError::StepTimeout {
+            block_id: BlockId::new("slow"),
+            timeout: Duration::from_secs(5),
+        };
+        let normalized = err.normalize_timeout_as_retryable(instance_id);
+        match normalized {
+            EngineError::StepFailed {
+                instance_id: got_id,
+                block_id,
+                retryable,
+                message,
+            } => {
+                assert_eq!(got_id, instance_id);
+                assert_eq!(block_id.as_str(), "slow");
+                assert!(retryable, "a timeout must be retry-eligible");
+                assert!(message.contains("timed out"));
+            }
+            other => panic!("expected StepFailed, got: {other:?}"),
+        }
+    }
+
+    /// Every other variant must pass through `normalize_timeout_as_retryable`
+    /// unchanged.
+    #[test]
+    fn normalize_timeout_as_retryable_leaves_other_variants_untouched() {
+        let instance_id = InstanceId::new();
+        let err = EngineError::StepFailed {
+            instance_id,
+            block_id: BlockId::new("b"),
+            message: "permanent".into(),
+            retryable: false,
+        };
+        let normalized = err.normalize_timeout_as_retryable(instance_id);
+        assert!(matches!(
+            normalized,
+            EngineError::StepFailed {
+                retryable: false,
+                ..
+            }
+        ));
     }
 }
