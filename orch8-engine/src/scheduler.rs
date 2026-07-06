@@ -1683,6 +1683,9 @@ async fn process_instance(
     // Fast path: all blocks are Steps. Execute multi-block per claim cycle.
     let mut completed_blocks = prefetched.completed_block_ids;
     completed_blocks.sort_unstable();
+    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
+    // during the `binary_search` filtering phase, improving hot path performance.
+    completed_blocks.dedup();
 
     for block in blocks.iter() {
         let orch8_types::sequence::BlockDefinition::Step(step_def) = block else {
