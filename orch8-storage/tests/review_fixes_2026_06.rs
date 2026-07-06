@@ -152,6 +152,59 @@ async fn recover_stale_resets_next_fire_at() {
 }
 
 // ---------------------------------------------------------------------------
+// C-1. heartbeat_instance renews the lease so a still-executing step is not
+// reclaimed by recover_stale_instances out from under itself.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn heartbeat_instance_prevents_stale_recovery() {
+    let s = store().await;
+
+    // A Running instance whose updated_at is already old enough to cross the
+    // stale threshold below — simulating a step that has been executing for
+    // a while (not one that crashed).
+    let mut inst = make_instance(InstanceState::Running);
+    inst.updated_at = Utc::now() - Duration::hours(1);
+    s.create_instance(&inst).await.unwrap();
+
+    // The scheduler's heartbeat task renews the lease.
+    s.heartbeat_instance(inst.id).await.unwrap();
+
+    // A reaper pass with a threshold shorter than the instance's original
+    // (pre-heartbeat) age must NOT reclaim it — the heartbeat's fresh
+    // updated_at keeps it out of the stale window.
+    let recovered = s
+        .recover_stale_instances(StdDuration::from_secs(300))
+        .await
+        .unwrap();
+    assert_eq!(
+        recovered, 0,
+        "a heartbeated instance must not be reclaimed as stale"
+    );
+    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Running);
+}
+
+#[tokio::test]
+async fn heartbeat_instance_is_noop_for_terminal_state() {
+    let s = store().await;
+    let mut inst = make_instance(InstanceState::Completed);
+    inst.updated_at = Utc::now() - Duration::hours(1);
+    s.create_instance(&inst).await.unwrap();
+
+    s.heartbeat_instance(inst.id).await.unwrap();
+
+    // A completed instance's updated_at must not be disturbed by a stray
+    // heartbeat racing its own completion.
+    let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Completed);
+    assert!(
+        refreshed.updated_at < Utc::now() - Duration::minutes(30),
+        "heartbeat must not touch a non-running/waiting instance"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 2. started_at survives a re-dispatch to Running
 // ---------------------------------------------------------------------------
 

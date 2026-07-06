@@ -137,6 +137,24 @@ impl SyncReporter {
         if let Err(e) = result {
             warn!(error = %e, "failed to create sync_command_acks table");
         }
+
+        // H-16: durable idempotency record, independent of `sync_command_acks`
+        // (which is just the ack outbox and gets its rows deleted as soon as
+        // an ack is included in an outbound request — it can't double as a
+        // "has this command_id ever executed" record without losing that
+        // history the moment the ack is sent).
+        let result = sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sync_executed_commands (
+                command_id TEXT PRIMARY KEY,
+                executed_at TEXT NOT NULL
+            )",
+        )
+        .execute(&self.pool)
+        .await;
+
+        if let Err(e) = result {
+            warn!(error = %e, "failed to create sync_executed_commands table");
+        }
     }
 
     /// Write a status update to the outbox. Coalesces per `instance_id`.
@@ -459,7 +477,34 @@ impl SyncReporter {
 
         // Process commands from server.
         for cmd in &sync_resp.commands {
-            self.execute_command(cmd, storage, lifecycle).await;
+            // H-16: durably mark the command as executed *before* running its
+            // side effects, and skip execution entirely if it's already
+            // marked. The server may redeliver a command whose ack it never
+            // received (lost response, restart before our ack round-trips) —
+            // without this check that redelivery re-runs side effects (e.g.
+            // starting a duplicate workflow instance, or double-cancelling)
+            // instead of converging as a no-op.
+            let insert_result = sqlx::query(
+                "INSERT INTO sync_executed_commands (command_id, executed_at) VALUES (?, ?)",
+            )
+            .bind(&cmd.id)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await;
+
+            match insert_result {
+                Ok(_) => {
+                    self.execute_command(cmd, storage, lifecycle).await;
+                }
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    debug!(command_id = %cmd.id, "command already executed — skipping duplicate delivery");
+                }
+                Err(e) => {
+                    warn!(error = %e, command_id = %cmd.id, "failed to record command idempotency marker; executing without dedupe guard");
+                    self.execute_command(cmd, storage, lifecycle).await;
+                }
+            }
+
             if let Err(e) =
                 sqlx::query("INSERT OR IGNORE INTO sync_command_acks (command_id) VALUES (?)")
                     .bind(&cmd.id)
@@ -468,6 +513,16 @@ impl SyncReporter {
             {
                 warn!(error = %e, command_id = %cmd.id, "failed to record sync command ack");
             }
+        }
+
+        // Prune old idempotency records so the table doesn't grow forever.
+        // 30 days comfortably outlives any plausible ack-redelivery window.
+        if let Err(e) = sqlx::query("DELETE FROM sync_executed_commands WHERE executed_at < ?")
+            .bind((chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339())
+            .execute(&self.pool)
+            .await
+        {
+            warn!(error = %e, "failed to prune old sync_executed_commands rows");
         }
 
         // Update sync interval from server hint.
@@ -902,4 +957,152 @@ fn find_wait_info(
         }
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_types::ids::{SequenceId, TenantId};
+    use orch8_types::sequence::{SequenceStatus, StepDef};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn setup(
+        sync_url: String,
+    ) -> (
+        SyncReporter,
+        Arc<dyn StorageBackend>,
+        Arc<InstanceLifecycleManager>,
+    ) {
+        let sqlite = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let storage: Arc<dyn StorageBackend> = sqlite.clone();
+        let mobile_storage = Arc::new(crate::storage::MobileStorage::new(sqlite));
+        let sequence_cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
+        let lifecycle = Arc::new(InstanceLifecycleManager::new(
+            storage.clone(),
+            mobile_storage,
+            sequence_cache,
+            10,
+        ));
+
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let reporter = SyncReporter::new(
+            pool,
+            sync_url,
+            "device-1".to_string(),
+            "key".to_string(),
+            1000,
+        );
+        reporter.init_tables().await;
+
+        (reporter, storage, lifecycle)
+    }
+
+    async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
+        let seq = SequenceDefinition {
+            id: SequenceId::new(),
+            tenant_id: TenantId::new("mobile").unwrap(),
+            namespace: orch8_types::ids::Namespace::new("default"),
+            name: name.to_string(),
+            version: 1,
+            deprecated: false,
+            status: SequenceStatus::Production,
+            blocks: vec![BlockDefinition::Step(Box::new(StepDef {
+                id: BlockId::new("s1"),
+                handler: "noop".to_string(),
+                params: serde_json::json!({}),
+                delay: None,
+                retry: None,
+                timeout: None,
+                rate_limit_key: None,
+                send_window: None,
+                context_access: None,
+                cancellable: true,
+                wait_for_input: None,
+                queue_name: None,
+                deadline: None,
+                on_deadline_breach: None,
+                fallback_handler: None,
+                cache_key: None,
+            }))],
+            interceptors: None,
+            input_schema: None,
+            sla: None,
+            on_failure: None,
+            on_cancel: None,
+            created_at: chrono::Utc::now(),
+        };
+        storage.create_sequence(&seq).await.unwrap();
+    }
+
+    async fn count_instances(storage: &Arc<dyn StorageBackend>) -> usize {
+        let filter = InstanceFilter::default();
+        let pagination = Pagination {
+            offset: 0,
+            limit: 100,
+            sort_ascending: true,
+        };
+        storage
+            .list_instances(&filter, &pagination)
+            .await
+            .unwrap()
+            .len()
+    }
+
+    /// H-16: redelivering the same `command_id` (e.g. because the server
+    /// never received our ack for it) must not re-execute the command's side
+    /// effects. Uses `start_workflow` because it's the starkest observable
+    /// case — a re-execution creates a second, distinct instance rather than
+    /// silently converging like an idempotent state write would.
+    #[tokio::test]
+    async fn redelivered_command_is_not_executed_twice() {
+        let body = serde_json::json!({
+            "commands": [{
+                "id": "cmd-1",
+                "type": "start_workflow",
+                "payload": { "sequence_name": "wf-a", "input": "{}" }
+            }],
+            "sync_interval_secs": 30
+        })
+        .to_string();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sync_url = format!("http://127.0.0.1:{port}/sync");
+
+        let server_body = body.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    server_body.len(),
+                    server_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let (reporter, storage, lifecycle) = setup(sync_url).await;
+        seed_sequence(&storage, "wf-a").await;
+
+        // Two independent sync cycles — each fetches its own copy of the
+        // same command from the "server", simulating a redelivery of a
+        // command whose ack the server never confirmed.
+        reporter.sync_once(&storage, &lifecycle).await;
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        server.await.unwrap();
+
+        assert_eq!(
+            count_instances(&storage).await,
+            1,
+            "a redelivered command must not start a second instance"
+        );
+    }
 }

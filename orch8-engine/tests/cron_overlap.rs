@@ -152,6 +152,11 @@ async fn skip_policy_fires_when_no_active_run() {
 
 #[tokio::test]
 async fn cancel_previous_cancels_active_then_fires() {
+    // M-10: `CancelPrevious` enqueues a `Cancel` signal rather than writing
+    // `Cancelled` directly, so the previous run's on_cancel hooks / scoped
+    // cancellation still apply (same path a user-initiated cancel takes).
+    // The cancellation is therefore no longer synchronous within
+    // `process_cron_tick` -- it lands once the signal is processed.
     let s = storage().await;
     let seq_id = seed_sequence(&s).await;
     let sched = mk_schedule(seq_id, OverlapPolicy::CancelPrevious);
@@ -162,9 +167,27 @@ async fn cancel_previous_cancels_active_then_fires() {
         .await
         .unwrap();
 
-    // Previous run cancelled.
+    // A Cancel signal was enqueued for the previous run (not an immediate
+    // direct state write).
+    let pending = s.get_pending_signals(prev).await.unwrap();
+    assert!(
+        pending
+            .iter()
+            .any(|sig| sig.signal_type == orch8_types::signal::SignalType::Cancel),
+        "expected a pending Cancel signal for the previous run, got: {pending:?}"
+    );
+    // Still Running until the signal is actually processed.
+    let prev_inst = s.get_instance(prev).await.unwrap().unwrap();
+    assert_eq!(prev_inst.state, InstanceState::Running);
+
+    // Drive the signal through, as the scheduler's signal-processing pass
+    // would on its next tick.
+    orch8_engine::signals::process_signals(&*s, prev, InstanceState::Running)
+        .await
+        .unwrap();
     let prev_inst = s.get_instance(prev).await.unwrap().unwrap();
     assert_eq!(prev_inst.state, InstanceState::Cancelled);
+
     // New run created: old (now cancelled) + new = 2 rows.
     assert_eq!(count_instances_for(&s, seq_id).await, 2);
 }
@@ -204,4 +227,71 @@ async fn fired_instance_is_stamped_with_cron_id() {
     // overlap checks can find it.
     let active = s.active_instance_ids_for_cron(sched.id, 100).await.unwrap();
     assert_eq!(active.len(), 1);
+}
+
+/// H-8: `trigger_cron_schedule` writes the instance and advances
+/// `next_fire_at` in two separate storage calls. This simulates a crash
+/// between the two: the instance for this exact fire already exists (created
+/// by the "first attempt"), but `next_fire_at` was never advanced, so
+/// `process_cron_tick` claims the same schedule again on this "retry" tick.
+/// The idempotency key must make the retry's `create_instance` a no-op
+/// (Conflict, swallowed) rather than a duplicate — and the fire time must
+/// still advance so the schedule doesn't spin on this tick forever.
+#[tokio::test]
+async fn crash_between_create_and_advance_does_not_duplicate_instance() {
+    let s = storage().await;
+    let seq_id = seed_sequence(&s).await;
+    let sched = mk_schedule(seq_id, OverlapPolicy::Allow);
+    s.create_cron_schedule(&sched).await.unwrap();
+
+    // Simulate the "first attempt": an instance already exists for this
+    // exact (schedule, fire_at), stamped with the same idempotency key
+    // `trigger_cron_schedule` would generate, but the schedule's
+    // `next_fire_at` was never advanced (the crash happened before that
+    // second write).
+    let fire_at = sched.next_fire_at.unwrap();
+    let idempotency_key = format!("cron:{}:{}", sched.id, fire_at.to_rfc3339());
+    let now = Utc::now();
+    let pre_existing = TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: seq_id,
+        tenant_id: TenantId::unchecked("t"),
+        namespace: Namespace::new("ns"),
+        state: InstanceState::Scheduled,
+        next_fire_at: Some(fire_at),
+        priority: orch8_types::instance::Priority::Normal,
+        timezone: "UTC".into(),
+        metadata: json!({ "cron_schedule_id": sched.id.to_string() }),
+        context: orch8_types::context::ExecutionContext::default(),
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: Some(idempotency_key),
+        session_id: None,
+        parent_instance_id: None,
+        budget: None,
+        created_at: now,
+        updated_at: now,
+    };
+    s.create_instance(&pre_existing).await.unwrap();
+    assert_eq!(count_instances_for(&s, seq_id).await, 1);
+
+    // The "retry" tick: next_fire_at is still due, so claim_due_cron_schedules
+    // picks the schedule up again.
+    process_cron_tick(&s, &SharedClock::default())
+        .await
+        .unwrap();
+
+    // No duplicate instance was created.
+    assert_eq!(
+        count_instances_for(&s, seq_id).await,
+        1,
+        "the idempotency key must prevent a duplicate instance on retry"
+    );
+    // The schedule still advanced past this fire — a Conflict on
+    // create_instance must not get stuck retrying the same tick forever.
+    let after = s.get_cron_schedule(sched.id).await.unwrap().unwrap();
+    assert!(
+        after.next_fire_at.unwrap() > fire_at,
+        "next_fire_at must advance even when create_instance hit a conflict"
+    );
 }

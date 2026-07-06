@@ -124,6 +124,12 @@ impl Engine {
         // a stuck task blocking deregistration.
         Self::drain_background(&mut background).await;
 
+        // M-7: wait for in-flight webhook deliveries to finish or observe
+        // `self.cancel` (already fired by this point, via the same token
+        // threaded through every `webhooks::emit` call) rather than letting
+        // the process tear down mid-request underneath them.
+        webhooks::wait_for_webhook_tasks(BACKGROUND_SHUTDOWN_TIMEOUT).await;
+
         // Deregister this node on shutdown.
         self.deregister_node().await;
 

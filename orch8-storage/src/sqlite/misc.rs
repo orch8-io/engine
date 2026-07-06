@@ -117,6 +117,20 @@ pub(super) async fn recover_stale_instances(
     Ok(result.rows_affected())
 }
 
+pub(super) async fn heartbeat_instance(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances SET updated_at=?1 WHERE id=?2 AND state IN ('running', 'waiting')",
+    )
+    .bind(ts(chrono::Utc::now()))
+    .bind(instance_id.into_uuid().to_string())
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
 // === Sub-Sequences ===
 
 pub(super) async fn get_child_instances(

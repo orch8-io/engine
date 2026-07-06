@@ -86,14 +86,17 @@ impl Drop for Subscription {
     fn drop(&mut self) {
         // Drop the inner receiver first so receiver_count decreases.
         drop(self.receiver.take());
-        if let Some(tx) = self.bus.channels.get(&self.instance_id)
-            && tx.receiver_count() == 0
-        {
-            // Release the shard guard before removing to avoid deadlocking
-            // the DashMap shard.
-            drop(tx);
-            self.bus.channels.remove(&self.instance_id);
-        }
+        // M-9: `remove_if` evaluates its predicate and removes atomically
+        // under the shard's write lock. The previous "get, check, drop
+        // guard, then remove" sequence had a window between the check and
+        // the removal where a concurrent `subscribe()` for this exact
+        // instance could reuse this channel (bumping `receiver_count` back
+        // above zero) — this stale `remove()` would then delete the entry
+        // out from under that brand-new subscriber, closing their channel
+        // before they ever received anything.
+        self.bus
+            .channels
+            .remove_if(&self.instance_id, |_, tx| tx.receiver_count() == 0);
     }
 }
 
@@ -126,13 +129,19 @@ impl StreamBus {
     /// is subscribed; if the last subscriber has gone away, the channel is
     /// dropped here.
     pub fn publish(&self, instance_id: InstanceId, event: StreamEvent) {
-        if let Some(tx) = self.channels.get(&instance_id)
-            && tx.send(event).is_err()
-        {
-            // No live receivers — drop the ref before removing to avoid
-            // deadlocking the shard.
-            drop(tx);
-            self.channels.remove(&instance_id);
+        let send_failed = self
+            .channels
+            .get(&instance_id)
+            .is_some_and(|tx| tx.send(event).is_err());
+        if send_failed {
+            // M-9: `remove_if` re-checks `receiver_count() == 0` atomically
+            // at removal time rather than trusting the `send` failure from
+            // a moment ago — if a subscriber raced in between (reusing this
+            // same channel via `subscribe()`), the fresh check sees a live
+            // receiver and skips the removal instead of yanking the channel
+            // out from under them.
+            self.channels
+                .remove_if(&instance_id, |_, tx| tx.receiver_count() == 0);
         }
     }
 
@@ -256,5 +265,51 @@ mod tests {
         drop(rx2);
         assert!(!bus.has_subscribers(id));
         assert!(bus.is_empty());
+    }
+
+    /// M-9: concurrent subscribe/publish/drop churn on the *same*
+    /// `instance_id` must never let a stale "`receiver_count` was zero"
+    /// check remove the channel out from under a subscriber that raced in
+    /// after
+    /// the check but before the (old, non-atomic) removal. Under the old
+    /// "get, check, drop guard, then remove" pattern this occasionally
+    /// closes a brand-new subscriber's channel before it ever receives
+    /// anything; `remove_if` re-checks atomically at removal time and must
+    /// never do that. Runs on a multi-thread runtime so the races are real
+    /// OS-thread interleavings, not just task-switch points.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_subscribe_publish_drop_never_orphans_a_fresh_subscriber() {
+        let bus = StreamBus::default();
+        let id = InstanceId::new();
+        let iterations = 500;
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let bus = bus.clone();
+            handles.push(tokio::spawn(async move {
+                for _ in 0..iterations {
+                    let mut rx = bus.subscribe(id);
+                    bus.publish(id, delta("b", "x"));
+                    // A channel we JUST subscribed to must never report
+                    // Closed -- that only happens if some other task's
+                    // concurrent Drop/publish erroneously removed our entry.
+                    match rx.recv().await {
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            panic!(
+                                "fresh subscription's channel closed underneath it -- \
+                                 a concurrent operation removed the entry it just \
+                                 subscribed to"
+                            );
+                        }
+                    }
+                    drop(rx);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
     }
 }

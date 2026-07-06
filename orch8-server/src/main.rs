@@ -42,10 +42,24 @@ struct Cli {
     #[arg(short, long, default_value = "orch8.toml")]
     config: String,
 
-    /// Acknowledge running without API-key auth. Without this flag, startup
-    /// fails when no API key is configured. Intended for local development only.
+    /// Acknowledge running without API-key auth AND without encryption at
+    /// rest (L-6: shorthand for --insecure-auth --insecure-storage together).
+    /// Without one of these flags, startup fails when no API key or no
+    /// encryption key is configured. Intended for local development only.
     #[arg(long)]
     insecure: bool,
+
+    /// Acknowledge running without API-key auth specifically. Lets an
+    /// operator accept that risk alone without also having to accept
+    /// unencrypted storage (which --insecure would force).
+    #[arg(long)]
+    insecure_auth: bool,
+
+    /// Acknowledge running without encryption at rest specifically. Lets an
+    /// operator accept that risk alone without also having to accept
+    /// unauthenticated endpoints (which --insecure would force).
+    #[arg(long)]
+    insecure_storage: bool,
 }
 
 // INVARIANT: bare `#[tokio::main]` = multi-thread runtime. The gRPC auth
@@ -56,6 +70,10 @@ struct Cli {
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // L-6: --insecure is shorthand for accepting both risks; the two
+    // specific flags let an operator accept just one.
+    let insecure_auth = cli.insecure || cli.insecure_auth;
+    let insecure_storage = cli.insecure || cli.insecure_storage;
 
     // Load configuration: TOML file (optional) -> env vars -> defaults.
     // This is synchronous filesystem I/O; run it off the async runtime thread.
@@ -74,11 +92,11 @@ async fn main() -> anyhow::Result<()> {
     // [telemetry] otlp_endpoint is set) and logging.
     let otel = init_observability(&config)?;
 
-    print_startup_banner(&config, cli.insecure);
+    print_startup_banner(&config, insecure_auth, insecure_storage);
 
     // Connect to storage backend.
     let storage = init_storage(&config).await?;
-    let storage = wrap_encryption(storage, &config, cli.insecure)?;
+    let storage = wrap_encryption(storage, &config, insecure_storage)?;
 
     // Wire the step-log sink: in-process handler logs captured by StepLogLayer
     // are persisted here when their `orch8.step` span closes.
@@ -119,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     validate_auth_config(
         has_api_key,
         require_tenant,
-        cli.insecure,
+        insecure_auth,
         &config.api.cors_origins,
     )?;
 
@@ -270,7 +288,7 @@ fn build_app_state(
 fn validate_auth_config(
     has_api_key: bool,
     require_tenant: bool,
-    insecure: bool,
+    insecure_auth: bool,
     cors_origins: &str,
 ) -> anyhow::Result<()> {
     if has_api_key {
@@ -308,15 +326,16 @@ fn validate_auth_config(
                  cross-tenant access checks fall open."
             );
         }
-    } else if insecure {
+    } else if insecure_auth {
         tracing::warn!(
-            "Running with --insecure: all endpoints are unauthenticated. \
+            "Running with --insecure-auth (or --insecure): all endpoints are unauthenticated. \
              Never use this flag in production."
         );
     } else {
         anyhow::bail!(
             "No API key configured. Set ORCH8_API_KEY (or api.api_key in the config file) \
-             to enable authentication, or pass --insecure to explicitly run without auth."
+             to enable authentication, or pass --insecure-auth (or --insecure) to explicitly \
+             run without auth."
         );
     }
     Ok(())
@@ -428,7 +447,7 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
 fn wrap_encryption(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
-    insecure: bool,
+    insecure_storage: bool,
 ) -> anyhow::Result<Arc<dyn StorageBackend>> {
     let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
     let key = if config.engine.encryption_key.is_empty() {
@@ -441,17 +460,18 @@ fn wrap_encryption(
         // context.data are persisted in PLAINTEXT. A DB dump or replica leak
         // would then expose every secret. Mirror the API-key contract — refuse
         // to start unless the operator explicitly accepts the risk.
-        if !insecure {
+        if !insecure_storage {
             anyhow::bail!(
                 "No encryption key configured: credentials and context.data would be stored \
                  in PLAINTEXT. Set ORCH8_ENCRYPTION_KEY (or engine.encryption_key in the config \
-                 file) to a 64-hex-character AES-256-GCM key, or pass --insecure to explicitly \
-                 run without encryption at rest (local development only)."
+                 file) to a 64-hex-character AES-256-GCM key, or pass --insecure-storage (or \
+                 --insecure) to explicitly run without encryption at rest (local development \
+                 only)."
             );
         }
         tracing::warn!(
-            "Running with --insecure: encryption at rest is DISABLED — credentials and \
-             context.data are stored in plaintext. Never use this in production."
+            "Running with --insecure-storage (or --insecure): encryption at rest is DISABLED — \
+             credentials and context.data are stored in plaintext. Never use this in production."
         );
         return Ok(storage);
     }
@@ -851,13 +871,13 @@ fn init_logging(config: &orch8_types::config::LoggingConfig, otel: &telemetry::O
     }
 }
 
-fn print_startup_banner(config: &EngineConfig, insecure: bool) {
+fn print_startup_banner(config: &EngineConfig, insecure_auth: bool, insecure_storage: bool) {
     let version = env!("CARGO_PKG_VERSION");
     let backend = &config.database.backend;
     let http = &config.api.http_addr;
     let grpc = &config.api.grpc_addr;
-    let auth = if insecure {
-        "disabled (--insecure)"
+    let auth = if insecure_auth {
+        "disabled (--insecure-auth)"
     } else if config.api.api_key.is_empty() {
         "none"
     } else {
@@ -867,6 +887,8 @@ fn print_startup_banner(config: &EngineConfig, insecure: bool) {
         || std::env::var("ORCH8_ENCRYPTION_KEY").is_ok_and(|k| !k.is_empty());
     let encryption = if encryption_key_set {
         "AES-256-GCM"
+    } else if insecure_storage {
+        "off (--insecure-storage)"
     } else {
         "off"
     };
@@ -985,6 +1007,60 @@ mod tests {
         assert!(validate_auth_config(true, true, false, "https://app.example.com, *").is_err());
         // Valid explicit list is accepted.
         assert!(validate_auth_config(true, true, false, "https://app.example.com").is_ok());
+    }
+
+    /// L-6: `--insecure-auth` alone must be sufficient to boot without an API
+    /// key — it must not require also accepting `--insecure-storage`.
+    #[test]
+    fn validate_auth_config_accepts_insecure_auth_alone_without_api_key() {
+        assert!(validate_auth_config(false, true, true, "").is_ok());
+        assert!(
+            validate_auth_config(false, true, false, "").is_err(),
+            "without insecure_auth and without an API key, startup must fail"
+        );
+    }
+
+    /// L-6: `--insecure-storage` alone must be sufficient to boot without an
+    /// encryption key — it must not require also accepting `--insecure-auth`.
+    #[tokio::test]
+    async fn wrap_encryption_accepts_insecure_storage_alone_without_key() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let config = EngineConfig::default();
+        assert!(config.engine.encryption_key.is_empty());
+
+        assert!(wrap_encryption(storage.clone(), &config, true).is_ok());
+        assert!(
+            wrap_encryption(storage, &config, false).is_err(),
+            "without insecure_storage and without an encryption key, startup must fail"
+        );
+    }
+
+    /// L-6: the two flags are independent -- `--insecure` (both) is not
+    /// required just to accept one of the two risks.
+    #[test]
+    fn cli_insecure_auth_and_insecure_storage_flags_are_independent() {
+        let cli = Cli::parse_from(["orch8", "--insecure-auth"]);
+        assert!(cli.insecure_auth);
+        assert!(!cli.insecure_storage);
+        assert!(!cli.insecure);
+
+        let cli = Cli::parse_from(["orch8", "--insecure-storage"]);
+        assert!(!cli.insecure_auth);
+        assert!(cli.insecure_storage);
+        assert!(!cli.insecure);
+
+        let cli = Cli::parse_from(["orch8", "--insecure"]);
+        assert!(cli.insecure);
+        // The individual flags are only derived from --insecure in main(),
+        // not set by clap itself -- confirm the derivation logic directly.
+        let insecure_auth = cli.insecure || cli.insecure_auth;
+        let insecure_storage = cli.insecure || cli.insecure_storage;
+        assert!(insecure_auth);
+        assert!(insecure_storage);
     }
 
     #[test]

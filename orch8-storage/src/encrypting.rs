@@ -279,6 +279,13 @@ impl EncryptingStorage {
     }
 
     /// Decrypt the `value` and `refresh_token` fields of a credential after reading.
+    ///
+    /// Deliberately lenient (not [`FieldEncryptor::decrypt_value_strict`]):
+    /// a credential written before encryption was enabled for this
+    /// deployment is legitimately plaintext at rest, and must keep reading
+    /// back unchanged (see `credential_plaintext_passthrough_on_read` in
+    /// `orch8-storage/tests/encrypting_coverage.rs`) rather than erroring on
+    /// every read until it happens to be re-saved.
     fn decrypt_credential(
         &self,
         credential: &mut orch8_types::credential::CredentialDef,
@@ -870,6 +877,9 @@ impl crate::InstanceStore for EncryptingStorage {
         stale_threshold: std::time::Duration,
     ) -> Result<u64, StorageError> {
         self.inner.recover_stale_instances(stale_threshold).await
+    }
+    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError> {
+        self.inner.heartbeat_instance(instance_id).await
     }
     async fn inject_blocks(
         &self,

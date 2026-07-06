@@ -21,7 +21,11 @@
 //! completed iteration** rather than re-running (and re-paying for) earlier
 //! turns — only the in-flight iteration is redone. (Per-iteration engine-level
 //! retry/circuit-breaker — i.e. desugaring into one durable step per turn — is
-//! the block-level follow-on.)
+//! the block-level follow-on.) The checkpoint is deleted once the loop
+//! reaches a terminal outcome (`"completed"` or `"max_iterations"`), so an
+//! agent step nested inside an engine `Loop` — which re-dispatches the same
+//! block id every pass — starts each pass fresh instead of restoring a
+//! finished prior pass's exhausted state.
 //!
 //! ## Params
 //!
@@ -146,11 +150,18 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
         let (s, k) = (load_storage.clone(), load_key.clone());
         async move { s.get_instance_kv(load_iid, &k).await.ok().flatten() }
     };
-    let (save_storage, save_iid) = (ctx.storage.clone(), ctx.instance_id);
+    let (save_storage, save_iid, save_key) = (ctx.storage.clone(), ctx.instance_id, cp_key.clone());
     let save_checkpoint = move |cp: Value| {
-        let (s, k) = (save_storage.clone(), cp_key.clone());
+        let (s, k) = (save_storage.clone(), save_key.clone());
         async move {
             let _ = s.set_instance_kv(save_iid, &k, &cp).await;
+        }
+    };
+    let (clear_storage, clear_iid) = (ctx.storage.clone(), ctx.instance_id);
+    let clear_checkpoint = move || {
+        let (s, k) = (clear_storage.clone(), cp_key.clone());
+        async move {
+            let _ = s.delete_instance_kv(clear_iid, &k).await;
         }
     };
 
@@ -161,6 +172,7 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
         dispatch_tool,
         load_checkpoint,
         save_checkpoint,
+        clear_checkpoint,
     )
     .await?;
 
@@ -180,13 +192,22 @@ enum ToolKind {
 /// The reason→act→observe driver, generic over how the model and tools are
 /// invoked (and how progress is checkpointed) so it can be unit-tested with
 /// deterministic closures and an in-memory checkpoint — no network or storage.
-async fn run_agent_loop<L, LFut, T, TFut, LD, LDFut, SV, SVFut>(
+///
+/// `clear_checkpoint` is called on every terminal exit (`"completed"` and
+/// `"max_iterations"` alike) so a *stale* checkpoint never survives a finished
+/// invocation. Without this, an agent step nested in an engine `Loop` reuses
+/// the same block id every pass: the next iteration's `load_checkpoint` would
+/// restore the *previous* iteration's already-exhausted `start_iteration`,
+/// completing instantly with zero LLM calls instead of starting fresh.
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop<L, LFut, T, TFut, LD, LDFut, SV, SVFut, CL, CLFut>(
     agent_params: &Value,
     max_iterations: u64,
     call_llm: L,
     dispatch_tool: T,
     load_checkpoint: LD,
     save_checkpoint: SV,
+    clear_checkpoint: CL,
 ) -> Result<Value, StepError>
 where
     L: Fn(Value) -> LFut,
@@ -197,6 +218,8 @@ where
     LDFut: std::future::Future<Output = Option<Value>>,
     SV: Fn(Value) -> SVFut,
     SVFut: std::future::Future<Output = ()>,
+    CL: Fn() -> CLFut,
+    CLFut: std::future::Future<Output = ()>,
 {
     let (mut messages, start_iteration, mut tool_calls_made) =
         restore_checkpoint(load_checkpoint().await, agent_params);
@@ -214,6 +237,7 @@ where
                 iteration,
                 "agent: model produced no tool calls — completing"
             );
+            clear_checkpoint().await;
             return Ok(result(
                 final_text(&assistant),
                 iteration + 1,
@@ -239,6 +263,7 @@ where
     }
 
     debug!(max_iterations, "agent: iteration budget exhausted");
+    clear_checkpoint().await;
     Ok(result(
         None,
         max_iterations,
@@ -835,6 +860,7 @@ mod tests {
             dispatch_tool,
             || async { Option::<Value>::None },
             |_cp: Value| async {},
+            || async {},
         )
         .await
     }
@@ -1072,6 +1098,7 @@ mod tests {
                 async move { Some(c) }
             },
             |_cp: Value| async {},
+            || async {},
         )
         .await
         .unwrap();
@@ -1081,6 +1108,104 @@ mod tests {
         assert_eq!(out["final"], "resumed answer");
         // Prior tool_calls_made carried over.
         assert_eq!(out["tool_calls_made"], 1);
+    }
+
+    /// H-9: the checkpoint must be cleared on successful completion — a
+    /// finished invocation's state must never leak into a later one (e.g. the
+    /// next pass of an engine `Loop` re-dispatching the same block id).
+    #[tokio::test]
+    async fn loop_clears_checkpoint_on_completion() {
+        let cleared = RefCell::new(false);
+        let out = super::run_agent_loop(
+            &json!({ "goal": "x" }),
+            6,
+            |_p| async { Ok(assistant_text("done")) },
+            |_c| async { Ok(json!({})) },
+            || async { Option::<Value>::None },
+            |_cp: Value| async {},
+            || {
+                *cleared.borrow_mut() = true;
+                async {}
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["stop_reason"], "completed");
+        assert!(
+            *cleared.borrow(),
+            "checkpoint must be cleared on completion"
+        );
+    }
+
+    /// H-9: the checkpoint must also be cleared when the iteration budget is
+    /// exhausted — that outcome is just as terminal as `"completed"`, and a
+    /// later pass over the same block id must not instantly restore an
+    /// already-exhausted `start_iteration`.
+    #[tokio::test]
+    async fn loop_clears_checkpoint_on_max_iterations() {
+        let cleared = RefCell::new(false);
+        let out = super::run_agent_loop(
+            &json!({
+                "goal": "x",
+                "tool_dispatch": { "type": "http", "url": "https://x.example" }
+            }),
+            2,
+            |_p| async { Ok(assistant_tool_call("tc", "spin", "{}")) },
+            |_c| async { Ok(json!({})) },
+            || async { Option::<Value>::None },
+            |_cp: Value| async {},
+            || {
+                *cleared.borrow_mut() = true;
+                async {}
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out["stop_reason"], "max_iterations");
+        assert!(
+            *cleared.borrow(),
+            "checkpoint must be cleared when the iteration budget is exhausted"
+        );
+    }
+
+    /// H-9 end-to-end: a stale checkpoint left behind by a finished pass must
+    /// not be resumed by the next pass over the same block id (the scenario
+    /// an agent step nested in an engine `Loop` hits every iteration).
+    #[tokio::test]
+    async fn stale_checkpoint_is_not_resumed_after_clear() {
+        async fn run_pass(store: &RefCell<Option<Value>>, reply: &'static str) -> Value {
+            super::run_agent_loop(
+                &json!({ "goal": "x" }),
+                6,
+                move |_p| async move { Ok(assistant_text(reply)) },
+                |_c| async { Ok(json!({})) },
+                || async { store.borrow().clone() },
+                |cp: Value| async move {
+                    *store.borrow_mut() = Some(cp);
+                },
+                || async move {
+                    *store.borrow_mut() = None;
+                },
+            )
+            .await
+            .unwrap()
+        }
+
+        let store: RefCell<Option<Value>> = RefCell::new(None);
+        let first = run_pass(&store, "first pass done").await;
+        assert_eq!(first["stop_reason"], "completed");
+        assert_eq!(first["iterations"], 1);
+        assert!(
+            store.borrow().is_none(),
+            "checkpoint left behind after completion"
+        );
+
+        // A second pass over the same (block id-keyed) checkpoint must start
+        // fresh, not resume the first pass's terminal state.
+        let second = run_pass(&store, "second pass done").await;
+        assert_eq!(second["stop_reason"], "completed");
+        assert_eq!(second["iterations"], 1);
+        assert_eq!(second["final"], "second pass done");
     }
 
     #[tokio::test]
@@ -1114,6 +1239,7 @@ mod tests {
                 saved.borrow_mut().push(cp);
                 async {}
             },
+            || async {},
         )
         .await
         .unwrap();
@@ -1357,7 +1483,7 @@ mod net_tests {
     }
 
     #[tokio::test]
-    async fn handle_agent_tool_iteration_writes_checkpoint() {
+    async fn handle_agent_tool_iteration_clears_checkpoint_on_completion() {
         let calls = Arc::new(AtomicU32::new(0));
         let c = Arc::clone(&calls);
         // 2 LLM turns (tool, then final) + 1 tool dispatch = 3 connections.
@@ -1386,14 +1512,15 @@ mod net_tests {
         assert_eq!(out["stop_reason"], "completed");
         assert_eq!(out["final"], "finished");
 
-        // A checkpoint was persisted after the tool iteration.
-        let cp = storage
-            .get_instance_kv(iid, "__agent__:b")
-            .await
-            .unwrap()
-            .expect("checkpoint should be written");
-        assert_eq!(cp["iteration"], 1);
-        assert_eq!(cp["tool_calls_made"], 1);
+        // H-9: a checkpoint was persisted after the tool iteration but must be
+        // cleared once the agent completes, so a later invocation over the
+        // same block id (e.g. the next pass of an enclosing Loop) does not
+        // resume this finished pass's exhausted state.
+        let cp = storage.get_instance_kv(iid, "__agent__:b").await.unwrap();
+        assert!(
+            cp.is_none(),
+            "checkpoint must be cleared after completion, got: {cp:?}"
+        );
     }
 
     #[tokio::test]

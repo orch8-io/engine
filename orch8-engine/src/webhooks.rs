@@ -8,6 +8,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, warn};
 
 use orch8_storage::StorageBackend;
@@ -32,6 +33,35 @@ const DEFAULT_WEBHOOK_CONCURRENCY: usize = 64;
 
 fn webhook_semaphore() -> &'static Arc<Semaphore> {
     WEBHOOK_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(DEFAULT_WEBHOOK_CONCURRENCY)))
+}
+
+/// Tracks every in-flight webhook delivery task (M-7) so graceful shutdown
+/// can wait for them to actually finish (or observe `cancel` and exit)
+/// instead of `emit`'s bare `tokio::spawn` calls being silently detached and
+/// then abruptly killed when the runtime is torn down mid-request.
+static WEBHOOK_TASKS: OnceLock<TaskTracker> = OnceLock::new();
+
+fn webhook_tasks() -> &'static TaskTracker {
+    WEBHOOK_TASKS.get_or_init(TaskTracker::new)
+}
+
+/// Wait (up to `timeout`) for every webhook delivery task spawned via
+/// [`emit`] to finish. Called during engine shutdown, after firing the
+/// `cancel` token so in-flight retries observe it, and returns once every
+/// task has completed or `timeout` elapses (whichever comes first) so a
+/// single hung dispatch can't stall shutdown forever.
+pub async fn wait_for_webhook_tasks(timeout: Duration) {
+    let tracker = webhook_tasks();
+    // `close()` makes `wait()` resolve once all *currently tracked* tasks
+    // finish, without blocking new tasks from being tracked (harmless if a
+    // step still emits one during the drain window).
+    tracker.close();
+    if tokio::time::timeout(timeout, tracker.wait()).await.is_err() {
+        warn!(
+            timeout_secs = timeout.as_secs(),
+            "timed out waiting for in-flight webhook deliveries to finish"
+        );
+    }
 }
 
 /// Wire the webhook outbox. Exhausted deliveries park via `storage`; `config`
@@ -81,7 +111,9 @@ pub struct WebhookEvent {
 }
 
 /// Send a webhook event to all configured URLs.
-/// Non-blocking: spawns a background task for each URL.
+/// Non-blocking: spawns a background task for each URL, tracked via
+/// [`webhook_tasks`] (M-7) so [`wait_for_webhook_tasks`] can await them at
+/// shutdown instead of the runtime abruptly killing an in-flight delivery.
 /// The `cancel` token allows graceful shutdown to abort in-flight webhook retries.
 pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationToken) {
     if config.urls.is_empty() {
@@ -95,6 +127,7 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
     );
 
     let semaphore = webhook_semaphore().clone();
+    let tasks = webhook_tasks();
 
     for url in &config.urls {
         let url = url.clone();
@@ -107,7 +140,7 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
         let cancel = cancel.clone();
         let permit = semaphore.clone().acquire_owned();
 
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let Ok(_permit) = permit.await else {
                 warn!(url = %url, "webhook semaphore closed; dropping dispatch");
                 return;
@@ -838,5 +871,72 @@ mod tests {
             header_value(raw, "X-Orch8-Signature").is_some(),
             "emit threaded the secret through to a signature"
         );
+    }
+
+    /// M-7: `emit`'s delivery task must be tracked so
+    /// `wait_for_webhook_tasks` actually waits for it to finish rather than
+    /// returning immediately while it's still in flight (which would let the
+    /// runtime tear it down mid-request during shutdown).
+    #[tokio::test]
+    async fn wait_for_webhook_tasks_waits_for_in_flight_delivery() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/hook");
+        let done = Arc::new(AtomicUsize::new(0));
+        let done_srv = done.clone();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 4096];
+            let _ = read_request_into(&mut stream, &mut buf).await;
+            // Deliberately slow response — gives wait_for_webhook_tasks
+            // something meaningful to actually wait for.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            done_srv.store(1, Ordering::SeqCst);
+            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+
+        let config = WebhookConfig {
+            urls: vec![url],
+            timeout_secs: 5,
+            max_retries: 0,
+            secret: None,
+        };
+        let event = instance_event(
+            "instance.completed",
+            InstanceId::new(),
+            serde_json::json!({}),
+        );
+        emit(&config, &event, &CancellationToken::new());
+
+        // The delivery is still in flight (server hasn't slept 150ms yet).
+        assert_eq!(done.load(Ordering::SeqCst), 0);
+
+        wait_for_webhook_tasks(Duration::from_secs(5)).await;
+
+        // By the time wait_for_webhook_tasks returns, the tracked delivery
+        // task (and therefore the mock server's slow-then-respond handler it
+        // awaited) must have completed.
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            1,
+            "wait_for_webhook_tasks must wait for the in-flight delivery to finish"
+        );
+    }
+
+    /// Minimal request reader for tests that need to hold the connection open
+    /// afterward (unlike `read_request`, which is only used with mock servers
+    /// that respond-then-close per request).
+    async fn read_request_into(
+        stream: &mut tokio::net::TcpStream,
+        buf: &mut [u8],
+    ) -> std::io::Result<usize> {
+        use tokio::io::AsyncReadExt;
+        stream.read(buf).await
     }
 }

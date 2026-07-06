@@ -91,7 +91,11 @@ impl DevServer {
             .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
             .fallback(dashboard_handler);
 
-        let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+        // M-25: this server runs with no auth (see module docs) and is
+        // "intended for local development only" -- binding `0.0.0.0` instead
+        // of loopback silently exposed it to every other device on the same
+        // network/Wi-Fi, not just the machine running it.
+        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
             .await
             .with_context(|| format!("bind port {port}"))?;
 

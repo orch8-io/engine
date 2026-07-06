@@ -704,7 +704,9 @@ pub(super) async fn execute_step_block(
         cache_key: resolved_cache_key,
     };
 
-    let result = crate::handlers::step::execute_step_dry(storage, handlers, exec_params).await;
+    let result = crate::handlers::step::execute_step_dry(storage, handlers, exec_params)
+        .await
+        .map_err(|e| e.normalize_timeout_as_retryable(instance_id));
 
     match result {
         Ok(block_output) => {

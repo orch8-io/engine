@@ -487,7 +487,10 @@ pub async fn execute_step_node(
         cache_key: resolved_cache_key,
     };
 
-    match crate::handlers::step::execute_step(storage, handlers, exec_params).await {
+    let result = crate::handlers::step::execute_step(storage, handlers, exec_params)
+        .await
+        .map_err(|e| e.normalize_timeout_as_retryable(instance.id));
+    match result {
         Ok(output) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_success(&instance.tenant_id, &step_def.handler);

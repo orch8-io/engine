@@ -693,6 +693,10 @@ impl crate::InstanceStore for SqliteStorage {
         misc::recover_stale_instances(self, stale_threshold).await
     }
 
+    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError> {
+        misc::heartbeat_instance(self, instance_id).await
+    }
+
     // === Sub-Sequences ===
 
     async fn get_child_instances(

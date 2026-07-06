@@ -1511,7 +1511,13 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
 }
 
 #[tokio::test]
-async fn signal_update_context_replaces_instance_context() {
+async fn signal_update_context_merges_into_instance_context() {
+    // M-6: `update_context` merges the signal's `data` keys into the
+    // instance's existing context.data rather than blindly overwriting the
+    // whole `ExecutionContext` -- the old blind-overwrite behavior this test
+    // used to assert would also wipe engine-owned `runtime`/`audit` fields
+    // whenever a caller built the signal payload as
+    // `ExecutionContext { data: ..., ..Default::default() }`.
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let seq = mk_sequence(vec![mk_step("s1", "noop")]);
     storage.create_sequence(&seq).await.unwrap();
@@ -1522,7 +1528,9 @@ async fn signal_update_context_replaces_instance_context() {
     let reg = registry();
     drive_n(&storage, &reg, inst.id, &seq, 1).await;
 
-    // Enqueue an update_context signal with a full replacement context.
+    // Enqueue an update_context signal. The payload must still decode as a
+    // full ExecutionContext (that's the signal's wire format), but only its
+    // `data` keys are applied.
     let new_ctx = orch8_types::context::ExecutionContext {
         data: json!({"new_key": "new_value"}),
         config: json!({}),
@@ -1554,15 +1562,15 @@ async fn signal_update_context_replaces_instance_context() {
     .unwrap();
     assert!(!abort, "update_context must not abort instance");
 
-    // Verify the context was replaced (not merged).
+    // Verify the context was merged (not replaced).
     let refreshed = storage.get_instance(inst.id).await.unwrap().unwrap();
-    assert!(
-        refreshed.context.data.get("original").is_none(),
-        "original context must be replaced, not merged"
+    assert_eq!(
+        refreshed.context.data["original"], true,
+        "pre-existing context key must survive the merge, not be wiped by a blind overwrite"
     );
     assert_eq!(
         refreshed.context.data["new_key"], "new_value",
-        "new context must be present after replacement"
+        "new context key must be present after the merge"
     );
 }
 

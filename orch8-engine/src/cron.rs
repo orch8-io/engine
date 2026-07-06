@@ -13,6 +13,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::clock::SharedClock;
 use orch8_types::context::ExecutionContext;
 use orch8_types::cron::CronSchedule;
+use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 
@@ -180,23 +181,37 @@ async fn apply_overlap_policy(
             Ok(false)
         }
         OverlapPolicy::CancelPrevious => {
+            // Enqueue a `Cancel` signal instead of writing `Cancelled`
+            // directly: the direct write bypassed `can_transition_to`'s CAS
+            // guard (could clobber a state the instance moved to concurrently)
+            // and skipped `on_cancel` cleanup hooks / scoped-cancellation
+            // handling that the normal signal path (`SignalAction::Cancel` in
+            // `signals.rs`) applies. `enqueue_signal_if_active` also closes
+            // the TOCTOU between the `active` read above and this write — an
+            // instance that finished in between is simply not signalled.
             for instance_id in &active {
-                if let Err(e) = storage
-                    .update_instance_state(*instance_id, InstanceState::Cancelled, None)
-                    .await
-                {
+                let signal = orch8_types::signal::Signal {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id: *instance_id,
+                    signal_type: orch8_types::signal::SignalType::Cancel,
+                    payload: serde_json::json!({}),
+                    delivered: false,
+                    created_at: now,
+                    delivered_at: None,
+                };
+                if let Err(e) = storage.enqueue_signal_if_active(&signal).await {
                     warn!(
                         cron_id = %schedule.id,
                         instance_id = %instance_id,
                         error = %e,
-                        "cancel_previous: failed to cancel still-active run"
+                        "cancel_previous: failed to signal-cancel still-active run"
                     );
                 }
             }
             info!(
                 cron_id = %schedule.id,
                 cancelled = active.len(),
-                "cancel_previous: cancelled still-active runs before firing"
+                "cancel_previous: signalled still-active runs to cancel before firing"
             );
             Ok(true)
         }
@@ -219,6 +234,23 @@ async fn trigger_cron_schedule(
     }
 
     // Create a new instance for this schedule.
+    //
+    // `idempotency_key` binds this instance to the exact (schedule, fire_at)
+    // pair: `create_instance` then `update_cron_fire_times` are two separate
+    // writes, and a crash between them would otherwise re-fire the same tick
+    // on the next scheduler pass (fire time never advanced) and create a
+    // duplicate instance. With the key set, the retry's `create_instance`
+    // hits the existing unique-index violation instead of duplicating —
+    // surfaced below as `StorageError::Conflict`.
+    //
+    // Keyed on `schedule.next_fire_at` (the due timestamp this schedule was
+    // *claimed* at), not `now` (wall-clock at execution time): a crash-retry
+    // runs on a later tick, so `now` would differ between the original
+    // attempt and the retry and the key would never collide, silently
+    // defeating the whole point of setting it.
+    let idempotency_key = schedule
+        .next_fire_at
+        .map(|fire_at| format!("cron:{}:{}", schedule.id, fire_at.to_rfc3339()));
     let instance = TaskInstance {
         id: InstanceId::new(),
         sequence_id: schedule.sequence_id,
@@ -232,7 +264,7 @@ async fn trigger_cron_schedule(
         context: ExecutionContext::default(),
         concurrency_key: None,
         max_concurrency: None,
-        idempotency_key: None,
+        idempotency_key,
         session_id: None,
         parent_instance_id: None,
         budget: None,
@@ -247,6 +279,17 @@ async fn trigger_cron_schedule(
                 instance_id = %instance.id,
                 sequence_id = %schedule.sequence_id,
                 "cron triggered new instance"
+            );
+        }
+        Err(StorageError::Conflict(_)) => {
+            // A crash between `create_instance` and `update_cron_fire_times`
+            // on a previous attempt at this exact fire — the instance for
+            // this tick already exists. Nothing to do but advance the fire
+            // time below.
+            info!(
+                cron_id = %schedule.id,
+                sequence_id = %schedule.sequence_id,
+                "cron instance for this fire already exists (crash-recovery retry), not duplicating"
             );
         }
         Err(e) => {

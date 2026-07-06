@@ -1,12 +1,14 @@
-//! `orch8-publisher` — Manifest generation, sequence publishing, and push fan-out.
+//! `orch8-publisher` — Manifest generation and sequence publishing.
 //!
-//! This crate is used server-side to publish sequences and manifests to a CDN,
-//! and to notify mobile devices of updates.
+//! This crate is used server-side to publish sequences and manifests to a
+//! CDN. Push fan-out to mobile devices lives in `orch8-push` (`FcmProvider`,
+//! `ApnsProvider`) — this crate previously carried its own `PushNotifier`
+//! (M-20), an unused, never-wired-up duplicate whose APNs path was a stub
+//! that always returned an error.
 
 pub mod cdn;
 pub mod manifest;
 pub mod publish;
-pub mod push;
 
 pub use cdn::{CdnBackend, CdnError, MemoryCdnBackend, S3CdnBackend};
 pub use manifest::{
@@ -14,4 +16,3 @@ pub use manifest::{
     SignedManifest,
 };
 pub use publish::{PublishError, SequencePublisher};
-pub use push::{PushError, PushNotifier};

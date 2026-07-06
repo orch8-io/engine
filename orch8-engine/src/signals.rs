@@ -170,10 +170,38 @@ async fn process_signals_inner(
                 return Ok(true);
             }
             SignalAction::UpdateContext(ctx) => {
-                // Payload was validated by `Signal::action()` — no runtime
-                // decode fallback needed here.
-                storage.update_instance_context(instance_id, &ctx).await?;
-                info!(instance_id = %instance_id, "context updated via signal");
+                // M-6: merge `ctx.data`'s keys into the instance's existing
+                // context.data rather than overwriting the whole
+                // `ExecutionContext` wholesale. The old blind-overwrite path
+                // replaced `runtime` (step counters, current_step, dry_run)
+                // and `audit` too, since `Signal::action()` requires a
+                // caller-supplied payload to decode as a *complete*
+                // `ExecutionContext` — a caller intending only to patch a
+                // workflow variable would typically build that payload as
+                // `ExecutionContext { data: ..., ..Default::default() }`,
+                // silently resetting engine-owned bookkeeping (e.g. letting
+                // `max_steps_per_instance` reset and enabling runaway loops).
+                // `merge_context_data` is per-key atomic (serialized against
+                // concurrent merges), so this is also safe under concurrent
+                // update_context signals.
+                match ctx.data.as_object() {
+                    Some(fields) => {
+                        for (key, value) in fields {
+                            storage.merge_context_data(instance_id, key, value).await?;
+                        }
+                        info!(
+                            instance_id = %instance_id,
+                            keys = fields.len(),
+                            "context data merged via signal"
+                        );
+                    }
+                    None => {
+                        warn!(
+                            instance_id = %instance_id,
+                            "update_context signal's data is not a JSON object — no fields to merge, skipping"
+                        );
+                    }
+                }
             }
             SignalAction::Custom { name, .. } => {
                 // Human-input signals are consumed by scheduler::check_human_input
@@ -636,6 +664,57 @@ mod tests {
         assert!(!r, "UpdateContext must not abort execution");
         let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
         assert_eq!(stored.context.data["answer"], 42);
+    }
+
+    /// M-6: the old blind-overwrite path replaced the *entire*
+    /// `ExecutionContext`, so a naive caller building the signal payload as
+    /// `ExecutionContext { data: ..., ..Default::default() }` would silently
+    /// wipe out unrelated `context.data` keys AND engine-owned `runtime`
+    /// bookkeeping (e.g. `total_steps_executed`, used by
+    /// `max_steps_per_instance` enforcement). The fix must merge only the
+    /// payload's `data` keys and leave everything else on the stored
+    /// instance untouched.
+    #[tokio::test]
+    async fn update_context_signal_merges_data_and_preserves_runtime() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut inst = mk_instance_with_state(InstanceState::Scheduled);
+        inst.context.data = json!({"existing_key": "keep_me"});
+        inst.context.runtime.total_steps_executed = 5;
+        storage.create_instance(&inst).await.unwrap();
+
+        // A naive caller's payload: only cares about `data`, everything else
+        // left at its `Default` value.
+        let naive_payload = ExecutionContext {
+            data: json!({"answer": 42}),
+            ..Default::default()
+        };
+        let sig = mk_signal(
+            inst.id,
+            SignalType::UpdateContext,
+            serde_json::to_value(&naive_payload).unwrap(),
+        );
+        storage.enqueue_signal(&sig).await.unwrap();
+        let r = process_signals_prefetched(
+            &storage,
+            inst.id,
+            InstanceState::Scheduled,
+            vec![sig],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!r, "UpdateContext must not abort execution");
+
+        let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(stored.context.data["answer"], 42, "new key must apply");
+        assert_eq!(
+            stored.context.data["existing_key"], "keep_me",
+            "pre-existing data key must survive the merge, not be wiped by overwrite"
+        );
+        assert_eq!(
+            stored.context.runtime.total_steps_executed, 5,
+            "engine-owned runtime bookkeeping must not be reset by a context-update signal"
+        );
     }
 
     #[tokio::test]

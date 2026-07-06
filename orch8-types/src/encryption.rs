@@ -17,6 +17,7 @@ use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use zeroize::Zeroize;
 
 /// NIST SP 800-38D's cautionary limit on AES-GCM invocations with a single
 /// key under random 96-bit nonces (~2^32, to keep nonce-collision
@@ -73,13 +74,23 @@ impl FieldEncryptor {
     /// Create an encryptor from a 32-byte (64 hex char) key.
     #[must_use = "returns a new FieldEncryptor; does not modify state"]
     pub fn from_hex_key(hex_key: &str) -> Result<Self, EncryptionError> {
-        let key_bytes = hex_decode(hex_key)?;
-        if key_bytes.len() != 32 {
-            return Err(EncryptionError::InvalidKeyLength(key_bytes.len()));
+        // L-9: `hex_decode` returns an owned `Vec<u8>` holding the raw key
+        // material. `aes_gcm::Key::from_slice` copies it into the cipher's
+        // own storage, so once that copy exists this buffer must be
+        // explicitly zeroized rather than left for a plain `Drop` (which
+        // just deallocates without clearing) -- otherwise the key can linger
+        // readable in freed heap memory.
+        let mut key_bytes = hex_decode(hex_key)?;
+        let len = key_bytes.len();
+        if len != 32 {
+            key_bytes.zeroize();
+            return Err(EncryptionError::InvalidKeyLength(len));
         }
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
+        let cipher = Aes256Gcm::new(key);
+        key_bytes.zeroize();
         Ok(Self {
-            cipher: Aes256Gcm::new(key),
+            cipher,
             old_cipher: None,
             encrypt_count: Arc::new(AtomicU64::new(0)),
             budget_warned: Arc::new(AtomicBool::new(false)),
@@ -133,12 +144,18 @@ impl FieldEncryptor {
     /// reading rows that were encrypted with the previous key.
     #[must_use = "returns a new FieldEncryptor with the old key; does not modify self"]
     pub fn with_old_key(mut self, hex_key: &str) -> Result<Self, EncryptionError> {
-        let key_bytes = hex_decode(hex_key)?;
-        if key_bytes.len() != 32 {
-            return Err(EncryptionError::InvalidKeyLength(key_bytes.len()));
+        // L-9: see `from_hex_key` -- zeroize the decoded key bytes once
+        // they've been copied into the cipher, rather than leaving them for
+        // a plain `Drop`.
+        let mut key_bytes = hex_decode(hex_key)?;
+        let len = key_bytes.len();
+        if len != 32 {
+            key_bytes.zeroize();
+            return Err(EncryptionError::InvalidKeyLength(len));
         }
         let key = aes_gcm::Key::<Aes256Gcm>::from_slice(&key_bytes);
         self.old_cipher = Some(Aes256Gcm::new(key));
+        key_bytes.zeroize();
         Ok(self)
     }
 
@@ -211,6 +228,29 @@ impl FieldEncryptor {
         }
 
         Err(EncryptionError::DecryptFailed)
+    }
+
+    /// Decrypt a value that is *required* to always be encrypted at rest
+    /// (M-2) -- e.g. a credential secret or refresh token, as opposed to
+    /// opportunistically-encrypted fields like `context.data` that must stay
+    /// readable if they predate encryption being enabled.
+    ///
+    /// Unlike [`Self::decrypt_value`], a value with no `"enc:v1:"`/`"enc:v2:"`
+    /// prefix is treated as an error rather than passed through unchanged.
+    /// For an always-encrypted field, unprefixed data at rest means the write
+    /// path failed to encrypt it -- silently accepting it as "already
+    /// plaintext" would mask that bug indefinitely instead of surfacing it.
+    pub fn decrypt_value_strict(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<serde_json::Value, EncryptionError> {
+        let serde_json::Value::String(s) = value else {
+            return Err(EncryptionError::NotEncrypted);
+        };
+        if !s.starts_with(ENC_PREFIX) && !s.starts_with(ENC_PREFIX_V2) {
+            return Err(EncryptionError::NotEncrypted);
+        }
+        self.decrypt_value(value)
     }
 
     /// Encrypt a JSON value with associated data binding the ciphertext to
@@ -369,6 +409,8 @@ pub enum EncryptionError {
     Json(#[from] serde_json::Error),
     #[error("base64 decode error: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("expected an encrypted value but found plaintext")]
+    NotEncrypted,
 }
 
 #[cfg(test)]
@@ -581,6 +623,23 @@ mod tests {
         assert!(matches!(err, EncryptionError::InvalidHex));
     }
 
+    /// L-9: `from_hex_key`/`with_old_key` zeroize the decoded key bytes
+    /// after copying them into the cipher, rather than leaving them for a
+    /// plain `Drop` (which deallocates without clearing). That memory-level
+    /// guarantee isn't observable from safe Rust (and this workspace denies
+    /// `unsafe_code`, including in tests), so this pins the behavior one
+    /// level up: `Vec<u8>::zeroize()` (the exact call both sites make)
+    /// clears the vec's logical contents rather than being a no-op wrapper.
+    #[test]
+    fn vec_zeroize_clears_logical_contents() {
+        let mut buf: Vec<u8> = vec![0xAA; 32];
+        buf.zeroize();
+        assert!(
+            buf.iter().all(|&b| b == 0) || buf.is_empty(),
+            "zeroize must not leave the original key bytes readable"
+        );
+    }
+
     #[test]
     fn with_old_key_rejects_invalid_hex() {
         let enc = FieldEncryptor::from_bytes(&test_key());
@@ -692,6 +751,58 @@ mod tests {
             .encrypt_value_with_aad(&serde_json::json!("x"), b"aad")
             .unwrap();
         assert!(enc.decrypt_value(&encrypted).is_err());
+    }
+
+    /// M-2: `decrypt_value_strict` must round-trip a genuinely encrypted
+    /// value exactly like `decrypt_value`.
+    #[test]
+    fn decrypt_value_strict_decrypts_valid_ciphertext() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let original = serde_json::json!({"secret": "sauce"});
+        let encrypted = enc.encrypt_value(&original).unwrap();
+        let decrypted = enc.decrypt_value_strict(&encrypted).unwrap();
+        assert_eq!(original, decrypted);
+    }
+
+    /// M-2: unlike `decrypt_value`, an unprefixed plaintext string must be
+    /// rejected -- an always-encrypted field finding plaintext at rest means
+    /// the write path failed to encrypt it, and that must surface as an
+    /// error rather than be silently accepted as "already decrypted".
+    #[test]
+    fn decrypt_value_strict_rejects_plaintext_string() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let plain = serde_json::json!("not-encrypted-at-all");
+        assert!(matches!(
+            enc.decrypt_value_strict(&plain),
+            Err(EncryptionError::NotEncrypted)
+        ));
+    }
+
+    #[test]
+    fn decrypt_value_strict_rejects_non_string_value() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let obj = serde_json::json!({"already": "an object"});
+        assert!(matches!(
+            enc.decrypt_value_strict(&obj),
+            Err(EncryptionError::NotEncrypted)
+        ));
+    }
+
+    /// A v2 (AAD-bound) payload is still "encrypted", just via the wrong
+    /// entry point -- `decrypt_value_strict` should surface the same
+    /// `DecryptFailed` that plain `decrypt_value` gives for v2, not
+    /// `NotEncrypted` (which would incorrectly suggest the data was never
+    /// encrypted at all).
+    #[test]
+    fn decrypt_value_strict_rejects_v2_payload_as_decrypt_failed_not_not_encrypted() {
+        let enc = FieldEncryptor::from_bytes(&test_key());
+        let encrypted = enc
+            .encrypt_value_with_aad(&serde_json::json!("x"), b"aad")
+            .unwrap();
+        assert!(matches!(
+            enc.decrypt_value_strict(&encrypted),
+            Err(EncryptionError::DecryptFailed)
+        ));
     }
 
     #[test]
