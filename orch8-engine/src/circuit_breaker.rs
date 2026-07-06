@@ -311,10 +311,10 @@ impl CircuitBreakerRegistry {
         // ⚡ Bolt: Fast path read lock to avoid write-lock contention. If the circuit
         // is already fully Open, there is no need to increment the failure count
         // or acquire a write lock on the DashMap shard.
-        if let Some(breaker) = self.breakers.get(q) {
-            if breaker.state == BreakerState::Open {
-                return;
-            }
+        if let Some(breaker) = self.breakers.get(q)
+            && breaker.state == BreakerState::Open
+        {
+            return;
         }
 
         let mut tripped_snapshot = None;
