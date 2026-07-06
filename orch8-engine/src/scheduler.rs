@@ -713,14 +713,17 @@ async fn enforce_concurrency_limits(
     // the allocation and hashing overhead of building a HashSet for
     // exclusion checking on the execution hot path.
     deferred_indices.sort_unstable();
-    let kept = instances
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| deferred_indices.binary_search(i).is_err())
-        .map(|(_, inst)| inst)
-        .collect();
+    deferred_indices.dedup();
 
-    Ok(kept)
+    let mut i = 0;
+    let mut instances = instances;
+    instances.retain(|_| {
+        let keep = deferred_indices.binary_search(&i).is_err();
+        i += 1;
+        keep
+    });
+
+    Ok(instances)
 }
 
 /// Process signals for instances in paused/waiting state.

@@ -63,3 +63,7 @@
 ## 2024-06-28 - Avoid Deep String Allocation Overhead on Output Compaction
 **Learning:** `collect_body_block_ids` in `orch8-engine/src/evaluator.rs` was accepting a mutable `std::collections::HashSet<BlockId>`, resulting in deep heap allocation clones for every `BlockId` on the hot output compaction execution path.
 **Action:** Replaced `HashSet` with `Vec<&'a BlockId>`, utilizing borrowed references combined with `.sort_unstable()` and `.dedup()` to perform zero-allocation tracking. Search changed to `vec.binary_search()`.
+
+## 2025-10-31 - [Zero-Allocation In-Place Vector Filtering]
+**Learning:** In the `enforce_concurrency_limits` hot path within `orch8-engine/src/scheduler.rs`, filtering elements from a `Vec` into a new `Vec` via `into_iter().enumerate().filter(...).collect()` forces unnecessary reallocation of the underlying buffer. Using `retain` avoids this reallocation by filtering the `Vec` in-place, keeping memory consumption stable during heavy scheduling loads.
+**Action:** When filtering a vector that you already own on a hot path, always use `.retain()` instead of collecting into a new vector to avoid unnecessary memory allocations.
