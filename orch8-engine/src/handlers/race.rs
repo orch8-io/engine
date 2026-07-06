@@ -3,11 +3,42 @@ use tracing::debug;
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
-use orch8_types::sequence::RaceDef;
+use orch8_types::sequence::{RaceDef, RaceSemantics};
 
 use crate::error::EngineError;
 use crate::evaluator;
 use crate::handlers::HandlerRegistry;
+
+/// Cancel every non-terminal branch (and its entire subtree) once the race
+/// has been decided. A losing branch root may itself be a composite (e.g.
+/// parallel) that is Running while a descendant is Waiting on an external
+/// worker, so every descendant's worker tasks must be purged too.
+async fn cancel_non_terminal_siblings(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    tree: &[ExecutionNode],
+    children: &[&ExecutionNode],
+) -> Result<(), EngineError> {
+    for child in children {
+        if !matches!(
+            child.state,
+            NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
+        ) {
+            // Cancel the direct child's worker task first, then recurse
+            // into its subtree to cancel any descendant workers.
+            if child.state == NodeState::Waiting {
+                storage
+                    .cancel_worker_tasks_for_block(instance.id.into_uuid(), child.block_id.as_str())
+                    .await?;
+            }
+            evaluator::cancel_subtree(storage, instance.id, tree, child.id).await?;
+            storage
+                .update_node_state(child.id, NodeState::Cancelled)
+                .await?;
+        }
+    }
+    Ok(())
+}
 
 /// Execute a race block: first branch to complete wins.
 /// Remaining branches are cancelled. Returns `true` if more work.
@@ -31,35 +62,7 @@ pub async fn execute_race(
 
     // Check if any branch completed (winner).
     if evaluator::any_completed(&children) {
-        // Cancel all non-terminal branches and their entire subtrees.
-        // A losing branch root may itself be a composite (e.g. parallel)
-        // that is Running while a descendant is Waiting on an external
-        // worker. We must recursively cancel every descendant and purge
-        // their worker tasks so the race decision is fully honoured.
-        for child in &children {
-            if !matches!(
-                child.state,
-                NodeState::Completed
-                    | NodeState::Failed
-                    | NodeState::Cancelled
-                    | NodeState::Skipped
-            ) {
-                // Cancel the direct child's worker task first, then recurse
-                // into its subtree to cancel any descendant workers.
-                if child.state == NodeState::Waiting {
-                    storage
-                        .cancel_worker_tasks_for_block(
-                            instance.id.into_uuid(),
-                            child.block_id.as_str(),
-                        )
-                        .await?;
-                }
-                evaluator::cancel_subtree(storage, instance.id, tree, child.id).await?;
-                storage
-                    .update_node_state(child.id, NodeState::Cancelled)
-                    .await?;
-            }
-        }
+        cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
         evaluator::complete_node(storage, node.id).await?;
         debug!(
             instance_id = %instance.id,
@@ -69,7 +72,26 @@ pub async fn execute_race(
         return Ok(true);
     }
 
-    // If all failed (no winner), the race fails.
+    // `FirstToResolve` (the default): the first branch to reach ANY terminal
+    // state decides the race, whether that's a success or a failure. If a
+    // branch has already failed and no branch has won, fail fast instead of
+    // waiting for every remaining branch to also fail.
+    if matches!(race_def.semantics, RaceSemantics::FirstToResolve)
+        && children.iter().any(|c| c.state == NodeState::Failed)
+    {
+        cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
+        evaluator::fail_node(storage, node.id).await?;
+        debug!(
+            instance_id = %instance.id,
+            block_id = %race_def.id,
+            "race block failed fast — FirstToResolve semantics, a branch failed"
+        );
+        return Ok(true);
+    }
+
+    // `FirstToSucceed` (or `FirstToResolve` with no failures yet): the race
+    // only fails once every branch has reached a terminal state with no
+    // winner among them.
     if evaluator::all_terminal(&children) {
         evaluator::fail_node(storage, node.id).await?;
         debug!(
@@ -214,6 +236,14 @@ mod tests {
             id: BlockId::new(id),
             branches: vec![],
             semantics: RaceSemantics::default(),
+        }
+    }
+
+    fn race_def_with_semantics(id: &str, semantics: RaceSemantics) -> RaceDef {
+        RaceDef {
+            id: BlockId::new(id),
+            branches: vec![],
+            semantics,
         }
     }
 
@@ -609,6 +639,112 @@ mod tests {
             node_by_block(&after, "prior_fail").state,
             NodeState::Failed,
             "terminal sibling must retain its Failed state, not be re-cancelled",
+        );
+    }
+
+    // R9: FirstToResolve semantics — a branch failing while a sibling is still
+    // Running must fail the race immediately (fail-fast), not wait for the
+    // sibling to also finish. The still-running sibling must be cancelled.
+    #[tokio::test]
+    async fn r9_first_to_resolve_fails_fast_on_first_branch_failure() {
+        let inst_id = InstanceId::new();
+        let race = mk_node(
+            inst_id,
+            "race",
+            BlockType::Race,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let failed = mk_node(
+            inst_id,
+            "failed",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Failed,
+        );
+        let still_running = mk_node(
+            inst_id,
+            "busy",
+            BlockType::Step,
+            Some(race.id),
+            Some(1),
+            NodeState::Running,
+        );
+        let (s, tree) = setup(vec![race.clone(), failed, still_running], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let race_node = node_by_block(&tree, "race").clone();
+        let def = race_def_with_semantics("race", RaceSemantics::FirstToResolve);
+
+        execute_race(&s, &registry, &inst, &race_node, &def, &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(
+            node_by_block(&after, "race").state,
+            NodeState::Failed,
+            "FirstToResolve: a branch failing must fail the race immediately"
+        );
+        assert_eq!(
+            node_by_block(&after, "busy").state,
+            NodeState::Cancelled,
+            "the still-running sibling must be cancelled once the race is decided"
+        );
+    }
+
+    // R10: FirstToSucceed semantics — a branch failing while a sibling is
+    // still Running must NOT fail the race yet; it stays Running until either
+    // a winner emerges or every branch is terminal.
+    #[tokio::test]
+    async fn r10_first_to_succeed_tolerates_a_failure_while_sibling_still_running() {
+        let inst_id = InstanceId::new();
+        let race = mk_node(
+            inst_id,
+            "race",
+            BlockType::Race,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let failed = mk_node(
+            inst_id,
+            "failed",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Failed,
+        );
+        let still_running = mk_node(
+            inst_id,
+            "busy",
+            BlockType::Step,
+            Some(race.id),
+            Some(1),
+            NodeState::Running,
+        );
+        let (s, tree) = setup(vec![race.clone(), failed, still_running], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let race_node = node_by_block(&tree, "race").clone();
+        let def = race_def_with_semantics("race", RaceSemantics::FirstToSucceed);
+
+        execute_race(&s, &registry, &inst, &race_node, &def, &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(
+            node_by_block(&after, "race").state,
+            NodeState::Running,
+            "FirstToSucceed: one branch failing must not resolve the race while a sibling is still running"
+        );
+        assert_eq!(
+            node_by_block(&after, "busy").state,
+            NodeState::Running,
+            "the still-running sibling must not be touched"
         );
     }
 }

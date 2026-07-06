@@ -615,10 +615,20 @@ impl SyncOrchestrator {
                 }
             }
 
-            let seq: SequenceDefinition =
-                serde_json::from_str(&seq_json).map_err(|e| MobileError::InvalidInput {
-                    message: format!("sequence JSON invalid: {e}"),
-                })?;
+            // H-14: a single poison manifest entry (passes hash + signature
+            // but fails to deserialize) must not abort the whole sync — skip
+            // just this entry so every other sequence in the manifest still
+            // syncs, and so the caller's ETag/version persistence (which only
+            // runs on a successful return) isn't blocked forever by one bad
+            // entry the server will keep serving on every future sync.
+            let seq: SequenceDefinition = match serde_json::from_str(&seq_json) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    warn!(name = %entry.name, error = %e, "sequence JSON invalid — skipping");
+                    sig_failures += 1;
+                    continue;
+                }
+            };
 
             self.upsert_sequence(&seq).await?;
             if existing.is_some() {
@@ -813,28 +823,37 @@ impl SyncOrchestrator {
     async fn upsert_sequence(&self, seq: &SequenceDefinition) -> Result<(), MobileError> {
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
-        if let Ok(Some(existing)) = self
+        match self
             .backend
             .get_sequence_by_name(&tenant, &ns, &seq.name, None)
             .await
         {
-            // Propagate delete failures — silently continuing into
-            // create_sequence with the old row still present either violates
-            // the unique constraint or leaves duplicate rows, and the sync
-            // would report success for an update that never happened.
-            self.backend
-                .delete_sequence(existing.id)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: format!("failed to replace sequence '{}': {e}", seq.name),
-                })?;
+            Ok(Some(existing)) => {
+                // M-18: delete-then-create as two independent calls could
+                // leave the old row deleted with the new one never created if
+                // create_sequence failed in between. `replace_sequence` runs
+                // both in a single transaction so the upsert is all-or-nothing.
+                self.backend
+                    .replace_sequence(existing.id, seq)
+                    .await
+                    .map_err(|e| MobileError::Storage {
+                        message: format!("failed to replace sequence '{}': {e}", seq.name),
+                    })?;
+            }
+            Ok(None) => {
+                self.backend
+                    .create_sequence(seq)
+                    .await
+                    .map_err(|e| MobileError::Storage {
+                        message: e.to_string(),
+                    })?;
+            }
+            Err(e) => {
+                return Err(MobileError::Storage {
+                    message: e.to_string(),
+                });
+            }
         }
-        self.backend
-            .create_sequence(seq)
-            .await
-            .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
-            })?;
         Ok(())
     }
 
@@ -1573,6 +1592,193 @@ mod tests {
         // download-failure path, not the skip-before-download check this
         // test targets. What matters here is that `connected` is true.
         assert_eq!(skipped, 1);
+    }
+
+    /// H-14: a poison manifest entry — one that passes hash AND signature
+    /// verification but fails to deserialize as a `SequenceDefinition` —
+    /// must not abort the whole sync. Every other entry in the same manifest
+    /// must still be processed (previously a bare `?` on the JSON parse
+    /// propagated an error out of the whole loop).
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::case_sensitive_file_extension_comparisons
+    )]
+    async fn download_and_verify_sequences_skips_poison_entry_but_processes_the_rest_h14() {
+        use ed25519_dalek::Signer;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+
+        // Valid signature + hash over bytes that are NOT a valid SequenceDefinition.
+        let poison_json = br#"{"not": "a sequence"}"#.to_vec();
+        let poison_hash = to_hex(&Sha256::digest(&poison_json));
+        let poison_sig = signing_key.sign(&poison_json);
+
+        let good_seq = make_test_sequence("seq-good", Utc::now());
+        let good_json = serde_json::to_vec(&good_seq).unwrap();
+        let good_hash = to_hex(&Sha256::digest(&good_json));
+        let good_sig = signing_key.sign(&good_json);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // 4 requests total: poison.json, poison.sig, good.json, good.sig.
+            for _ in 0..4 {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                let body: Vec<u8> = if path.contains("poison") {
+                    if path.ends_with(".sig") {
+                        BASE64.encode(poison_sig.to_bytes()).into_bytes()
+                    } else {
+                        poison_json.clone()
+                    }
+                } else if path.ends_with(".sig") {
+                    BASE64.encode(good_sig.to_bytes()).into_bytes()
+                } else {
+                    good_json.clone()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+            }
+        });
+
+        let manifest = Manifest {
+            signing_keys: vec![],
+            sequences: vec![
+                ManifestSequenceEntry {
+                    name: "seq-poison".to_string(),
+                    version: 1,
+                    url: format!("http://127.0.0.1:{port}/poison.json"),
+                    signing_key_id: "k1".to_string(),
+                    sha256: poison_hash,
+                    required_handlers: vec![],
+                    min_sdk_version: "0.0.0".to_string(),
+                },
+                ManifestSequenceEntry {
+                    name: "seq-good".to_string(),
+                    version: 1,
+                    url: format!("http://127.0.0.1:{port}/good.json"),
+                    signing_key_id: "k1".to_string(),
+                    sha256: good_hash,
+                    required_handlers: vec![],
+                    min_sdk_version: "0.0.0".to_string(),
+                },
+            ],
+            removed: vec![],
+            manifest_version: 1,
+            generated_at: Utc::now(),
+        };
+
+        let mut trusted_keys = HashMap::new();
+        trusted_keys.insert("k1".to_string(), verifying_key);
+        let local_sequences = HashMap::new();
+
+        let (added, updated, skipped, sig_failures) = orch
+            .download_and_verify_sequences(
+                &manifest,
+                &SyncAuth::UrlToken,
+                &HashSet::new(),
+                &local_sequences,
+                &mut trusted_keys,
+            )
+            .await
+            .expect("H-14: a poison entry must not abort the whole sync");
+
+        server.await.unwrap();
+
+        assert_eq!(
+            sig_failures, 1,
+            "the poison entry must be counted as a failure, not abort the sync"
+        );
+        assert_eq!(
+            added, 1,
+            "the well-formed sibling entry must still be processed"
+        );
+        assert_eq!(updated, 0);
+        assert_eq!(skipped, 0);
+    }
+
+    /// M-18: `upsert_sequence` used to delete the old row then create the new
+    /// one as two independent calls — if the create step failed, the old row
+    /// was gone forever with the new one never persisted. `replace_sequence`
+    /// now runs both in one transaction, so a failed create must roll back to
+    /// the pre-upsert state instead of orphaning the sequence.
+    #[tokio::test]
+    async fn upsert_sequence_rolls_back_atomically_when_create_step_fails_m18() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend.clone(),
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        // Existing sequence that the upsert will attempt to replace.
+        let existing = make_test_sequence("seq-a", Utc::now());
+        let existing_id = existing.id;
+        backend.create_sequence(&existing).await.unwrap();
+
+        // A second, unrelated sequence whose id we'll deliberately collide
+        // with, to force the create step of the replace to fail.
+        let other = make_test_sequence("seq-other", Utc::now());
+        backend.create_sequence(&other).await.unwrap();
+
+        // "New" definition for seq-a that reuses `other`'s id — the INSERT
+        // will hit a PRIMARY KEY conflict.
+        let mut conflicting_new = make_test_sequence("seq-a", Utc::now());
+        conflicting_new.id = other.id;
+
+        let result = orch.upsert_sequence(&conflicting_new).await;
+        assert!(result.is_err(), "the conflicting create must fail");
+
+        let still_there = backend.get_sequence(existing_id).await.unwrap();
+        assert!(
+            still_there.is_some(),
+            "M-18: the old sequence must survive a failed replace, not be left deleted"
+        );
+        let other_untouched = backend.get_sequence(other.id).await.unwrap();
+        assert!(
+            other_untouched.is_some(),
+            "the unrelated sequence must be untouched"
+        );
     }
 
     /// M-23: previously a 429 was not retried at all (only 5xx and

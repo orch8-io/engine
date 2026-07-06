@@ -4,8 +4,11 @@ use orch8_types::ids::*;
 use super::SqliteStorage;
 use super::helpers::{row_to_sequence, ts};
 
-pub(super) async fn create(
-    storage: &SqliteStorage,
+/// Insert a sequence row using an already-open connection/transaction. Shared
+/// by [`create`] (its own transaction) and [`replace`] (same transaction as
+/// the preceding delete, for atomicity).
+async fn create_on(
+    conn: &mut sqlx::SqliteConnection,
     seq: &orch8_types::sequence::SequenceDefinition,
 ) -> Result<(), StorageError> {
     let blocks = serde_json::to_string(&seq.blocks)?;
@@ -47,7 +50,17 @@ pub(super) async fn create(
     .bind(&on_failure)
     .bind(&on_cancel)
     .bind(ts(seq.created_at))
-    .execute(&storage.pool).await?;
+    .execute(conn).await?;
+    Ok(())
+}
+
+pub(super) async fn create(
+    storage: &SqliteStorage,
+    seq: &orch8_types::sequence::SequenceDefinition,
+) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    create_on(&mut tx, seq).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -139,16 +152,18 @@ pub(super) async fn update_status(
     Ok(())
 }
 
-pub(super) async fn delete(storage: &SqliteStorage, id: SequenceId) -> Result<(), StorageError> {
-    let mut tx = storage.pool.begin().await?;
-
+/// Delete a sequence row (and its dependent instances/cron schedules) using
+/// an already-open connection/transaction. Shared by [`delete`] (its own
+/// transaction) and [`replace`] (same transaction as the following insert,
+/// for atomicity).
+async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<(), StorageError> {
     let id_str = id.to_string();
 
     // Gather instance IDs referencing this sequence.
     let instance_ids: Vec<String> =
         sqlx::query_scalar("SELECT id FROM task_instances WHERE sequence_id = ?1")
             .bind(&id_str)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?;
 
     if !instance_ids.is_empty() {
@@ -179,25 +194,48 @@ pub(super) async fn delete(storage: &SqliteStorage, id: SequenceId) -> Result<()
                 sep.push_bind(iid);
             }
             sep.push_unseparated(")");
-            qb.build().execute(&mut *tx).await?;
+            qb.build().execute(&mut *conn).await?;
         }
 
         sqlx::query("DELETE FROM task_instances WHERE sequence_id = ?1")
             .bind(&id_str)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     }
 
     sqlx::query("DELETE FROM cron_schedules WHERE sequence_id = ?1")
         .bind(&id_str)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
     sqlx::query("DELETE FROM sequences WHERE id = ?1")
         .bind(&id_str)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
+    Ok(())
+}
+
+pub(super) async fn delete(storage: &SqliteStorage, id: SequenceId) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    delete_on(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomically replace a sequence: delete `old_id` and insert `new` as a
+/// single transaction. Used when upserting a same-name sequence with a new
+/// definition (e.g. mobile sync's `upsert_sequence`) so a mid-operation
+/// failure can't leave the old row deleted with the new one never created —
+/// see M-18 in `docs/DEEP_REVIEW_2026-07.md`.
+pub(super) async fn replace(
+    storage: &SqliteStorage,
+    old_id: SequenceId,
+    new: &orch8_types::sequence::SequenceDefinition,
+) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    delete_on(&mut tx, old_id).await?;
+    create_on(&mut tx, new).await?;
     tx.commit().await?;
     Ok(())
 }

@@ -140,6 +140,23 @@ pub trait SequenceStore: Send + Sync + 'static {
     /// Delete a sequence by ID.
     async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError>;
 
+    /// Atomically replace a sequence: delete `old_id` and insert `new` as a
+    /// single unit. Used when upserting a same-name sequence with a new
+    /// definition (e.g. mobile sync) so a mid-operation failure can't leave
+    /// the old row deleted with the new one never created.
+    ///
+    /// The default impl is a **non-atomic** delete-then-create for backends
+    /// that don't override it -- overriding backends must wrap both
+    /// operations in a single transaction (see `sqlite::sequences::replace`).
+    async fn replace_sequence(
+        &self,
+        old_id: SequenceId,
+        new: &SequenceDefinition,
+    ) -> Result<(), StorageError> {
+        self.delete_sequence(old_id).await?;
+        self.create_sequence(new).await
+    }
+
     // === Manifest advisory lock (Postgres only) ===
 
     async fn acquire_manifest_lock(&self, _tenant_id: &str) -> Result<(), StorageError> {

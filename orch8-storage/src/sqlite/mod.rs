@@ -427,6 +427,14 @@ impl crate::SequenceStore for SqliteStorage {
         sequences::delete(self, id).await
     }
 
+    async fn replace_sequence(
+        &self,
+        old_id: SequenceId,
+        new: &SequenceDefinition,
+    ) -> Result<(), StorageError> {
+        sequences::replace(self, old_id, new).await
+    }
+
     // SQLite has no advisory-lock primitive, so `manifest_locks` (a real
     // table, tenant_id as PK) stands in for one. Poll-with-backoff until the
     // row can be inserted rather than blocking on a DB-level lock -- SQLite's

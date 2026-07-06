@@ -15,7 +15,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use orch8_storage::postgres::PostgresStorage;
-use orch8_storage::{InstanceStore, MobileSyncStore, SchedulingStore, SequenceStore, WorkerStore};
+use orch8_storage::{
+    InstanceStore, MobileSyncStore, ResourceStore, SchedulingStore, SequenceStore, WorkerStore,
+};
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -398,4 +400,46 @@ async fn heartbeat_instance_renews_lease_on_postgres() {
         refreshed_done.updated_at < Utc::now() - chrono::Duration::minutes(30),
         "heartbeat must not touch a non-running/waiting instance"
     );
+}
+
+/// Regression test: `postgres::externalized::batch_save` used to build each
+/// bulk INSERT with `QueryBuilder::new("... VALUES ")` and then call
+/// `push_values(...)`, which *also* emits its own `VALUES` clause — producing
+/// a literal `VALUES VALUES (...)` and a Postgres syntax error on every
+/// non-empty call, on both the compressed and inline branches. Covers both
+/// branches (a large payload crosses the zstd compression threshold, a small
+/// one stays inline) in a single batch.
+#[tokio::test]
+async fn batch_save_externalized_state_mixed_sizes_does_not_hit_sql_syntax_error() {
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&inst).await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let small_key = format!("bs-small-{suffix}");
+    let large_key = format!("bs-large-{suffix}");
+    let entries = vec![
+        (small_key.clone(), serde_json::json!({"n": 1})),
+        (
+            large_key.clone(),
+            serde_json::json!({"blob": "x".repeat(5_000)}),
+        ),
+    ];
+
+    InstanceStore::batch_save_externalized_state(&s, inst.id, &entries)
+        .await
+        .expect("batch_save_externalized_state must not hit a SQL syntax error");
+
+    let fetched = s
+        .batch_get_externalized_state(&[small_key.clone(), large_key.clone()])
+        .await
+        .unwrap();
+    assert_eq!(fetched.len(), 2);
+    assert_eq!(fetched[&small_key], entries[0].1);
+    assert_eq!(fetched[&large_key], entries[1].1);
 }

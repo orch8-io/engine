@@ -9,6 +9,61 @@ use tracing::debug;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// `SigV4` URI-encode a single path segment or query key/value: percent-encode
+/// every byte except unreserved characters (`A-Z a-z 0-9 - . _ ~`), per the
+/// AWS Signature Version 4 spec (`UriEncode`).
+fn sigv4_uri_encode(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for b in s.bytes() {
+        let c = b as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
+            out.push(c);
+        } else {
+            out.push('%');
+            write!(out, "{b:02X}").unwrap();
+        }
+    }
+    out
+}
+
+/// `SigV4` canonical URI: percent-encode each path segment individually,
+/// leaving the `/` separators alone (M-22 fix — previously the raw,
+/// unencoded `url.path()` was used, so any reserved character in the path
+/// broke the signature's byte-for-byte match with what S3 recomputes).
+fn canonical_uri(path: &str) -> String {
+    path.split('/')
+        .map(sigv4_uri_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `SigV4` canonical query string: percent-encode each key/value, then sort
+/// the pairs by (encoded key, encoded value) in byte order (M-22 fix —
+/// previously the raw, unsorted `url.query()` was used, so a request with
+/// out-of-order or unencoded query params produced a signature S3 would
+/// reject).
+fn canonical_query(query: Option<&str>) -> String {
+    let Some(q) = query.filter(|q| !q.is_empty()) else {
+        return String::new();
+    };
+    let mut pairs: Vec<(String, String)> = q
+        .split('&')
+        .map(|kv| {
+            let mut it = kv.splitn(2, '=');
+            let k = it.next().unwrap_or("");
+            let v = it.next().unwrap_or("");
+            (sigv4_uri_encode(k), sigv4_uri_encode(v))
+        })
+        .collect();
+    pairs.sort();
+    pairs
+        .into_iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Trait for CDN backends (S3, R2, GCS, etc.).
 #[async_trait::async_trait]
 pub trait CdnBackend: Send + Sync {
@@ -132,8 +187,8 @@ impl S3CdnBackend {
 
         let canonical_request = format!(
             "{method}\n{uri}\n{query_string}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
-            uri = url.path(),
-            query_string = url.query().unwrap_or(""),
+            uri = canonical_uri(url.path()),
+            query_string = canonical_query(url.query()),
         );
 
         let scope = format!("{date_stamp}/{}/s3/aws4_request", self.region);
@@ -361,6 +416,48 @@ mod tests {
         backend.delete("test.txt").await.unwrap();
         let etag = backend.get_etag("test.txt").await.unwrap();
         assert!(etag.is_none());
+    }
+
+    // M-22: reserved characters in a path segment must be percent-encoded
+    // per the SigV4 spec, not passed through raw.
+    #[test]
+    fn canonical_uri_percent_encodes_reserved_characters() {
+        assert_eq!(
+            canonical_uri("/manifests/v1 (draft).json"),
+            "/manifests/v1%20%28draft%29.json"
+        );
+        assert_eq!(canonical_uri("/a/b/c"), "/a/b/c");
+        assert_eq!(canonical_uri("/unreserved-._~ok"), "/unreserved-._~ok");
+    }
+
+    // M-22: query parameters must be sorted by key (then value) — an
+    // out-of-order query string must canonicalize identically regardless of
+    // the order the caller happened to build it in.
+    #[test]
+    fn canonical_query_sorts_out_of_order_params() {
+        assert_eq!(
+            canonical_query(Some("b=2&a=1")),
+            canonical_query(Some("a=1&b=2")),
+        );
+        assert_eq!(canonical_query(Some("b=2&a=1")), "a=1&b=2");
+    }
+
+    // M-22: repeated keys with different values must be sorted by value too,
+    // not left in encounter order.
+    #[test]
+    fn canonical_query_sorts_repeated_keys_by_value() {
+        assert_eq!(canonical_query(Some("k=2&k=1")), "k=1&k=2");
+    }
+
+    #[test]
+    fn canonical_query_percent_encodes_keys_and_values() {
+        assert_eq!(canonical_query(Some("a b=c d")), "a%20b=c%20d");
+    }
+
+    #[test]
+    fn canonical_query_empty_or_none_is_empty_string() {
+        assert_eq!(canonical_query(None), "");
+        assert_eq!(canonical_query(Some("")), "");
     }
 
     #[test]

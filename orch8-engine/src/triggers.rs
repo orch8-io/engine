@@ -17,10 +17,20 @@ use orch8_types::ids::{InstanceId, Namespace};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
+/// A running listener's cancel token plus the config it was started with, so
+/// `sync_triggers` can detect an in-place config edit (same slug, different
+/// `trigger_type`/`config`) and restart the listener instead of leaving it
+/// running against stale configuration.
+struct ActiveListener {
+    cancel: CancellationToken,
+    trigger_type: TriggerType,
+    config: serde_json::Value,
+}
+
 /// Tracks active trigger listeners so we can start/stop them as definitions change.
 struct ActiveTriggers {
-    /// Map of slug -> cancel token for the listener task.
-    listeners: HashMap<String, CancellationToken>,
+    /// Map of slug -> the listener currently running for it.
+    listeners: HashMap<String, ActiveListener>,
 }
 
 /// Run the trigger processor loop. Periodically syncs trigger definitions from DB
@@ -49,9 +59,9 @@ pub async fn run_trigger_loop(
                 // Cancel all active listeners.
                 {
                     let active = active.read().await;
-                    for (slug, token) in &active.listeners {
+                    for (slug, listener) in &active.listeners {
                         debug!(slug, "cancelling trigger listener");
-                        token.cancel();
+                        listener.cancel.cancel();
                     }
                 }
                 return;
@@ -86,28 +96,43 @@ async fn sync_triggers(
             .map(|t| (t.slug.clone(), t))
             .collect();
 
-        // Stop listeners for triggers that were removed or disabled.
+        // Stop listeners for triggers that were removed, disabled, or whose
+        // trigger_type/config changed in place — a config edit under the same
+        // slug must restart the listener rather than keep running the old one.
         let to_remove: Vec<String> = active
             .listeners
-            .keys()
-            .filter(|slug| !desired.contains_key(*slug))
-            .cloned()
+            .iter()
+            .filter(|(slug, existing)| match desired.get(*slug) {
+                None => true,
+                Some(trigger) => {
+                    existing.trigger_type != trigger.trigger_type
+                        || existing.config != trigger.config
+                }
+            })
+            .map(|(slug, _)| slug.clone())
             .collect();
         for slug in to_remove {
-            if let Some(token) = active.listeners.remove(&slug) {
+            if let Some(listener) = active.listeners.remove(&slug) {
                 info!(slug, "stopping trigger listener");
-                token.cancel();
+                listener.cancel.cancel();
             }
         }
 
-        // Start listeners for new triggers.
+        // Start listeners for new or just-restarted triggers.
         for (slug, trigger) in &desired {
             if active.listeners.contains_key(slug) {
                 continue;
             }
 
             let child_cancel = parent_cancel.child_token();
-            active.listeners.insert(slug.clone(), child_cancel.clone());
+            active.listeners.insert(
+                slug.clone(),
+                ActiveListener {
+                    cancel: child_cancel.clone(),
+                    trigger_type: trigger.trigger_type.clone(),
+                    config: trigger.config.clone(),
+                },
+            );
 
             match trigger.trigger_type {
                 #[cfg(feature = "nats")]
@@ -771,5 +796,78 @@ mod tests {
         let stored = storage.get_instance(id).await.unwrap().unwrap();
         assert_eq!(stored.namespace.as_str(), "prod");
         assert_eq!(stored.sequence_id, seq_id);
+    }
+
+    // M-8: editing a trigger's config in place (same slug) must restart its
+    // listener — the old CancellationToken must be cancelled and a fresh one
+    // issued — rather than leave the stale-config listener running forever.
+    #[tokio::test]
+    async fn sync_triggers_restarts_listener_when_config_changes_in_place_m8() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut trigger = mk_trigger("t-m8", "seq", TriggerType::ActivepiecesPoll);
+        trigger.config = serde_json::json!({"poll_url": "https://a.example.com"});
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let active = Arc::new(RwLock::new(ActiveTriggers {
+            listeners: HashMap::new(),
+        }));
+        let cancel = CancellationToken::new();
+
+        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        let token_v1 = {
+            let active = active.read().await;
+            active.listeners.get("t-m8").unwrap().cancel.clone()
+        };
+        assert!(
+            !token_v1.is_cancelled(),
+            "freshly started listener must not be cancelled"
+        );
+
+        // Edit the trigger's config in place — same slug, different config.
+        trigger.config = serde_json::json!({"poll_url": "https://b.example.com"});
+        storage.update_trigger(&trigger).await.unwrap();
+
+        sync_triggers(&storage, &active, &cancel).await.unwrap();
+
+        assert!(
+            token_v1.is_cancelled(),
+            "M-8: the old listener must be cancelled when its config changes in place"
+        );
+        let token_v2 = {
+            let active = active.read().await;
+            active.listeners.get("t-m8").unwrap().cancel.clone()
+        };
+        assert!(
+            !token_v2.is_cancelled(),
+            "a fresh listener must be running with the new config"
+        );
+    }
+
+    // Contrast case: re-syncing with an UNCHANGED trigger must not restart
+    // the listener (no unnecessary churn).
+    #[tokio::test]
+    async fn sync_triggers_leaves_listener_running_when_config_is_unchanged() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut trigger = mk_trigger("t-stable", "seq", TriggerType::ActivepiecesPoll);
+        trigger.config = serde_json::json!({"poll_url": "https://a.example.com"});
+        storage.create_trigger(&trigger).await.unwrap();
+
+        let active = Arc::new(RwLock::new(ActiveTriggers {
+            listeners: HashMap::new(),
+        }));
+        let cancel = CancellationToken::new();
+
+        sync_triggers(&storage, &active, &cancel).await.unwrap();
+        let token_v1 = {
+            let active = active.read().await;
+            active.listeners.get("t-stable").unwrap().cancel.clone()
+        };
+
+        sync_triggers(&storage, &active, &cancel).await.unwrap();
+
+        assert!(
+            !token_v1.is_cancelled(),
+            "re-syncing an unchanged trigger must not cancel/restart its listener"
+        );
     }
 }

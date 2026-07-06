@@ -130,8 +130,7 @@ pub(super) async fn batch_save(
     for chunk in compressed.chunks(500) {
         let mut qb = sqlx::QueryBuilder::new(
             r"INSERT INTO externalized_state
-                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
-              VALUES ",
+                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at) ",
         );
         qb.push_values(chunk, |mut b, (ref_key, payload_bytes, size_bytes)| {
             b.push_bind(Uuid::now_v7())
@@ -156,8 +155,7 @@ pub(super) async fn batch_save(
     for chunk in inline.chunks(500) {
         let mut qb = sqlx::QueryBuilder::new(
             r"INSERT INTO externalized_state
-                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at)
-              VALUES ",
+                  (id, instance_id, ref_key, payload, payload_bytes, compression, size_bytes, created_at) ",
         );
         qb.push_values(chunk, |mut b, (ref_key, payload, size_bytes)| {
             b.push_bind(Uuid::now_v7())
