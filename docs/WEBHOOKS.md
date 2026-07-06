@@ -1,6 +1,6 @@
 # Webhooks
 
-The engine POSTs JSON event payloads to URLs you configure when instances reach terminal states. Webhooks are fire-and-forget with retry; they do not block the scheduler.
+The engine POSTs JSON event payloads to URLs you configure when instances reach terminal states. Webhooks are delivered asynchronously with retry — they do not block the scheduler — and deliveries that exhaust their retries are parked in a queryable outbox.
 
 ---
 
@@ -16,12 +16,14 @@ urls = [
 ]
 timeout_secs = 10
 max_retries = 3
+secret = "<shared-hmac-secret>"  # optional — enables payload signing
 ```
 
 Or via environment:
 
 ```bash
 ORCH8_WEBHOOK_URLS="https://hooks.internal/orch8-events,https://hooks.staging.acme.com/orch8"
+ORCH8_WEBHOOK_SECRET="<shared-hmac-secret>"
 ```
 
 All configured URLs receive every event. There is no per-tenant or per-event filtering today — subscribe by URL and filter in your endpoint.
@@ -33,9 +35,10 @@ All configured URLs receive every event. There is no per-tenant or per-event fil
 | `event_type` | Fires when | `data` shape |
 |---|---|---|
 | `instance.completed` | Instance reaches terminal `completed` state | `{}` |
-| `instance.failed` | Instance reaches terminal `failed` state (including DLQ entry after retry exhaustion) | `{}` |
+| `instance.failed` | Instance reaches terminal `failed` state (including DLQ entry after retry exhaustion) | `{}`, or `{"error": "<message>"}` on some failure paths |
+| `instance.sla_breached` | An instance with an `sla` policy exceeds `max_runtime` or `max_step_runtime` | `{"type", "limit_ms", "elapsed_ms", "step_id", "sequence_id", "tenant_id"}` |
 
-Only instance-terminal events are emitted today. Block-level and signal events are not published.
+Block-level and signal events are not published.
 
 ---
 
@@ -66,15 +69,16 @@ Only instance-terminal events are emitted today. Block-level and signal events a
 - **Retries.** `max_retries` is the number of retries _after_ the first attempt. With the default `max_retries = 3` a single event is attempted up to 4 times total.
 - **Backoff.** Exponential starting at 500ms: `500ms → 1s → 2s → 4s → ...`. Doubles on each attempt.
 - **Success.** Any `2xx` or `3xx` HTTP status counts as success.
-- **Failure.** `4xx` and `5xx` are both retried until `max_retries` is exhausted. On exhaustion the engine logs the failure and increments the `orch8_webhooks_failed_total` counter. **The event is dropped.** There is no dead-letter storage for failed webhooks.
-- **Shutdown.** In-flight retries are aborted by the shutdown cancellation token. Tune `shutdown_grace_period_secs` if you need more time to drain.
+- **Failure.** `4xx` and `5xx` are both retried until `max_retries` is exhausted. On exhaustion the engine logs the failure, increments `orch8_webhooks_failed_total`, and **parks the event in the webhook outbox** (`orch8_webhooks_parked_total`) instead of dropping it. Inspect and act on parked events via the API: `GET /webhooks/outbox` to list, `POST /webhooks/outbox/{id}/redeliver` to retry, `DELETE /webhooks/outbox/{id}` to discard.
+- **Shutdown.** In-flight deliveries are tracked and awaited at shutdown (up to 10s) before the runtime exits. A retry loop interrupted by shutdown parks its event in the outbox rather than losing it.
 
 ### Guidance for subscribers
 
 1. **Idempotency.** Use `instance_id` + `event_type` as your de-duplication key.
 2. **Return quickly.** Acknowledge within `timeout_secs` (default 10s) and do work asynchronously.
 3. **Return 2xx fast.** Any slow response eats into your subscriber's capacity and increases retry pressure.
-4. **Don't depend on webhooks alone for consistency.** Treat them as a latency optimization on top of periodic `GET /instances` polling if you need guaranteed delivery.
+4. **Don't depend on webhooks alone for consistency.** Delivery is at-least-once and exhausted events require an operator (or automation) to redeliver from the outbox. Treat webhooks as a latency optimization on top of periodic `GET /instances` polling if you need guaranteed delivery.
+5. **Monitor the outbox.** Alert on `orch8_webhooks_parked_total` and drain `GET /webhooks/outbox` — parked events are not retried automatically.
 
 ---
 
@@ -102,7 +106,8 @@ Exposed at `/metrics` in Prometheus format:
 | Metric | Type | Description |
 |---|---|---|
 | `orch8_webhooks_sent_total` | Counter | Successful deliveries (2xx/3xx response) |
-| `orch8_webhooks_failed_total` | Counter | Events dropped after exhausting all retries |
+| `orch8_webhooks_failed_total` | Counter | Deliveries that exhausted all retries |
+| `orch8_webhooks_parked_total` | Counter | Exhausted deliveries parked in the webhook outbox |
 
 ---
 

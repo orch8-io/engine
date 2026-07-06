@@ -8,7 +8,7 @@ The common thread across all embedding contexts: the engine replaces something t
 
 ## Mobile Applications
 
-Rust compiles to native libraries for iOS (`.a` via `aarch64-apple-ios`) and Android (`.so` via NDK). Expose the engine through a C FFI layer and wrap it with Swift or Kotlin bindings using [UniFFI](https://github.com/mozilla/uniffi-rs).
+Rust compiles to native libraries for iOS (`.a` via `aarch64-apple-ios`) and Android (`.so` via NDK). This is shipped: the `orch8-mobile` crate embeds the engine with an SQLite backend and exposes Swift/Kotlin bindings via [UniFFI](https://github.com/mozilla/uniffi-rs). See [MOBILE_SDK.md](MOBILE_SDK.md).
 
 **Architecture**
 
@@ -23,7 +23,7 @@ Mobile App
 
 ### Load sequences from the server
 
-Sequence definitions are JSON. A device can fetch a sequence from a server at runtime, cache it in SQLite, and run it locally — including offline.
+Sequence definitions are JSON. A device can fetch a sequence from a server at runtime, cache it in SQLite, and run it locally — including offline. The shipped sync pipeline (`orch8-publisher` → CDN → `orch8-mobile`) delivers Ed25519-signed sequence manifests: devices verify signatures and manifest-version monotonicity before installing anything, and skip re-downloading sequences whose version/hash is unchanged.
 
 ```
 Server                          Mobile Device

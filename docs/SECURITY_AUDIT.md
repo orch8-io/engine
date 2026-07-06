@@ -68,11 +68,25 @@ internal `reqwest` client also followed HTTP redirects by default.
 ## Remaining Design-Level Items (not addressed in this pass)
 
 The following are documented as architectural/security design concerns that
-were out of scope for this tactical fix round:
+were out of scope for this tactical fix round.
+
+*Status update (2026-07-06):* the July 2026 deep-review fix pass (merge
+`40da554`, PR #90 merge `9305586`) closed two of these:
+
+- ✅ `orch8-storage` single-row lookups lack tenant predicates — fixed:
+  `get_credential`, `get_trigger`, and `get_plugin` now take a
+  `tenant_id: Option<&TenantId>` parameter, so scoping is enforced by the
+  signatures.
+- ✅ `orch8-storage` plaintext secrets unless `EncryptingStorage` wrapper is
+  used — mitigated: the server now fails closed at boot without an encryption
+  key (an explicit `--insecure-storage` opt-out is required), and encryption
+  coverage was extended to block outputs, worker-task params/context, signal
+  payloads, externalized state, instance KV state, checkpoints, and step logs
+  (with tenant/field-bound AAD, `enc:v2:`).
+
+Still open:
 
 - `orch8` crate scheduler does not scope ticks by tenant.
-- `orch8-storage` single-row lookups lack tenant predicates in some paths.
-- `orch8-storage` plaintext secrets unless `EncryptingStorage` wrapper is used.
 - `orch8-grpc` synchronous `block_in_place` auth interceptor.
 - `orch8-engine` SSRF DNS-rebinding window and expression/template depth limits.
 - `orch8-publisher` CDN endpoint HTTPS enforcement pending review.

@@ -94,6 +94,22 @@ Required top-level fields:
 | `blocks` | Non-empty array of blocks. Every block ID must be globally unique inside the sequence. |
 | `created_at` | RFC 3339 timestamp string. |
 
+Optional top-level fields:
+
+| Field | Use |
+|---|---|
+| `input_schema` | JSON Schema validated against `context.data` at instance create. A create whose data fails validation is rejected with HTTP 422. Also drives the dashboard's run form. |
+| `sla` | Alert-only SLA policy: `{ "max_runtime": ms, "max_step_runtime": ms }`. A breach fires an `instance.sla_breached` webhook and a metric; the instance keeps running. |
+| `on_failure` | Best-effort cleanup blocks run when the instance reaches terminal `Failed`. Errors are swallowed. |
+| `on_cancel` | Same as `on_failure`, for terminal `Cancelled`. |
+
+Validation limits (enforced at publish time):
+
+- Block nesting depth: at most 64.
+- `parallel`/`race` branches: at most 256 per block.
+- `loop`/`for_each` `max_iterations`: at most 100,000 (default 1,000 when omitted).
+- Total blocks per sequence (root + nested): at most 5,000.
+
 Valid block types:
 
 ```text
@@ -154,7 +170,7 @@ Common step fields:
 | `handler` | Built-in, external worker name, plugin handler, or integration handler. |
 | `params` | Static JSON config passed to the handler. |
 | `retry` | Automatic retry/backoff for failures. |
-| `timeout` | Max runtime in milliseconds. |
+| `timeout` | Max runtime in milliseconds. A timed-out attempt is a retryable failure: `retry` applies, and a surrounding `try_catch` can catch it. |
 | `delay` | Durable wait before running the step. |
 | `rate_limit_key` | Throttle this step using a named rate limit. |
 | `send_window` | Run only during specific local hours/days. |
@@ -164,6 +180,8 @@ Common step fields:
 | `on_deadline_breach` | Handler to run when the SLA is breached. |
 | `fallback_handler` | Alternate handler when circuit breaker is open. |
 | `cache_key` | Cache step output by template-resolved key. |
+| `context_access` | Restrict which context sections/fields this step can read, e.g. `{ "data": { "fields": ["user_id"] } }`. |
+| `cancellable` | Set `false` to let this step finish even if the instance is cancelled. Default `true`. |
 
 ### Parallel
 
@@ -187,7 +205,9 @@ Run independent branches and continue when all complete.
 }
 ```
 
-Use for independent work that can happen at the same time.
+Use for independent work whose results are all needed before the sequence continues.
+
+Execution semantics: branches progress independently and the block completes when all branches complete. Steps handled by external workers can be in flight on their queues simultaneously; steps that run in-process (built-in handlers such as `http_request` or `llm_call`) are dispatched one at a time per instance, so in-process branches interleave rather than run concurrently.
 
 ### Race
 
@@ -210,6 +230,8 @@ Run competing branches and keep the first result.
 ```
 
 Use for provider failover, lowest-latency fetches, or redundant AI/tool calls.
+
+Winner semantics: the first branch to complete successfully wins and the remaining branches are cancelled (including any in-flight external worker tasks). A branch that fails does not decide the race; the race block fails only if every branch fails.
 
 ### Router
 
@@ -280,7 +302,9 @@ Repeat while a condition is true.
 }
 ```
 
-Always set a practical `max_iterations` for agent loops.
+Always set a practical `max_iterations` for agent loops. It defaults to 1000 and may not exceed 100,000.
+
+For long-running loops, set `retain_iterations: N` to keep only the most recent N iterations' step outputs; older outputs are deleted at each iteration boundary so storage stays bounded. Omit it to retain everything. (`for_each` supports the same field.)
 
 ### ForEach
 
@@ -319,6 +343,8 @@ Call another published sequence and wait for it.
 ```
 
 Use for reusable workflow components. Omit `version` to call the latest non-deprecated version.
+
+Sub-sequences may nest at most 16 levels deep; a spawn beyond that fails the step rather than creating the child. The parent's execution budget (if any) is propagated to the child.
 
 ### ABSplit
 
@@ -883,6 +909,7 @@ Before publishing:
 - Retries have valid positive values.
 - Routers have at least one route or a default.
 - Loops and foreach blocks have non-empty bodies and bounded iterations.
+- The sequence is within validation limits: nesting ≤ 64 deep, ≤ 256 branches per parallel/race, `max_iterations` ≤ 100,000, ≤ 5,000 total blocks.
 - New behavior uses a new sequence ID and higher version.
 
 ## LLM Prompt

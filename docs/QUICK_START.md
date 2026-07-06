@@ -35,17 +35,34 @@ my-project/
 
 ### 3. Start the engine
 
+The server fails closed on two things: it refuses to boot without an encryption
+key (data at rest is encrypted) and without an API key. `orch8 init` already
+generated an API key into `orch8.toml`; supply an encryption key via env:
+
 ```bash
+export ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)
 orch8-server --config orch8.toml
 ```
 
+For a throwaway local run you can skip both instead:
+`orch8-server --config orch8.toml --insecure-storage` disables encryption at
+rest only; `--insecure` additionally disables authentication.
+
 The server starts on `http://localhost:8080`. Migrations run automatically.
+
+Export the generated API key and tenant for the curl steps below — every
+request needs `x-api-key` and `x-tenant-id` headers:
+
+```bash
+export ORCH8_API_KEY=$(sed -n 's/^api_key = "\(.*\)"/\1/p' orch8.toml)
+alias ocurl='curl -s -H "x-api-key: $ORCH8_API_KEY" -H "x-tenant-id: demo"'
+```
 
 ### 4. Create a sequence
 
 ```bash
 SEQUENCE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-curl -s -X POST http://localhost:8080/sequences \
+ocurl -X POST http://localhost:8080/sequences \
   -H 'Content-Type: application/json' \
   -d "{
     \"id\": \"$SEQUENCE_ID\",
@@ -84,7 +101,7 @@ scaffold ready-made sequences so you don't have to hand-write this JSON.)
 ### 5. Create an instance
 
 ```bash
-INSTANCE_ID=$(curl -s -X POST http://localhost:8080/instances \
+INSTANCE_ID=$(ocurl -X POST http://localhost:8080/instances \
   -H 'Content-Type: application/json' \
   -d "{
     \"sequence_id\": \"$SEQUENCE_ID\",
@@ -102,14 +119,15 @@ echo "Instance: $INSTANCE_ID"
 
 ```bash
 # Poll until state is "completed"
-watch -n 1 "curl -s http://localhost:8080/instances/$INSTANCE_ID | jq '{state, updated_at}'"
+watch -n 1 "curl -s -H 'x-api-key: $ORCH8_API_KEY' -H 'x-tenant-id: demo' \
+  http://localhost:8080/instances/$INSTANCE_ID | jq '{state, updated_at}'"
 ```
 
 Or a simple loop:
 
 ```bash
 while true; do
-  STATE=$(curl -s http://localhost:8080/instances/$INSTANCE_ID | jq -r '.state')
+  STATE=$(ocurl http://localhost:8080/instances/$INSTANCE_ID | jq -r '.state')
   echo "State: $STATE"
   [ "$STATE" = "completed" ] && break
   sleep 1
@@ -132,16 +150,24 @@ cd my-project
 ### 2. Start the stack
 
 ```bash
-docker compose up -d
+docker compose up -d postgres
 ```
 
-This starts Postgres on port 5434 (mapped from 5432). Start the engine separately:
+This starts Postgres on port 5434 (mapped from 5432). The compose file also
+defines an `engine` container (`ghcr.io/orch8-io/engine`), but it needs
+`ORCH8_API_KEY` and `ORCH8_ENCRYPTION_KEY` added under its `environment:`
+before it will boot — for the quick start, run the engine locally against the
+compose Postgres instead. Point `database.url` in `orch8.toml` at the
+`postgres://orch8:orch8@localhost:5434/orch8` line (already scaffolded as a
+comment), then:
 
 ```bash
+export ORCH8_ENCRYPTION_KEY=$(openssl rand -hex 32)
 orch8-server --config orch8.toml
 ```
 
-Wait a few seconds for Postgres to be healthy, then check the engine:
+Wait a few seconds for Postgres to be healthy, then check the engine
+(health endpoints are unauthenticated):
 
 ```bash
 curl -s http://localhost:8080/health/ready
@@ -163,7 +189,9 @@ Use `@orch8.io/sdk` to author sequences in TypeScript. See the [SDK README](http
 npm install @orch8.io/sdk
 ```
 
-Requires Node 18+ (uses the global `fetch`).
+Requires Node 18+ (uses the global `fetch`). The server requires an API key by
+default (`x-api-key` header) — see the SDK README for how to configure the
+client's auth headers, or run the server with `--insecure` for a local demo.
 
 ### 2. Define a workflow and deploy it
 
@@ -222,10 +250,12 @@ To run handlers in Node instead of built-ins, see the [SDK documentation](https:
 
 You can pause and resume a running instance at any time using signals.
 
+(`ocurl` is the authenticated-curl alias from Option A, step 3.)
+
 ### Pause
 
 ```bash
-curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "pause",
@@ -236,7 +266,7 @@ curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
 ### Resume
 
 ```bash
-curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "resume",
@@ -247,7 +277,7 @@ curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
 ### Cancel
 
 ```bash
-curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "cancel",
@@ -257,10 +287,11 @@ curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
 
 ### Update context mid-flight
 
-Merge data into `context.data` while the instance is running:
+Merge data into `context.data` while the instance is running (existing keys
+not named in the payload are preserved; `config` cannot be changed this way):
 
 ```bash
-curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "update_context",
@@ -276,20 +307,20 @@ Instances that exhaust all retry attempts land in the DLQ (they remain as `faile
 
 ```bash
 # List all failed instances for a tenant
-curl -s "http://localhost:8080/instances/dlq?tenant_id=demo&namespace=default&limit=50" \
+ocurl "http://localhost:8080/instances/dlq?tenant_id=demo&namespace=default&limit=50" \
   | jq '[.[] | {id, sequence_id, updated_at, "error": .context.runtime.error}]'
 ```
 
 Retry a specific failed instance:
 
 ```bash
-curl -s -X POST http://localhost:8080/instances/$INSTANCE_ID/retry
+ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/retry
 ```
 
 Bulk-cancel all failed instances for a sequence:
 
 ```bash
-curl -s -X PATCH http://localhost:8080/instances/bulk/state \
+ocurl -X PATCH http://localhost:8080/instances/bulk/state \
   -H 'Content-Type: application/json' \
   -d "{
     \"filter\": {

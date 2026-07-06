@@ -37,7 +37,7 @@ orch8-engine          Scheduler tick loop, evaluator, handlers, signals, recover
     |
 orch8-storage         StorageBackend trait + PostgresStorage + SqliteStorage
     |
-orch8-types           Domain types, IDs, config, errors (zero-dependency)
+orch8-types           Domain types, IDs, config, errors (shared by every crate)
     |
 orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
     |
@@ -197,6 +197,7 @@ The engine's heartbeat fires every N milliseconds (default 100ms, configurable).
 - **Postgres is the timer wheel**: Zero engine memory for scheduled instances. A million waiting instances = a million rows with `next_fire_at` timestamps
 - **Priority ordering**: Critical > High > Normal > Low, then earliest `next_fire_at`
 - **Multi-block execution**: All steps in a sequence run in one claim cycle (not one-per-tick)
+- **Lease heartbeat**: While a step is in flight, the engine periodically touches the instance's `updated_at`, so the stale-instance reaper (`stale_instance_threshold_secs`) only recovers instances whose node actually died — a slow-but-healthy long-running step is never re-dispatched out from under itself
 
 ---
 
@@ -237,7 +238,7 @@ Write handlers in **any language**. Workers poll the engine for tasks via REST A
 | `pause` | Running → Paused |
 | `resume` | Paused → Scheduled |
 | `cancel` | Running → Cancelled (terminal) |
-| `update_context` | Replaces instance ExecutionContext |
+| `update_context` | Merges the payload's `data` keys into the instance context (engine-owned `runtime`/`audit` bookkeeping and read-only `config` are preserved, never overwritten) |
 | `custom(name)` | Logged, for user handlers |
 
 Signals are stored in `signal_inbox` and processed at the start of each claim cycle. At the handler boundary, `Signal::action()` lifts the `(signal_type, payload)` pair into a typed `SignalAction` variant — `UpdateContext` carries a validated `ExecutionContext`; decode failures are logged + marked delivered rather than re-tried, so malformed payloads cannot poison the queue.
@@ -308,6 +309,8 @@ CREATE INDEX idx_rate_limits_key ON rate_limits (tenant_id, resource_key);
 
 ### Prometheus Metrics (`GET /metrics`)
 
+`/metrics` (and the Swagger UI at `/swagger-ui`) sit behind the same API-key auth as the rest of the management surface — a Prometheus scraper must send the `x-api-key` header (and `x-tenant-id` when tenant enforcement is on).
+
 | Metric | Type |
 |--------|------|
 | `orch8_instances_claimed_total` | Counter |
@@ -333,7 +336,7 @@ CREATE INDEX idx_rate_limits_key ON rate_limits (tenant_id, resource_key);
 ### Health Checks
 
 - `GET /health/live` — liveness (always 200)
-- `GET /health/ready` — readiness (200 if DB reachable)
+- `GET /health/ready` — readiness (200 if the DB is reachable **and** the engine tick loop is alive; 503 if either has died, so an orchestrator pulls the pod and restarts it rather than leaving a zombie API accepting work it will never execute)
 
 ### Webhooks
 
@@ -374,8 +377,8 @@ Benchmarked on Apple Silicon, single Postgres, single engine process:
 | `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
 | `ORCH8_WEBHOOK_URLS` | — | Comma-separated webhook URLs |
 | `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers) |
-| `ORCH8_API_KEY` | — | Optional API key for auth |
-| `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest |
+| `ORCH8_API_KEY` | — | API key for auth (the server refuses to start without one unless `--insecure-auth` / `--insecure` is passed) |
+| `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest (required unless `--insecure-storage` / `--insecure` is passed) |
 
 See [Configuration Reference](CONFIGURATION.md) for all options including TOML fields.
 

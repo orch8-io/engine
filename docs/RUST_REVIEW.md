@@ -2,6 +2,13 @@
 
 This report records the findings from a deep review of the `orch8.io/engine` Rust workspace for potential bugs, non-idiomatic patterns, and missing best practices.
 
+> **Status update (2026-07-06):** subsequent fix passes resolved several findings below;
+> resolved rows are marked **✅ FIXED** inline. Still open: the gRPC `block_in_place`
+> interceptor (§2/§3 — now carries a safety comment, but remains synchronous),
+> the `stream_bus` `expect`s, and the mobile/publisher `reqwest::Client` builder
+> `expect`s (now explicitly `#[allow(clippy::expect_used)]`-annotated as accepted
+> infallible constructs rather than converted to `Result`).
+
 **Scope:** library source code (`*/src/**/*.rs`) across the 12 workspace crates; test modules were noted only when they expose production risks.
 
 **Tools used:** `cargo audit`, `cargo machete`, `cargo clippy` with `-W clippy::unwrap_used -W clippy::expect_used -W clippy::panic`, and manual pattern scanning.
@@ -13,8 +20,8 @@ This report records the findings from a deep review of the `orch8.io/engine` Rus
 | Severity | Item | Detail |
 |---|---|---|
 | **Medium** | `rsa` vulnerability (RUSTSEC-2023-0071) | Transitive dependency via `sqlx-mysql` 0.8.6. No fixed upgrade exists. The engine does not appear to use MySQL directly, so this exposure comes entirely from the `sqlx` MySQL feature. Consider disabling the `mysql` feature in `sqlx` if it is not required. |
-| **Low** | `proc-macro-error2` unmaintained (RUSTSEC-2026-0173) | Transitive via `tabled` 0.17.0, used by `orch8-cli`. Monitor for an upstream update or replace `tabled`. |
-| **Low** | Unused dependency | `cargo machete` reports `tracing-subscriber` in `orch8-cli/Cargo.toml` as unused. Remove it to reduce compile time and attack surface. |
+| **Low** | `proc-macro-error2` unmaintained (RUSTSEC-2026-0173) | ✅ FIXED — `tabled` is no longer in the dependency tree; `proc-macro-error2` is gone from `Cargo.lock`. |
+| **Low** | Unused dependency | ✅ FIXED — `tracing-subscriber` removed from `orch8-cli/Cargo.toml`. |
 
 ---
 
@@ -24,18 +31,18 @@ A robust workflow engine should not panic on unexpected runtime state. The follo
 
 | Severity | File | Line(s) | Issue | Suggested Fix |
 |---|---|---|---|---|
-| **Critical** | `orch8-grpc/src/auth.rs` | 98 | `.unwrap()` on `expected_digest.as_ref()` after an early-return guard. A logic change could make every gRPC request panic. | Replace with `if let Some(digest) = expected_digest { ... }` or model the digest as always present. |
+| **Critical** | `orch8-grpc/src/auth.rs` | 98 | ✅ FIXED — the `.unwrap()` on `expected_digest` is gone from the production path. | — |
 | **High** | `orch8-grpc/src/auth.rs` | 122 | `tokio::task::block_in_place(|| Handle::current().block_on(...))` inside a Tonic interceptor. Blocks a worker thread for the full storage/auth round-trip on every gRPC request. | Move authentication into an async tower layer/middleware that can `.await` the storage lookup. |
 | **High** | `orch8-engine/src/stream_bus.rs` | 68, 76 | `Deref` / `DerefMut` impls `.expect("subscription receiver present")` if `receiver` is `None`. A partial-drop or misuse path will panic. | Return a proper error, or model the receiver as always-present via the type system. |
 | **Medium** | `orch8-mobile/src/telemetry.rs` | 60 | `reqwest::Client::builder().build().expect(...)` panics if any builder option is invalid. | Return `Result<Self, MobileError>` from `new`. |
 | **Medium** | `orch8-mobile/src/sync.rs` | 146 | Same `reqwest` builder `.expect`. | Return `Result`. |
 | **Medium** | `orch8-mobile/src/sync_reporter.rs` | 71 | Same `reqwest` builder `.expect`. | Return `Result`. |
 | **Medium** | `orch8-publisher/src/cdn.rs` | 64 | Same `reqwest` builder `.expect`. | Return `Result<CdnClient, CdnError>`. |
-| **Medium** | `orch8-publisher/src/push.rs` | 17 | Same `reqwest` builder `.expect`. | Return `Result`. |
-| **Medium** | `orch8-api/src/instances/bulk.rs` | 261 | `unreachable!()` for `BatchAction::Retry`. A future variant or refactor reaching this arm will panic the server. | Return an error instead of panicking. |
-| **Medium** | `orch8-cli/src/main.rs` | 278 | `unreachable!()` for commands already handled earlier. New enum variants risk a panic. | Make the match exhaustive or return a typed CLI error. |
-| **Low** | `orch8-server/src/main.rs` | 461, 470, 472, 502 | `.expect()` during startup (Prometheus, signal handlers, gRPC address parse). | Propagate via `?` so the process exits cleanly with a clear error. |
-| **Low** | `orch8-types/src/clock.rs` | 75, 81, 88 | `.expect("ManualClock lock poisoned")` on `RwLock`. | Use `unwrap_or_else(PoisonError::into_inner)` or return a result. |
+| **Medium** | `orch8-publisher/src/push.rs` | 17 | ✅ FIXED — `orch8-publisher/src/push.rs` was deleted entirely (push delivery now goes through `orch8-push`). | — |
+| **Medium** | `orch8-api/src/instances/bulk.rs` | 261 | ✅ FIXED — the `unreachable!()` is gone. | — |
+| **Medium** | `orch8-cli/src/main.rs` | 278 | ✅ FIXED — the `unreachable!()` is gone. | — |
+| **Low** | `orch8-server/src/main.rs` | 461, 470, 472, 502 | ✅ FIXED — startup `.expect()`s replaced with propagated errors. | — |
+| **Low** | `orch8-types/src/clock.rs` | 75, 81, 88 | ✅ FIXED — the `.expect("ManualClock lock poisoned")` calls are gone. | — |
 | **Low** | `orch8-engine/src/webhooks.rs` | 293 | `HmacSha256::new_from_slice(...).expect(...)` — infallible for this crate, but still a panic construct. | Use `unwrap_or_else(|_| unreachable!())` with a comment, or avoid the panic path. |
 | **Low** | `orch8-publisher/src/cdn.rs` | 93, 273 | `SystemTime::duration_since(UNIX_EPOCH).expect` and HMAC `.expect` — infallible in practice. | Replace with safe fallbacks. |
 | **Low** | `orch8-mobile/src/lib.rs` | 50 | `TenantId::new("mobile").expect(...)` — constant, infallible. | Acceptable; could use an unchecked constructor if one exists. |
@@ -59,7 +66,7 @@ A robust workflow engine should not panic on unexpected runtime state. The follo
 
 | Severity | File | Line(s) | Issue | Suggested Fix |
 |---|---|---|---|---|
-| **Medium** | `orch8-types/src/config.rs` | 91–97 | `SecretString::drop` uses `unsafe { self.0.as_mut_vec() }` and `write_volatile` to zero memory. | Audit for soundness with the current Rust `String` layout; add a unit test verifying the bytes are cleared; keep the `SAFETY` comment current. |
+| **Medium** | `orch8-types/src/config.rs` | 91–97 | ✅ FIXED — `SecretString` now zeroes via the `zeroize` crate; the hand-rolled `unsafe` block is gone. | — |
 
 ---
 
@@ -152,11 +159,11 @@ Production code is missing documentation for roughly **657 public items**. Top o
 ## Priority Recommendations
 
 1. **Convert gRPC auth to an async layer** and remove `block_in_place` / `block_on` in `orch8-grpc/src/auth.rs`.
-2. **Remove or guard production `unwrap()`/`expect()`** in `orch8-grpc/src/auth.rs`, `orch8-engine/src/stream_bus.rs`, and the mobile/publisher `reqwest::Client::build()` constructors.
+2. **Remove or guard production `unwrap()`/`expect()`** — partially done: the `orch8-grpc/src/auth.rs` unwrap is fixed; `orch8-engine/src/stream_bus.rs` and the mobile/publisher `reqwest::Client::build()` `expect`s remain (now `#[allow]`-annotated as accepted).
 3. **Move startup filesystem I/O off the async runtime thread** in `orch8-server/src/main.rs`.
 4. **Stop discarding error context** via `.map_err(|e| e.to_string())`; switch to structured errors with source chaining in `orch8-storage` and `orch8-publisher`.
 5. **Add `#![warn(missing_docs)]`** and back-fill public documentation, starting with `orch8-types`, `orch8-engine`, and `orch8-api`.
-6. **Review the `unsafe` memory-zeroing** in `SecretString::drop` for soundness and add tests.
+6. ~~Review the `unsafe` memory-zeroing in `SecretString::drop`~~ — done: replaced with the `zeroize` crate.
 7. **Add post-deserialization validation** at all request/JSON boundaries that currently rely solely on `serde`.
 8. **Prune the `sqlx` MySQL feature** if MySQL is not used, eliminating the `rsa` RUSTSEC exposure.
-9. **Remove the unused `tracing-subscriber` dependency** from `orch8-cli/Cargo.toml`.
+9. ~~Remove the unused `tracing-subscriber` dependency from `orch8-cli/Cargo.toml`~~ — done.

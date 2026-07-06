@@ -4,6 +4,14 @@ Base URL: `http://localhost:8080` (configurable via `ORCH8_HTTP_ADDR`)
 
 All request/response bodies are JSON. Dates use ISO 8601 / RFC 3339 format.
 
+Every route is served both at the root path and under the `/api/v1` prefix (e.g. `/instances` and `/api/v1/instances` are equivalent).
+
+## Authentication
+
+When `ORCH8_API_KEY` is set, every endpoint requires an `x-api-key` header — including `/metrics`, `/swagger-ui`, and `/api-docs/openapi.json`. When `ORCH8_REQUIRE_TENANT_HEADER` is set, requests must also carry an `x-tenant-id` header, and tenant-owned resources are scoped to that tenant.
+
+Only the health probes (`/health/live`, `/health/ready`, `/info`) and inbound public webhooks (`POST /webhooks/{slug}`, which use their own per-trigger secrets) stay public, so load-balancer checks and third-party webhook callers keep working.
+
 ---
 
 ## Health
@@ -26,7 +34,7 @@ Always returns 200 if the process is running.
 GET /health/ready
 ```
 
-Returns 200 if the database is reachable.
+Returns 200 only if the database is reachable **and** the engine tick loop is running. A server whose scheduler has died reports 503 even with a healthy database, so the load balancer stops routing work to a node that would accept instances but never execute them.
 
 **Response:** `200 OK` or `503 Service Unavailable`
 
@@ -188,6 +196,9 @@ POST /instances
 | `concurrency_key` | string | null | Key for concurrency limiting |
 | `max_concurrency` | integer | null | Max parallel instances with same key |
 | `idempotency_key` | string | null | Deduplication key |
+| `dry_run` | boolean | `false` | Simulate the run: side-effecting steps (HTTP/LLM/MCP calls, agent loops, event/signal emission, memory writes, block injection, external plugins) skip their real effect and return a stub; control flow and templating run normally |
+| `dry_run_auto_approve` | boolean | `false` | With `dry_run`, auto-approve `human_review` gates with the default choice so the simulation flows past them. Ignored unless `dry_run` is true |
+| `budget` | object | null | Resource budget (token/step caps) enforced by the scheduler; when exceeded the instance is paused with `metadata.paused_reason = "budget_exceeded"` |
 
 **Response:** `201 Created`
 
@@ -293,7 +304,13 @@ GET /instances?tenant_id=acme&namespace=default&state=running,scheduled&limit=50
 GET /instances?metadata.env=prod&metadata.team=core
 ```
 
-**Response:** `200 OK` — array of `TaskInstance` objects.
+**Response:** `200 OK` — paginated envelope:
+
+```json
+{ "items": [ /* TaskInstance objects */ ], "has_more": true }
+```
+
+`has_more` is true when the page is full (another page may exist at the next `offset`).
 
 ---
 
@@ -654,11 +671,24 @@ PUT /cron/{id}
   "cron_expr": "0 10 * * * *",
   "timezone": "Europe/London",
   "enabled": false,
-  "metadata": { "type": "weekly-digest" }
+  "metadata": { "type": "weekly-digest" },
+  "overlap_policy": "skip"
 }
 ```
 
 **Response:** `200 OK` — updated `CronSchedule`.
+
+---
+
+### Preview Next Fires
+
+```
+GET /cron/{id}/next-fires?n=5
+```
+
+Returns the schedule's upcoming fire instants (UTC, DST-correct) without waiting for them. `n` defaults to 5, max 50.
+
+**Response:** `200 OK`
 
 ---
 
@@ -695,6 +725,7 @@ POST /workers/tasks/poll
 | `handler_name` | string | **required** | Handler to claim tasks for |
 | `worker_id` | string | **required** | Unique worker identifier |
 | `limit` | integer | `1` | Max tasks to claim |
+| `version` | string | null | Worker build/deploy version, recorded on the worker registry and checked against [version pins](#worker-version-pins) |
 
 **Response:** `200 OK`
 
@@ -827,6 +858,8 @@ GET /metrics
 
 **Response:** `200 OK` — Prometheus text format (v0.0.4)
 
+When `ORCH8_API_KEY` is set, the scraper must send it as `x-api-key` (and an `x-tenant-id` when `ORCH8_REQUIRE_TENANT_HEADER` is set) — the metrics endpoint is behind the same auth as the rest of the management surface.
+
 **Counters:**
 
 | Metric | Description |
@@ -842,7 +875,10 @@ GET /metrics
 | `orch8_recovery_stale_instances_total` | Stale instances recovered at startup |
 | `orch8_webhooks_sent_total` | Webhooks delivered |
 | `orch8_webhooks_failed_total` | Webhook delivery failures |
+| `orch8_webhooks_parked_total` | Webhooks parked in the outbox after exhausting retries |
 | `orch8_cron_triggered_total` | Cron instances created |
+| `orch8_cron_skipped_total` | Cron fires skipped by the `skip` overlap policy |
+| `orch8_sla_breached_total` | SLA breach events (`type` label: runtime vs step runtime) |
 
 **Histograms:**
 
@@ -900,6 +936,13 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `http_request` | `url`, `method` ("GET"/"POST"/"PUT"/"DELETE"), `body`, `timeout_ms` (default 10000) | `{ "status": 200, "body": "..." }` |
 | `llm_call` | `provider`, `model`, `messages`, `temperature`, `max_tokens` | `{ "content": "...", "usage": {...} }` |
 | `tool_call` | `tool_name`, `arguments` | _(tool-specific output)_ |
+| `mcp_call` | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms` | _(MCP tool result, or tool list for `"list"`)_ |
+| `agent` | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }` |
+| `embed` | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`) | `{ "embedding"\|"embeddings", "model", "dimensions" }` |
+| `memory_store` | `text`, optional `embedding`, `key`, `metadata` | `{ "key": "...", "dimensions": N }` |
+| `memory_search` | `query` or `query_embedding`, optional `top_k` | `{ "results": [{ key, text, score, metadata }], "count": N }` |
+| `blob_put` | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB) | _(an `ArtifactRef` to pass between steps)_ |
+| `blob_get` | `ref` (ArtifactRef), `encoding` | _(the stored content)_ |
 | `human_review` | `prompt`, `timeout_ms`, `escalation_handler` | `{ "approved": bool, "reviewer": "...", "comments": "..." }` |
 | `self_modify` | `blocks` (array of block definitions to inject) | `{ "injected": N }` |
 | `emit_event` | See [Workflow coordination handlers](#workflow-coordination-handlers) | `{ instance_id, sequence_name, deduped }` |
@@ -1079,7 +1122,7 @@ Reads another instance's context and state.
 }
 ```
 
-All branches run concurrently. Completes when all finish. Fails if any branch fails.
+Branches progress independently; the block completes when all branches finish and fails if any branch fails. External-worker steps can be in flight on their queues simultaneously; in-process steps (built-in handlers) are dispatched one at a time per instance and interleave. See [SEQUENCES.md — Parallel](SEQUENCES.md#parallel).
 
 ---
 
@@ -1097,12 +1140,7 @@ All branches run concurrently. Completes when all finish. Fails if any branch fa
 }
 ```
 
-| Semantics | Behavior |
-|-----------|----------|
-| `first_to_resolve` (default) | First branch to complete (success or failure) wins |
-| `first_to_succeed` | First successful branch wins; failures ignored until all fail |
-
-Losing branches are cancelled.
+The first branch to complete **successfully** wins and the losing branches are cancelled. A failing branch does not decide the race; the block fails only if every branch fails. (The `semantics` field is accepted by the schema but not currently consulted — behavior is always first-success-wins.)
 
 ---
 
@@ -1243,7 +1281,7 @@ Child blocks inside a cancellation scope cannot be cancelled by external cancel 
 
 ## Mobile Sync
 
-Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints are tenant-scoped when `X-Tenant-Id` is provided.
+Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints are tenant-scoped when `X-Tenant-Id` is provided: device ownership is enforced, so syncing against, re-registering, or queueing commands for a device that belongs to another tenant is rejected.
 
 ### Sync
 
@@ -1372,6 +1410,14 @@ The following endpoint groups are available via the OpenAPI spec (Swagger UI at 
 - **Cluster** — Node listing, heartbeat, drain
 - **Webhooks** — Webhook subscription management
 - **Telemetry** — Execution telemetry and rollback history
+- **API Keys** — Per-tenant API key create/list/revoke (`/api-keys`)
+- **Sequence lifecycle** — List, delete, versions, promote/deprecate/unpublish, status, and `POST /sequences/migrate-instance`
+- **Execution introspection** — `GET /instances/{id}/tree` (execution tree), `/timeline`, `/audit`, `/artifacts`, and SSE streaming at `GET /instances/{id}/stream`
+- **Checkpoints & recovery** — `GET|POST /instances/{id}/checkpoints`, `/checkpoints/latest`, `/checkpoints/prune`, `POST /instances/{id}/fork`, `POST /instances/{id}/resume-from/{block_id}`, `POST /instances/{id}/inject-blocks`
+- **Bulk reschedule** — `PATCH /instances/bulk/reschedule` (shift `next_fire_at` by `offset_secs`)
+- **Rollback policies** — `/rollback-policies` CRUD
+- **Usage & info** — `GET /usage`, `GET /info` (version + environment label)
+- **MCP server** — `POST /mcp` (expose the engine itself as an MCP server)
 
 ---
 
@@ -1393,5 +1439,6 @@ All error responses follow this format:
 | `404` | Resource not found (instance, sequence, cron schedule, worker task) |
 | `409` | Conflict (state transition not allowed, duplicate resource) |
 | `413` | Payload too large (context exceeds `max_context_bytes`) |
+| `422` | Unprocessable entity (`context.data` fails the sequence's `input_schema`) |
 | `500` | Internal server error |
 | `503` | Service unavailable (storage connection failure) |

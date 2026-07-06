@@ -81,9 +81,15 @@ let config = MobileEngineConfig(
     handlerTimeoutMs: 30000,
     operationTimeoutMs: 10000,
     telemetryEnabled: true,
+    telemetryUrl: "https://telemetry.example.com/ingest",
     environment: "production",
     rootPublicKey: "<base64-ed25519-public-key>",
-    sdkVersion: "0.1.0"
+    sdkVersion: "0.1.0",
+    memoryBudgetBytes: 0,
+    sequencesUrl: "",
+    syncUrl: "",       // optional server command/status sync
+    deviceId: "",
+    syncApiKey: ""
 )
 
 let engine = try MobileEngine(
@@ -109,9 +115,15 @@ val config = MobileEngineConfig(
     handlerTimeoutMs = 30000u,
     operationTimeoutMs = 10000u,
     telemetryEnabled = true,
+    telemetryUrl = "https://telemetry.example.com/ingest",
     environment = "production",
     rootPublicKey = "<base64-ed25519-public-key>",
-    sdkVersion = "0.1.0"
+    sdkVersion = "0.1.0",
+    memoryBudgetBytes = 0u,
+    sequencesUrl = "",
+    syncUrl = "",       // optional server command/status sync
+    deviceId = "",
+    syncApiKey = ""
 )
 
 val dbPath = context.getDatabasePath("orch8.db").absolutePath
@@ -157,8 +169,22 @@ let result = try engine.sync(
     manifestUrl: "https://api.example.com/mobile/manifest.json",
     tokenProvider: nil  // or a TokenProvider for authenticated endpoints
 )
-print("Synced: \(result.added) added, \(result.updated) updated, \(result.removed) removed")
+print("Synced: \(result.added) added, \(result.updated) updated, \(result.removed) removed, \(result.skipped) skipped")
 ```
+
+Sync is designed to be cheap and safe to run repeatedly:
+
+- **Replay protection.** Besides the signature, the manifest carries a strictly-increasing
+  `manifest_version`. The SDK persists the last applied version and rejects any manifest
+  that is not newer, so a captured older (validly-signed) manifest cannot be replayed to
+  reinstall since-removed sequences.
+- **Unchanged sequences are never re-downloaded.** Entries whose version matches the local
+  copy are skipped before any network request — only changed sequences cost bandwidth.
+- **One bad entry doesn't brick sync.** A sequence that fails to download, fails its hash
+  check, or fails signature verification is counted in `result.skipped` /
+  `result.signatureFailures` and the rest of the manifest still applies.
+- **Backoff with jitter.** Retryable HTTP errors back off exponentially with real random
+  jitter, and a server-sent `Retry-After` header is honored.
 
 ### 4. Start the Engine
 
@@ -213,10 +239,13 @@ engine.setListener(listener: MyListener())
 | `activeInstances()` | List all non-terminal instances |
 | `completeStep(instanceId, stepName, output)` | Complete a step in Waiting state |
 | `loadSequenceFromJson(json)` | Load a sequence directly (bypasses sync) |
+| `loadSequencesFromUrl(url)` | Load sequences from a JSON-array endpoint (defaults to `sequencesUrl`) |
 | `loadedSequences()` | List locally stored sequences |
 | `sync(manifestUrl, tokenProvider?)` | Sync sequences from remote manifest |
 | `flushTelemetry(endpointUrl)` | Flush buffered telemetry events |
 | `setDeviceContext(ctx)` | Set device info for telemetry |
+| `reportPowerState(state)` | Report device power state to throttle background work |
+| `onPushReceived()` | Trigger an immediate tick after a push notification |
 | `shutdown()` | Shut down the engine |
 
 ### MobileEngineConfig
@@ -238,6 +267,11 @@ engine.setListener(listener: MyListener())
 | `environment` | String | "production" | Target environment |
 | `rootPublicKey` | String | "" | Ed25519 key for manifest verification |
 | `sdkVersion` | String | crate version | SDK version for compatibility checks |
+| `memoryBudgetBytes` | u64 | 0 | Skip ticks while process RSS exceeds this budget (0 = unlimited) |
+| `sequencesUrl` | String | `""` | Endpoint returning a JSON array of sequences for `loadSequencesFromUrl` |
+| `syncUrl` | String | `""` | Server sync endpoint for status reporting and commands. Empty = disabled |
+| `deviceId` | String | `""` | Unique device identifier sent with each sync request |
+| `syncApiKey` | String | `""` | API key authenticating sync requests |
 
 ### StepHandler Protocol
 
@@ -261,6 +295,23 @@ protocol EngineListener {
     func onStepPending(instanceId: String, stepName: String, handler: String)
 }
 ```
+
+## Server Sync (status reporting & commands)
+
+Setting `syncUrl`, `deviceId`, and `syncApiKey` enables the bidirectional sync channel:
+the SDK periodically POSTs instance status updates and approval requests to your server
+and receives commands back (`complete_step`, `cancel_instance`, `start_workflow`).
+
+- **HTTPS is required.** `syncUrl` must be a public HTTPS host on port 443 — `http://`
+  and private/loopback addresses are rejected at engine construction.
+- **Commands execute effectively once.** A durable idempotency record is written before a
+  command runs, so a command redelivered after the app was killed mid-sync is not executed
+  twice. Old records are pruned automatically.
+- **Commands are authenticated by transport, not signed.** Unlike sequences (Ed25519-verified
+  end-to-end), commands rely on TLS plus your `syncApiKey`. Protect the sync endpoint
+  accordingly.
+- **Device ownership is enforced server-side.** The `/mobile/sync` and device-registration
+  endpoints verify that `deviceId` belongs to the calling tenant.
 
 ## Background Execution
 
@@ -335,6 +386,22 @@ Reduce active instances by calling `cancelInstance()` on stale ones, or increase
 
 ### "sequence size exceeds limit"
 Increase `maxSequenceSizeBytes` or reduce the sequence JSON size.
+
+### "invalid URL" on sync / telemetry
+All remote endpoints (`syncUrl`, `telemetryUrl`, `sequencesUrl`, telemetry flush targets)
+must be HTTPS on port 443 and resolve to a public host — loopback, private-range, and
+link-local addresses are rejected to limit SSRF risk.
+
+### Telemetry not flushing while offline
+Auto-flush (triggered when the buffer passes its high-water mark) is rate-limited by a
+cooldown after a failed attempt, so an offline device does not hammer the network on every
+`record()` call. Events stay buffered; call `flushTelemetry()` or sync once connectivity
+returns.
+
+### Database schema after SDK upgrades
+File-backed databases created by an older SDK are migrated forward automatically at engine
+construction — per-version schema deltas are applied based on the database's recorded
+schema version. No action needed.
 
 ### Crash recovery
 The engine sets a `dirty` flag when `pause()` times out. On the next `resume()`, it automatically recovers stale instances that were mid-execution when the app was killed.

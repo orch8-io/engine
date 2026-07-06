@@ -16,6 +16,8 @@ This page is the index. Each cloud target has its own section below with a copy-
 
 SQLite is a first-class backend for small deployments. Once you need more than one engine replica **or** want off-host durability, move to Postgres.
 
+Upgrades are safe on both backends: Postgres migrations are checksum-verified and never edited in place (CI-enforced), and a file-backed SQLite database created by an older binary is migrated forward at boot with versioned schema deltas.
+
 ---
 
 ## High availability
@@ -27,14 +29,14 @@ Recommended:
 - **2+ replicas** for availability.
 - **PodDisruptionBudget** (or equivalent) of `maxUnavailable: 1`.
 - **`ORCH8_SHUTDOWN_GRACE_PERIOD_SECS=30`** — lets in-flight steps drain before SIGKILL.
-- **Readiness gate** on `GET /health/ready` (returns 200 only when the DB is reachable).
-- **Rolling updates** are safe — the stale-instance reaper recovers any instance held by a pod that exits ungracefully.
+- **Readiness gate** on `GET /health/ready` (returns 200 only when the DB is reachable **and** the engine tick loop is alive; 503 otherwise, so a pod whose engine died is pulled from rotation instead of accepting work it will never run).
+- **Rolling updates** are safe — the stale-instance reaper recovers any instance held by a pod that exits ungracefully. Healthy pods heartbeat their claimed instances, so the reaper never yanks a long-running step from a live node.
 
 ---
 
 ## Docker
 
-The container image defaults to SQLite. For real deployments, override:
+The container image defaults to SQLite. The server is secure by default: it refuses to start without both `ORCH8_API_KEY` and `ORCH8_ENCRYPTION_KEY` set (pass `--insecure` explicitly for a local throwaway container). For real deployments, override:
 
 ```bash
 docker run --rm -p 8080:8080 -p 50051:50051 \
@@ -171,6 +173,9 @@ app = "orch8-engine"
   ORCH8_STORAGE_BACKEND = "sqlite"
   ORCH8_DATABASE_URL    = "sqlite:///data/orch8.db?mode=rwc"
   ORCH8_LOG_JSON        = "true"
+  # ORCH8_API_KEY and ORCH8_ENCRYPTION_KEY are required for startup — set them
+  # as secrets, not in this file:
+  #   fly secrets set ORCH8_API_KEY=<random> ORCH8_ENCRYPTION_KEY=<64-hex-chars>
 
 [http_service]
   internal_port = 8080
@@ -201,11 +206,11 @@ Before opening traffic:
 
 - [ ] `ORCH8_API_KEY` is set to a random 32+ char value.
 - [ ] `ORCH8_ENCRYPTION_KEY` is set (64 hex chars) and backed up in a separate secret store.
-- [ ] `ORCH8_CORS_ORIGINS` is restricted to the domains that need it — not `*`.
-- [ ] `ORCH8_REQUIRE_TENANT_HEADER=true` if you run multi-tenant.
+- [ ] `ORCH8_CORS_ORIGINS` is restricted to the domains that need it — the server refuses to start with `*` while API-key auth is on.
+- [ ] `ORCH8_REQUIRE_TENANT_HEADER=true` (the default). Only disable for single-tenant deployments, which additionally requires `ORCH8_ALLOW_NO_TENANT_ISOLATION=1`.
 - [ ] Postgres SSL is enforced (`sslmode=require` in the DSN).
 - [ ] Postgres automated backups are on. **Test the restore.**
-- [ ] `/metrics` is scraped by your Prometheus.
+- [ ] `/metrics` is scraped by your Prometheus — it sits behind API-key auth, so configure the scrape job to send the `x-api-key` header (and `x-tenant-id` when tenant enforcement is on).
 - [ ] Log level is `info` or `warn`, format is `json`.
 - [ ] Webhook subscribers handle dedup on `instance_id + event_type` (see [WEBHOOKS.md](WEBHOOKS.md)).
 - [ ] Replicas ≥ 2 behind a load balancer with health checks.
@@ -217,7 +222,7 @@ Before opening traffic:
 
 Minimum viable:
 
-- **Metrics:** scrape `/metrics` every 15s (see [API.md — Metrics](API.md#metrics)).
+- **Metrics:** scrape `/metrics` every 15s with the `x-api-key` header set (see [API.md — Metrics](API.md#metrics)).
 - **Logs:** `ORCH8_LOG_JSON=true`, ship to your log aggregator.
 - **Dashboard:** import [`docs/grafana-dashboard.json`](grafana-dashboard.json) into Grafana.
 - **Alerts:** at minimum, alert on `orch8_instances_failed_total` rate and `orch8_tick_duration_seconds` p99.
