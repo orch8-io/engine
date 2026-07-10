@@ -369,7 +369,10 @@ async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Durat
         chrono::Duration::from_std(retention).unwrap_or_else(|_| chrono::Duration::zero());
     let cutoff = chrono::Utc::now() - chrono_ret;
 
-    match storage.delete_terminal_instances(cutoff, GC_BATCH_LIMIT).await {
+    match storage
+        .delete_terminal_instances(cutoff, GC_BATCH_LIMIT)
+        .await
+    {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(count = n, "instance gc: deleted terminal instances");

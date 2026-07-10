@@ -186,8 +186,7 @@ pub(super) async fn mark_delivered_batch(
         return Ok(());
     }
     let now = ts(chrono::Utc::now());
-    let mut qb =
-        sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1, delivered_at=");
+    let mut qb = sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1, delivered_at=");
     qb.push_bind(now);
     qb.push(" WHERE id IN (");
     let mut separated = qb.separated(",");

@@ -1861,7 +1861,15 @@ impl crate::AdminStore for SqliteStorage {
         threshold: f64,
         reason: &str,
     ) -> Result<(), StorageError> {
-        rollback::record_rollback(self, tenant_id, sequence_name, error_rate, threshold, reason).await
+        rollback::record_rollback(
+            self,
+            tenant_id,
+            sequence_name,
+            error_rate,
+            threshold,
+            reason,
+        )
+        .await
     }
 
     async fn query_error_rate(

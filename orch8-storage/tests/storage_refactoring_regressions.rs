@@ -35,7 +35,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{AdminStore, InstanceStore, ResourceStore, SignalStore, TelemetryStore, WorkerStore};
+use orch8_storage::{
+    AdminStore, InstanceStore, ResourceStore, SignalStore, TelemetryStore, WorkerStore,
+};
 use orch8_types::context::ExecutionContext;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -110,7 +112,10 @@ async fn expire_timed_out_does_not_fail_tasks_before_their_deadline() {
     s.create_worker_task(&task).await.unwrap();
 
     let expired = s.expire_timed_out_worker_tasks().await.unwrap();
-    assert_eq!(expired, 0, "a task with a 1-hour timeout must not expire immediately");
+    assert_eq!(
+        expired, 0,
+        "a task with a 1-hour timeout must not expire immediately"
+    );
 
     let reread = s.get_worker_task(task.id).await.unwrap().unwrap();
     assert_eq!(reread.state, WorkerTaskState::Pending);
@@ -443,8 +448,7 @@ async fn delete_terminal_instances_removes_old_terminal_rows_and_history() {
         s.list_audit_log(old.id, 10).await.unwrap().is_empty(),
         "audit_log for the deleted instance must be cleaned up (no FK cascade on SQLite)"
     );
-    let (input_tokens, output_tokens) =
-        s.query_instance_usage_totals(old.id).await.unwrap();
+    let (input_tokens, output_tokens) = s.query_instance_usage_totals(old.id).await.unwrap();
     assert_eq!(
         (input_tokens, output_tokens),
         (0, 0),

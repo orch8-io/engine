@@ -33,12 +33,14 @@ pub(super) async fn ingest_telemetry_event(
         }
         Err(_) => payload.to_string(),
     };
-    sqlx::query("INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)")
-        .bind(event_type)
-        .bind(&enriched)
-        .bind(created_at.to_rfc3339())
-        .execute(storage.pool())
-        .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+    )
+    .bind(event_type)
+    .bind(&enriched)
+    .bind(created_at.to_rfc3339())
+    .execute(storage.pool())
+    .await?;
     Ok(())
 }
 
@@ -122,8 +124,9 @@ pub(super) async fn ingest_telemetry_events_batch(
     let mut total = 0u64;
     // SQLite has a variable limit of 999 by default; 3 params per row -> batch <= 333.
     for chunk in events.chunks(333) {
-        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
-            sqlx::QueryBuilder::new("INSERT INTO telemetry_events (event_type, payload, created_at) ");
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
+            "INSERT INTO telemetry_events (event_type, payload, created_at) ",
+        );
         qb.push_values(chunk, |mut b, event| {
             let enriched = match serde_json::from_str::<serde_json::Value>(&event.payload) {
                 Ok(mut v) => {
@@ -166,12 +169,14 @@ pub(super) async fn ingest_telemetry_error(
         "sequence_name": sequence_name,
         "tenant_id": tenant_id,
     });
-    sqlx::query("INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)")
-        .bind("InstanceFailed")
-        .bind(payload.to_string())
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(storage.pool())
-        .await?;
+    sqlx::query(
+        "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+    )
+    .bind("InstanceFailed")
+    .bind(payload.to_string())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(storage.pool())
+    .await?;
     Ok(())
 }
 

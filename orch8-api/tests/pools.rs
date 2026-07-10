@@ -190,5 +190,8 @@ async fn delete_resource_rejects_cross_pool_resource_id() {
         .unwrap()
         .iter()
         .any(|r| r["id"] == *resource_id);
-    assert!(still_present, "resource must survive cross-pool delete attempt");
+    assert!(
+        still_present,
+        "resource must survive cross-pool delete attempt"
+    );
 }

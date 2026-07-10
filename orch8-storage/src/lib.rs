@@ -172,7 +172,10 @@ pub trait SequenceStore: Send + Sync + 'static {
     /// Backends with nothing to release (in-memory, the default impl here)
     /// return a no-op guard. `SQLite` has a real lock to release (a row in
     /// `manifest_locks`) and returns a guard that deletes it on drop.
-    async fn acquire_manifest_lock(&self, _tenant_id: &str) -> Result<ManifestLockGuard, StorageError> {
+    async fn acquire_manifest_lock(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<ManifestLockGuard, StorageError> {
         Ok(ManifestLockGuard::noop())
     }
 }
