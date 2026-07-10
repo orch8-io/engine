@@ -16,10 +16,12 @@ use uuid::Uuid;
 
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::{
-    InstanceStore, MobileSyncStore, ResourceStore, SchedulingStore, SequenceStore, WorkerStore,
+    ExecutionTreeStore, InstanceStore, MobileSyncStore, ResourceStore, SchedulingStore,
+    SequenceStore, WorkerStore,
 };
 use orch8_types::context::{ExecutionContext, RuntimeContext};
-use orch8_types::ids::{BlockId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId};
+use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId, Namespace, ResourceKey, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
@@ -442,4 +444,106 @@ async fn batch_save_externalized_state_mixed_sizes_does_not_hit_sql_syntax_error
     assert_eq!(fetched.len(), 2);
     assert_eq!(fetched[&small_key], entries[0].1);
     assert_eq!(fetched[&large_key], entries[1].1);
+}
+
+/// Regression test for H2 (`STORAGE_REFACTORING_2026-07.md`): Postgres's
+/// `update_node_state` / `update_nodes_state` bound `started_at =
+/// COALESCE($4, started_at)` with `$4` always `Some(now)` on a Running
+/// transition, so COALESCE always picked the new value — overwriting the
+/// original start time on every Waiting -> Running re-dispatch. SQLite was
+/// already correct (see `review_fixes_2026_06.rs`); this covers the PG side.
+#[tokio::test]
+async fn update_node_state_preserves_started_at_on_redispatch_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&inst).await.unwrap();
+
+    let node = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: inst.id,
+        block_id: BlockId::new("s1"),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Pending,
+        started_at: None,
+        completed_at: None,
+    };
+    s.create_execution_nodes_batch(std::slice::from_ref(&node))
+        .await
+        .unwrap();
+
+    s.update_node_state(node.id, NodeState::Running)
+        .await
+        .unwrap();
+    let first = s.get_execution_tree(inst.id).await.unwrap()[0]
+        .started_at
+        .expect("first Running transition sets started_at");
+
+    s.update_node_state(node.id, NodeState::Waiting)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    s.update_node_state(node.id, NodeState::Running)
+        .await
+        .unwrap();
+
+    let second = s.get_execution_tree(inst.id).await.unwrap()[0]
+        .started_at
+        .unwrap();
+    assert_eq!(
+        first, second,
+        "re-dispatch must not overwrite the original started_at on Postgres"
+    );
+}
+
+#[tokio::test]
+async fn batch_node_updates_preserve_started_at_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&inst).await.unwrap();
+
+    let node = ExecutionNode {
+        id: ExecutionNodeId::new(),
+        instance_id: inst.id,
+        block_id: BlockId::new("s1"),
+        parent_id: None,
+        block_type: BlockType::Step,
+        branch_index: None,
+        state: NodeState::Pending,
+        started_at: None,
+        completed_at: None,
+    };
+    s.create_execution_nodes_batch(std::slice::from_ref(&node))
+        .await
+        .unwrap();
+
+    s.update_nodes_state(&[node.id], NodeState::Running)
+        .await
+        .unwrap();
+    let first = s.get_execution_tree(inst.id).await.unwrap()[0]
+        .started_at
+        .expect("batch Running transition sets started_at");
+
+    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    s.update_nodes_state(&[node.id], NodeState::Running)
+        .await
+        .unwrap();
+    let second = s.get_execution_tree(inst.id).await.unwrap()[0]
+        .started_at
+        .unwrap();
+    assert_eq!(
+        first, second,
+        "batch re-transition must keep started_at on Postgres"
+    );
 }

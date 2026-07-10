@@ -154,6 +154,7 @@ pub(super) async fn claim_for_tenant(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
          WHERE wt.handler_name=?1 AND wt.state='pending' AND ti.tenant_id=?3
+         ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
     .bind(handler_name)
@@ -312,7 +313,7 @@ pub(super) async fn expire_timed_out(storage: &SqliteStorage) -> Result<u64, Sto
              completed_at=?1
          WHERE state IN ('pending','claimed')
            AND timeout_ms IS NOT NULL
-           AND datetime(created_at, '+' || (timeout_ms / 1000) || ' seconds') < ?1",
+           AND datetime(created_at, '+' || (timeout_ms / 1000.0) || ' seconds') < datetime(?1)",
     )
     .bind(&now)
     .execute(&storage.pool)

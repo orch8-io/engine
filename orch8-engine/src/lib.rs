@@ -313,7 +313,8 @@ impl Engine {
 
         // Externalized-state GC sweeper (TTL-based cleanup, every 5 minutes).
         // Also sweeps terminal-instance artifacts when retention is configured
-        // (`artifact_retention_secs > 0`); otherwise artifacts are kept.
+        // (`artifact_retention_secs > 0`); otherwise artifacts are kept. Same
+        // for terminal `task_instances` rows themselves (`instance_retention_secs`).
         let gc_storage = Arc::clone(&self.storage);
         let gc_cancel = self.cancel.clone();
         // Only sweep when retention is configured AND an artifact backend is
@@ -322,11 +323,16 @@ impl Engine {
         let artifact_retention = (self.config.artifact_retention_secs > 0
             && self.storage.artifacts_enabled())
         .then(|| Duration::from_secs(self.config.artifact_retention_secs));
+        // Off by default -- deleting task_instances rows removes queryable
+        // instance history, so a deployment must opt in explicitly.
+        let instance_retention = (self.config.instance_retention_secs > 0)
+            .then(|| Duration::from_secs(self.config.instance_retention_secs));
         set.spawn(async move {
             gc::run_gc_loop(
                 gc_storage,
                 gc::GC_DEFAULT_INTERVAL,
                 artifact_retention,
+                instance_retention,
                 gc_cancel,
             )
             .await;

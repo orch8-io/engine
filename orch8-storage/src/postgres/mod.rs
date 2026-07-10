@@ -21,11 +21,13 @@ mod pools;
 mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
+mod rollback;
 mod rows;
 mod sequences;
 mod sessions;
 mod signals;
 mod step_logs;
+mod telemetry;
 mod triggers;
 mod webhook_outbox;
 mod worker_commands;
@@ -57,14 +59,6 @@ pub struct PostgresStorage {
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
     /// methods return `Unsupported`.
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
-    /// Held connections for in-flight `acquire_manifest_lock` calls, keyed by
-    /// tenant ID. `pg_advisory_lock` is session-scoped -- the same connection
-    /// that acquired it must be the one that unlocks it -- so the connection
-    /// is checked out of the pool and parked here for the lock's lifetime
-    /// rather than returned after a single statement.
-    manifest_locks: tokio::sync::Mutex<
-        std::collections::HashMap<String, sqlx::pool::PoolConnection<sqlx::Postgres>>,
-    >,
 }
 
 impl PostgresStorage {
@@ -149,7 +143,6 @@ impl PostgresStorage {
         Ok(Self {
             pool,
             artifact_store: None,
-            manifest_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -228,37 +221,52 @@ impl crate::SequenceStore for PostgresStorage {
         sequences::delete(self, id).await
     }
 
+    async fn replace_sequence(
+        &self,
+        old_id: SequenceId,
+        new: &SequenceDefinition,
+    ) -> Result<(), StorageError> {
+        sequences::replace(self, old_id, new).await
+    }
+
     // `pg_advisory_lock` is session-scoped: only the connection that took it
     // can release it. Check out a dedicated connection from the pool and
-    // park it in `manifest_locks` for the lock's lifetime -- released back to
-    // the pool on `release_manifest_lock` (or if it's simply dropped, e.g. on
-    // shutdown, Postgres releases session-level advisory locks when the
-    // backend disconnects). Blocks (bounded by the connection's
-    // `statement_timeout`, currently 30s) if another node already holds the
-    // same tenant's lock, giving concurrent manifest publishes real mutual
-    // exclusion instead of racing to interleave partial/duplicate versions.
-    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+    // hand it to the returned guard, which spawns the unlock + connection
+    // return on `Drop` -- release is no longer the caller's responsibility
+    // (closes M8: a panic or early return between acquire and release used
+    // to strand the pooled connection permanently). Each acquire gets its
+    // own connection rather than sharing one keyed by tenant in a map, so a
+    // second concurrent acquire for the same tenant can no longer clobber
+    // the first's entry -- it simply blocks on `pg_advisory_lock` (bounded
+    // by the connection's `statement_timeout`, currently 30s) until the
+    // first guard drops, which is the real mutual-exclusion semantics this
+    // lock exists for.
+    async fn acquire_manifest_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<crate::ManifestLockGuard, StorageError> {
         let mut conn = self.pool.acquire().await?;
         sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
             .bind(tenant_id)
             .execute(&mut *conn)
             .await?;
-        self.manifest_locks
-            .lock()
-            .await
-            .insert(tenant_id.to_string(), conn);
-        Ok(())
-    }
-
-    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
-        let held = self.manifest_locks.lock().await.remove(tenant_id);
-        if let Some(mut conn) = held {
-            sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
-                .bind(tenant_id)
-                .execute(&mut *conn)
-                .await?;
-        }
-        Ok(())
+        let tenant_owned = tenant_id.to_string();
+        Ok(crate::ManifestLockGuard::new(move || {
+            tokio::spawn(async move {
+                if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
+                    .bind(&tenant_owned)
+                    .execute(&mut *conn)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        tenant_id = %tenant_owned,
+                        "failed to release manifest advisory lock; it will clear when the connection resets"
+                    );
+                }
+                // `conn` drops here either way, returning it to the pool.
+            });
+        }))
     }
 }
 
@@ -1504,28 +1512,17 @@ impl crate::AdminStore for PostgresStorage {
         confirmation_window_secs: Option<i32>,
         webhook_url: Option<&str>,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            r"INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs, cooldown_secs, confirmation_window_secs, webhook_url)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (tenant_id, sequence_name) DO UPDATE SET
-               error_rate_threshold = EXCLUDED.error_rate_threshold,
-               time_window_secs = EXCLUDED.time_window_secs,
-               cooldown_secs = EXCLUDED.cooldown_secs,
-               confirmation_window_secs = EXCLUDED.confirmation_window_secs,
-               webhook_url = EXCLUDED.webhook_url,
-               enabled = 1,
-               updated_at = NOW()"
+        rollback::create_rollback_policy(
+            self,
+            tenant_id,
+            sequence_name,
+            error_rate_threshold,
+            time_window_secs,
+            cooldown_secs,
+            confirmation_window_secs,
+            webhook_url,
         )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .bind(error_rate_threshold)
-        .bind(time_window_secs)
-        .bind(cooldown_secs.unwrap_or(3600))
-        .bind(confirmation_window_secs.unwrap_or(60))
-        .bind(webhook_url)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn get_rollback_policy(
@@ -1533,42 +1530,7 @@ impl crate::AdminStore for PostgresStorage {
         tenant_id: &str,
         sequence_name: &str,
     ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        let row: Option<(i64, String, String, f64, i32, bool, i32, i32, Option<String>, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2"
-        )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(
-            |(
-                id,
-                tenant_id,
-                sequence_name,
-                error_rate_threshold,
-                time_window_secs,
-                enabled,
-                cooldown_secs,
-                confirmation_window_secs,
-                webhook_url,
-                created_at,
-                updated_at,
-            )| {
-                orch8_types::rollback::RollbackPolicy {
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    error_rate_threshold,
-                    time_window_secs,
-                    enabled,
-                    cooldown_secs,
-                    confirmation_window_secs,
-                    webhook_url,
-                    created_at,
-                    updated_at,
-                }
-            },
-        ))
+        rollback::get_rollback_policy(self, tenant_id, sequence_name).await
     }
 
     async fn list_rollback_policies(
@@ -1576,66 +1538,7 @@ impl crate::AdminStore for PostgresStorage {
         tenant_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        let rows: Vec<(
-            i64,
-            String,
-            String,
-            f64,
-            i32,
-            bool,
-            i32,
-            i32,
-            Option<String>,
-            DateTime<Utc>,
-            DateTime<Utc>,
-        )> = if let Some(t) = tenant_id {
-            sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 LIMIT $2"
-            )
-            .bind(t)
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, created_at, updated_at FROM rollback_policies LIMIT $1"
-            )
-            .bind(i64::from(limit))
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    error_rate_threshold,
-                    time_window_secs,
-                    enabled,
-                    cooldown_secs,
-                    confirmation_window_secs,
-                    webhook_url,
-                    created_at,
-                    updated_at,
-                )| {
-                    orch8_types::rollback::RollbackPolicy {
-                        id,
-                        tenant_id,
-                        sequence_name,
-                        error_rate_threshold,
-                        time_window_secs,
-                        enabled,
-                        cooldown_secs,
-                        confirmation_window_secs,
-                        webhook_url,
-                        created_at,
-                        updated_at,
-                    }
-                },
-            )
-            .collect())
+        rollback::list_rollback_policies(self, tenant_id, limit).await
     }
 
     async fn delete_rollback_policy(
@@ -1643,12 +1546,7 @@ impl crate::AdminStore for PostgresStorage {
         tenant_id: &str,
         sequence_name: &str,
     ) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2")
-            .bind(tenant_id)
-            .bind(sequence_name)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        rollback::delete_rollback_policy(self, tenant_id, sequence_name).await
     }
 
     async fn record_rollback(
@@ -1659,17 +1557,7 @@ impl crate::AdminStore for PostgresStorage {
         threshold: f64,
         reason: &str,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO rollback_history (tenant_id, sequence_name, error_rate, threshold, reason) VALUES ($1, $2, $3, $4, $5)"
-        )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .bind(error_rate)
-        .bind(threshold)
-        .bind(reason)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        rollback::record_rollback(self, tenant_id, sequence_name, error_rate, threshold, reason).await
     }
 
     async fn query_error_rate(
@@ -1678,29 +1566,7 @@ impl crate::AdminStore for PostgresStorage {
         sequence_name: &str,
         window_secs: i64,
     ) -> Result<Option<f64>, StorageError> {
-        let start = Utc::now() - chrono::Duration::seconds(window_secs);
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            r"SELECT
-               COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
-               COUNT(*) as total
-             FROM telemetry_mobile_events
-             WHERE tenant_id = $1
-               AND payload->>'sequence_name' = $2
-               AND created_at >= $3",
-        )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .bind(start)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.and_then(|(failed, total)| {
-            if total > 0 {
-                #[allow(clippy::cast_precision_loss)]
-                Some(failed as f64 / total as f64)
-            } else {
-                None
-            }
-        }))
+        rollback::query_error_rate(self, tenant_id, sequence_name, window_secs).await
     }
 
     async fn list_rollback_history(
@@ -1709,70 +1575,7 @@ impl crate::AdminStore for PostgresStorage {
         sequence_name: Option<&str>,
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
-        use std::fmt::Write;
-        let mut query = String::from(
-            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1",
-        );
-        let mut param_idx = 1u32;
-        if tenant_id.is_some() {
-            let _ = write!(query, " AND tenant_id = ${param_idx}");
-            param_idx += 1;
-        }
-        if sequence_name.is_some() {
-            let _ = write!(query, " AND sequence_name = ${param_idx}");
-            param_idx += 1;
-        }
-        let _ = write!(query, " ORDER BY triggered_at DESC LIMIT ${param_idx}");
-
-        let mut q = sqlx::query_as(&query);
-        if let Some(t) = tenant_id {
-            q = q.bind(t);
-        }
-        if let Some(s) = sequence_name {
-            q = q.bind(s);
-        }
-        q = q.bind(i64::from(limit));
-
-        let rows: Vec<(
-            i64,
-            String,
-            String,
-            DateTime<Utc>,
-            f64,
-            f64,
-            Option<String>,
-            String,
-            bool,
-        )> = q.fetch_all(&self.pool).await?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    triggered_at,
-                    error_rate,
-                    threshold,
-                    previous_manifest_version,
-                    reason,
-                    alert_sent,
-                )| {
-                    orch8_types::rollback::RollbackHistory {
-                        id,
-                        tenant_id,
-                        sequence_name,
-                        triggered_at,
-                        error_rate,
-                        threshold,
-                        previous_manifest_version,
-                        reason,
-                        alert_sent,
-                    }
-                },
-            )
-            .collect())
+        rollback::list_rollback_history(self, tenant_id, sequence_name, limit).await
     }
 
     async fn ping(&self) -> Result<(), StorageError> {
@@ -1780,275 +1583,7 @@ impl crate::AdminStore for PostgresStorage {
     }
 }
 
-// ============================================================================
-// Sub-trait 9: TelemetryStore
-// ============================================================================
-
-#[async_trait]
-impl crate::TelemetryStore for PostgresStorage {
-    async fn ingest_telemetry_event(
-        &self,
-        event_type: &str,
-        payload: &str,
-        device_id: &str,
-        os_name: &str,
-        os_version: &str,
-        app_version: &str,
-        sdk_version: &str,
-        tenant_id: &str,
-        created_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r"INSERT INTO telemetry_mobile_events
-               (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            ",
-        )
-        .bind(event_type)
-        .bind(payload)
-        .bind(device_id)
-        .bind(os_name)
-        .bind(os_version)
-        .bind(app_version)
-        .bind(sdk_version)
-        .bind(tenant_id)
-        .bind(created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
-        sqlx::query(
-            r"INSERT INTO usage_events
-               (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(&event.tenant_id)
-        .bind(event.instance_id.map(orch8_types::ids::InstanceId::into_uuid))
-        .bind(&event.block_id)
-        .bind(&event.kind)
-        .bind(&event.model)
-        .bind(event.input_tokens)
-        .bind(event.output_tokens)
-        .bind(event.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn query_usage(
-        &self,
-        tenant_id: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
-        use sqlx::Row;
-        // SUM(bigint) is NUMERIC in Postgres — cast back to BIGINT for i64 decode.
-        let rows = sqlx::query(
-            r"SELECT kind, model,
-                     COUNT(*)::BIGINT AS events,
-                     COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-                     COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
-              FROM usage_events
-              WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3
-              GROUP BY kind, model ORDER BY kind, model",
-        )
-        .bind(tenant_id)
-        .bind(start)
-        .bind(end)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .iter()
-            .map(|r| crate::UsageAggregate {
-                kind: r.get("kind"),
-                model: r.get("model"),
-                events: r.get("events"),
-                input_tokens: r.get("input_tokens"),
-                output_tokens: r.get("output_tokens"),
-            })
-            .collect())
-    }
-
-    async fn query_instance_usage_totals(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<(i64, i64), StorageError> {
-        use sqlx::Row;
-        // SUM(bigint) is NUMERIC in Postgres — cast back to BIGINT for i64 decode.
-        let row = sqlx::query(
-            r"SELECT COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
-                     COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens
-              FROM usage_events WHERE instance_id = $1",
-        )
-        .bind(instance_id.into_uuid())
-        .fetch_one(&self.pool)
-        .await?;
-        Ok((row.get("input_tokens"), row.get("output_tokens")))
-    }
-
-    async fn ingest_telemetry_events_batch(
-        &self,
-        events: &[crate::TelemetryEvent],
-    ) -> Result<u64, StorageError> {
-        if events.is_empty() {
-            return Ok(0);
-        }
-        let mut total = 0u64;
-        // Postgres limit: 65535 params. 9 params per row -> batch <= ~7000.
-        for chunk in events.chunks(7000) {
-            let mut qb: sqlx::QueryBuilder<'_, sqlx::Postgres> = sqlx::QueryBuilder::new(
-                "INSERT INTO telemetry_mobile_events (event_type, payload, device_id, os_name, os_version, app_version, sdk_version, tenant_id, created_at) ",
-            );
-            qb.push_values(chunk, |mut b, event| {
-                b.push_bind(&event.event_type);
-                b.push_bind(&event.payload);
-                b.push_bind(&event.device_id);
-                b.push_bind(&event.os_name);
-                b.push_bind(&event.os_version);
-                b.push_bind(&event.app_version);
-                b.push_bind(&event.sdk_version);
-                b.push_bind(&event.tenant_id);
-                b.push_bind(event.created_at);
-            });
-            let result = qb.build().execute(&self.pool).await?;
-            total += result.rows_affected();
-        }
-        Ok(total)
-    }
-
-    async fn ingest_telemetry_error(
-        &self,
-        error_type: &str,
-        message: &str,
-        stack_trace: Option<&str>,
-        device_id: &str,
-        os_name: &str,
-        os_version: &str,
-        app_version: &str,
-        sdk_version: &str,
-        tenant_id: &str,
-        instance_id: Option<&str>,
-        sequence_name: Option<&str>,
-    ) -> Result<(), StorageError> {
-        sqlx::query(
-            r"INSERT INTO telemetry_mobile_errors
-               (error_type, message, stack_trace, device_id, os_name, os_version, app_version, sdk_version, tenant_id, instance_id, sequence_name)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            ",
-        )
-        .bind(error_type)
-        .bind(message)
-        .bind(stack_trace)
-        .bind(device_id)
-        .bind(os_name)
-        .bind(os_version)
-        .bind(app_version)
-        .bind(sdk_version)
-        .bind(tenant_id)
-        .bind(instance_id)
-        .bind(sequence_name)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn query_telemetry_dashboard(
-        &self,
-        query_type: &str,
-        tenant_id: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<(String, i64)>, StorageError> {
-        let rows: Vec<(String, i64)> = match query_type {
-            "sync_completed_versions" => {
-                sqlx::query_as(
-                    r"SELECT COALESCE(payload->>'version', 'unknown') as version, COUNT(*) as cnt
-                       FROM telemetry_mobile_events
-                       WHERE event_type = 'SyncCompleted'
-                         AND tenant_id = $1
-                         AND received_at BETWEEN $2 AND $3
-                       GROUP BY payload->>'version'
-                       ORDER BY cnt DESC
-                       LIMIT 50",
-                )
-                .bind(tenant_id)
-                .bind(start)
-                .bind(end)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            "error_rate_per_sequence" => {
-                sqlx::query_as(
-                    r"SELECT COALESCE(sequence_name, 'unknown') as name, COUNT(*) as cnt
-                       FROM telemetry_mobile_errors
-                       WHERE tenant_id = $1
-                         AND received_at BETWEEN $2 AND $3
-                       GROUP BY sequence_name
-                       ORDER BY cnt DESC
-                       LIMIT 50",
-                )
-                .bind(tenant_id)
-                .bind(start)
-                .bind(end)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            "top_failing_steps" => sqlx::query_as(
-                r"SELECT COALESCE(payload->>'step_name', 'unknown') as step_name, COUNT(*) as cnt
-                       FROM telemetry_mobile_events
-                       WHERE event_type = 'InstanceFailed'
-                         AND tenant_id = $1
-                         AND received_at BETWEEN $2 AND $3
-                       GROUP BY payload->>'step_name'
-                       ORDER BY cnt DESC
-                       LIMIT 50",
-            )
-            .bind(tenant_id)
-            .bind(start)
-            .bind(end)
-            .fetch_all(&self.pool)
-            .await?,
-            "device_os_breakdown" => {
-                sqlx::query_as(
-                    r"SELECT COALESCE(os_name, 'unknown') as os_name, COUNT(*) as cnt
-                       FROM telemetry_mobile_events
-                       WHERE tenant_id = $1
-                         AND received_at BETWEEN $2 AND $3
-                       GROUP BY os_name
-                       ORDER BY cnt DESC
-                       LIMIT 50",
-                )
-                .bind(tenant_id)
-                .bind(start)
-                .bind(end)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            _ => Vec::new(),
-        };
-        Ok(rows)
-    }
-
-    async fn delete_old_telemetry_events(
-        &self,
-        older_than: DateTime<Utc>,
-        limit: u32,
-    ) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM telemetry_mobile_events WHERE id IN (
-                SELECT id FROM telemetry_mobile_events WHERE received_at < $1 LIMIT $2
-            )",
-        )
-        .bind(older_than)
-        .bind(i64::from(limit))
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected())
-    }
-}
-
+// TelemetryStore is implemented in telemetry.rs
 // ============================================================================
 // Sub-trait 10: ResourceStore
 // ============================================================================
@@ -2101,6 +1636,14 @@ impl crate::ResourceStore for PostgresStorage {
 
     async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError> {
         instances::mark_artifacts_gced(self, instance_id).await
+    }
+
+    async fn delete_terminal_instances(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        instances::delete_terminal_instances(self, cutoff, limit).await
     }
 
     async fn set_instance_kv(

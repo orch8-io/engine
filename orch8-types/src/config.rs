@@ -378,6 +378,17 @@ pub struct SchedulerConfig {
     /// `ORCH8_ARTIFACT_RETENTION_SECS`.
     #[serde(default)]
     pub artifact_retention_secs: u64,
+    /// Terminal instance retention, in seconds. When `> 0`, the background GC
+    /// sweeper deletes `task_instances` rows (and their execution history --
+    /// execution tree, block outputs, signals, worker tasks, checkpoints,
+    /// externalized state, step logs, audit log entries) that have been in a
+    /// terminal state for longer than this window. `0` (default) disables the
+    /// sweep -- unlike artifact retention, this removes queryable instance
+    /// history, so it defaults off rather than to a preset window; deployments
+    /// that want it must opt in explicitly. Set via
+    /// `ORCH8_INSTANCE_RETENTION_SECS`.
+    #[serde(default)]
+    pub instance_retention_secs: u64,
 }
 
 impl Default for SchedulerConfig {
@@ -402,6 +413,7 @@ impl Default for SchedulerConfig {
             max_steps_per_instance: 0,
             clock: crate::clock::SharedClock::default(),
             artifact_retention_secs: 0,
+            instance_retention_secs: 0,
         }
     }
 }

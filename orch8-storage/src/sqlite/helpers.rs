@@ -180,7 +180,7 @@ pub(super) fn row_to_signal(row: &sqlx::sqlite::SqliteRow) -> Result<Signal, Sto
         payload: parse_json(row.get::<&str, _>("payload"))?,
         delivered: row.get::<i32, _>("delivered") != 0,
         created_at: parse_ts(row.get::<&str, _>("created_at"))?,
-        delivered_at: None,
+        delivered_at: parse_ts_opt(row.get::<Option<String>, _>("delivered_at"))?,
     })
 }
 
@@ -217,8 +217,11 @@ pub(super) fn row_to_worker_task(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<WorkerTask, StorageError> {
     use orch8_types::worker::WorkerTaskState;
+    // A corrupt `state` column must surface as an error, not silently
+    // resurrect the row as Pending -- a corrupt Completed/Failed task
+    // coerced back to Pending becomes claimable again.
     let state =
-        WorkerTaskState::from_str(row.get::<&str, _>("state")).unwrap_or(WorkerTaskState::Pending);
+        WorkerTaskState::from_str(row.get::<&str, _>("state")).map_err(StorageError::Query)?;
     Ok(WorkerTask {
         id: parse_uuid(row.get::<&str, _>("id"))?,
         instance_id: InstanceId::from_uuid(parse_uuid(row.get::<&str, _>("instance_id"))?),

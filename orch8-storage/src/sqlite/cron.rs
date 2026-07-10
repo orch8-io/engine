@@ -85,29 +85,24 @@ pub(super) async fn delete(storage: &SqliteStorage, id: Uuid) -> Result<(), Stor
     Ok(())
 }
 
-pub(super) async fn claim_due(
-    storage: &SqliteStorage,
-    now: DateTime<Utc>,
+async fn claim_due_inner(
+    conn: &mut sqlx::SqliteConnection,
+    now_str: &str,
 ) -> Result<Vec<CronSchedule>, StorageError> {
-    let now_str = ts(now);
-
     // SQLite lacks FOR UPDATE SKIP LOCKED, so we do a two-step approach:
     // 1. SELECT ids that are due and haven't been claimed for this window
     // 2. UPDATE those ids to mark them triggered
     // 3. Return the matched schedules
-    let mut tx = storage.pool.begin().await?;
-
     let due_ids: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM cron_schedules \
          WHERE enabled = 1 AND next_fire_at <= ?1 \
            AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)",
     )
-    .bind(&now_str)
-    .fetch_all(&mut *tx)
+    .bind(now_str)
+    .fetch_all(&mut *conn)
     .await?;
 
     if due_ids.is_empty() {
-        tx.commit().await?;
         return Ok(vec![]);
     }
 
@@ -116,8 +111,8 @@ pub(super) async fn claim_due(
             "UPDATE cron_schedules SET last_triggered_at = ?2, updated_at = ?2 WHERE id = ?1",
         )
         .bind(id)
-        .bind(&now_str)
-        .execute(&mut *tx)
+        .bind(now_str)
+        .execute(&mut *conn)
         .await?;
     }
 
@@ -125,13 +120,41 @@ pub(super) async fn claim_due(
     for id in &due_ids {
         let row = sqlx::query("SELECT * FROM cron_schedules WHERE id = ?1")
             .bind(id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
         result.push(row_to_cron(&row)?);
     }
 
-    tx.commit().await?;
     Ok(result)
+}
+
+pub(super) async fn claim_due(
+    storage: &SqliteStorage,
+    now: DateTime<Utc>,
+) -> Result<Vec<CronSchedule>, StorageError> {
+    let now_str = ts(now);
+
+    // `BEGIN IMMEDIATE` acquires a RESERVED write lock up-front, closing the
+    // check-then-act window between the SELECT and the per-id UPDATE above --
+    // sqlx's `pool.begin()` uses DEFERRED, which lets two concurrent claimers
+    // both read the same due rows before either takes the write lock,
+    // double-firing the loser's schedule. Same pattern as
+    // `signals.rs::enqueue_if_active` and `instances.rs::claim_due`.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+
+    let result = claim_due_inner(&mut conn, &now_str).await;
+
+    match result {
+        Ok(schedules) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(schedules)
+        }
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
 }
 
 pub(super) async fn update_fire_times(

@@ -696,6 +696,11 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     {
         config.engine.artifact_retention_secs = secs;
     }
+    if let Ok(val) = std::env::var("ORCH8_INSTANCE_RETENTION_SECS")
+        && let Ok(secs) = val.parse::<u64>()
+    {
+        config.engine.instance_retention_secs = secs;
+    }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
         config.database.backend = val;
     }

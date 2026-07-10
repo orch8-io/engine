@@ -122,14 +122,20 @@ pub(super) async fn update(
 pub(super) async fn delete(store: &SqliteStorage, slug: &str) -> Result<(), StorageError> {
     // Remove poll state first so a polling trigger never leaves an orphaned
     // cursor behind (SQLite schema declares no FK cascade for this table).
+    // Both deletes run in one transaction so a concurrent
+    // `upsert_trigger_poll_state` landing between them can't re-create the
+    // poll-state row after its trigger is gone, and a mid-operation failure
+    // can't leave partial state.
+    let mut tx = store.pool.begin().await?;
     sqlx::query("DELETE FROM trigger_poll_state WHERE slug = ?1")
         .bind(slug)
-        .execute(&store.pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM triggers WHERE slug = ?1")
         .bind(slug)
-        .execute(&store.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(())
 }
 

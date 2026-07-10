@@ -159,12 +159,55 @@ pub trait SequenceStore: Send + Sync + 'static {
 
     // === Manifest advisory lock (Postgres only) ===
 
-    async fn acquire_manifest_lock(&self, _tenant_id: &str) -> Result<(), StorageError> {
-        Ok(())
+    /// Acquire a per-tenant advisory lock for the duration of a manifest
+    /// publish, returning an RAII guard that releases it on drop.
+    ///
+    /// Release is intentionally not a separate caller-invoked method: the
+    /// caller previously had to remember to call a matching
+    /// `release_manifest_lock`, and any early return (including a panic)
+    /// between acquire and that call stranded the lock/connection. The
+    /// guard makes release unconditional -- it runs whether the critical
+    /// section returns `Ok`, `Err`, or unwinds.
+    ///
+    /// Backends with nothing to release (in-memory, the default impl here)
+    /// return a no-op guard. `SQLite` has a real lock to release (a row in
+    /// `manifest_locks`) and returns a guard that deletes it on drop.
+    async fn acquire_manifest_lock(&self, _tenant_id: &str) -> Result<ManifestLockGuard, StorageError> {
+        Ok(ManifestLockGuard::noop())
+    }
+}
+
+/// RAII guard returned by [`SequenceStore::acquire_manifest_lock`]. Dropping
+/// it runs the backend's release logic (if any) exactly once.
+///
+/// Holds an optional `FnOnce` rather than a backend-specific type so every
+/// implementor of the object-safe [`StorageBackend`] trait can return the
+/// same concrete type regardless of what (if anything) it needs to clean up.
+pub struct ManifestLockGuard {
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ManifestLockGuard {
+    /// A guard with nothing to release on drop.
+    #[must_use]
+    pub const fn noop() -> Self {
+        Self { on_drop: None }
     }
 
-    async fn release_manifest_lock(&self, _tenant_id: &str) -> Result<(), StorageError> {
-        Ok(())
+    /// A guard that runs `f` exactly once, on drop.
+    #[must_use]
+    pub fn new(f: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            on_drop: Some(Box::new(f)),
+        }
+    }
+}
+
+impl Drop for ManifestLockGuard {
+    fn drop(&mut self) {
+        if let Some(f) = self.on_drop.take() {
+            f();
+        }
     }
 }
 
@@ -1938,6 +1981,28 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// sweeper does not re-scan it. Default: `Ok(())`.
     async fn mark_artifacts_gced(&self, _instance_id: InstanceId) -> Result<(), StorageError> {
         Ok(())
+    }
+
+    /// Delete up to `limit` **terminal** instances (state Completed / Failed /
+    /// Cancelled -- same set as [`Self::list_artifact_gc_candidates`]) whose
+    /// `updated_at` is older than `cutoff`, along with their execution
+    /// history: `task_instances` row deletion cascades to execution tree,
+    /// block outputs, signals, worker tasks, checkpoints and externalized
+    /// state (all declare `ON DELETE CASCADE`); `step_logs`, `audit_log` and
+    /// `usage_events` have no FK to `task_instances` and are deleted
+    /// explicitly for the same instance ids in the same transaction.
+    ///
+    /// Drives the opt-in instance-retention GC sweeper
+    /// (`instance_retention_secs` in `SchedulerConfig`) -- unlike artifact
+    /// retention this removes queryable instance history, so it is off by
+    /// default. Returns the number of instances deleted. Default: `Ok(0)`
+    /// (backends without instance storage opt out).
+    async fn delete_terminal_instances(
+        &self,
+        _cutoff: DateTime<Utc>,
+        _limit: u32,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
     }
 
     // === Externalized State ===

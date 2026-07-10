@@ -575,9 +575,14 @@ async fn insert_externalized_row(
     if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
         let compressed = compress(payload)?;
         sqlx::query(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-             VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
+             VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5) \
+             ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = NULL, \
+                 payload_bytes = excluded.payload_bytes, \
+                 compression = 'zstd', \
+                 size_bytes = excluded.size_bytes",
         )
         .bind(ref_key)
         .bind(instance_id.into_uuid().to_string())
@@ -588,9 +593,14 @@ async fn insert_externalized_row(
         .await?;
     } else {
         sqlx::query(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
+             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5) \
+             ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = excluded.payload, \
+                 payload_bytes = NULL, \
+                 compression = NULL, \
+                 size_bytes = excluded.size_bytes",
         )
         .bind(ref_key)
         .bind(instance_id.into_uuid().to_string())
@@ -850,6 +860,61 @@ pub(super) async fn list_artifact_gc_candidates(
         }
     }
     Ok(ids)
+}
+
+/// See [`crate::ResourceStore::delete_terminal_instances`].
+pub(super) async fn delete_terminal_instances(
+    storage: &SqliteStorage,
+    cutoff: DateTime<Utc>,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let mut tx = storage.pool.begin().await?;
+
+    // Same terminal-state set as `list_artifact_gc_candidates` -- keep in
+    // sync with `InstanceState::is_terminal()`.
+    let rows = sqlx::query(
+        "SELECT id FROM task_instances \
+         WHERE state IN ('completed','failed','cancelled') \
+           AND updated_at < ?1 \
+         ORDER BY updated_at ASC LIMIT ?2",
+    )
+    .bind(ts(cutoff))
+    .bind(i64::from(limit))
+    .fetch_all(&mut *tx)
+    .await?;
+    let ids: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Unlike Postgres, none of `step_logs`, `audit_log`, `usage_events`
+    // declare `ON DELETE CASCADE` (or any FK at all) to `task_instances` on
+    // SQLite -- Postgres's `audit_log` cascades (migration 016), SQLite's
+    // doesn't. All three are deleted explicitly here so the divergence
+    // doesn't leave orphans on this backend.
+    for table in ["step_logs", "audit_log", "usage_events"] {
+        let sql = format!("DELETE FROM {table} WHERE instance_id IN (");
+        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);
+        let mut separated = qb.separated(",");
+        for id in &ids {
+            separated.push_bind(id);
+        }
+        qb.push(")");
+        qb.build().execute(&mut *tx).await?;
+    }
+
+    let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> =
+        sqlx::QueryBuilder::new("DELETE FROM task_instances WHERE id IN (");
+    let mut separated = qb.separated(",");
+    for id in &ids {
+        separated.push_bind(id);
+    }
+    qb.push(")");
+    let result = qb.build().execute(&mut *tx).await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected())
 }
 
 /// Mark an instance artifact-swept (idempotent). See

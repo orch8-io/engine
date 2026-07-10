@@ -95,7 +95,9 @@ impl SequenceRow {
             name: self.name,
             version: self.version,
             deprecated: self.deprecated,
-            status: self.status.parse().unwrap_or_default(),
+            status: self.status.parse().map_err(|e| {
+                StorageError::Query(format!("invalid sequence status '{}': {e}", self.status))
+            })?,
             blocks,
             interceptors,
             input_schema,
@@ -132,7 +134,7 @@ pub(super) struct InstanceRow {
 impl InstanceRow {
     pub fn into_instance(self) -> Result<TaskInstance, StorageError> {
         let state = InstanceState::from_str(&self.state).map_err(StorageError::Query)?;
-        let priority = Priority::try_from(self.priority).unwrap_or(Priority::Normal);
+        let priority = Priority::try_from(self.priority).map_err(StorageError::Query)?;
         let context = serde_json::from_value(self.context)?;
         let budget = self.budget.map(serde_json::from_value).transpose()?;
 
@@ -173,10 +175,14 @@ pub(super) struct ExecutionNodeRow {
 }
 
 impl ExecutionNodeRow {
-    pub fn into_node(self) -> ExecutionNode {
-        let block_type = BlockType::from_str(&self.block_type).unwrap_or(BlockType::Step);
-        let state = NodeState::from_str(&self.state).unwrap_or(NodeState::Pending);
-        ExecutionNode {
+    // Corrupt block_type/state must surface as an error, not silently
+    // resurrect the row as Step/Pending -- a corrupt Completed node masked
+    // as Pending gets re-executed by the scheduler, duplicating side
+    // effects. Matches SQLite's strict decode (sqlite/helpers.rs).
+    pub fn into_node(self) -> Result<ExecutionNode, StorageError> {
+        let block_type = BlockType::from_str(&self.block_type).map_err(StorageError::Query)?;
+        let state = NodeState::from_str(&self.state).map_err(StorageError::Query)?;
+        Ok(ExecutionNode {
             id: ExecutionNodeId::from_uuid(self.id),
             instance_id: InstanceId::from_uuid(self.instance_id),
             block_id: BlockId::new(self.block_id),
@@ -186,7 +192,7 @@ impl ExecutionNodeRow {
             state,
             started_at: self.started_at,
             completed_at: self.completed_at,
-        }
+        })
     }
 }
 
@@ -320,9 +326,13 @@ pub(super) struct WorkerTaskRow {
 }
 
 impl WorkerTaskRow {
-    pub fn into_task(self) -> WorkerTask {
-        let state = WorkerTaskState::from_str(&self.state).unwrap_or(WorkerTaskState::Pending);
-        WorkerTask {
+    // A corrupt `state` column must surface as an error, not silently
+    // resurrect the row as Pending -- a corrupt Completed/Failed task
+    // coerced back to Pending becomes claimable again, re-running work that
+    // already finished (or already failed permanently).
+    pub fn into_task(self) -> Result<WorkerTask, StorageError> {
+        let state = WorkerTaskState::from_str(&self.state).map_err(StorageError::Query)?;
+        Ok(WorkerTask {
             id: self.id,
             instance_id: InstanceId::from_uuid(self.instance_id),
             block_id: BlockId::new(self.block_id),
@@ -341,7 +351,7 @@ impl WorkerTaskRow {
             error_message: self.error_message,
             error_retryable: self.error_retryable,
             created_at: self.created_at,
-        }
+        })
     }
 }
 

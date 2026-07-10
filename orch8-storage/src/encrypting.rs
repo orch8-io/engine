@@ -25,6 +25,100 @@ use crate::StorageBackend;
 /// unlikely to start with it.
 const ARTIFACT_ENC_MAGIC: &[u8] = b"O8ENC\x01";
 
+/// Wraps a whole `impl SomeTrait for EncryptingStorage { ... }` block, where
+/// each method is either:
+/// - a bare signature ending in `;` -- expands to a pure pass-through
+///   (`self.inner.$name(args).await`), the shape most of this decorator's
+///   methods take, since most `StorageBackend` methods never touch
+///   `context.data` (the only field this wrapper encrypts); or
+/// - a signature with a `{ ... }` body -- a hand-written encrypting
+///   override, emitted verbatim.
+///
+/// Collapses what would otherwise be a several-line `async fn foo(&self,
+/// ...) -> R { self.inner.foo(...).await }` block into one line per
+/// pass-through method, and keeps `self.inner.$name` textually present in
+/// the expansion so a `grep self.inner.` coverage audit (the technique that
+/// found finding M1 in the 2026-07 storage review) still surfaces every
+/// pass-through, macro-expanded or not.
+///
+/// This is *not* a substitute for R1's original proposal (an
+/// exhaustiveness-checked delegation macro via `ambassador`) -- that crate
+/// turned out to be incompatible with `EncryptingStorage.inner` being a
+/// trait object (`Arc<dyn StorageBackend>` never satisfies the generic
+/// `Target: Trait` bound `ambassador`'s derive requires, only method-call
+/// syntax gets the vtable dispatch). A newly-added trait method is *not*
+/// automatically caught by this macro -- it still requires a human to add a
+/// `;`-terminated line (or a hand-written encrypting override) for it.
+///
+/// Implementation note: this macro expands to literal `async fn` items and
+/// applies `#[async_trait]` to the *result*, rather than each method calling
+/// a smaller per-method macro from inside an already-`#[async_trait]`-tagged
+/// block. `#[async_trait]` rewrites the literal `async fn` syntax it sees at
+/// its own expansion time, which runs before any macro invocations nested
+/// inside the block are expanded -- a per-method macro call would still look
+/// like an opaque, non-`async fn` item to it and be left untransformed
+/// (hand-rolling `#[async_trait]`'s lifetime-elaborated desugaring by hand
+/// was tried and abandoned: every reference-typed argument needs its own
+/// named lifetime bound to `'async_trait`, which a macro operating on
+/// already-captured `$ty:ty` fragments can't inject generically). Expanding
+/// to the whole block first sidesteps the ordering problem -- almost: a
+/// naive single-pass expansion that itself recursively invokes
+/// `passthrough_impl!` *from inside* the `#[async_trait]`-tagged block hits
+/// the exact same issue one level deeper (the attribute still sees an
+/// unexpanded nested macro call, not `async fn` syntax). The fix is the
+/// standard "TT-muncher with accumulator" shape below: each `@munch` step
+/// recurses via its own top-level macro invocation (not one nested inside an
+/// attributed item), building the fully-expanded method list up in the `[$(
+/// $methods:tt)*]` accumulator, and only the base case -- once every method
+/// has already been expanded to literal `async fn` tokens -- emits the
+/// `#[async_trait] impl { ... }` block. By then there is no macro call left
+/// inside it for the attribute to fail to see.
+macro_rules! passthrough_impl {
+    (impl crate::$trait_name:ident for EncryptingStorage { $($body:tt)* }) => {
+        passthrough_impl!(@munch [$trait_name] [] $($body)*);
+    };
+
+    // Base case: every method already expanded into the accumulator.
+    (@munch [$trait_name:ident] [$($methods:tt)*]) => {
+        #[async_trait]
+        impl crate::$trait_name for EncryptingStorage {
+            $($methods)*
+        }
+    };
+
+    // Pass-through: bare signature terminated by `;`.
+    (@munch [$trait_name:ident] [$($methods:tt)*] async fn $name:ident(&self $(, $arg:ident : $ty:ty)* $(,)?) -> $ret:ty ; $($rest:tt)*) => {
+        passthrough_impl!(@munch [$trait_name] [$($methods)* async fn $name(&self, $($arg: $ty),*) -> $ret {
+            self.inner.$name($($arg),*).await
+        }] $($rest)*);
+    };
+
+    // Hand-written override: signature with an inline body, emitted as-is.
+    //
+    // Captures `self` via `&$self_tok:tt` rather than matching the literal
+    // `&self` (as the pass-through arm above does) -- the body is emitted
+    // verbatim from the call site's tokens, so its `self.` references carry
+    // the call site's hygiene context. Re-emitting a *literal* `self` here
+    // (as the pass-through arm safely can, since it also writes the body
+    // itself) would mint a hygienically distinct `self`, and `#[async_trait]`'s
+    // `self` -> `__self` rewrite then only renames one of the two, leaving
+    // the other unresolved ("cannot find value `__self`"). Re-emitting the
+    // captured token instead preserves its original identity.
+    (@munch [$trait_name:ident] [$($methods:tt)*] async fn $name:ident(&$self_tok:tt $(, $arg:ident : $ty:ty)* $(,)?) -> $ret:ty { $($fn_body:tt)* } $($rest:tt)*) => {
+        passthrough_impl!(@munch [$trait_name] [$($methods)* async fn $name(&$self_tok, $($arg: $ty),*) -> $ret { $($fn_body)* }] $($rest)*);
+    };
+
+    // Non-async override (e.g. a trait method that isn't `async fn`, like
+    // `ResourceStore::artifacts_enabled`). `#[async_trait]` only transforms
+    // `async fn` items and passes plain `fn` items through untouched -- but
+    // the same `self`-hygiene concern as the async override arm still
+    // applies (the body's `self` comes from the call site), so `self` is
+    // still captured via `&$self_tok:tt` rather than matched literally.
+    (@munch [$trait_name:ident] [$($methods:tt)*] fn $name:ident(&$self_tok:tt $(, $arg:ident : $ty:ty)* $(,)?) -> $ret:ty { $($fn_body:tt)* } $($rest:tt)*) => {
+        passthrough_impl!(@munch [$trait_name] [$($methods)* fn $name(&$self_tok, $($arg: $ty),*) -> $ret { $($fn_body)* }] $($rest)*);
+    };
+}
+
 /// Wraps an inner `StorageBackend` and encrypts/decrypts `context.data` transparently.
 pub struct EncryptingStorage {
     inner: Arc<dyn StorageBackend>,
@@ -383,73 +477,22 @@ impl EncryptingStorage {
 // Sub-trait 1: SequenceStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::SequenceStore for EncryptingStorage {
-    async fn create_sequence(
-        &self,
-        seq: &orch8_types::sequence::SequenceDefinition,
-    ) -> Result<(), StorageError> {
-        self.inner.create_sequence(seq).await
-    }
-    async fn get_sequence(
-        &self,
-        id: orch8_types::ids::SequenceId,
-    ) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError> {
-        self.inner.get_sequence(id).await
-    }
-    async fn get_sequence_by_name(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        namespace: &orch8_types::ids::Namespace,
-        name: &str,
-        version: Option<i32>,
-    ) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError> {
-        self.inner
-            .get_sequence_by_name(tenant_id, namespace, name, version)
-            .await
-    }
-    async fn list_sequence_versions(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        namespace: &orch8_types::ids::Namespace,
-        name: &str,
-    ) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
-        self.inner
-            .list_sequence_versions(tenant_id, namespace, name)
-            .await
-    }
-    async fn list_sequences(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-        namespace: Option<&orch8_types::ids::Namespace>,
-        limit: u32,
-        offset: u32,
-    ) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
-        self.inner
-            .list_sequences(tenant_id, namespace, limit, offset)
-            .await
-    }
-    async fn deprecate_sequence(
-        &self,
-        id: orch8_types::ids::SequenceId,
-    ) -> Result<(), StorageError> {
-        self.inner.deprecate_sequence(id).await
-    }
-    async fn update_sequence_status(
-        &self,
-        id: orch8_types::ids::SequenceId,
-        status: &str,
-    ) -> Result<(), StorageError> {
-        self.inner.update_sequence_status(id, status).await
-    }
-    async fn delete_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<(), StorageError> {
-        self.inner.delete_sequence(id).await
-    }
-    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
-        self.inner.acquire_manifest_lock(tenant_id).await
-    }
-    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
-        self.inner.release_manifest_lock(tenant_id).await
+passthrough_impl! {
+    impl crate::SequenceStore for EncryptingStorage {
+        async fn create_sequence(&self, seq: &orch8_types::sequence::SequenceDefinition) -> Result<(), StorageError>;
+        async fn get_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError>;
+        async fn get_sequence_by_name(&self, tenant_id: &orch8_types::ids::TenantId, namespace: &orch8_types::ids::Namespace, name: &str, version: Option<i32>) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError>;
+        async fn list_sequence_versions(&self, tenant_id: &orch8_types::ids::TenantId, namespace: &orch8_types::ids::Namespace, name: &str) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError>;
+        async fn list_sequences(&self, tenant_id: Option<&orch8_types::ids::TenantId>, namespace: Option<&orch8_types::ids::Namespace>, limit: u32, offset: u32) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError>;
+        async fn deprecate_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
+        async fn update_sequence_status(&self, id: orch8_types::ids::SequenceId, status: &str) -> Result<(), StorageError>;
+        async fn delete_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
+        // Must delegate explicitly -- without this override, the trait default
+        // (delete then create, two separate writes) shadows the inner
+        // backend's atomic single-transaction replace whenever encryption is
+        // enabled. Still a pure pass-through, just one that must be listed.
+        async fn replace_sequence(&self, old_id: orch8_types::ids::SequenceId, new: &orch8_types::sequence::SequenceDefinition) -> Result<(), StorageError>;
+        async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<crate::ManifestLockGuard, StorageError>;
     }
 }
 
@@ -457,8 +500,8 @@ impl crate::SequenceStore for EncryptingStorage {
 // Sub-trait 2: InstanceStore -- encryption on create/get/update context paths
 // ============================================================================
 
-#[async_trait]
-impl crate::InstanceStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::InstanceStore for EncryptingStorage {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         let encrypted = self.encrypt_instance(instance)?;
         self.inner.create_instance(encrypted.as_ref()).await
@@ -549,6 +592,13 @@ impl crate::InstanceStore for EncryptingStorage {
         // `jsonb_set`; jittered backoff plus a generous retry bound keeps a
         // burst of concurrent branch/signal writers from hard-failing the
         // step instead of just taking a little longer.
+        //
+        // MAX_ATTEMPTS=20 is an intentional fan-in ceiling, not a bug to be
+        // "fixed" into an unbounded loop: it bounds worst-case latency for a
+        // single `merge_context_data` call under contention. If a workload
+        // regularly needs more than ~20 concurrent writers merging into the
+        // same instance's context, that's a signal to raise the bound (and
+        // re-check `MAX_BACKOFF_MS`) rather than remove it.
         for attempt in 0..MAX_ATTEMPTS {
             let Some(mut instance) = self.inner.get_instance(id).await? else {
                 return Ok(());
@@ -582,14 +632,8 @@ impl crate::InstanceStore for EncryptingStorage {
         )))
     }
 
-    async fn merge_instance_metadata(
-        &self,
-        id: InstanceId,
-        patch: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        // Metadata is never encrypted (only `context.data` is) — pure pass-through.
-        self.inner.merge_instance_metadata(id, patch).await
-    }
+    // Metadata is never encrypted (only `context.data` is) — pure pass-through.
+    async fn merge_instance_metadata(&self, id: InstanceId, patch: &serde_json::Value) -> Result<(), StorageError>;
 
     async fn list_instances(
         &self,
@@ -768,161 +812,30 @@ impl crate::InstanceStore for EncryptingStorage {
 
     // --- Pass-through InstanceStore methods ---
 
-    async fn update_instance_state(
-        &self,
-        id: InstanceId,
-        new_state: orch8_types::instance::InstanceState,
-        next_fire_at: Option<DateTime<Utc>>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .update_instance_state(id, new_state, next_fire_at)
-            .await
-    }
-    async fn batch_reschedule_instances(
-        &self,
-        ids: &[InstanceId],
-        fire_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner.batch_reschedule_instances(ids, fire_at).await
-    }
-    async fn conditional_update_instance_state(
-        &self,
-        id: InstanceId,
-        expected_state: orch8_types::instance::InstanceState,
-        new_state: orch8_types::instance::InstanceState,
-        next_fire_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, StorageError> {
-        self.inner
-            .conditional_update_instance_state(id, expected_state, new_state, next_fire_at)
-            .await
-    }
-    async fn update_instance_sequence(
-        &self,
-        id: InstanceId,
-        new_sequence_id: orch8_types::ids::SequenceId,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .update_instance_sequence(id, new_sequence_id)
-            .await
-    }
-    async fn count_instances(
-        &self,
-        filter: &orch8_types::filter::InstanceFilter,
-    ) -> Result<u64, StorageError> {
-        self.inner.count_instances(filter).await
-    }
-    async fn bulk_update_state(
-        &self,
-        filter: &orch8_types::filter::InstanceFilter,
-        new_state: orch8_types::instance::InstanceState,
-    ) -> Result<u64, StorageError> {
-        self.inner.bulk_update_state(filter, new_state).await
-    }
-    async fn bulk_reschedule(
-        &self,
-        filter: &orch8_types::filter::InstanceFilter,
-        offset_secs: i64,
-    ) -> Result<u64, StorageError> {
-        self.inner.bulk_reschedule(filter, offset_secs).await
-    }
-    async fn update_instance_started_at(
-        &self,
-        id: InstanceId,
-        started_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner.update_instance_started_at(id, started_at).await
-    }
-    async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError> {
-        // Pass-through: the counter lives in `context.runtime`, which is never
-        // encrypted (only `context.data` is), so the inner backend's atomic
-        // increment is correct as-is.
-        self.inner.increment_total_steps(id).await
-    }
-    async fn update_instance_current_step_started_at(
-        &self,
-        id: InstanceId,
-        ts: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .update_instance_current_step_started_at(id, ts)
-            .await
-    }
-    async fn count_running_by_concurrency_key(
-        &self,
-        concurrency_key: &str,
-    ) -> Result<i64, StorageError> {
-        self.inner
-            .count_running_by_concurrency_key(concurrency_key)
-            .await
-    }
-    async fn count_running_by_concurrency_keys(
-        &self,
-        concurrency_keys: &[&str],
-    ) -> Result<std::collections::HashMap<String, i64>, StorageError> {
-        self.inner
-            .count_running_by_concurrency_keys(concurrency_keys)
-            .await
-    }
-    async fn concurrency_position(
-        &self,
-        instance_id: InstanceId,
-        concurrency_key: &str,
-    ) -> Result<i64, StorageError> {
-        self.inner
-            .concurrency_position(instance_id, concurrency_key)
-            .await
-    }
-    async fn recover_stale_instances(
-        &self,
-        stale_threshold: std::time::Duration,
-    ) -> Result<u64, StorageError> {
-        self.inner.recover_stale_instances(stale_threshold).await
-    }
-    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError> {
-        self.inner.heartbeat_instance(instance_id).await
-    }
-    async fn inject_blocks(
-        &self,
-        instance_id: InstanceId,
-        blocks_json: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        self.inner.inject_blocks(instance_id, blocks_json).await
-    }
-    async fn inject_blocks_at_position(
-        &self,
-        instance_id: InstanceId,
-        new_blocks_json: &serde_json::Value,
-        position: Option<usize>,
-    ) -> Result<serde_json::Value, StorageError> {
-        self.inner
-            .inject_blocks_at_position(instance_id, new_blocks_json, position)
-            .await
-    }
-    async fn get_injected_blocks(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<Option<serde_json::Value>, StorageError> {
-        self.inner.get_injected_blocks(instance_id).await
-    }
-    async fn record_or_get_emit_dedupe(
-        &self,
-        scope: &crate::DedupeScope,
-        key: &str,
-        candidate_child: InstanceId,
-    ) -> Result<crate::EmitDedupeOutcome, StorageError> {
-        self.inner
-            .record_or_get_emit_dedupe(scope, key, candidate_child)
-            .await
-    }
-    async fn delete_expired_emit_event_dedupe(
-        &self,
-        older_than: DateTime<Utc>,
-        limit: u32,
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .delete_expired_emit_event_dedupe(older_than, limit)
-            .await
-    }
+    async fn update_instance_state(&self, id: InstanceId, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
+    async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
+    async fn conditional_update_instance_state(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
+    async fn count_instances(&self, filter: &orch8_types::filter::InstanceFilter) -> Result<u64, StorageError>;
+    async fn bulk_update_state(&self, filter: &orch8_types::filter::InstanceFilter, new_state: orch8_types::instance::InstanceState) -> Result<u64, StorageError>;
+    async fn bulk_reschedule(&self, filter: &orch8_types::filter::InstanceFilter, offset_secs: i64) -> Result<u64, StorageError>;
+    async fn update_instance_started_at(&self, id: InstanceId, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+    // Pass-through: the counter lives in `context.runtime`, which is never
+    // encrypted (only `context.data` is), so the inner backend's atomic
+    // increment is correct as-is.
+    async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError>;
+    async fn update_instance_current_step_started_at(&self, id: InstanceId, ts: DateTime<Utc>) -> Result<(), StorageError>;
+    async fn count_running_by_concurrency_key(&self, concurrency_key: &str) -> Result<i64, StorageError>;
+    async fn count_running_by_concurrency_keys(&self, concurrency_keys: &[&str]) -> Result<std::collections::HashMap<String, i64>, StorageError>;
+    async fn concurrency_position(&self, instance_id: InstanceId, concurrency_key: &str) -> Result<i64, StorageError>;
+    async fn recover_stale_instances(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
+    async fn heartbeat_instance(&self, instance_id: InstanceId) -> Result<(), StorageError>;
+    async fn inject_blocks(&self, instance_id: InstanceId, blocks_json: &serde_json::Value) -> Result<(), StorageError>;
+    async fn inject_blocks_at_position(&self, instance_id: InstanceId, new_blocks_json: &serde_json::Value, position: Option<usize>) -> Result<serde_json::Value, StorageError>;
+    async fn get_injected_blocks(&self, instance_id: InstanceId) -> Result<Option<serde_json::Value>, StorageError>;
+    async fn record_or_get_emit_dedupe(&self, scope: &crate::DedupeScope, key: &str, candidate_child: InstanceId) -> Result<crate::EmitDedupeOutcome, StorageError>;
+    async fn delete_expired_emit_event_dedupe(&self, older_than: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
+
     async fn batch_save_externalized_state(
         &self,
         instance_id: InstanceId,
@@ -935,60 +848,23 @@ impl crate::InstanceStore for EncryptingStorage {
         crate::InstanceStore::batch_save_externalized_state(&*self.inner, instance_id, &encrypted)
             .await
     }
+    }
 }
 
 // ============================================================================
 // Sub-trait 3: ExecutionTreeStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::ExecutionTreeStore for EncryptingStorage {
-    async fn create_execution_node(
-        &self,
-        node: &orch8_types::execution::ExecutionNode,
-    ) -> Result<(), StorageError> {
-        self.inner.create_execution_node(node).await
-    }
-    async fn create_execution_nodes_batch(
-        &self,
-        nodes: &[orch8_types::execution::ExecutionNode],
-    ) -> Result<(), StorageError> {
-        self.inner.create_execution_nodes_batch(nodes).await
-    }
-    async fn get_execution_tree(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError> {
-        self.inner.get_execution_tree(instance_id).await
-    }
-    async fn update_node_state(
-        &self,
-        node_id: orch8_types::ids::ExecutionNodeId,
-        state: orch8_types::execution::NodeState,
-    ) -> Result<(), StorageError> {
-        self.inner.update_node_state(node_id, state).await
-    }
-    async fn batch_activate_nodes(
-        &self,
-        node_ids: &[orch8_types::ids::ExecutionNodeId],
-    ) -> Result<(), StorageError> {
-        self.inner.batch_activate_nodes(node_ids).await
-    }
-    async fn update_nodes_state(
-        &self,
-        node_ids: &[orch8_types::ids::ExecutionNodeId],
-        state: orch8_types::execution::NodeState,
-    ) -> Result<(), StorageError> {
-        self.inner.update_nodes_state(node_ids, state).await
-    }
-    async fn get_children(
-        &self,
-        parent_id: orch8_types::ids::ExecutionNodeId,
-    ) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError> {
-        self.inner.get_children(parent_id).await
-    }
-    async fn delete_execution_tree(&self, instance_id: InstanceId) -> Result<(), StorageError> {
-        self.inner.delete_execution_tree(instance_id).await
+passthrough_impl! {
+    impl crate::ExecutionTreeStore for EncryptingStorage {
+        async fn create_execution_node(&self, node: &orch8_types::execution::ExecutionNode) -> Result<(), StorageError>;
+        async fn create_execution_nodes_batch(&self, nodes: &[orch8_types::execution::ExecutionNode]) -> Result<(), StorageError>;
+        async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
+        async fn update_node_state(&self, node_id: orch8_types::ids::ExecutionNodeId, state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
+        async fn batch_activate_nodes(&self, node_ids: &[orch8_types::ids::ExecutionNodeId]) -> Result<(), StorageError>;
+        async fn update_nodes_state(&self, node_ids: &[orch8_types::ids::ExecutionNodeId], state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
+        async fn get_children(&self, parent_id: orch8_types::ids::ExecutionNodeId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
+        async fn delete_execution_tree(&self, instance_id: InstanceId) -> Result<(), StorageError>;
     }
 }
 
@@ -997,8 +873,8 @@ impl crate::ExecutionTreeStore for EncryptingStorage {
 // InstanceStore methods that OutputStore calls reference)
 // ============================================================================
 
-#[async_trait]
-impl crate::OutputStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::OutputStore for EncryptingStorage {
     async fn save_block_output(
         &self,
         output: &orch8_types::output::BlockOutput,
@@ -1057,19 +933,9 @@ impl crate::OutputStore for EncryptingStorage {
         }
         Ok(out)
     }
-    async fn get_completed_block_ids(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<Vec<orch8_types::ids::BlockId>, StorageError> {
-        self.inner.get_completed_block_ids(instance_id).await
-    }
-    async fn get_completed_block_ids_batch(
-        &self,
-        instance_ids: &[InstanceId],
-    ) -> Result<std::collections::HashMap<InstanceId, Vec<orch8_types::ids::BlockId>>, StorageError>
-    {
-        self.inner.get_completed_block_ids_batch(instance_ids).await
-    }
+    async fn get_completed_block_ids(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::ids::BlockId>, StorageError>;
+    async fn get_completed_block_ids_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<orch8_types::ids::BlockId>>, StorageError>;
+
     async fn save_output_and_transition(
         &self,
         output: &orch8_types::output::BlockOutput,
@@ -1148,34 +1014,12 @@ impl crate::OutputStore for EncryptingStorage {
             )
             .await
     }
-    async fn delete_block_outputs(
-        &self,
-        instance_id: InstanceId,
-        block_id: &orch8_types::ids::BlockId,
-    ) -> Result<u64, StorageError> {
-        self.inner.delete_block_outputs(instance_id, block_id).await
-    }
-    async fn delete_block_outputs_batch(
-        &self,
-        instance_id: InstanceId,
-        block_ids: &[orch8_types::ids::BlockId],
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .delete_block_outputs_batch(instance_id, block_ids)
-            .await
-    }
-    async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError> {
-        self.inner.delete_all_block_outputs(instance_id).await
-    }
-    async fn delete_sentinel_block_outputs(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<u64, StorageError> {
-        self.inner.delete_sentinel_block_outputs(instance_id).await
-    }
-    async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_block_output_by_id(id).await
-    }
+    async fn delete_block_outputs(&self, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId) -> Result<u64, StorageError>;
+    async fn delete_block_outputs_batch(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
+    async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
+    async fn delete_sentinel_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
+    async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError>;
+
     async fn get_outputs_page(
         &self,
         instance_id: InstanceId,
@@ -1194,13 +1038,7 @@ impl crate::OutputStore for EncryptingStorage {
     // Pass-through: this is a raw row copy on the inner backend, so a
     // ciphertext `output` column is copied verbatim -- consistent with what
     // `save_block_output` would have written for the destination instance.
-    async fn copy_block_outputs(
-        &self,
-        src: InstanceId,
-        dst: InstanceId,
-        block_ids: &[orch8_types::ids::BlockId],
-    ) -> Result<u64, StorageError> {
-        self.inner.copy_block_outputs(src, dst, block_ids).await
+    async fn copy_block_outputs(&self, src: InstanceId, dst: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
     }
 }
 
@@ -1208,8 +1046,8 @@ impl crate::OutputStore for EncryptingStorage {
 // Sub-trait 5: SignalStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::SignalStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::SignalStore for EncryptingStorage {
     async fn enqueue_signal(
         &self,
         signal: &orch8_types::signal::Signal,
@@ -1249,17 +1087,9 @@ impl crate::SignalStore for EncryptingStorage {
         }
         Ok(batch)
     }
-    async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError> {
-        self.inner.mark_signal_delivered(signal_id).await
-    }
-    async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError> {
-        self.inner.mark_signals_delivered(signal_ids).await
-    }
-    async fn get_signalled_instance_ids(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<(InstanceId, orch8_types::instance::InstanceState)>, StorageError> {
-        self.inner.get_signalled_instance_ids(limit).await
+    async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+    async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
+    async fn get_signalled_instance_ids(&self, limit: u32) -> Result<Vec<(InstanceId, orch8_types::instance::InstanceState)>, StorageError>;
     }
 }
 
@@ -1267,8 +1097,8 @@ impl crate::SignalStore for EncryptingStorage {
 // Sub-trait 6: WorkerStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::WorkerStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::WorkerStore for EncryptingStorage {
     async fn create_worker_task(
         &self,
         task: &orch8_types::worker::WorkerTask,
@@ -1328,27 +1158,10 @@ impl crate::WorkerStore for EncryptingStorage {
             .complete_worker_task(task_id, worker_id, &encrypted)
             .await
     }
-    async fn fail_worker_task(
-        &self,
-        task_id: Uuid,
-        worker_id: &str,
-        message: &str,
-        retryable: bool,
-    ) -> Result<bool, StorageError> {
-        self.inner
-            .fail_worker_task(task_id, worker_id, message, retryable)
-            .await
-    }
-    async fn heartbeat_worker_task(
-        &self,
-        task_id: Uuid,
-        worker_id: &str,
-    ) -> Result<bool, StorageError> {
-        self.inner.heartbeat_worker_task(task_id, worker_id).await
-    }
-    async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_worker_task(task_id).await
-    }
+    async fn fail_worker_task(&self, task_id: Uuid, worker_id: &str, message: &str, retryable: bool) -> Result<bool, StorageError>;
+    async fn heartbeat_worker_task(&self, task_id: Uuid, worker_id: &str) -> Result<bool, StorageError>;
+    async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
+
     async fn retry_worker_task(
         &self,
         old_task_id: Uuid,
@@ -1368,33 +1181,11 @@ impl crate::WorkerStore for EncryptingStorage {
             )
             .await
     }
-    async fn reap_stale_worker_tasks(
-        &self,
-        stale_threshold: std::time::Duration,
-    ) -> Result<u64, StorageError> {
-        self.inner.reap_stale_worker_tasks(stale_threshold).await
-    }
-    async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError> {
-        self.inner.expire_timed_out_worker_tasks().await
-    }
-    async fn cancel_worker_tasks_for_blocks(
-        &self,
-        instance_id: Uuid,
-        block_ids: &[String],
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .cancel_worker_tasks_for_blocks(instance_id, block_ids)
-            .await
-    }
-    async fn cancel_worker_tasks_for_block(
-        &self,
-        instance_id: Uuid,
-        block_id: &str,
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .cancel_worker_tasks_for_block(instance_id, block_id)
-            .await
-    }
+    async fn reap_stale_worker_tasks(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
+    async fn expire_timed_out_worker_tasks(&self) -> Result<u64, StorageError>;
+    async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
+    async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
+
     async fn list_worker_tasks(
         &self,
         filter: &orch8_types::worker_filter::WorkerTaskFilter,
@@ -1406,12 +1197,8 @@ impl crate::WorkerStore for EncryptingStorage {
         }
         Ok(tasks)
     }
-    async fn worker_task_stats(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-    ) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError> {
-        self.inner.worker_task_stats(tenant_id).await
-    }
+    async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
+
     async fn claim_worker_tasks_from_queue(
         &self,
         queue_name: &str,
@@ -1452,160 +1239,28 @@ impl crate::WorkerStore for EncryptingStorage {
         Ok(tasks)
     }
 
-    async fn upsert_worker_registration(
-        &self,
-        registration: &orch8_types::worker::WorkerRegistration,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_worker_registration(registration).await
-    }
-
-    async fn list_worker_registrations(
-        &self,
-        seen_within_secs: Option<i64>,
-    ) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError> {
-        self.inner.list_worker_registrations(seen_within_secs).await
-    }
-
-    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError> {
-        self.inner.claimed_task_counts_by_worker().await
-    }
-
-    async fn park_webhook(
-        &self,
-        entry: &orch8_types::webhook_outbox::WebhookOutboxEntry,
-    ) -> Result<(), StorageError> {
-        self.inner.park_webhook(entry).await
-    }
-
-    async fn list_webhook_outbox(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
-        self.inner.list_webhook_outbox(limit).await
-    }
-
-    async fn get_webhook_outbox(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
-        self.inner.get_webhook_outbox(id).await
-    }
-
-    async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_webhook_outbox(id).await
-    }
-
-    async fn create_queue_routing_rule(
-        &self,
-        rule: &orch8_types::queue_routing::QueueRoutingRule,
-    ) -> Result<(), StorageError> {
-        self.inner.create_queue_routing_rule(rule).await
-    }
-
-    async fn list_queue_routing_rules(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-        handler_name: Option<&str>,
-    ) -> Result<Vec<orch8_types::queue_routing::QueueRoutingRule>, StorageError> {
-        self.inner
-            .list_queue_routing_rules(tenant_id, handler_name)
-            .await
-    }
-
-    async fn get_queue_routing_rule(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<orch8_types::queue_routing::QueueRoutingRule>, StorageError> {
-        self.inner.get_queue_routing_rule(id).await
-    }
-
-    async fn delete_queue_routing_rule(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_queue_routing_rule(id).await
-    }
-
-    async fn enqueue_worker_command(
-        &self,
-        command: &orch8_types::worker::WorkerCommand,
-    ) -> Result<(), StorageError> {
-        self.inner.enqueue_worker_command(command).await
-    }
-
-    async fn list_worker_commands(
-        &self,
-        worker_id: &str,
-    ) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError> {
-        self.inner.list_worker_commands(worker_id).await
-    }
-
-    async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_worker_command(id).await
-    }
-
-    async fn upsert_worker_version_pin(
-        &self,
-        pin: &orch8_types::worker::WorkerVersionPin,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_worker_version_pin(pin).await
-    }
-
-    async fn get_worker_version_pin(
-        &self,
-        tenant_id: &str,
-        handler_name: &str,
-    ) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError> {
-        self.inner
-            .get_worker_version_pin(tenant_id, handler_name)
-            .await
-    }
-
-    async fn list_worker_version_pins(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError> {
-        self.inner.list_worker_version_pins(tenant_id).await
-    }
-
-    async fn delete_worker_version_pin(
-        &self,
-        tenant_id: &str,
-        handler_name: &str,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .delete_worker_version_pin(tenant_id, handler_name)
-            .await
-    }
-
-    async fn upsert_queue_dispatch(
-        &self,
-        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_queue_dispatch(config).await
-    }
-
-    async fn get_queue_dispatch(
-        &self,
-        tenant_id: &str,
-        queue_name: &str,
-    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
-        self.inner.get_queue_dispatch(tenant_id, queue_name).await
-    }
-
-    async fn list_queue_dispatch(
-        &self,
-        tenant_id: Option<&str>,
-    ) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
-        self.inner.list_queue_dispatch(tenant_id).await
-    }
-
-    async fn delete_queue_dispatch(
-        &self,
-        tenant_id: &str,
-        queue_name: &str,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .delete_queue_dispatch(tenant_id, queue_name)
-            .await
-    }
+    async fn upsert_worker_registration(&self, registration: &orch8_types::worker::WorkerRegistration) -> Result<(), StorageError>;
+    async fn list_worker_registrations(&self, seen_within_secs: Option<i64>) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError>;
+    async fn claimed_task_counts_by_worker(&self) -> Result<Vec<(String, i64)>, StorageError>;
+    async fn park_webhook(&self, entry: &orch8_types::webhook_outbox::WebhookOutboxEntry) -> Result<(), StorageError>;
+    async fn list_webhook_outbox(&self, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+    async fn get_webhook_outbox(&self, id: Uuid) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+    async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn create_queue_routing_rule(&self, rule: &orch8_types::queue_routing::QueueRoutingRule) -> Result<(), StorageError>;
+    async fn list_queue_routing_rules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, handler_name: Option<&str>) -> Result<Vec<orch8_types::queue_routing::QueueRoutingRule>, StorageError>;
+    async fn get_queue_routing_rule(&self, id: Uuid) -> Result<Option<orch8_types::queue_routing::QueueRoutingRule>, StorageError>;
+    async fn delete_queue_routing_rule(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn enqueue_worker_command(&self, command: &orch8_types::worker::WorkerCommand) -> Result<(), StorageError>;
+    async fn list_worker_commands(&self, worker_id: &str) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError>;
+    async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn upsert_worker_version_pin(&self, pin: &orch8_types::worker::WorkerVersionPin) -> Result<(), StorageError>;
+    async fn get_worker_version_pin(&self, tenant_id: &str, handler_name: &str) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError>;
+    async fn list_worker_version_pins(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError>;
+    async fn delete_worker_version_pin(&self, tenant_id: &str, handler_name: &str) -> Result<(), StorageError>;
+    async fn upsert_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig) -> Result<(), StorageError>;
+    async fn get_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+    async fn list_queue_dispatch(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+    async fn delete_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<(), StorageError>;
 
     // Step log messages can echo step input/output (handler errors, template
     // debug output) -- the same data class as context, so the message text
@@ -1641,90 +1296,26 @@ impl crate::WorkerStore for EncryptingStorage {
         }
         Ok(logs)
     }
+    }
 }
 
 // ============================================================================
 // Sub-trait 7: SchedulingStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::SchedulingStore for EncryptingStorage {
-    async fn create_cron_schedule(
-        &self,
-        schedule: &orch8_types::cron::CronSchedule,
-    ) -> Result<(), StorageError> {
-        self.inner.create_cron_schedule(schedule).await
-    }
-    async fn get_cron_schedule(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError> {
-        self.inner.get_cron_schedule(id).await
-    }
-    async fn list_cron_schedules(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError> {
-        self.inner.list_cron_schedules(tenant_id, limit).await
-    }
-    async fn update_cron_schedule(
-        &self,
-        schedule: &orch8_types::cron::CronSchedule,
-    ) -> Result<(), StorageError> {
-        self.inner.update_cron_schedule(schedule).await
-    }
-    async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_cron_schedule(id).await
-    }
-    async fn claim_due_cron_schedules(
-        &self,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError> {
-        self.inner.claim_due_cron_schedules(now).await
-    }
-    async fn update_cron_fire_times(
-        &self,
-        id: Uuid,
-        last_triggered_at: DateTime<Utc>,
-        next_fire_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .update_cron_fire_times(id, last_triggered_at, next_fire_at)
-            .await
-    }
-    async fn record_cron_skip(
-        &self,
-        id: Uuid,
-        now: DateTime<Utc>,
-        next_fire_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner.record_cron_skip(id, now, next_fire_at).await
-    }
-    async fn active_instance_ids_for_cron(
-        &self,
-        cron_id: Uuid,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError> {
-        self.inner
-            .active_instance_ids_for_cron(cron_id, limit)
-            .await
-    }
-    async fn check_rate_limit(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        resource_key: &orch8_types::ids::ResourceKey,
-        now: DateTime<Utc>,
-    ) -> Result<orch8_types::rate_limit::RateLimitCheck, StorageError> {
-        self.inner
-            .check_rate_limit(tenant_id, resource_key, now)
-            .await
-    }
-    async fn upsert_rate_limit(
-        &self,
-        limit: &orch8_types::rate_limit::RateLimit,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_rate_limit(limit).await
+passthrough_impl! {
+    impl crate::SchedulingStore for EncryptingStorage {
+        async fn create_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
+        async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn update_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
+        async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
+        async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn update_cron_fire_times(&self, id: Uuid, last_triggered_at: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn record_cron_skip(&self, id: Uuid, now: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn active_instance_ids_for_cron(&self, cron_id: Uuid, limit: u32) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError>;
+        async fn check_rate_limit(&self, tenant_id: &orch8_types::ids::TenantId, resource_key: &orch8_types::ids::ResourceKey, now: DateTime<Utc>) -> Result<orch8_types::rate_limit::RateLimitCheck, StorageError>;
+        async fn upsert_rate_limit(&self, limit: &orch8_types::rate_limit::RateLimit) -> Result<(), StorageError>;
     }
 }
 
@@ -1732,42 +1323,15 @@ impl crate::SchedulingStore for EncryptingStorage {
 // Sub-trait 8: AdminStore -- encryption on credential CRUD
 // ============================================================================
 
-#[async_trait]
-impl crate::AdminStore for EncryptingStorage {
-    // --- Sessions (pass-through) ---
-    async fn create_session(
-        &self,
-        session: &orch8_types::session::Session,
-    ) -> Result<(), StorageError> {
-        self.inner.create_session(session).await
-    }
-    async fn get_session(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<orch8_types::session::Session>, StorageError> {
-        self.inner.get_session(id).await
-    }
-    async fn get_session_by_key(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        session_key: &str,
-    ) -> Result<Option<orch8_types::session::Session>, StorageError> {
-        self.inner.get_session_by_key(tenant_id, session_key).await
-    }
-    async fn update_session_data(
-        &self,
-        id: Uuid,
-        data: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        self.inner.update_session_data(id, data).await
-    }
-    async fn update_session_state(
-        &self,
-        id: Uuid,
-        state: orch8_types::session::SessionState,
-    ) -> Result<(), StorageError> {
-        self.inner.update_session_state(id, state).await
-    }
+passthrough_impl! {
+    impl crate::AdminStore for EncryptingStorage {
+    // --- Sessions ---
+    async fn create_session(&self, session: &orch8_types::session::Session) -> Result<(), StorageError>;
+    async fn get_session(&self, id: Uuid) -> Result<Option<orch8_types::session::Session>, StorageError>;
+    async fn get_session_by_key(&self, tenant_id: &orch8_types::ids::TenantId, session_key: &str) -> Result<Option<orch8_types::session::Session>, StorageError>;
+    async fn update_session_data(&self, id: Uuid, data: &serde_json::Value) -> Result<(), StorageError>;
+    async fn update_session_state(&self, id: Uuid, state: orch8_types::session::SessionState) -> Result<(), StorageError>;
+
     async fn list_session_instances(
         &self,
         session_id: Uuid,
@@ -1780,34 +1344,11 @@ impl crate::AdminStore for EncryptingStorage {
     }
 
     // --- Plugins (pass-through) ---
-    async fn create_plugin(
-        &self,
-        plugin: &orch8_types::plugin::PluginDef,
-    ) -> Result<(), StorageError> {
-        self.inner.create_plugin(plugin).await
-    }
-    async fn get_plugin(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-        name: &str,
-    ) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError> {
-        self.inner.get_plugin(tenant_id, name).await
-    }
-    async fn list_plugins(
-        &self,
-        tenant_id: Option<&orch8_types::ids::TenantId>,
-    ) -> Result<Vec<orch8_types::plugin::PluginDef>, StorageError> {
-        self.inner.list_plugins(tenant_id).await
-    }
-    async fn update_plugin(
-        &self,
-        plugin: &orch8_types::plugin::PluginDef,
-    ) -> Result<(), StorageError> {
-        self.inner.update_plugin(plugin).await
-    }
-    async fn delete_plugin(&self, name: &str) -> Result<(), StorageError> {
-        self.inner.delete_plugin(name).await
-    }
+    async fn create_plugin(&self, plugin: &orch8_types::plugin::PluginDef) -> Result<(), StorageError>;
+    async fn get_plugin(&self, tenant_id: Option<&orch8_types::ids::TenantId>, name: &str) -> Result<Option<orch8_types::plugin::PluginDef>, StorageError>;
+    async fn list_plugins(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::plugin::PluginDef>, StorageError>;
+    async fn update_plugin(&self, plugin: &orch8_types::plugin::PluginDef) -> Result<(), StorageError>;
+    async fn delete_plugin(&self, name: &str) -> Result<(), StorageError>;
 
     // --- Triggers (secret encrypted at rest) ---
     // `TriggerDef.secret` is the HMAC key used to authenticate inbound webhook
@@ -1852,21 +1393,9 @@ impl crate::AdminStore for EncryptingStorage {
             .update_trigger(&self.encrypt_trigger(trigger)?)
             .await
     }
-    async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
-        self.inner.delete_trigger(slug).await
-    }
-    async fn get_trigger_poll_state(
-        &self,
-        slug: &str,
-    ) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError> {
-        self.inner.get_trigger_poll_state(slug).await
-    }
-    async fn upsert_trigger_poll_state(
-        &self,
-        state: &orch8_types::trigger::TriggerPollState,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_trigger_poll_state(state).await
-    }
+    async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
+    async fn get_trigger_poll_state(&self, slug: &str) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError>;
+    async fn upsert_trigger_poll_state(&self, state: &orch8_types::trigger::TriggerPollState) -> Result<(), StorageError>;
 
     // --- Credentials (with encryption) ---
     async fn create_credential(
@@ -1909,9 +1438,7 @@ impl crate::AdminStore for EncryptingStorage {
         self.inner.update_credential(&encrypted).await
     }
 
-    async fn delete_credential(&self, id: &str) -> Result<(), StorageError> {
-        self.inner.delete_credential(id).await
-    }
+    async fn delete_credential(&self, id: &str) -> Result<(), StorageError>;
 
     async fn list_credentials_due_for_refresh(
         &self,
@@ -1928,310 +1455,62 @@ impl crate::AdminStore for EncryptingStorage {
     }
 
     // --- API keys (pass-through: records hold only a SHA-256 hash, no secret) ---
-    async fn create_api_key(
-        &self,
-        key: &orch8_types::api_key::ApiKeyRecord,
-    ) -> Result<(), StorageError> {
-        self.inner.create_api_key(key).await
-    }
-
-    async fn lookup_api_key_by_hash(
-        &self,
-        key_hash: &str,
-    ) -> Result<Option<orch8_types::api_key::ApiKeyRecord>, StorageError> {
-        self.inner.lookup_api_key_by_hash(key_hash).await
-    }
-
-    async fn list_api_keys(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-    ) -> Result<Vec<orch8_types::api_key::ApiKeyRecord>, StorageError> {
-        self.inner.list_api_keys(tenant_id).await
-    }
-
-    async fn revoke_api_key(&self, id: &str) -> Result<bool, StorageError> {
-        self.inner.revoke_api_key(id).await
-    }
-
-    async fn touch_api_key(
-        &self,
-        id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner.touch_api_key(id, at).await
-    }
+    async fn create_api_key(&self, key: &orch8_types::api_key::ApiKeyRecord) -> Result<(), StorageError>;
+    async fn lookup_api_key_by_hash(&self, key_hash: &str) -> Result<Option<orch8_types::api_key::ApiKeyRecord>, StorageError>;
+    async fn list_api_keys(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::api_key::ApiKeyRecord>, StorageError>;
+    async fn revoke_api_key(&self, id: &str) -> Result<bool, StorageError>;
+    async fn touch_api_key(&self, id: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(), StorageError>;
 
     // --- Cluster (pass-through) ---
-    async fn register_node(
-        &self,
-        node: &orch8_types::cluster::ClusterNode,
-    ) -> Result<(), StorageError> {
-        self.inner.register_node(node).await
-    }
-    async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError> {
-        self.inner.heartbeat_node(node_id).await
-    }
-    async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError> {
-        self.inner.drain_node(node_id).await
-    }
-    async fn deregister_node(&self, node_id: Uuid) -> Result<(), StorageError> {
-        self.inner.deregister_node(node_id).await
-    }
-    async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError> {
-        self.inner.list_nodes().await
-    }
-    async fn should_drain(&self, node_id: Uuid) -> Result<bool, StorageError> {
-        self.inner.should_drain(node_id).await
-    }
-    async fn reap_stale_nodes(
-        &self,
-        stale_threshold: std::time::Duration,
-    ) -> Result<u64, StorageError> {
-        self.inner.reap_stale_nodes(stale_threshold).await
-    }
+    async fn register_node(&self, node: &orch8_types::cluster::ClusterNode) -> Result<(), StorageError>;
+    async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+    async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+    async fn deregister_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+    async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError>;
+    async fn should_drain(&self, node_id: Uuid) -> Result<bool, StorageError>;
+    async fn reap_stale_nodes(&self, stale_threshold: std::time::Duration) -> Result<u64, StorageError>;
 
     // --- Circuit Breakers (pass-through) ---
-    async fn upsert_circuit_breaker(
-        &self,
-        state: &orch8_types::circuit_breaker::CircuitBreakerState,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_circuit_breaker(state).await
-    }
-    async fn list_open_circuit_breakers(
-        &self,
-    ) -> Result<Vec<orch8_types::circuit_breaker::CircuitBreakerState>, StorageError> {
-        self.inner.list_open_circuit_breakers().await
-    }
-    async fn delete_circuit_breaker(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        handler: &str,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_circuit_breaker(tenant_id, handler).await
-    }
+    async fn upsert_circuit_breaker(&self, state: &orch8_types::circuit_breaker::CircuitBreakerState) -> Result<(), StorageError>;
+    async fn list_open_circuit_breakers(&self) -> Result<Vec<orch8_types::circuit_breaker::CircuitBreakerState>, StorageError>;
+    async fn delete_circuit_breaker(&self, tenant_id: &orch8_types::ids::TenantId, handler: &str) -> Result<(), StorageError>;
 
     // --- Audit Log (pass-through) ---
-    async fn append_audit_log(
-        &self,
-        entry: &orch8_types::audit::AuditLogEntry,
-    ) -> Result<(), StorageError> {
-        self.inner.append_audit_log(entry).await
-    }
-    async fn list_audit_log(
-        &self,
-        instance_id: InstanceId,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
-        self.inner.list_audit_log(instance_id, limit).await
-    }
-    async fn list_audit_log_by_tenant(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
-        self.inner.list_audit_log_by_tenant(tenant_id, limit).await
-    }
+    async fn append_audit_log(&self, entry: &orch8_types::audit::AuditLogEntry) -> Result<(), StorageError>;
+    async fn list_audit_log(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
+    async fn list_audit_log_by_tenant(&self, tenant_id: &orch8_types::ids::TenantId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
 
     // --- Rollback policies (pass-through) ---
-    async fn create_rollback_policy(
-        &self,
-        tenant_id: &str,
-        sequence_name: &str,
-        error_rate_threshold: f64,
-        time_window_secs: i32,
-        cooldown_secs: Option<i32>,
-        confirmation_window_secs: Option<i32>,
-        webhook_url: Option<&str>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .create_rollback_policy(
-                tenant_id,
-                sequence_name,
-                error_rate_threshold,
-                time_window_secs,
-                cooldown_secs,
-                confirmation_window_secs,
-                webhook_url,
-            )
-            .await
-    }
-    async fn get_rollback_policy(
-        &self,
-        tenant_id: &str,
-        sequence_name: &str,
-    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        self.inner
-            .get_rollback_policy(tenant_id, sequence_name)
-            .await
-    }
-    async fn list_rollback_policies(
-        &self,
-        tenant_id: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        self.inner.list_rollback_policies(tenant_id, limit).await
-    }
-    async fn delete_rollback_policy(
-        &self,
-        tenant_id: &str,
-        sequence_name: &str,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .delete_rollback_policy(tenant_id, sequence_name)
-            .await
-    }
-    async fn record_rollback(
-        &self,
-        tenant_id: &str,
-        sequence_name: &str,
-        error_rate: f64,
-        threshold: f64,
-        reason: &str,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .record_rollback(tenant_id, sequence_name, error_rate, threshold, reason)
-            .await
-    }
-    async fn query_error_rate(
-        &self,
-        tenant_id: &str,
-        sequence_name: &str,
-        window_secs: i64,
-    ) -> Result<Option<f64>, StorageError> {
-        self.inner
-            .query_error_rate(tenant_id, sequence_name, window_secs)
-            .await
-    }
-    async fn list_rollback_history(
-        &self,
-        tenant_id: Option<&str>,
-        sequence_name: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
-        self.inner
-            .list_rollback_history(tenant_id, sequence_name, limit)
-            .await
-    }
+    async fn create_rollback_policy(&self, tenant_id: &str, sequence_name: &str, error_rate_threshold: f64, time_window_secs: i32, cooldown_secs: Option<i32>, confirmation_window_secs: Option<i32>, webhook_url: Option<&str>) -> Result<(), StorageError>;
+    async fn get_rollback_policy(&self, tenant_id: &str, sequence_name: &str) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError>;
+    async fn list_rollback_policies(&self, tenant_id: Option<&str>, limit: u32) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError>;
+    async fn delete_rollback_policy(&self, tenant_id: &str, sequence_name: &str) -> Result<(), StorageError>;
+    async fn record_rollback(&self, tenant_id: &str, sequence_name: &str, error_rate: f64, threshold: f64, reason: &str) -> Result<(), StorageError>;
+    async fn query_error_rate(&self, tenant_id: &str, sequence_name: &str, window_secs: i64) -> Result<Option<f64>, StorageError>;
+    async fn list_rollback_history(&self, tenant_id: Option<&str>, sequence_name: Option<&str>, limit: u32) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError>;
 
     // --- Health (pass-through) ---
-    async fn ping(&self) -> Result<(), StorageError> {
-        self.inner.ping().await
+    async fn ping(&self) -> Result<(), StorageError>;
     }
 }
 
 // ============================================================================
-// Sub-trait 9: TelemetryStore -- relies on default no-op impls from the trait
+// Sub-trait 9: TelemetryStore -- pure pass-through. The decorator does not
+// persist telemetry itself; delegating to the inner backend rather than
+// relying on the trait's default no-op impls avoids silently discarding the
+// inner backend's real implementation.
 // ============================================================================
-// The trait provides default no-op implementations for all methods, so we
-// don't need to implement anything here. The EncryptingStorage decorator
-// does not persist telemetry itself -- the inner backend handles it.
-// However, to avoid hiding the inner backend's real implementations behind
-// the defaults, we delegate to the inner backend.
 
-#[async_trait]
-impl crate::TelemetryStore for EncryptingStorage {
-    async fn ingest_telemetry_event(
-        &self,
-        event_type: &str,
-        payload: &str,
-        device_id: &str,
-        os_name: &str,
-        os_version: &str,
-        app_version: &str,
-        sdk_version: &str,
-        tenant_id: &str,
-        created_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .ingest_telemetry_event(
-                event_type,
-                payload,
-                device_id,
-                os_name,
-                os_version,
-                app_version,
-                sdk_version,
-                tenant_id,
-                created_at,
-            )
-            .await
-    }
-
-    async fn ingest_telemetry_events_batch(
-        &self,
-        events: &[crate::TelemetryEvent],
-    ) -> Result<u64, StorageError> {
-        self.inner.ingest_telemetry_events_batch(events).await
-    }
-
-    async fn ingest_telemetry_error(
-        &self,
-        error_type: &str,
-        message: &str,
-        stack_trace: Option<&str>,
-        device_id: &str,
-        os_name: &str,
-        os_version: &str,
-        app_version: &str,
-        sdk_version: &str,
-        tenant_id: &str,
-        instance_id: Option<&str>,
-        sequence_name: Option<&str>,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .ingest_telemetry_error(
-                error_type,
-                message,
-                stack_trace,
-                device_id,
-                os_name,
-                os_version,
-                app_version,
-                sdk_version,
-                tenant_id,
-                instance_id,
-                sequence_name,
-            )
-            .await
-    }
-
-    async fn query_telemetry_dashboard(
-        &self,
-        query_type: &str,
-        tenant_id: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<(String, i64)>, StorageError> {
-        self.inner
-            .query_telemetry_dashboard(query_type, tenant_id, start, end)
-            .await
-    }
-
-    async fn delete_old_telemetry_events(
-        &self,
-        older_than: DateTime<Utc>,
-        limit: u32,
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .delete_old_telemetry_events(older_than, limit)
-            .await
-    }
-    async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
-        self.inner.record_usage_event(event).await
-    }
-    async fn query_usage(
-        &self,
-        tenant_id: &str,
-        start: DateTime<Utc>,
-        end: DateTime<Utc>,
-    ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
-        self.inner.query_usage(tenant_id, start, end).await
-    }
-    async fn query_instance_usage_totals(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<(i64, i64), StorageError> {
-        self.inner.query_instance_usage_totals(instance_id).await
+passthrough_impl! {
+    impl crate::TelemetryStore for EncryptingStorage {
+        async fn ingest_telemetry_event(&self, event_type: &str, payload: &str, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, created_at: DateTime<Utc>) -> Result<(), StorageError>;
+        async fn ingest_telemetry_events_batch(&self, events: &[crate::TelemetryEvent]) -> Result<u64, StorageError>;
+        async fn ingest_telemetry_error(&self, error_type: &str, message: &str, stack_trace: Option<&str>, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, instance_id: Option<&str>, sequence_name: Option<&str>) -> Result<(), StorageError>;
+        async fn query_telemetry_dashboard(&self, query_type: &str, tenant_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<(String, i64)>, StorageError>;
+        async fn delete_old_telemetry_events(&self, older_than: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
+        async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError>;
+        async fn query_usage(&self, tenant_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<Vec<crate::UsageAggregate>, StorageError>;
+        async fn query_instance_usage_totals(&self, instance_id: InstanceId) -> Result<(i64, i64), StorageError>;
     }
 }
 
@@ -2239,8 +1518,8 @@ impl crate::TelemetryStore for EncryptingStorage {
 // Sub-trait 10: ResourceStore -- pure pass-through
 // ============================================================================
 
-#[async_trait]
-impl crate::ResourceStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::ResourceStore for EncryptingStorage {
     // --- Artifacts ---
     // Artifact bytes are encrypted at rest (AES-256-GCM) in this wrapper before
     // they reach the object store, so blobs get the same protection as context
@@ -2295,34 +1574,18 @@ impl crate::ResourceStore for EncryptingStorage {
             None => Ok(None),
         }
     }
-    async fn delete_artifact(&self, key: &str) -> Result<(), StorageError> {
-        self.inner.delete_artifact(key).await
-    }
-    async fn list_artifacts(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError> {
-        self.inner.list_artifacts(instance_id).await
-    }
+    async fn delete_artifact(&self, key: &str) -> Result<(), StorageError>;
+    async fn list_artifacts(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError>;
     // Artifact deletion needs no crypto (delete-by-key is opaque), so delegate
     // straight to the inner backend. Explicit override rather than inheriting
     // the trait's provided method, to keep decorator coverage exhaustive.
-    async fn delete_instance_artifacts(
-        &self,
-        instance_id: InstanceId,
-    ) -> Result<u64, StorageError> {
-        self.inner.delete_instance_artifacts(instance_id).await
-    }
-    async fn list_artifact_gc_candidates(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-        limit: u32,
-    ) -> Result<Vec<InstanceId>, StorageError> {
-        self.inner.list_artifact_gc_candidates(cutoff, limit).await
-    }
-    async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError> {
-        self.inner.mark_artifacts_gced(instance_id).await
-    }
+    async fn delete_instance_artifacts(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
+    async fn list_artifact_gc_candidates(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<InstanceId>, StorageError>;
+    async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError>;
+    // No field on `TaskInstance`/`StepLog`/`AuditLogEntry` survives outside
+    // `context.data` (already handled elsewhere) once the row is deleted, so
+    // this is a pure pass-through -- nothing here to encrypt or decrypt.
+    async fn delete_terminal_instances(&self, cutoff: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<u64, StorageError>;
 
     // --- Instance KV State ---
     // Holds step-handler-defined state, including the agent step's
@@ -2358,13 +1621,7 @@ impl crate::ResourceStore for EncryptingStorage {
             .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
             .collect()
     }
-    async fn delete_instance_kv(
-        &self,
-        instance_id: InstanceId,
-        key: &str,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_instance_kv(instance_id, key).await
-    }
+    async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
 
     // --- Externalized State ---
     // Payloads pulled out of `context.data` by the externalization path carry
@@ -2391,9 +1648,8 @@ impl crate::ResourceStore for EncryptingStorage {
             None => Ok(None),
         }
     }
-    async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError> {
-        self.inner.delete_externalized_state(ref_key).await
-    }
+    async fn delete_externalized_state(&self, ref_key: &str) -> Result<(), StorageError>;
+
     async fn batch_save_externalized_state(
         &self,
         instance_id: InstanceId,
@@ -2415,71 +1671,19 @@ impl crate::ResourceStore for EncryptingStorage {
             .map(|(k, v)| self.decrypt_json_value(&v).map(|dv| (k, dv)))
             .collect()
     }
-    async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError> {
-        self.inner.delete_expired_externalized_state(limit).await
-    }
+    async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError>;
 
-    // --- Resource Pools ---
-    async fn create_resource_pool(
-        &self,
-        pool: &orch8_types::pool::ResourcePool,
-    ) -> Result<(), StorageError> {
-        self.inner.create_resource_pool(pool).await
-    }
-    async fn get_resource_pool(
-        &self,
-        id: Uuid,
-    ) -> Result<Option<orch8_types::pool::ResourcePool>, StorageError> {
-        self.inner.get_resource_pool(id).await
-    }
-    async fn list_resource_pools(
-        &self,
-        tenant_id: &orch8_types::ids::TenantId,
-    ) -> Result<Vec<orch8_types::pool::ResourcePool>, StorageError> {
-        self.inner.list_resource_pools(tenant_id).await
-    }
-    async fn update_pool_round_robin_index(
-        &self,
-        pool_id: Uuid,
-        index: u32,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .update_pool_round_robin_index(pool_id, index)
-            .await
-    }
-    async fn delete_resource_pool(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_resource_pool(id).await
-    }
-    async fn add_pool_resource(
-        &self,
-        resource: &orch8_types::pool::PoolResource,
-    ) -> Result<(), StorageError> {
-        self.inner.add_pool_resource(resource).await
-    }
-    async fn list_pool_resources(
-        &self,
-        pool_id: Uuid,
-    ) -> Result<Vec<orch8_types::pool::PoolResource>, StorageError> {
-        self.inner.list_pool_resources(pool_id).await
-    }
-    async fn update_pool_resource(
-        &self,
-        resource: &orch8_types::pool::PoolResource,
-    ) -> Result<(), StorageError> {
-        self.inner.update_pool_resource(resource).await
-    }
-    async fn delete_pool_resource(&self, id: Uuid) -> Result<(), StorageError> {
-        self.inner.delete_pool_resource(id).await
-    }
-    async fn increment_resource_usage(
-        &self,
-        resource_id: Uuid,
-        today: chrono::NaiveDate,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .increment_resource_usage(resource_id, today)
-            .await
-    }
+    // --- Resource Pools (pass-through) ---
+    async fn create_resource_pool(&self, pool: &orch8_types::pool::ResourcePool) -> Result<(), StorageError>;
+    async fn get_resource_pool(&self, id: Uuid) -> Result<Option<orch8_types::pool::ResourcePool>, StorageError>;
+    async fn list_resource_pools(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::pool::ResourcePool>, StorageError>;
+    async fn update_pool_round_robin_index(&self, pool_id: Uuid, index: u32) -> Result<(), StorageError>;
+    async fn delete_resource_pool(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn add_pool_resource(&self, resource: &orch8_types::pool::PoolResource) -> Result<(), StorageError>;
+    async fn list_pool_resources(&self, pool_id: Uuid) -> Result<Vec<orch8_types::pool::PoolResource>, StorageError>;
+    async fn update_pool_resource(&self, resource: &orch8_types::pool::PoolResource) -> Result<(), StorageError>;
+    async fn delete_pool_resource(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn increment_resource_usage(&self, resource_id: Uuid, today: chrono::NaiveDate) -> Result<(), StorageError>;
 
     // --- Checkpoints ---
     // `checkpoint_data` holds a snapshot of execution state including agent
@@ -2516,120 +1720,30 @@ impl crate::ResourceStore for EncryptingStorage {
         }
         Ok(cps)
     }
-    async fn prune_checkpoints(
-        &self,
-        instance_id: InstanceId,
-        keep: u32,
-    ) -> Result<u64, StorageError> {
-        self.inner.prune_checkpoints(instance_id, keep).await
+    async fn prune_checkpoints(&self, instance_id: InstanceId, keep: u32) -> Result<u64, StorageError>;
     }
 }
 
-#[async_trait]
-impl crate::MobileSyncStore for EncryptingStorage {
+passthrough_impl! {
+    impl crate::MobileSyncStore for EncryptingStorage {
     // Device/status/approval methods are pass-through (no secret-bearing
     // columns). Only command payloads can carry resolved credentials, so those
     // are encrypted at rest and decrypted on the way out to the device (which
     // receives plaintext over TLS).
 
-    async fn register_mobile_device(
-        &self,
-        device: &crate::MobileDevice,
-    ) -> Result<(), StorageError> {
-        self.inner.register_mobile_device(device).await
-    }
-
-    async fn get_mobile_device(
-        &self,
-        device_id: &str,
-    ) -> Result<Option<crate::MobileDevice>, StorageError> {
-        self.inner.get_mobile_device(device_id).await
-    }
-
-    async fn update_device_last_sync(&self, device_id: &str) -> Result<(), StorageError> {
-        self.inner.update_device_last_sync(device_id).await
-    }
-
-    async fn list_mobile_devices(
-        &self,
-        tenant_id: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<crate::MobileDevice>, StorageError> {
-        self.inner.list_mobile_devices(tenant_id, limit).await
-    }
-
-    async fn mark_stale_devices_inactive(
-        &self,
-        stale_after_secs: i64,
-    ) -> Result<u64, StorageError> {
-        self.inner
-            .mark_stale_devices_inactive(stale_after_secs)
-            .await
-    }
-
-    async fn upsert_mobile_instance_status(
-        &self,
-        status: &crate::MobileInstanceStatus,
-    ) -> Result<(), StorageError> {
-        self.inner.upsert_mobile_instance_status(status).await
-    }
-
-    async fn upsert_mobile_instance_status_batch(
-        &self,
-        statuses: &[crate::MobileInstanceStatus],
-    ) -> Result<(), StorageError> {
-        self.inner
-            .upsert_mobile_instance_status_batch(statuses)
-            .await
-    }
-
-    async fn list_mobile_instance_status(
-        &self,
-        tenant_id: Option<&str>,
-        device_id: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<crate::MobileInstanceStatus>, StorageError> {
-        self.inner
-            .list_mobile_instance_status(tenant_id, device_id, limit)
-            .await
-    }
-
-    async fn insert_mobile_approval(
-        &self,
-        approval: &crate::MobileApprovalRequest,
-    ) -> Result<bool, StorageError> {
-        self.inner.insert_mobile_approval(approval).await
-    }
-
-    async fn get_mobile_approval(
-        &self,
-        id: &str,
-    ) -> Result<Option<crate::MobileApprovalRequest>, StorageError> {
-        self.inner.get_mobile_approval(id).await
-    }
-
-    async fn resolve_mobile_approval(
-        &self,
-        id: &str,
-        resolution: &str,
-    ) -> Result<Option<crate::MobileApprovalRequest>, StorageError> {
-        self.inner.resolve_mobile_approval(id, resolution).await
-    }
-
-    async fn list_mobile_approvals(
-        &self,
-        tenant_id: Option<&str>,
-        state: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
-        self.inner
-            .list_mobile_approvals(tenant_id, state, limit)
-            .await
-    }
-
-    async fn expire_mobile_approvals(&self) -> Result<u64, StorageError> {
-        self.inner.expire_mobile_approvals().await
-    }
+    async fn register_mobile_device(&self, device: &crate::MobileDevice) -> Result<(), StorageError>;
+    async fn get_mobile_device(&self, device_id: &str) -> Result<Option<crate::MobileDevice>, StorageError>;
+    async fn update_device_last_sync(&self, device_id: &str) -> Result<(), StorageError>;
+    async fn list_mobile_devices(&self, tenant_id: Option<&str>, limit: u32) -> Result<Vec<crate::MobileDevice>, StorageError>;
+    async fn mark_stale_devices_inactive(&self, stale_after_secs: i64) -> Result<u64, StorageError>;
+    async fn upsert_mobile_instance_status(&self, status: &crate::MobileInstanceStatus) -> Result<(), StorageError>;
+    async fn upsert_mobile_instance_status_batch(&self, statuses: &[crate::MobileInstanceStatus]) -> Result<(), StorageError>;
+    async fn list_mobile_instance_status(&self, tenant_id: Option<&str>, device_id: Option<&str>, limit: u32) -> Result<Vec<crate::MobileInstanceStatus>, StorageError>;
+    async fn insert_mobile_approval(&self, approval: &crate::MobileApprovalRequest) -> Result<bool, StorageError>;
+    async fn get_mobile_approval(&self, id: &str) -> Result<Option<crate::MobileApprovalRequest>, StorageError>;
+    async fn resolve_mobile_approval(&self, id: &str, resolution: &str) -> Result<Option<crate::MobileApprovalRequest>, StorageError>;
+    async fn list_mobile_approvals(&self, tenant_id: Option<&str>, state: Option<&str>, limit: u32) -> Result<Vec<crate::MobileApprovalRequest>, StorageError>;
+    async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;
 
     async fn create_mobile_command(
         &self,
@@ -2655,20 +1769,9 @@ impl crate::MobileSyncStore for EncryptingStorage {
         Ok(commands)
     }
 
-    async fn ack_mobile_commands(
-        &self,
-        device_id: &str,
-        command_ids: &[String],
-    ) -> Result<u64, StorageError> {
-        self.inner.ack_mobile_commands(device_id, command_ids).await
-    }
-
-    async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError> {
-        self.inner.cleanup_acked_commands(older_than_secs).await
-    }
-
-    async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
-        self.inner.cleanup_expired_commands(ttl_secs).await
+    async fn ack_mobile_commands(&self, device_id: &str, command_ids: &[String]) -> Result<u64, StorageError>;
+    async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError>;
+    async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError>;
     }
 }
 

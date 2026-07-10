@@ -192,6 +192,7 @@ async fn claim_from_queue_inner(
              JOIN task_instances ti ON ti.id = wt.instance_id
              WHERE wt.queue_name=?1 AND wt.handler_name=?2 AND wt.state='pending'
                AND ti.tenant_id=?4
+             ORDER BY wt.created_at ASC
              LIMIT ?3",
         )
         .bind(queue_name)
@@ -201,7 +202,7 @@ async fn claim_from_queue_inner(
         .fetch_all(&mut *conn)
         .await?
     } else {
-        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' LIMIT ?3")
+        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' ORDER BY created_at ASC LIMIT ?3")
             .bind(queue_name)
             .bind(handler_name)
             .bind(limit as i64)
@@ -281,11 +282,32 @@ pub(super) async fn inject_blocks(
     instance_id: InstanceId,
     blocks_json: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    let mut tx = storage.pool.begin().await?;
+
+    // Read current injected blocks within the transaction so a concurrent
+    // writer's snapshot can't slip in between our read and our write, and
+    // append rather than overwrite (mirrors inject_blocks_at_position and
+    // the Postgres COALESCE(existing,'[]') || $2 merge semantics).
+    let row = sqlx::query("SELECT blocks FROM injected_blocks WHERE instance_id=?1")
+        .bind(instance_id.into_uuid().to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let existing: Option<serde_json::Value> = row
+        .map(|r| serde_json::from_str::<serde_json::Value>(r.get::<&str, _>("blocks")))
+        .transpose()?;
+
+    let mut arr = existing
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    arr.extend(blocks_json.as_array().cloned().unwrap_or_default());
+
     sqlx::query("INSERT OR REPLACE INTO injected_blocks (instance_id, blocks) VALUES (?1, ?2)")
         .bind(instance_id.into_uuid().to_string())
-        .bind(serde_json::to_string(blocks_json)?)
-        .execute(&storage.pool)
+        .bind(serde_json::to_string(&serde_json::Value::Array(arr))?)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 

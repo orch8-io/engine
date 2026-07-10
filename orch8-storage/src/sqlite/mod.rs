@@ -39,17 +39,20 @@ mod helpers;
 mod instances;
 mod kv_state;
 mod misc;
+mod mobile_sync;
 mod outputs;
 mod plugins;
 mod pools;
 mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
+mod rollback;
 mod schema;
 mod sequences;
 mod sessions;
 mod signals;
 mod step_logs;
+mod telemetry;
 mod triggers;
 mod webhook_outbox;
 mod worker_commands;
@@ -441,7 +444,10 @@ impl crate::SequenceStore for SqliteStorage {
     // single-writer model means a long `BEGIN IMMEDIATE` hold here would
     // stall every other write on the connection, whereas polling only blocks
     // the caller of this specific method.
-    async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
+    async fn acquire_manifest_lock(
+        &self,
+        tenant_id: &str,
+    ) -> Result<crate::ManifestLockGuard, StorageError> {
         const MAX_ATTEMPTS: u32 = 100;
         const POLL_INTERVAL_MS: u64 = 50;
         for attempt in 0..MAX_ATTEMPTS {
@@ -452,7 +458,26 @@ impl crate::SequenceStore for SqliteStorage {
                     .execute(&self.pool)
                     .await;
             match result {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    let pool = self.pool.clone();
+                    let tenant_owned = tenant_id.to_string();
+                    return Ok(crate::ManifestLockGuard::new(move || {
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                sqlx::query("DELETE FROM manifest_locks WHERE tenant_id = ?1")
+                                    .bind(&tenant_owned)
+                                    .execute(&pool)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    tenant_id = %tenant_owned,
+                                    "failed to release sqlite manifest lock row"
+                                );
+                            }
+                        });
+                    }));
+                }
                 Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                     if attempt + 1 == MAX_ATTEMPTS {
                         break;
@@ -465,14 +490,6 @@ impl crate::SequenceStore for SqliteStorage {
         Err(StorageError::Query(format!(
             "acquire_manifest_lock: timed out waiting for tenant {tenant_id}"
         )))
-    }
-
-    async fn release_manifest_lock(&self, tenant_id: &str) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM manifest_locks WHERE tenant_id = ?1")
-            .bind(tenant_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }
 
@@ -1799,32 +1816,17 @@ impl crate::AdminStore for SqliteStorage {
         confirmation_window_secs: Option<i32>,
         webhook_url: Option<&str>,
     ) -> Result<(), StorageError> {
-        let cooldown = cooldown_secs.unwrap_or(3600);
-        let confirmation = confirmation_window_secs.unwrap_or(60);
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs, cooldown_secs, confirmation_window_secs, webhook_url)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(tenant_id, sequence_name) DO UPDATE SET
-               error_rate_threshold = excluded.error_rate_threshold,
-               time_window_secs = excluded.time_window_secs,
-               cooldown_secs = excluded.cooldown_secs,
-               confirmation_window_secs = excluded.confirmation_window_secs,
-               webhook_url = excluded.webhook_url,
-               enabled = 1,
-               updated_at = datetime('now')"
+        rollback::create_rollback_policy(
+            self,
+            tenant_id,
+            sequence_name,
+            error_rate_threshold,
+            time_window_secs,
+            cooldown_secs,
+            confirmation_window_secs,
+            webhook_url,
         )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .bind(error_rate_threshold)
-        .bind(time_window_secs)
-        .bind(cooldown)
-        .bind(confirmation)
-        .bind(webhook_url)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        .await
     }
 
     async fn get_rollback_policy(
@@ -1832,45 +1834,7 @@ impl crate::AdminStore for SqliteStorage {
         tenant_id: &str,
         sequence_name: &str,
     ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        let row: Option<(i64, String, String, f64, i32, i32, i32, i32, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
-             FROM rollback_policies WHERE tenant_id = ? AND sequence_name = ?"
-        )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(
-            |(
-                id,
-                tenant_id,
-                sequence_name,
-                error_rate_threshold,
-                time_window_secs,
-                enabled,
-                cooldown_secs,
-                confirmation_window_secs,
-                webhook_url,
-                created_at,
-                updated_at,
-            )| {
-                orch8_types::rollback::RollbackPolicy {
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    error_rate_threshold,
-                    time_window_secs,
-                    enabled: enabled != 0,
-                    cooldown_secs,
-                    confirmation_window_secs,
-                    webhook_url,
-                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                        .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc)),
-                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                        .map_or_else(|_| chrono::Utc::now(), |dt| dt.with_timezone(&chrono::Utc)),
-                }
-            },
-        ))
+        rollback::get_rollback_policy(self, tenant_id, sequence_name).await
     }
 
     async fn list_rollback_policies(
@@ -1878,74 +1842,7 @@ impl crate::AdminStore for SqliteStorage {
         tenant_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        let rows: Vec<(
-            i64,
-            String,
-            String,
-            f64,
-            i32,
-            i32,
-            i32,
-            i32,
-            Option<String>,
-            String,
-            String,
-        )> = if let Some(t) = tenant_id {
-            sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
-                 FROM rollback_policies WHERE tenant_id = ? LIMIT ?"
-            )
-            .bind(t)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
-        } else {
-            sqlx::query_as(
-                "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, cooldown_secs, confirmation_window_secs, webhook_url, created_at, updated_at
-                 FROM rollback_policies LIMIT ?"
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
-        };
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    error_rate_threshold,
-                    time_window_secs,
-                    enabled,
-                    cooldown_secs,
-                    confirmation_window_secs,
-                    webhook_url,
-                    created_at,
-                    updated_at,
-                )| {
-                    orch8_types::rollback::RollbackPolicy {
-                        id,
-                        tenant_id,
-                        sequence_name,
-                        error_rate_threshold,
-                        time_window_secs,
-                        enabled: enabled != 0,
-                        cooldown_secs,
-                        confirmation_window_secs,
-                        webhook_url,
-                        created_at: chrono::DateTime::parse_from_rfc3339(&created_at).map_or_else(
-                            |_| chrono::Utc::now(),
-                            |dt| dt.with_timezone(&chrono::Utc),
-                        ),
-                        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at).map_or_else(
-                            |_| chrono::Utc::now(),
-                            |dt| dt.with_timezone(&chrono::Utc),
-                        ),
-                    }
-                },
-            )
-            .collect())
+        rollback::list_rollback_policies(self, tenant_id, limit).await
     }
 
     async fn delete_rollback_policy(
@@ -1953,12 +1850,7 @@ impl crate::AdminStore for SqliteStorage {
         tenant_id: &str,
         sequence_name: &str,
     ) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM rollback_policies WHERE tenant_id = ? AND sequence_name = ?")
-            .bind(tenant_id)
-            .bind(sequence_name)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        rollback::delete_rollback_policy(self, tenant_id, sequence_name).await
     }
 
     async fn record_rollback(
@@ -1969,18 +1861,7 @@ impl crate::AdminStore for SqliteStorage {
         threshold: f64,
         reason: &str,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO rollback_history (tenant_id, sequence_name, error_rate, threshold, reason)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(tenant_id)
-        .bind(sequence_name)
-        .bind(error_rate)
-        .bind(threshold)
-        .bind(reason)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        rollback::record_rollback(self, tenant_id, sequence_name, error_rate, threshold, reason).await
     }
 
     async fn query_error_rate(
@@ -1989,30 +1870,7 @@ impl crate::AdminStore for SqliteStorage {
         sequence_name: &str,
         window_secs: i64,
     ) -> Result<Option<f64>, StorageError> {
-        let start = chrono::Utc::now() - chrono::Duration::seconds(window_secs);
-        let start_str = start.to_rfc3339();
-        let row: Option<(i64, i64)> = sqlx::query_as(
-            r"SELECT
-               COUNT(*) FILTER (WHERE event_type = 'InstanceFailed') as failed,
-               COUNT(*) as total
-             FROM telemetry_events
-             WHERE created_at >= ?1
-               AND json_extract(payload, '$.sequence_name') = ?2
-               AND json_extract(payload, '$.tenant_id') = ?3",
-        )
-        .bind(start_str)
-        .bind(sequence_name)
-        .bind(tenant_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.and_then(|(failed, total)| {
-            if total > 0 {
-                #[allow(clippy::cast_precision_loss)]
-                Some(failed as f64 / total as f64)
-            } else {
-                None
-            }
-        }))
+        rollback::query_error_rate(self, tenant_id, sequence_name, window_secs).await
     }
 
     async fn list_rollback_history(
@@ -2021,70 +1879,7 @@ impl crate::AdminStore for SqliteStorage {
         sequence_name: Option<&str>,
         limit: u32,
     ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
-        let mut query = String::from(
-            "SELECT id, tenant_id, sequence_name, triggered_at, error_rate, threshold, previous_manifest_version, reason, alert_sent FROM rollback_history WHERE 1=1",
-        );
-        if tenant_id.is_some() {
-            query.push_str(" AND tenant_id = ?");
-        }
-        if sequence_name.is_some() {
-            query.push_str(" AND sequence_name = ?");
-        }
-        query.push_str(" ORDER BY triggered_at DESC LIMIT ?");
-
-        let mut q = sqlx::query_as(&query);
-        if let Some(t) = tenant_id {
-            q = q.bind(t);
-        }
-        if let Some(s) = sequence_name {
-            q = q.bind(s);
-        }
-        q = q.bind(limit);
-
-        let rows: Vec<(
-            i64,
-            String,
-            String,
-            String,
-            f64,
-            f64,
-            Option<String>,
-            String,
-            i32,
-        )> = q.fetch_all(&self.pool).await?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    tenant_id,
-                    sequence_name,
-                    triggered_at,
-                    error_rate,
-                    threshold,
-                    previous_manifest_version,
-                    reason,
-                    alert_sent,
-                )| {
-                    orch8_types::rollback::RollbackHistory {
-                        id,
-                        tenant_id,
-                        sequence_name,
-                        triggered_at: chrono::DateTime::parse_from_rfc3339(&triggered_at)
-                            .map_or_else(
-                                |_| chrono::Utc::now(),
-                                |dt| dt.with_timezone(&chrono::Utc),
-                            ),
-                        error_rate,
-                        threshold,
-                        previous_manifest_version,
-                        reason,
-                        alert_sent: alert_sent != 0,
-                    }
-                },
-            )
-            .collect())
+        rollback::list_rollback_history(self, tenant_id, sequence_name, limit).await
     }
 
     // === Health ===
@@ -2104,52 +1899,31 @@ impl crate::TelemetryStore for SqliteStorage {
         &self,
         event_type: &str,
         payload: &str,
-        _device_id: &str,
-        _os_name: &str,
-        _os_version: &str,
-        _app_version: &str,
-        _sdk_version: &str,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
         tenant_id: &str,
         created_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let enriched = match serde_json::from_str::<serde_json::Value>(payload) {
-            Ok(mut v) => {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.entry("tenant_id")
-                        .or_insert_with(|| serde_json::Value::String(tenant_id.to_string()));
-                }
-                v.to_string()
-            }
-            Err(_) => payload.to_string(),
-        };
-        sqlx::query(
-            "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        telemetry::ingest_telemetry_event(
+            self,
+            event_type,
+            payload,
+            device_id,
+            os_name,
+            os_version,
+            app_version,
+            sdk_version,
+            tenant_id,
+            created_at,
         )
-        .bind(event_type)
-        .bind(&enriched)
-        .bind(created_at.to_rfc3339())
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn record_usage_event(&self, event: &crate::UsageEvent) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO usage_events \
-             (tenant_id, instance_id, block_id, kind, model, input_tokens, output_tokens, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        )
-        .bind(&event.tenant_id)
-        .bind(event.instance_id.map(|i| i.to_string()))
-        .bind(&event.block_id)
-        .bind(&event.kind)
-        .bind(&event.model)
-        .bind(event.input_tokens)
-        .bind(event.output_tokens)
-        .bind(event.created_at.to_rfc3339())
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        telemetry::record_usage_event(self, event).await
     }
 
     async fn query_usage(
@@ -2158,124 +1932,62 @@ impl crate::TelemetryStore for SqliteStorage {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<crate::UsageAggregate>, StorageError> {
-        use sqlx::Row;
-        let rows = sqlx::query(
-            "SELECT kind, model, COUNT(*) AS events, \
-                    COALESCE(SUM(input_tokens), 0) AS input_tokens, \
-                    COALESCE(SUM(output_tokens), 0) AS output_tokens \
-             FROM usage_events \
-             WHERE tenant_id = ?1 AND created_at >= ?2 AND created_at < ?3 \
-             GROUP BY kind, model ORDER BY kind, model",
-        )
-        .bind(tenant_id)
-        .bind(start.to_rfc3339())
-        .bind(end.to_rfc3339())
-        .fetch_all(self.pool())
-        .await?;
-        Ok(rows
-            .iter()
-            .map(|r| crate::UsageAggregate {
-                kind: r.get("kind"),
-                model: r.get("model"),
-                events: r.get("events"),
-                input_tokens: r.get("input_tokens"),
-                output_tokens: r.get("output_tokens"),
-            })
-            .collect())
+        telemetry::query_usage(self, tenant_id, start, end).await
     }
 
     async fn query_instance_usage_totals(
         &self,
         instance_id: InstanceId,
     ) -> Result<(i64, i64), StorageError> {
-        use sqlx::Row;
-        let row = sqlx::query(
-            "SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens, \
-                    COALESCE(SUM(output_tokens), 0) AS output_tokens \
-             FROM usage_events WHERE instance_id = ?1",
-        )
-        .bind(instance_id.to_string())
-        .fetch_one(self.pool())
-        .await?;
-        Ok((row.get("input_tokens"), row.get("output_tokens")))
+        telemetry::query_instance_usage_totals(self, instance_id).await
     }
 
     async fn ingest_telemetry_events_batch(
         &self,
         events: &[crate::TelemetryEvent],
     ) -> Result<u64, StorageError> {
-        if events.is_empty() {
-            return Ok(0);
-        }
-        let mut total = 0u64;
-        // SQLite has a variable limit of 999 by default; 3 params per row -> batch <= 333.
-        for chunk in events.chunks(333) {
-            let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-                "INSERT INTO telemetry_events (event_type, payload, created_at) ",
-            );
-            qb.push_values(chunk, |mut b, event| {
-                let enriched = match serde_json::from_str::<serde_json::Value>(&event.payload) {
-                    Ok(mut v) => {
-                        if let Some(obj) = v.as_object_mut() {
-                            obj.entry("tenant_id").or_insert_with(|| {
-                                serde_json::Value::String(event.tenant_id.clone())
-                            });
-                        }
-                        v.to_string()
-                    }
-                    Err(_) => event.payload.clone(),
-                };
-                b.push_bind(&event.event_type);
-                b.push_bind(enriched);
-                b.push_bind(event.created_at.to_rfc3339());
-            });
-            let result = qb.build().execute(self.pool()).await?;
-            total += result.rows_affected();
-        }
-        Ok(total)
+        telemetry::ingest_telemetry_events_batch(self, events).await
     }
 
     async fn ingest_telemetry_error(
         &self,
         error_type: &str,
         message: &str,
-        _stack_trace: Option<&str>,
-        _device_id: &str,
-        _os_name: &str,
-        _os_version: &str,
-        _app_version: &str,
-        _sdk_version: &str,
+        stack_trace: Option<&str>,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
         tenant_id: &str,
         instance_id: Option<&str>,
         sequence_name: Option<&str>,
     ) -> Result<(), StorageError> {
-        let payload = serde_json::json!({
-            "error_type": error_type,
-            "message": message,
-            "instance_id": instance_id,
-            "sequence_name": sequence_name,
-            "tenant_id": tenant_id,
-        });
-        sqlx::query(
-            "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
+        telemetry::ingest_telemetry_error(
+            self,
+            error_type,
+            message,
+            stack_trace,
+            device_id,
+            os_name,
+            os_version,
+            app_version,
+            sdk_version,
+            tenant_id,
+            instance_id,
+            sequence_name,
         )
-        .bind("InstanceFailed")
-        .bind(payload.to_string())
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        .await
     }
 
     async fn query_telemetry_dashboard(
         &self,
-        _query_type: &str,
-        _tenant_id: &str,
-        _start: DateTime<Utc>,
-        _end: DateTime<Utc>,
+        query_type: &str,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> Result<Vec<(String, i64)>, StorageError> {
-        // Dashboard queries are server-side (Postgres) only.
-        Ok(Vec::new())
+        telemetry::query_telemetry_dashboard(self, query_type, tenant_id, start, end).await
     }
 
     async fn delete_old_telemetry_events(
@@ -2283,16 +1995,7 @@ impl crate::TelemetryStore for SqliteStorage {
         older_than: DateTime<Utc>,
         limit: u32,
     ) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM telemetry_events WHERE id IN (
-                SELECT id FROM telemetry_events WHERE created_at < ?1 LIMIT ?2
-            )",
-        )
-        .bind(older_than.to_rfc3339())
-        .bind(limit)
-        .execute(self.pool())
-        .await?;
-        Ok(result.rows_affected())
+        telemetry::delete_old_telemetry_events(self, older_than, limit).await
     }
 }
 
@@ -2350,6 +2053,14 @@ impl crate::ResourceStore for SqliteStorage {
 
     async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError> {
         instances::mark_artifacts_gced(self, instance_id).await
+    }
+
+    async fn delete_terminal_instances(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError> {
+        instances::delete_terminal_instances(self, cutoff, limit).await
     }
 
     // === Instance KV State ===
@@ -2538,71 +2249,18 @@ impl crate::MobileSyncStore for SqliteStorage {
         &self,
         device: &crate::MobileDevice,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO mobile_devices (device_id, tenant_id, push_token, platform, app_version, active, registered_at)
-             VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
-             ON CONFLICT(device_id) DO UPDATE SET
-               push_token = excluded.push_token,
-               platform = excluded.platform,
-               app_version = excluded.app_version,
-               active = 1",
-        )
-        .bind(&device.device_id)
-        .bind(&device.tenant_id)
-        .bind(&device.push_token)
-        .bind(&device.platform)
-        .bind(&device.app_version)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        mobile_sync::register_mobile_device(self, device).await
     }
 
     async fn get_mobile_device(
         &self,
         device_id: &str,
     ) -> Result<Option<crate::MobileDevice>, StorageError> {
-        let row: Option<(String, String, Option<String>, String, Option<String>, bool, Option<String>, String)> =
-            sqlx::query_as(
-                "SELECT device_id, tenant_id, push_token, platform, app_version, active, last_sync_at, registered_at
-                 FROM mobile_devices WHERE device_id = ?",
-            )
-            .bind(device_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(row.map(
-            |(
-                device_id,
-                tenant_id,
-                push_token,
-                platform,
-                app_version,
-                active,
-                last_sync_at,
-                registered_at,
-            )| {
-                crate::MobileDevice {
-                    device_id,
-                    tenant_id,
-                    push_token,
-                    platform,
-                    app_version,
-                    active,
-                    last_sync_at,
-                    registered_at,
-                }
-            },
-        ))
+        mobile_sync::get_mobile_device(self, device_id).await
     }
 
     async fn update_device_last_sync(&self, device_id: &str) -> Result<(), StorageError> {
-        sqlx::query("UPDATE mobile_devices SET last_sync_at = datetime('now') WHERE device_id = ?")
-            .bind(device_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        mobile_sync::update_device_last_sync(self, device_id).await
     }
 
     async fn list_mobile_devices(
@@ -2610,110 +2268,21 @@ impl crate::MobileSyncStore for SqliteStorage {
         tenant_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<crate::MobileDevice>, StorageError> {
-        let mut sql = String::from(
-            "SELECT device_id, tenant_id, push_token, platform, app_version, active, last_sync_at, registered_at
-             FROM mobile_devices",
-        );
-        if tenant_id.is_some() {
-            sql.push_str(" WHERE tenant_id = ?");
-        }
-        sql.push_str(" ORDER BY registered_at DESC LIMIT ?");
-
-        let mut query = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-                bool,
-                Option<String>,
-                String,
-            ),
-        >(&sql);
-        if let Some(tid) = tenant_id {
-            query = query.bind(tid);
-        }
-        query = query.bind(limit);
-
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    device_id,
-                    tenant_id,
-                    push_token,
-                    platform,
-                    app_version,
-                    active,
-                    last_sync_at,
-                    registered_at,
-                )| {
-                    crate::MobileDevice {
-                        device_id,
-                        tenant_id,
-                        push_token,
-                        platform,
-                        app_version,
-                        active,
-                        last_sync_at,
-                        registered_at,
-                    }
-                },
-            )
-            .collect())
+        mobile_sync::list_mobile_devices(self, tenant_id, limit).await
     }
 
     async fn mark_stale_devices_inactive(
         &self,
         stale_threshold_secs: i64,
     ) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "UPDATE mobile_devices SET active = 0
-             WHERE active = 1 AND last_sync_at < datetime('now', '-' || ? || ' seconds')",
-        )
-        .bind(stale_threshold_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        mobile_sync::mark_stale_devices_inactive(self, stale_threshold_secs).await
     }
 
     async fn upsert_mobile_instance_status(
         &self,
         status: &crate::MobileInstanceStatus,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO mobile_instance_status (device_id, instance_id, sequence_name, state, current_step, handler, context_summary, steps, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(device_id, instance_id) DO UPDATE SET
-               sequence_name = excluded.sequence_name,
-               state = excluded.state,
-               current_step = excluded.current_step,
-               handler = excluded.handler,
-               context_summary = excluded.context_summary,
-               steps = excluded.steps,
-               updated_at = excluded.updated_at",
-        )
-        .bind(&status.device_id)
-        .bind(&status.instance_id)
-        .bind(&status.sequence_name)
-        .bind(&status.state)
-        .bind(&status.current_step)
-        .bind(&status.handler)
-        .bind(&status.context_summary)
-        .bind(&status.steps)
-        .bind(&status.updated_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        mobile_sync::upsert_mobile_instance_status(self, status).await
     }
 
     async fn list_mobile_instance_status(
@@ -2722,157 +2291,21 @@ impl crate::MobileSyncStore for SqliteStorage {
         device_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<crate::MobileInstanceStatus>, StorageError> {
-        let mut sql = String::from(
-            "SELECT s.device_id, s.instance_id, s.sequence_name, s.state, s.current_step, s.handler, s.context_summary, s.steps, s.updated_at
-             FROM mobile_instance_status s",
-        );
-        let mut conditions = Vec::new();
-        if tenant_id.is_some() {
-            sql.push_str(" JOIN mobile_devices d ON d.device_id = s.device_id");
-            conditions.push("d.tenant_id = ?");
-        }
-        if device_id.is_some() {
-            conditions.push("s.device_id = ?");
-        }
-        if !conditions.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-        sql.push_str(" ORDER BY s.updated_at DESC LIMIT ?");
-
-        let mut query = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                String,
-            ),
-        >(&sql);
-        if let Some(tid) = tenant_id {
-            query = query.bind(tid);
-        }
-        if let Some(did) = device_id {
-            query = query.bind(did);
-        }
-        query = query.bind(limit);
-
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    device_id,
-                    instance_id,
-                    sequence_name,
-                    state,
-                    current_step,
-                    handler,
-                    context_summary,
-                    steps,
-                    updated_at,
-                )| {
-                    crate::MobileInstanceStatus {
-                        device_id,
-                        instance_id,
-                        sequence_name,
-                        state,
-                        current_step,
-                        handler,
-                        context_summary,
-                        steps,
-                        updated_at,
-                    }
-                },
-            )
-            .collect())
+        mobile_sync::list_mobile_instance_status(self, tenant_id, device_id, limit).await
     }
 
     async fn insert_mobile_approval(
         &self,
         approval: &crate::MobileApprovalRequest,
     ) -> Result<bool, StorageError> {
-        let result = sqlx::query(
-            "INSERT INTO mobile_approval_requests (id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
-             ON CONFLICT(device_id, instance_id, block_id) DO NOTHING",
-        )
-        .bind(&approval.id)
-        .bind(&approval.device_id)
-        .bind(&approval.tenant_id)
-        .bind(&approval.instance_id)
-        .bind(&approval.block_id)
-        .bind(&approval.sequence_name)
-        .bind(&approval.prompt)
-        .bind(&approval.choices)
-        .bind(&approval.store_as)
-        .bind(approval.timeout_secs)
-        .bind(&approval.metadata)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected() > 0)
+        mobile_sync::insert_mobile_approval(self, approval).await
     }
 
     async fn get_mobile_approval(
         &self,
         id: &str,
     ) -> Result<Option<crate::MobileApprovalRequest>, StorageError> {
-        let row: Option<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, String, Option<String>, String, Option<String>)> =
-            sqlx::query_as(
-                "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution, created_at, resolved_at
-                 FROM mobile_approval_requests WHERE id = ?",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(row.map(
-            |(
-                id,
-                device_id,
-                tenant_id,
-                instance_id,
-                block_id,
-                sequence_name,
-                prompt,
-                choices,
-                store_as,
-                timeout_secs,
-                metadata,
-                state,
-                resolution,
-                created_at,
-                resolved_at,
-            )| {
-                crate::MobileApprovalRequest {
-                    id,
-                    device_id,
-                    tenant_id,
-                    instance_id,
-                    block_id,
-                    sequence_name,
-                    prompt,
-                    choices,
-                    store_as,
-                    timeout_secs,
-                    metadata,
-                    state,
-                    resolution,
-                    created_at,
-                    resolved_at,
-                }
-            },
-        ))
+        mobile_sync::get_mobile_approval(self, id).await
     }
 
     async fn resolve_mobile_approval(
@@ -2880,20 +2313,7 @@ impl crate::MobileSyncStore for SqliteStorage {
         id: &str,
         resolution: &str,
     ) -> Result<Option<crate::MobileApprovalRequest>, StorageError> {
-        let result = sqlx::query(
-            "UPDATE mobile_approval_requests SET state = 'resolved', resolution = ?, resolved_at = datetime('now')
-             WHERE id = ? AND state = 'pending'",
-        )
-        .bind(resolution)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-        self.get_mobile_approval(id).await
+        mobile_sync::resolve_mobile_approval(self, id, resolution).await
     }
 
     async fn list_mobile_approvals(
@@ -2902,121 +2322,18 @@ impl crate::MobileSyncStore for SqliteStorage {
         state: Option<&str>,
         limit: u32,
     ) -> Result<Vec<crate::MobileApprovalRequest>, StorageError> {
-        let mut sql = String::from(
-            "SELECT id, device_id, tenant_id, instance_id, block_id, sequence_name, prompt, choices, store_as, timeout_secs, metadata, state, resolution, created_at, resolved_at
-             FROM mobile_approval_requests WHERE 1=1",
-        );
-        if tenant_id.is_some() {
-            sql.push_str(" AND tenant_id = ?");
-        }
-        if state.is_some() {
-            sql.push_str(" AND state = ?");
-        }
-        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
-
-        let mut query = sqlx::query_as::<
-            _,
-            (
-                String,
-                String,
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i64>,
-                Option<String>,
-                String,
-                Option<String>,
-                String,
-                Option<String>,
-            ),
-        >(&sql);
-        if let Some(tid) = tenant_id {
-            query = query.bind(tid);
-        }
-        if let Some(s) = state {
-            query = query.bind(s);
-        }
-        query = query.bind(limit);
-
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    device_id,
-                    tenant_id,
-                    instance_id,
-                    block_id,
-                    sequence_name,
-                    prompt,
-                    choices,
-                    store_as,
-                    timeout_secs,
-                    metadata,
-                    state,
-                    resolution,
-                    created_at,
-                    resolved_at,
-                )| {
-                    crate::MobileApprovalRequest {
-                        id,
-                        device_id,
-                        tenant_id,
-                        instance_id,
-                        block_id,
-                        sequence_name,
-                        prompt,
-                        choices,
-                        store_as,
-                        timeout_secs,
-                        metadata,
-                        state,
-                        resolution,
-                        created_at,
-                        resolved_at,
-                    }
-                },
-            )
-            .collect())
+        mobile_sync::list_mobile_approvals(self, tenant_id, state, limit).await
     }
 
     async fn expire_mobile_approvals(&self) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "UPDATE mobile_approval_requests SET state = 'expired'
-             WHERE state = 'pending' AND timeout_secs IS NOT NULL
-               AND datetime(created_at, '+' || timeout_secs || ' seconds') < datetime('now')",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        mobile_sync::expire_mobile_approvals(self).await
     }
 
     async fn create_mobile_command(
         &self,
         command: &crate::MobileCommand,
     ) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO mobile_commands (id, device_id, command_type, payload, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))",
-        )
-        .bind(&command.id)
-        .bind(&command.device_id)
-        .bind(&command.command_type)
-        .bind(&command.payload)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(())
+        mobile_sync::create_mobile_command(self, command).await
     }
 
     async fn fetch_pending_commands(
@@ -3024,33 +2341,7 @@ impl crate::MobileSyncStore for SqliteStorage {
         device_id: &str,
         limit: u32,
     ) -> Result<Vec<crate::MobileCommand>, StorageError> {
-        let rows: Vec<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, device_id, command_type, payload, created_at, acked_at
-             FROM mobile_commands
-             WHERE device_id = ? AND acked_at IS NULL
-             ORDER BY created_at ASC LIMIT ?",
-        )
-        .bind(device_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(
-                |(id, device_id, command_type, payload, created_at, acked_at)| {
-                    crate::MobileCommand {
-                        id,
-                        device_id,
-                        command_type,
-                        payload,
-                        created_at,
-                        acked_at,
-                    }
-                },
-            )
-            .collect())
+        mobile_sync::fetch_pending_commands(self, device_id, limit).await
     }
 
     async fn ack_mobile_commands(
@@ -3058,47 +2349,15 @@ impl crate::MobileSyncStore for SqliteStorage {
         device_id: &str,
         command_ids: &[String],
     ) -> Result<u64, StorageError> {
-        if command_ids.is_empty() {
-            return Ok(0);
-        }
-        let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "UPDATE mobile_commands SET acked_at = datetime('now') WHERE device_id = ",
-        );
-        qb.push_bind(device_id);
-        qb.push(" AND id IN (");
-        let mut separated = qb.separated(", ");
-        for id in command_ids {
-            separated.push_bind(id);
-        }
-        separated.push_unseparated(")");
-        let result = qb
-            .build()
-            .execute(&self.pool)
-            .await
-            .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        mobile_sync::ack_mobile_commands(self, device_id, command_ids).await
     }
 
     async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM mobile_commands WHERE acked_at IS NOT NULL AND acked_at < datetime('now', '-' || ? || ' seconds')",
-        )
-        .bind(older_than_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        mobile_sync::cleanup_acked_commands(self, older_than_secs).await
     }
 
     async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
-        let result = sqlx::query(
-            "DELETE FROM mobile_commands WHERE acked_at IS NULL AND created_at < datetime('now', '-' || ? || ' seconds')",
-        )
-        .bind(ttl_secs)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Query(e.to_string()))?;
-        Ok(result.rows_affected())
+        mobile_sync::cleanup_expired_commands(self, ttl_secs).await
     }
 }
 
@@ -4675,10 +3934,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn advisory_lock_default_noop() {
+    async fn advisory_lock_acquire_and_drop_releases() {
         let storage = SqliteStorage::in_memory().await.unwrap();
-        storage.acquire_manifest_lock("tenant-1").await.unwrap();
-        storage.release_manifest_lock("tenant-1").await.unwrap();
+        let guard = storage.acquire_manifest_lock("tenant-1").await.unwrap();
+        drop(guard);
     }
 
     /// Seed a sequence plus `n` instances of it (block_outputs has an FK to
@@ -4877,7 +4136,7 @@ mod tests {
     async fn manifest_lock_serializes_concurrent_acquires_for_same_tenant() {
         let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
 
-        storage.acquire_manifest_lock("t1").await.unwrap();
+        let guard1 = storage.acquire_manifest_lock("t1").await.unwrap();
 
         // A second acquire for the same tenant must not succeed while the
         // first is still held.
@@ -4891,16 +4150,16 @@ mod tests {
             "second acquire must still be blocked while the first lock is held"
         );
 
-        storage.release_manifest_lock("t1").await.unwrap();
+        drop(guard1);
 
         // Now the waiter must succeed.
-        waiter
+        let guard2 = waiter
             .await
             .unwrap()
             .expect("second acquire must succeed once the first is released");
 
         // Clean up: release the second acquirer's lock too.
-        storage.release_manifest_lock("t1").await.unwrap();
+        drop(guard2);
     }
 
     /// A different tenant's lock must not be blocked by another tenant's
@@ -4908,7 +4167,7 @@ mod tests {
     #[tokio::test]
     async fn manifest_lock_is_independent_per_tenant() {
         let storage = SqliteStorage::in_memory().await.unwrap();
-        storage.acquire_manifest_lock("tenant-a").await.unwrap();
+        let guard_a = storage.acquire_manifest_lock("tenant-a").await.unwrap();
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -4916,9 +4175,9 @@ mod tests {
         )
         .await
         .expect("a different tenant's lock must not block on tenant-a's lock");
-        result.unwrap();
+        let guard_b = result.unwrap();
 
-        storage.release_manifest_lock("tenant-a").await.unwrap();
-        storage.release_manifest_lock("tenant-b").await.unwrap();
+        drop(guard_a);
+        drop(guard_b);
     }
 }

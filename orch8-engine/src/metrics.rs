@@ -49,6 +49,21 @@ pub const GC_EMIT_DEDUPE_DELETED: &str = "orch8_gc_emit_dedupe_deleted_total";
 pub const GC_EMIT_DEDUPE_ERRORS: &str = "orch8_gc_emit_dedupe_errors_total";
 pub const GC_ARTIFACTS_DELETED: &str = "orch8_gc_artifacts_deleted_total";
 pub const GC_ARTIFACTS_ERRORS: &str = "orch8_gc_artifacts_errors_total";
+pub const GC_TELEMETRY_DELETED: &str = "orch8_gc_telemetry_deleted_total";
+pub const GC_TELEMETRY_ERRORS: &str = "orch8_gc_telemetry_errors_total";
+/// Mobile devices flagged `active = false` after missing the sync-staleness
+/// window (not a deletion — the row is kept for device history).
+pub const GC_MOBILE_DEVICES_DEACTIVATED: &str = "orch8_gc_mobile_devices_deactivated_total";
+/// Pending approval requests flipped to `expired` after missing their
+/// caller-supplied `timeout_secs`.
+pub const GC_MOBILE_APPROVALS_EXPIRED: &str = "orch8_gc_mobile_approvals_expired_total";
+/// Acked or abandoned (never-acked, past TTL) mobile commands deleted.
+pub const GC_MOBILE_COMMANDS_DELETED: &str = "orch8_gc_mobile_commands_deleted_total";
+pub const GC_MOBILE_ERRORS: &str = "orch8_gc_mobile_errors_total";
+/// Terminal `task_instances` rows (and their cascaded/explicitly-cleaned
+/// execution history) deleted by the opt-in instance-retention sweep.
+pub const GC_INSTANCES_DELETED: &str = "orch8_gc_instances_deleted_total";
+pub const GC_INSTANCES_ERRORS: &str = "orch8_gc_instances_errors_total";
 
 // === Histogram names ===
 pub const TICK_DURATION: &str = "orch8_tick_duration_seconds";

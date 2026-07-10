@@ -280,18 +280,17 @@ async fn check_rollback(
 
     // Attempt manifest regeneration so the rolled-back sequence is removed on next sync.
     if let Some(ref publisher) = state.publisher {
-        if let Err(e) = state.storage.acquire_manifest_lock(tenant_id).await {
-            warn!(error = %e, "failed to acquire manifest lock during rollback");
-        } else {
-            let removed = vec![orch8_publisher::ManifestRemoved {
-                name: sequence_name.to_string(),
-                removed_at: chrono::Utc::now(),
-            }];
-            if let Err(e) = publisher.publish_manifest(vec![], removed, vec![]).await {
-                warn!(error = %e, "failed to regenerate manifest during rollback");
-            }
-            if let Err(e) = state.storage.release_manifest_lock(tenant_id).await {
-                warn!(error = %e, "failed to release manifest lock during rollback");
+        match state.storage.acquire_manifest_lock(tenant_id).await {
+            Err(e) => warn!(error = %e, "failed to acquire manifest lock during rollback"),
+            Ok(_guard) => {
+                let removed = vec![orch8_publisher::ManifestRemoved {
+                    name: sequence_name.to_string(),
+                    removed_at: chrono::Utc::now(),
+                }];
+                if let Err(e) = publisher.publish_manifest(vec![], removed, vec![]).await {
+                    warn!(error = %e, "failed to regenerate manifest during rollback");
+                }
+                // `_guard` drops here (success, error, or panic), releasing the lock.
             }
         }
     }

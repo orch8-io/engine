@@ -23,8 +23,8 @@ async fn rollback_quiet(conn: &mut sqlx::SqliteConnection) {
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.
-const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at) \
-     VALUES (?1,?2,?3,?4,0,?5)";
+const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at,delivered_at) \
+     VALUES (?1,?2,?3,?4,?5,?6,?7)";
 
 /// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.
 /// Serialization errors surface as [`StorageError::Serialization`] before
@@ -37,7 +37,9 @@ fn bind_signal_insert<'q>(
         .bind(s.instance_id.into_uuid().to_string())
         .bind(serde_json::to_string(&s.signal_type)?)
         .bind(serde_json::to_string(&s.payload)?)
-        .bind(ts(s.created_at)))
+        .bind(s.delivered as i32)
+        .bind(ts(s.created_at))
+        .bind(s.delivered_at.map(ts)))
 }
 
 pub(super) async fn enqueue(storage: &SqliteStorage, signal: &Signal) -> Result<(), StorageError> {
@@ -168,8 +170,9 @@ pub(super) async fn mark_delivered(
     storage: &SqliteStorage,
     signal_id: Uuid,
 ) -> Result<(), StorageError> {
-    sqlx::query("UPDATE signal_inbox SET delivered=1 WHERE id=?1")
+    sqlx::query("UPDATE signal_inbox SET delivered=1, delivered_at=?2 WHERE id=?1")
         .bind(signal_id.to_string())
+        .bind(ts(chrono::Utc::now()))
         .execute(&storage.pool)
         .await?;
     Ok(())
@@ -182,7 +185,11 @@ pub(super) async fn mark_delivered_batch(
     if signal_ids.is_empty() {
         return Ok(());
     }
-    let mut qb = sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1 WHERE id IN (");
+    let now = ts(chrono::Utc::now());
+    let mut qb =
+        sqlx::QueryBuilder::new("UPDATE signal_inbox SET delivered=1, delivered_at=");
+    qb.push_bind(now);
+    qb.push(" WHERE id IN (");
     let mut separated = qb.separated(",");
     for id in signal_ids {
         separated.push_bind(id.to_string());

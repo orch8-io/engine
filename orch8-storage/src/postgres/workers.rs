@@ -44,7 +44,7 @@ pub(super) async fn get(
     .bind(task_id)
     .fetch_optional(&store.pool)
     .await?;
-    Ok(row.map(WorkerTaskRow::into_task))
+    row.map(WorkerTaskRow::into_task).transpose()
 }
 
 pub(super) async fn claim(
@@ -72,7 +72,7 @@ pub(super) async fn claim(
     .bind(i64::from(limit))
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
 /// Tenant-scoped claim: the `task_instances` join is inside the same
@@ -111,7 +111,7 @@ pub(super) async fn claim_for_tenant(
     .bind(tenant_id.as_str())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
 pub(super) async fn complete(
@@ -331,7 +331,7 @@ pub(super) async fn list(
         .fetch_all(&store.pool)
         .await?;
 
-    Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
 pub(super) async fn stats(

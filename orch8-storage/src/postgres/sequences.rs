@@ -5,8 +5,11 @@ use orch8_types::sequence::SequenceDefinition;
 use super::PostgresStorage;
 use super::rows::SequenceRow;
 
-pub(super) async fn create(
-    store: &PostgresStorage,
+/// Insert a sequence row using an already-open connection/transaction.
+/// Shared by [`create`] (its own transaction) and [`replace`] (same
+/// transaction as the preceding delete, for atomicity).
+async fn create_on(
+    conn: &mut sqlx::PgConnection,
     seq: &SequenceDefinition,
 ) -> Result<(), StorageError> {
     let definition = serde_json::json!({
@@ -32,8 +35,18 @@ pub(super) async fn create(
     .bind(seq.deprecated)
     .bind(seq.status.to_string())
     .bind(seq.created_at)
-    .execute(&store.pool)
+    .execute(conn)
     .await?;
+    Ok(())
+}
+
+pub(super) async fn create(
+    store: &PostgresStorage,
+    seq: &SequenceDefinition,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+    create_on(&mut tx, seq).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -156,17 +169,20 @@ pub(super) async fn update_status(
     Ok(())
 }
 
-pub(super) async fn delete(store: &PostgresStorage, id: SequenceId) -> Result<(), StorageError> {
+/// Delete a sequence row (and its dependent instances/cron schedules) using
+/// an already-open connection/transaction. Shared by [`delete`] (its own
+/// transaction) and [`replace`] (same transaction as the following insert,
+/// for atomicity).
+async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), StorageError> {
     // Cascade: remove terminal instances (and their FK dependents) before
     // deleting the sequence. Only terminal instances should remain at this
     // point — the API handler rejects deletes if active instances exist.
-    let mut tx = store.pool.begin().await?;
 
     // Gather instance IDs referencing this sequence.
     let instance_ids: Vec<uuid::Uuid> =
         sqlx::query_scalar("SELECT id FROM task_instances WHERE sequence_id = $1")
             .bind(id.into_uuid())
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?;
 
     if !instance_ids.is_empty() {
@@ -190,27 +206,50 @@ pub(super) async fn delete(store: &PostgresStorage, id: SequenceId) -> Result<()
             };
             sqlx::query(sql)
                 .bind(&instance_ids)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
         }
 
         sqlx::query("DELETE FROM task_instances WHERE sequence_id = $1")
             .bind(id.into_uuid())
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     }
 
     // Also remove cron schedules referencing this sequence.
     sqlx::query("DELETE FROM cron_schedules WHERE sequence_id = $1")
         .bind(id.into_uuid())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
     sqlx::query("DELETE FROM sequences WHERE id = $1")
         .bind(id.into_uuid())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
 
+    Ok(())
+}
+
+pub(super) async fn delete(store: &PostgresStorage, id: SequenceId) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+    delete_on(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Atomically replace a sequence: delete `old_id` and insert `new` as a
+/// single transaction, mirroring `sqlite/sequences.rs::replace`. Closes M2 —
+/// without this override, Postgres fell to the trait default (delete then
+/// create in two separate transactions), so a crash between them could
+/// permanently lose the sequence.
+pub(super) async fn replace(
+    store: &PostgresStorage,
+    old_id: SequenceId,
+    new: &SequenceDefinition,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+    delete_on(&mut tx, old_id).await?;
+    create_on(&mut tx, new).await?;
     tx.commit().await?;
     Ok(())
 }

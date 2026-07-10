@@ -22,9 +22,14 @@ pub(super) async fn save(
     if raw.len() >= COMPRESSION_THRESHOLD_BYTES {
         let compressed = compress(payload)?;
         sqlx::query(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-             VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5)",
+             VALUES (?1, ?2, NULL, ?3, 'zstd', ?4, ?5) \
+             ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = NULL, \
+                 payload_bytes = excluded.payload_bytes, \
+                 compression = 'zstd', \
+                 size_bytes = excluded.size_bytes",
         )
         .bind(ref_key)
         .bind(instance_id.into_uuid().to_string())
@@ -35,9 +40,14 @@ pub(super) async fn save(
         .await?;
     } else {
         sqlx::query(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) \
-             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
+             VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5) \
+             ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = excluded.payload, \
+                 payload_bytes = NULL, \
+                 compression = NULL, \
+                 size_bytes = excluded.size_bytes",
         )
         .bind(ref_key)
         .bind(instance_id.into_uuid().to_string())
@@ -124,7 +134,7 @@ pub(super) async fn batch_save(
 
     if !compressed.is_empty() {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) ",
         );
         qb.push_values(
@@ -139,12 +149,19 @@ pub(super) async fn batch_save(
                     .push_bind(&now);
             },
         );
+        qb.push(
+            " ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = NULL, \
+                 payload_bytes = excluded.payload_bytes, \
+                 compression = 'zstd', \
+                 size_bytes = excluded.size_bytes",
+        );
         qb.build().execute(&mut *tx).await?;
     }
 
     if !inline.is_empty() {
         let mut qb = sqlx::QueryBuilder::new(
-            "INSERT OR REPLACE INTO externalized_state \
+            "INSERT INTO externalized_state \
              (ref_key, instance_id, payload, payload_bytes, compression, size_bytes, created_at) ",
         );
         qb.push_values(&inline, |mut b, (ref_key, payload, size_bytes)| {
@@ -156,6 +173,13 @@ pub(super) async fn batch_save(
                 .push_bind(size_bytes)
                 .push_bind(&now);
         });
+        qb.push(
+            " ON CONFLICT(ref_key) DO UPDATE SET \
+                 payload = excluded.payload, \
+                 payload_bytes = NULL, \
+                 compression = NULL, \
+                 size_bytes = excluded.size_bytes",
+        );
         qb.build().execute(&mut *tx).await?;
     }
 

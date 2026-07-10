@@ -68,7 +68,7 @@ pub(super) async fn get_tree(
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(ExecutionNodeRow::into_node).collect())
+    rows.into_iter().map(ExecutionNodeRow::into_node).collect()
 }
 
 pub(super) async fn update_node_state(
@@ -93,7 +93,7 @@ pub(super) async fn update_node_state(
         None
     };
     sqlx::query(
-        "UPDATE execution_tree SET state = $2, completed_at = COALESCE($3, completed_at), started_at = COALESCE($4, started_at) WHERE id = $1",
+        "UPDATE execution_tree SET state = $2, completed_at = COALESCE($3, completed_at), started_at = COALESCE(started_at, $4) WHERE id = $1",
     )
     .bind(node_id.into_uuid())
     .bind(state.to_string())
@@ -155,7 +155,7 @@ pub(super) async fn update_nodes_state(
         "UPDATE execution_tree \
          SET state = $1, \
              completed_at = COALESCE($2, completed_at), \
-             started_at   = COALESCE($3, started_at) \
+             started_at   = COALESCE(started_at, $3) \
          WHERE id = ANY($4)",
     )
     .bind(state.to_string())
@@ -189,5 +189,5 @@ pub(super) async fn get_children(
     .bind(parent_id.into_uuid())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(ExecutionNodeRow::into_node).collect())
+    rows.into_iter().map(ExecutionNodeRow::into_node).collect()
 }

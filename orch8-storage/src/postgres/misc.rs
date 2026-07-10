@@ -172,7 +172,7 @@ pub(super) async fn claim_worker_tasks_from_queue(
     .bind(queue_name)
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
 /// Tenant-scoped variant — same lock-and-filter discipline as
@@ -211,7 +211,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     .bind(tenant_id.as_str())
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows.into_iter().map(WorkerTaskRow::into_task).collect())
+    rows.into_iter().map(WorkerTaskRow::into_task).collect()
 }
 
 // === Dynamic Step Injection ===

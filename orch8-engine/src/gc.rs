@@ -1,8 +1,13 @@
-//! Background GC sweeper for `externalized_state`.
+//! Background GC sweeper for `externalized_state` and related bounded-growth
+//! tables.
 //!
 //! Externalized payloads may carry an `expires_at` timestamp (set by the
 //! caller that wrote them). This loop periodically asks storage to delete
-//! up to [`GC_BATCH_LIMIT`] rows whose `expires_at` has elapsed.
+//! up to [`GC_BATCH_LIMIT`] rows whose `expires_at` has elapsed. The same
+//! tick also sweeps `telemetry_events` and the mobile-sync tables
+//! (`mobile_devices`, `mobile_approval_requests`, `mobile_commands`) — these
+//! prune methods existed on both backends but had no non-test caller until
+//! this loop wired them in (review finding L3).
 //!
 //! Design notes:
 //! - The sweep is bounded per tick to avoid one long-running transaction
@@ -10,12 +15,16 @@
 //! - Errors are logged but never propagated — GC is a best-effort
 //!   background maintenance task; a missed sweep just means the next one
 //!   picks up the slack.
-//! - Instance-scoped cleanup is handled separately via FK cascade
-//!   (`ON DELETE CASCADE` on `externalized_state.instance_id` → `task_instances.id`).
-//!   `Postgres` enforces this natively; `SQLite` requires both the FK declaration
-//!   and a connection-level `PRAGMA foreign_keys = ON` (set in the `SQLite`
-//!   pool options). This loop only targets TTL-expired rows, not
-//!   instance-deletion cleanup.
+//! - Row-level cleanup for tables FK'd to `task_instances` with
+//!   `ON DELETE CASCADE` (`Postgres` enforces this natively; `SQLite` also
+//!   requires a connection-level `PRAGMA foreign_keys = ON`, set in the
+//!   `SQLite` pool options) happens automatically whenever a `task_instances`
+//!   row is deleted -- which this loop does too, opt-in, via the
+//!   terminal-instance sweep (`instance_retention_secs` in
+//!   `SchedulerConfig`; off by default since it removes queryable instance
+//!   history). Tables with no FK to `task_instances` at all (`step_logs`,
+//!   `audit_log` on `SQLite`, `usage_events`) are cleaned up explicitly by
+//!   that same sweep rather than relying on cascade.
 //!
 //! See `docs/CONTEXT_MANAGEMENT.md` §8.5 for the lifecycle contract.
 
@@ -67,6 +76,21 @@ pub const GC_DEFAULT_INTERVAL: Duration = Duration::from_secs(300);
 /// so the value can be used in a `const` context with `Duration::from_secs`.
 pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
 
+/// Default retention for `telemetry_events` rows (90 days).
+pub const TELEMETRY_EVENTS_DEFAULT_TTL: Duration = Duration::from_secs(7_776_000);
+
+/// Default inactivity window after which a mobile device's `last_sync_at`
+/// causes it to be marked `active = false` (30 days). This updates a flag,
+/// it does not delete the device row.
+pub const MOBILE_DEVICE_STALE_DEFAULT_THRESHOLD: Duration = Duration::from_secs(2_592_000);
+
+/// Default retention for acked mobile commands before deletion (7 days).
+pub const MOBILE_COMMAND_ACKED_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
+
+/// Default retention for never-acked (abandoned) mobile commands before
+/// deletion (7 days).
+pub const MOBILE_COMMAND_EXPIRED_DEFAULT_TTL: Duration = Duration::from_secs(604_800);
+
 /// Run the expiry sweeper until `cancel` fires.
 ///
 /// Each tick calls `StorageBackend::delete_expired_externalized_state` once
@@ -83,6 +107,7 @@ pub async fn run_gc_loop(
     storage: Arc<dyn StorageBackend>,
     interval: Duration,
     artifact_retention: Option<Duration>,
+    instance_retention: Option<Duration>,
     cancel: CancellationToken,
 ) {
     run_gc_loop_with_ttl(
@@ -90,6 +115,7 @@ pub async fn run_gc_loop(
         interval,
         EMIT_DEDUPE_DEFAULT_TTL,
         artifact_retention,
+        instance_retention,
         cancel,
     )
     .await;
@@ -102,6 +128,7 @@ pub async fn run_gc_loop_with_ttl(
     interval: Duration,
     dedupe_ttl: Duration,
     artifact_retention: Option<Duration>,
+    instance_retention: Option<Duration>,
     cancel: CancellationToken,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -116,6 +143,11 @@ pub async fn run_gc_loop_with_ttl(
                     sweep_externalized(storage.as_ref()),
                     sweep_emit_dedupe(storage.as_ref(), dedupe_ttl),
                     sweep_artifacts_opt(storage.as_ref(), artifact_retention),
+                    sweep_telemetry_events(storage.as_ref()),
+                    sweep_mobile_devices(storage.as_ref()),
+                    sweep_mobile_approvals(storage.as_ref()),
+                    sweep_mobile_commands(storage.as_ref()),
+                    sweep_terminal_instances_opt(storage.as_ref(), instance_retention),
                 );
             }
         }
@@ -160,6 +192,102 @@ async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
             let kind = error_kind(&e);
             tracing::error!(error = %e, kind, "emit_event_dedupe gc sweep failed");
             metrics::inc_with(metrics::GC_EMIT_DEDUPE_ERRORS, &[("kind", kind)]);
+        }
+    }
+}
+
+/// Delete `telemetry_events` rows older than [`TELEMETRY_EVENTS_DEFAULT_TTL`].
+/// Closes review finding L3: `delete_old_telemetry_events` had a real
+/// implementation on both backends but no caller outside tests.
+async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
+    let ttl = chrono::Duration::from_std(TELEMETRY_EVENTS_DEFAULT_TTL)
+        .unwrap_or_else(|_| chrono::Duration::zero());
+    let cutoff = chrono::Utc::now() - ttl;
+    match storage
+        .delete_old_telemetry_events(cutoff, GC_BATCH_LIMIT)
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "telemetry gc: deleted expired rows");
+            metrics::inc_by(metrics::GC_TELEMETRY_DELETED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "telemetry gc sweep failed");
+            metrics::inc_with(metrics::GC_TELEMETRY_ERRORS, &[("kind", kind)]);
+        }
+    }
+}
+
+/// Mark mobile devices `active = false` once they've missed
+/// [`MOBILE_DEVICE_STALE_DEFAULT_THRESHOLD`] of sync activity. Closes review
+/// finding L3 for `mark_stale_devices_inactive`.
+async fn sweep_mobile_devices(storage: &dyn StorageBackend) {
+    let secs = i64::try_from(MOBILE_DEVICE_STALE_DEFAULT_THRESHOLD.as_secs()).unwrap_or(i64::MAX);
+    match storage.mark_stale_devices_inactive(secs).await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "mobile gc: deactivated stale devices");
+            metrics::inc_by(metrics::GC_MOBILE_DEVICES_DEACTIVATED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "mobile device gc sweep failed");
+            metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "devices")]);
+        }
+    }
+}
+
+/// Flip pending mobile approval requests to `expired` once they've missed
+/// their caller-supplied `timeout_secs`. Closes review finding L3 for
+/// `expire_mobile_approvals`.
+async fn sweep_mobile_approvals(storage: &dyn StorageBackend) {
+    match storage.expire_mobile_approvals().await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "mobile gc: expired pending approvals");
+            metrics::inc_by(metrics::GC_MOBILE_APPROVALS_EXPIRED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "mobile approval gc sweep failed");
+            metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "approvals")]);
+        }
+    }
+}
+
+/// Delete acked mobile commands past [`MOBILE_COMMAND_ACKED_DEFAULT_TTL`] and
+/// never-acked (abandoned) ones past [`MOBILE_COMMAND_EXPIRED_DEFAULT_TTL`].
+/// Closes review finding L3 for `cleanup_acked_commands` /
+/// `cleanup_expired_commands`.
+async fn sweep_mobile_commands(storage: &dyn StorageBackend) {
+    let acked_secs = i64::try_from(MOBILE_COMMAND_ACKED_DEFAULT_TTL.as_secs()).unwrap_or(i64::MAX);
+    match storage.cleanup_acked_commands(acked_secs).await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "mobile gc: deleted acked commands");
+            metrics::inc_by(metrics::GC_MOBILE_COMMANDS_DELETED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "mobile command gc (acked) sweep failed");
+            metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "commands_acked")]);
+        }
+    }
+
+    let expired_secs =
+        i64::try_from(MOBILE_COMMAND_EXPIRED_DEFAULT_TTL.as_secs()).unwrap_or(i64::MAX);
+    match storage.cleanup_expired_commands(expired_secs).await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "mobile gc: deleted abandoned commands");
+            metrics::inc_by(metrics::GC_MOBILE_COMMANDS_DELETED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "mobile command gc (expired) sweep failed");
+            metrics::inc_with(metrics::GC_MOBILE_ERRORS, &[("sweep", "commands_expired")]);
         }
     }
 }
@@ -218,6 +346,40 @@ async fn sweep_artifacts(storage: &dyn StorageBackend, retention: Duration) {
     if deleted > 0 {
         tracing::info!(count = deleted, "artifact gc: deleted blobs");
         metrics::inc_by(metrics::GC_ARTIFACTS_DELETED, deleted);
+    }
+}
+
+/// No-op wrapper so the terminal-instance sweep can sit in the same
+/// `tokio::join!` as the other sweeps regardless of whether retention is
+/// enabled. Off by default (`retention: None`) -- see
+/// `SchedulerConfig::instance_retention_secs`.
+async fn sweep_terminal_instances_opt(storage: &dyn StorageBackend, retention: Option<Duration>) {
+    if let Some(retention) = retention {
+        sweep_terminal_instances(storage, retention).await;
+    }
+}
+
+/// Delete `task_instances` rows (and their execution history) that have been
+/// terminal for longer than `retention`. Bounded per tick by
+/// [`GC_BATCH_LIMIT`]. Closes review finding L1 -- previously there was no
+/// non-test path that ever deleted a `task_instances` row outside of
+/// `delete_sequence`'s cascade.
+async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Duration) {
+    let chrono_ret =
+        chrono::Duration::from_std(retention).unwrap_or_else(|_| chrono::Duration::zero());
+    let cutoff = chrono::Utc::now() - chrono_ret;
+
+    match storage.delete_terminal_instances(cutoff, GC_BATCH_LIMIT).await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "instance gc: deleted terminal instances");
+            metrics::inc_by(metrics::GC_INSTANCES_DELETED, n);
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "instance gc sweep failed");
+            metrics::inc_with(metrics::GC_INSTANCES_ERRORS, &[("kind", kind)]);
+        }
     }
 }
 
@@ -294,7 +456,7 @@ mod tests {
         let handle = tokio::spawn({
             let storage = Arc::clone(&storage);
             let cancel = cancel.clone();
-            async move { run_gc_loop(storage, Duration::from_millis(10), None, cancel).await }
+            async move { run_gc_loop(storage, Duration::from_millis(10), None, None, cancel).await }
         });
         // Let the loop enter its select!, then cancel.
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -346,6 +508,7 @@ mod tests {
                     Duration::from_millis(10),
                     Duration::from_secs(1),
                     None,
+                    None,
                     cancel,
                 )
                 .await;
@@ -369,6 +532,171 @@ mod tests {
             outcome,
             EmitDedupeOutcome::Inserted,
             "dedupe row should have been swept by the gc loop"
+        );
+    }
+
+    /// End-to-end proof that the GC loop wires in `sweep_mobile_approvals`:
+    /// a pending approval whose `timeout_secs` has already elapsed flips to
+    /// `expired` on the next tick. Regression for review finding L3 —
+    /// `expire_mobile_approvals` had a real implementation on both backends
+    /// but no non-test caller before this loop wired it in.
+    #[tokio::test]
+    async fn gc_loop_sweeps_expired_mobile_approvals() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+
+        let approval = orch8_storage::MobileApprovalRequest {
+            id: "appr-1".into(),
+            device_id: "dev-1".into(),
+            tenant_id: "t1".into(),
+            instance_id: "inst-1".into(),
+            block_id: "b1".into(),
+            sequence_name: None,
+            prompt: None,
+            choices: None,
+            store_as: None,
+            timeout_secs: Some(0),
+            metadata: None,
+            state: "pending".into(),
+            resolution: None,
+            created_at: String::new(),
+            resolved_at: None,
+        };
+        storage.insert_mobile_approval(&approval).await.unwrap();
+
+        // SQLite's `datetime('now')` resolves to whole seconds — sleep past
+        // the second boundary so `created_at + 0s < now()` is unambiguous.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let cancel = CancellationToken::new();
+        let handle = {
+            let storage = Arc::clone(&storage);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_gc_loop(storage, Duration::from_millis(10), None, None, cancel).await;
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("gc loop did not exit on cancel")
+            .unwrap();
+
+        let updated = storage
+            .get_mobile_approval("appr-1")
+            .await
+            .unwrap()
+            .expect("approval should still exist");
+        assert_eq!(
+            updated.state, "expired",
+            "pending approval past its timeout should have been expired by the gc loop"
+        );
+    }
+
+    fn old_terminal_instance() -> orch8_types::instance::TaskInstance {
+        let now = chrono::Utc::now();
+        orch8_types::instance::TaskInstance {
+            id: orch8_types::ids::InstanceId::new(),
+            sequence_id: orch8_types::ids::SequenceId::new(),
+            tenant_id: orch8_types::ids::TenantId::unchecked("t"),
+            namespace: orch8_types::ids::Namespace::new("default"),
+            state: orch8_types::instance::InstanceState::Completed,
+            next_fire_at: None,
+            priority: orch8_types::instance::Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: orch8_types::context::ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now - chrono::Duration::days(1),
+            updated_at: now - chrono::Duration::days(1),
+        }
+    }
+
+    /// End-to-end proof that the GC loop wires in `sweep_terminal_instances`
+    /// when `instance_retention` is `Some(..)`: a terminal instance older
+    /// than the retention window is deleted. Regression for review finding
+    /// L1 -- there was previously no non-test path that ever deleted a
+    /// `task_instances` row outside of `delete_sequence`'s cascade.
+    #[tokio::test]
+    async fn gc_loop_sweeps_old_terminal_instances_when_retention_enabled() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let inst = old_terminal_instance();
+        storage.create_instance(&inst).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let handle = {
+            let storage = Arc::clone(&storage);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_gc_loop(
+                    storage,
+                    Duration::from_millis(10),
+                    None,
+                    Some(Duration::from_secs(3600)), // 1h retention; instance is 1 day old.
+                    cancel,
+                )
+                .await;
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("gc loop did not exit on cancel")
+            .unwrap();
+
+        assert!(
+            storage.get_instance(inst.id).await.unwrap().is_none(),
+            "old terminal instance should have been swept once retention is enabled"
+        );
+    }
+
+    /// The instance-retention sweep is opt-in -- with `instance_retention:
+    /// None` (the default), an old terminal instance must survive.
+    #[tokio::test]
+    async fn gc_loop_leaves_terminal_instances_when_retention_disabled() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let inst = old_terminal_instance();
+        storage.create_instance(&inst).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let handle = {
+            let storage = Arc::clone(&storage);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                run_gc_loop(storage, Duration::from_millis(10), None, None, cancel).await;
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("gc loop did not exit on cancel")
+            .unwrap();
+
+        assert!(
+            storage.get_instance(inst.id).await.unwrap().is_some(),
+            "terminal instance must survive when instance_retention is disabled (the default)"
         );
     }
 
@@ -433,7 +761,7 @@ mod tests {
         let handle = tokio::spawn({
             let storage = Arc::clone(&storage);
             let cancel = cancel.clone();
-            async move { run_gc_loop(storage, Duration::from_millis(5), None, cancel).await }
+            async move { run_gc_loop(storage, Duration::from_millis(5), None, None, cancel).await }
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
         cancel.cancel();

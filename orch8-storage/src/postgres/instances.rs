@@ -869,7 +869,7 @@ pub(super) async fn list_waiting_with_trees(
     let mut trees: HashMap<uuid::Uuid, Vec<orch8_types::execution::ExecutionNode>> = HashMap::new();
     for row in tree_rows {
         let iid = row.instance_id; // Copy the Uuid before consuming the row.
-        trees.entry(iid).or_default().push(row.into_node());
+        trees.entry(iid).or_default().push(row.into_node()?);
     }
 
     let out = instances
@@ -986,6 +986,51 @@ pub(super) async fn list_artifact_gc_candidates(
         ids.push(InstanceId::from_uuid(id));
     }
     Ok(ids)
+}
+
+/// See [`crate::ResourceStore::delete_terminal_instances`].
+pub(super) async fn delete_terminal_instances(
+    store: &PostgresStorage,
+    cutoff: DateTime<Utc>,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let mut tx = store.pool.begin().await?;
+
+    // Same terminal-state set as `list_artifact_gc_candidates` -- keep in
+    // sync with `InstanceState::is_terminal()`.
+    let ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM task_instances \
+         WHERE state::text IN ('completed','failed','cancelled') \
+           AND updated_at < $1 \
+         ORDER BY updated_at ASC LIMIT $2",
+    )
+    .bind(cutoff)
+    .bind(i64::from(limit))
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // `step_logs` and `usage_events` have no FK to `task_instances` on
+    // Postgres, so they are not covered by the `ON DELETE CASCADE` the
+    // instance row deletion below relies on for execution_tree /
+    // block_outputs / signal_inbox / worker_tasks / checkpoints /
+    // externalized_state / audit_log (all cascade -- see migrations 016 and
+    // 034).
+    for table in ["step_logs", "usage_events"] {
+        let sql = format!("DELETE FROM {table} WHERE instance_id = ANY($1)");
+        sqlx::query(&sql).bind(&ids).execute(&mut *tx).await?;
+    }
+
+    let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected())
 }
 
 /// Mark an instance artifact-swept (idempotent). See

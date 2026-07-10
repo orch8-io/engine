@@ -424,7 +424,7 @@ async fn gc_16_loop_exits_on_cancel() {
     let handle = tokio::spawn({
         let storage = Arc::clone(&storage);
         let cancel = cancel.clone();
-        async move { run_gc_loop(storage, Duration::from_millis(10), None, cancel).await }
+        async move { run_gc_loop(storage, Duration::from_millis(10), None, None, cancel).await }
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     cancel.cancel();
@@ -441,7 +441,7 @@ async fn gc_17_empty_storage_noop() {
     let handle = tokio::spawn({
         let storage = Arc::clone(&storage);
         let cancel = cancel.clone();
-        async move { run_gc_loop(storage, Duration::from_millis(5), None, cancel).await }
+        async move { run_gc_loop(storage, Duration::from_millis(5), None, None, cancel).await }
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     cancel.cancel();
@@ -482,6 +482,7 @@ async fn gc_20_sweeps_expired_dedupe() {
                 Duration::from_millis(10),
                 Duration::from_secs(1),
                 None,
+                None,
                 cancel,
             )
             .await;
@@ -520,6 +521,7 @@ async fn gc_21_preserves_fresh_dedupe() {
                 Duration::from_millis(10),
                 Duration::from_secs(3600),
                 None,
+                None,
                 cancel,
             )
             .await;
@@ -545,7 +547,7 @@ async fn gc_22_multiple_ticks() {
     let handle = tokio::spawn({
         let storage = Arc::clone(&storage);
         let cancel = cancel.clone();
-        async move { run_gc_loop(storage, Duration::from_millis(5), None, cancel).await }
+        async move { run_gc_loop(storage, Duration::from_millis(5), None, None, cancel).await }
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     cancel.cancel();
@@ -570,7 +572,7 @@ async fn gc_24_cancellation_prompt() {
     let handle = tokio::spawn({
         let storage = Arc::clone(&storage);
         let cancel = cancel.clone();
-        async move { run_gc_loop(storage, Duration::from_secs(60), None, cancel).await }
+        async move { run_gc_loop(storage, Duration::from_secs(60), None, None, cancel).await }
     });
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(2), handle)
@@ -598,6 +600,7 @@ async fn gc_25_zero_ttl_sweeps_everything() {
                 storage,
                 Duration::from_millis(10),
                 Duration::from_secs(0),
+                None,
                 None,
                 cancel,
             )
@@ -643,6 +646,7 @@ async fn gc_26_multiple_dedupe_rows_swept() {
                 Duration::from_millis(10),
                 Duration::from_secs(1),
                 None,
+                None,
                 cancel,
             )
             .await;
@@ -676,7 +680,7 @@ async fn gc_27_preserves_running_instances() {
     let handle = tokio::spawn({
         let storage = Arc::clone(&storage);
         let cancel = cancel.clone();
-        async move { run_gc_loop(storage, Duration::from_millis(5), None, cancel).await }
+        async move { run_gc_loop(storage, Duration::from_millis(5), None, None, cancel).await }
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     cancel.cancel();
@@ -709,6 +713,7 @@ async fn gc_28_dedupe_tenant_scope_swept() {
                 Duration::from_millis(10),
                 Duration::from_secs(1),
                 None,
+                None,
                 cancel,
             )
             .await;
@@ -731,12 +736,12 @@ async fn gc_29_concurrent_gc_loops_dont_panic() {
     let h1 = tokio::spawn({
         let s = Arc::clone(&storage);
         let c = cancel.clone();
-        async move { run_gc_loop(s, Duration::from_millis(5), None, c).await }
+        async move { run_gc_loop(s, Duration::from_millis(5), None, None, c).await }
     });
     let h2 = tokio::spawn({
         let s = Arc::clone(&storage);
         let c = cancel.clone();
-        async move { run_gc_loop(s, Duration::from_millis(7), None, c).await }
+        async move { run_gc_loop(s, Duration::from_millis(7), None, None, c).await }
     });
     tokio::time::sleep(Duration::from_millis(40)).await;
     cancel.cancel();

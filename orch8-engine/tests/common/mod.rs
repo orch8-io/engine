@@ -688,6 +688,7 @@ pub fn default_config() -> SchedulerConfig {
         max_steps_per_instance: 0,
         clock: orch8_types::clock::SharedClock::default(),
         artifact_retention_secs: 0,
+        instance_retention_secs: 0,
     }
 }
 
