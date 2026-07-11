@@ -102,25 +102,18 @@ pub(crate) async fn list_approvals(
 
     let (sequences_map, completed_map) = tokio::join!(
         async {
-            // Deduplicate sequence IDs to avoid redundant fetches.
-            // TODO: add `get_sequences_batch` to StorageBackend for a true single-query batch.
-            let mut seen = std::collections::HashSet::new();
-            let mut map = std::collections::HashMap::new();
-            for sid in sequence_ids {
-                if !seen.insert(sid) {
-                    continue;
-                }
-                match state.storage.get_sequence(sid).await {
-                    Ok(Some(seq)) => {
-                        map.insert(sid, seq);
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        tracing::warn!(sequence_id = %sid, error = %e, "approvals: failed to fetch sequence");
-                    }
+            let ids: Vec<_> = sequence_ids
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            match state.storage.get_sequences(&ids).await {
+                Ok(sequences) => sequences.into_iter().map(|seq| (seq.id, seq)).collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "approvals: failed to batch fetch sequences");
+                    std::collections::HashMap::new()
                 }
             }
-            map
         },
         async {
             match state

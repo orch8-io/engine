@@ -96,6 +96,13 @@ pub trait SequenceStore: Send + Sync + 'static {
         id: SequenceId,
     ) -> Result<Option<SequenceDefinition>, StorageError>;
 
+    /// Fetch several sequences in one storage round-trip. Missing IDs are
+    /// omitted from the result so callers can apply their own error policy.
+    async fn get_sequences(
+        &self,
+        ids: &[SequenceId],
+    ) -> Result<Vec<SequenceDefinition>, StorageError>;
+
     async fn get_sequence_by_name(
         &self,
         tenant_id: &TenantId,

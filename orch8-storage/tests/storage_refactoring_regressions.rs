@@ -2,24 +2,24 @@
 //! (`STORAGE_REFACTORING_2026-07.md`). Each test reproduces one confirmed
 //! bug from the review's High/Medium findings:
 //!
-//!   H1. `expire_timed_out_worker_tasks` (SQLite) must not fail a task whose
+//!   H1. `expire_timed_out_worker_tasks` (`SQLite`) must not fail a task whose
 //!       timeout hasn't actually elapsed just because the computed expiry
-//!       falls on the same calendar day as now (string-vs-datetime() collation
+//!       falls on the same calendar day as now (`string-vs-datetime()` collation
 //!       trap).
-//!   H3. `inject_blocks` (SQLite) must append to existing injected blocks
+//!   H3. `inject_blocks` (`SQLite`) must append to existing injected blocks
 //!       across multiple calls, not overwrite them.
-//!   H4. `signal_inbox` (SQLite) must persist `delivered` / `delivered_at`
+//!   H4. `signal_inbox` (`SQLite`) must persist `delivered` / `delivered_at`
 //!       faithfully — an already-delivered `Signal` must not come back as
 //!       pending, and marking delivery must stamp `delivered_at`.
-//!   M5. `externalized_state` upsert (SQLite) must preserve the original
+//!   M5. `externalized_state` upsert (`SQLite`) must preserve the original
 //!       `created_at` across a re-save, not regenerate it via `INSERT OR
 //!       REPLACE` (which would defeat GC TTL aging for repeatedly-updated
 //!       context fields).
-//!   L1. `delete_terminal_instances` (SQLite) must delete old terminal
-//!       instances and their non-cascaded history (step_logs, audit_log,
-//!       usage_events), while leaving recent or non-terminal instances
+//!   L1. `delete_terminal_instances` (`SQLite`) must delete old terminal
+//!       instances and their non-cascaded history (`step_logs`, `audit_log`,
+//!       `usage_events`), while leaving recent or non-terminal instances
 //!       alone.
-//!   R4. `rollback_policies`/`rollback_history` timestamp columns (SQLite)
+//!   R4. `rollback_policies`/`rollback_history` timestamp columns (`SQLite`)
 //!       must round-trip the real stored value on read, not silently
 //!       substitute `Utc::now()` because the stored SQLite-native format
 //!       doesn't parse as RFC 3339.

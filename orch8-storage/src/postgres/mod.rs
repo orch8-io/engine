@@ -176,6 +176,13 @@ impl crate::SequenceStore for PostgresStorage {
         sequences::get(self, id).await
     }
 
+    async fn get_sequences(
+        &self,
+        ids: &[SequenceId],
+    ) -> Result<Vec<SequenceDefinition>, StorageError> {
+        sequences::get_many(self, ids).await
+    }
+
     async fn get_sequence_by_name(
         &self,
         tenant_id: &TenantId,

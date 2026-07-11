@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
+use orch8_types::error::StorageError;
 #[cfg(test)]
 use orch8_types::ids::TenantId;
 use orch8_types::ids::{InstanceId, Namespace};
@@ -138,9 +139,29 @@ impl InstanceLifecycleManager {
             updated_at: now,
         };
 
-        self.storage.create_instance(&instance).await?;
-
-        let id_str = instance_id.to_string();
+        // The in-memory/persisted preflight above is fast, but concurrent
+        // callers can both observe a missing key. The storage unique index is
+        // authoritative: on that race, return the instance inserted by the
+        // winner rather than creating a second mobile workflow.
+        let id_str = match self.storage.create_instance(&instance).await {
+            Ok(()) => instance_id.to_string(),
+            Err(StorageError::Conflict(_)) if dedup_key.is_some_and(|key| !key.is_empty()) => {
+                let key = dedup_key.filter(|key| !key.is_empty()).ok_or_else(|| {
+                    MobileError::Storage {
+                        message: "missing dedup key after conflict".into(),
+                    }
+                })?;
+                let existing = self
+                    .storage
+                    .find_by_idempotency_key(&tenant, key)
+                    .await?
+                    .ok_or_else(|| MobileError::Storage {
+                        message: "dedup conflict without an instance".into(),
+                    })?;
+                existing.id.to_string()
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         if let Some(key) = dedup_key {
             self.dedup_keys
@@ -502,6 +523,18 @@ mod tests {
         let id1 = lifecycle.start("seq", "{}", Some("dedup-1")).await.unwrap();
         let id2 = lifecycle.start("seq", "{}", Some("dedup-1")).await.unwrap();
         assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_with_dedup_return_the_same_instance() {
+        let (lifecycle, _mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+
+        let (first, second) = tokio::join!(
+            lifecycle.start("seq", "{}", Some("concurrent-dedup")),
+            lifecycle.start("seq", "{}", Some("concurrent-dedup")),
+        );
+        assert_eq!(first.unwrap(), second.unwrap());
     }
 
     #[tokio::test]

@@ -330,41 +330,58 @@ pub(super) async fn inject_blocks_at_position(
     new_blocks_json: &serde_json::Value,
     position: Option<usize>,
 ) -> Result<serde_json::Value, StorageError> {
-    let mut tx = storage.pool.begin().await?;
+    // `BEGIN DEFERRED` (the sqlx default) allows two callers to read the same
+    // snapshot before either attempts the write. One then fails with
+    // SQLITE_BUSY, dropping an otherwise-valid injection. Acquire SQLite's
+    // write reservation before the read, mirroring claim_due's locking
+    // strategy and making the documented atomic merge reliable under load.
+    let mut conn = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
-    let final_value = if let Some(pos) = position {
-        // Read current injected blocks within the transaction so a concurrent
-        // writer's snapshot can't slip in between our read and our write.
-        let row = sqlx::query("SELECT blocks FROM injected_blocks WHERE instance_id=?1")
+    let result = async {
+        let final_value = if let Some(pos) = position {
+            let row = sqlx::query("SELECT blocks FROM injected_blocks WHERE instance_id=?1")
+                .bind(instance_id.into_uuid().to_string())
+                .fetch_optional(&mut *conn)
+                .await?;
+            let existing: Option<serde_json::Value> = row
+                .map(|r| serde_json::from_str::<serde_json::Value>(r.get::<&str, _>("blocks")))
+                .transpose()?;
+
+            let mut arr = existing
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+
+            let new_arr = new_blocks_json.as_array().cloned().unwrap_or_default();
+            let insert_at = pos.min(arr.len());
+            for (i, block) in new_arr.into_iter().enumerate() {
+                arr.insert(insert_at + i, block);
+            }
+            serde_json::Value::Array(arr)
+        } else {
+            new_blocks_json.clone()
+        };
+
+        sqlx::query("INSERT OR REPLACE INTO injected_blocks (instance_id, blocks) VALUES (?1, ?2)")
             .bind(instance_id.into_uuid().to_string())
-            .fetch_optional(&mut *tx)
+            .bind(serde_json::to_string(&final_value)?)
+            .execute(&mut *conn)
             .await?;
-        let existing: Option<serde_json::Value> = row
-            .map(|r| serde_json::from_str::<serde_json::Value>(r.get::<&str, _>("blocks")))
-            .transpose()?;
 
-        let mut arr = existing
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
+        Ok::<_, StorageError>(final_value)
+    }
+    .await;
 
-        let new_arr = new_blocks_json.as_array().cloned().unwrap_or_default();
-        let insert_at = pos.min(arr.len());
-        for (i, block) in new_arr.into_iter().enumerate() {
-            arr.insert(insert_at + i, block);
+    match result {
+        Ok(final_value) => {
+            sqlx::query("COMMIT").execute(&mut *conn).await?;
+            Ok(final_value)
         }
-        serde_json::Value::Array(arr)
-    } else {
-        new_blocks_json.clone()
-    };
-
-    sqlx::query("INSERT OR REPLACE INTO injected_blocks (instance_id, blocks) VALUES (?1, ?2)")
-        .bind(instance_id.into_uuid().to_string())
-        .bind(serde_json::to_string(&final_value)?)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
-    Ok(final_value)
+        Err(e) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            Err(e)
+        }
+    }
 }
 
 // === Emit Event Dedupe ===

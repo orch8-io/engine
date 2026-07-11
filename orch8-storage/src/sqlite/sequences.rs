@@ -75,6 +75,23 @@ pub(super) async fn get(
     row.map(|r| row_to_sequence(&r)).transpose()
 }
 
+pub(super) async fn get_many(
+    storage: &SqliteStorage,
+    ids: &[SequenceId],
+) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut qb = sqlx::QueryBuilder::new("SELECT * FROM sequences WHERE id IN (");
+    let mut separated = qb.separated(",");
+    for id in ids {
+        separated.push_bind(id.to_string());
+    }
+    separated.push_unseparated(")");
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_sequence).collect()
+}
+
 pub(super) async fn get_by_name(
     storage: &SqliteStorage,
     tenant_id: &TenantId,

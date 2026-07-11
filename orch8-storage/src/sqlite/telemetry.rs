@@ -180,15 +180,15 @@ pub(super) async fn ingest_telemetry_error(
     Ok(())
 }
 
-pub(super) async fn query_telemetry_dashboard(
+pub(super) fn query_telemetry_dashboard(
     _storage: &SqliteStorage,
     _query_type: &str,
     _tenant_id: &str,
     _start: DateTime<Utc>,
     _end: DateTime<Utc>,
-) -> Result<Vec<(String, i64)>, StorageError> {
+) -> Vec<(String, i64)> {
     // Dashboard queries are server-side (Postgres) only.
-    Ok(Vec::new())
+    Vec::new()
 }
 
 pub(super) async fn delete_old_telemetry_events(

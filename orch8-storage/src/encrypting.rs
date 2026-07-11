@@ -481,6 +481,7 @@ passthrough_impl! {
     impl crate::SequenceStore for EncryptingStorage {
         async fn create_sequence(&self, seq: &orch8_types::sequence::SequenceDefinition) -> Result<(), StorageError>;
         async fn get_sequence(&self, id: orch8_types::ids::SequenceId) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError>;
+        async fn get_sequences(&self, ids: &[orch8_types::ids::SequenceId]) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError>;
         async fn get_sequence_by_name(&self, tenant_id: &orch8_types::ids::TenantId, namespace: &orch8_types::ids::Namespace, name: &str, version: Option<i32>) -> Result<Option<orch8_types::sequence::SequenceDefinition>, StorageError>;
         async fn list_sequence_versions(&self, tenant_id: &orch8_types::ids::TenantId, namespace: &orch8_types::ids::Namespace, name: &str) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError>;
         async fn list_sequences(&self, tenant_id: Option<&orch8_types::ids::TenantId>, namespace: Option<&orch8_types::ids::Namespace>, limit: u32, offset: u32) -> Result<Vec<orch8_types::sequence::SequenceDefinition>, StorageError>;

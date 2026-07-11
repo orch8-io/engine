@@ -648,6 +648,24 @@ async fn t23_get_sequence_nonexistent_returns_none() {
 }
 
 #[tokio::test]
+async fn t23b_get_sequences_returns_matches_and_omits_missing_ids() {
+    let s = store().await;
+    let first = make_sequence_named("t", "first", "default");
+    let second = make_sequence_named("t", "second", "default");
+    s.create_sequence(&first).await.unwrap();
+    s.create_sequence(&second).await.unwrap();
+
+    let sequences = s
+        .get_sequences(&[first.id, SequenceId::new(), second.id])
+        .await
+        .unwrap();
+    let ids: std::collections::HashSet<_> = sequences.into_iter().map(|seq| seq.id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&first.id));
+    assert!(ids.contains(&second.id));
+}
+
+#[tokio::test]
 async fn t24_list_sequences_by_tenant() {
     let s = store().await;
     let seq1 = make_sequence("tenant_a");

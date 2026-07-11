@@ -21,6 +21,13 @@ pub struct InjectBlocksRequest {
     pub position: Option<usize>,
 }
 
+/// Convert the public API's optional insertion point to the storage contract.
+/// `usize::MAX` is clamped to the current array length by the backend, making
+/// an omitted position a true append even when blocks were injected earlier.
+fn storage_injection_position(position: Option<usize>) -> usize {
+    position.unwrap_or(usize::MAX)
+}
+
 /// Validate injected blocks and return their IDs.
 fn validate_injected_blocks(blocks: &serde_json::Value) -> Result<Vec<String>, ApiError> {
     let arr = blocks
@@ -92,7 +99,11 @@ pub async fn inject_blocks(
     // clobber each other on the write-back.
     let final_blocks = state
         .storage
-        .inject_blocks_at_position(InstanceId::from_uuid(id), &body.blocks, body.position)
+        .inject_blocks_at_position(
+            InstanceId::from_uuid(id),
+            &body.blocks,
+            Some(storage_injection_position(body.position)),
+        )
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
@@ -169,5 +180,11 @@ mod tests {
             err.to_string()
                 .contains("blocks[0] is not a valid BlockDefinition")
         );
+    }
+
+    #[test]
+    fn omitted_position_maps_to_append() {
+        assert_eq!(storage_injection_position(None), usize::MAX);
+        assert_eq!(storage_injection_position(Some(3)), 3);
     }
 }

@@ -167,6 +167,19 @@ pub enum SelfModifyResult {
 /// "blocks": [...], "position": …}`), inject the declared blocks into the
 /// instance's `injected_blocks`.
 ///
+/// Delegates the merge entirely to `StorageBackend::inject_blocks_at_position`
+/// rather than reading `injected_blocks` here and writing the merged result
+/// back with the plain `inject_blocks` -- that two-step read-then-write was
+/// not atomic (a concurrent self-modify call could interleave and lose a
+/// write) and, since `inject_blocks` itself appends its argument onto
+/// whatever is already stored, double-counted every block that was already
+/// present by the time this function's own merge ran (a previously-injected
+/// block would come back twice). `inject_blocks_at_position` does the read
+/// and the position-clamped insert inside a single transaction, so there is
+/// exactly one merge, not two. A missing `position` is expressed as
+/// `Some(usize::MAX)`, which the storage layer clamps to the current
+/// length -- i.e. append at the end.
+///
 /// Inject failures are logged at `warn` level but not surfaced — the step
 /// already completed successfully, and the block list is additive (missing
 /// injection just means the next tick won't see the new blocks).
@@ -186,39 +199,15 @@ pub async fn apply_self_modify(
     let Some(blocks) = output.get("blocks").filter(|v| v.is_array()) else {
         return SelfModifyResult::Failed;
     };
-    let position = output.get("position").and_then(serde_json::Value::as_u64);
-    // Both branches must start from the existing `injected_blocks` and merge
-    // the new ones in — otherwise a positionless call (documented as
-    // "append") would CLOBBER every previously-injected block, losing any
-    // earlier self-modify output in the same instance. That broke the agent
-    // pattern the handler was written to support: iterative self-extension
-    // across multiple steps.
-    let existing = match storage.get_injected_blocks(instance_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "failed to read injected blocks from storage"
-            );
-            return SelfModifyResult::Failed;
-        }
-    };
-    let mut arr = existing
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default();
-    let new = blocks.as_array().cloned().unwrap_or_default();
-    if let Some(pos) = position {
-        #[allow(clippy::cast_possible_truncation)]
-        let at = (pos.min(usize::MAX as u64) as usize).min(arr.len());
-        // Perf: use splice instead of repeated insert to avoid O(n×m) shifting.
-        let _: Vec<_> = arr.splice(at..at, new).collect();
-    } else {
-        // No position → true append at the end of the existing list.
-        arr.extend(new);
-    }
-    let final_blocks = serde_json::Value::Array(arr);
-    if let Err(e) = storage.inject_blocks(instance_id, &final_blocks).await {
+    #[allow(clippy::cast_possible_truncation)]
+    let position = output
+        .get("position")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(usize::MAX, |pos| pos.min(usize::MAX as u64) as usize);
+    if let Err(e) = storage
+        .inject_blocks_at_position(instance_id, blocks, Some(position))
+        .await
+    {
         tracing::warn!(
             instance_id = %instance_id,
             error = %e,

@@ -452,7 +452,7 @@ async fn batch_save_externalized_state_mixed_sizes_does_not_hit_sql_syntax_error
 /// `update_node_state` / `update_nodes_state` bound `started_at =
 /// COALESCE($4, started_at)` with `$4` always `Some(now)` on a Running
 /// transition, so COALESCE always picked the new value — overwriting the
-/// original start time on every Waiting -> Running re-dispatch. SQLite was
+/// original start time on every Waiting -> Running re-dispatch. `SQLite` was
 /// already correct (see `review_fixes_2026_06.rs`); this covers the PG side.
 #[tokio::test]
 async fn update_node_state_preserves_started_at_on_redispatch_postgres() {

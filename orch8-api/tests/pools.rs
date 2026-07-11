@@ -130,19 +130,19 @@ async fn delete_resource_rejects_cross_pool_resource_id() {
     let client = reqwest::Client::new();
 
     // Pool A owns the resource.
-    let pool_a_resp = client
+    let first_pool_response = client
         .post(format!("{}/pools", srv.base_url))
         .header("X-Tenant-Id", "t1")
         .json(&json!({"tenant_id": "t1", "name": "pool-a"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(pool_a_resp.status(), StatusCode::CREATED);
-    let pool_a: serde_json::Value = pool_a_resp.json().await.unwrap();
-    let pool_a_id = pool_a["id"].as_str().unwrap();
+    assert_eq!(first_pool_response.status(), StatusCode::CREATED);
+    let first_response_body: serde_json::Value = first_pool_response.json().await.unwrap();
+    let first_pool_id = first_response_body["id"].as_str().unwrap();
 
     let res_resp = client
-        .post(format!("{}/pools/{pool_a_id}/resources", srv.base_url))
+        .post(format!("{}/pools/{first_pool_id}/resources", srv.base_url))
         .header("X-Tenant-Id", "t1")
         .json(&json!({"resource_key": "victim-rk", "name": "victim-res"}))
         .send()
@@ -153,21 +153,21 @@ async fn delete_resource_rejects_cross_pool_resource_id() {
     let resource_id = resource["id"].as_str().unwrap();
 
     // Pool B belongs to the same caller but does not own the resource.
-    let pool_b_resp = client
+    let second_pool_response = client
         .post(format!("{}/pools", srv.base_url))
         .header("X-Tenant-Id", "t1")
         .json(&json!({"tenant_id": "t1", "name": "pool-b"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(pool_b_resp.status(), StatusCode::CREATED);
-    let pool_b: serde_json::Value = pool_b_resp.json().await.unwrap();
-    let pool_b_id = pool_b["id"].as_str().unwrap();
+    assert_eq!(second_pool_response.status(), StatusCode::CREATED);
+    let second_response_body: serde_json::Value = second_pool_response.json().await.unwrap();
+    let second_pool_id = second_response_body["id"].as_str().unwrap();
 
     // Deleting pool A's resource_id via pool B's URL must not succeed.
     let del_resp = client
         .delete(format!(
-            "{}/pools/{pool_b_id}/resources/{resource_id}",
+            "{}/pools/{second_pool_id}/resources/{resource_id}",
             srv.base_url
         ))
         .header("X-Tenant-Id", "t1")
@@ -178,7 +178,7 @@ async fn delete_resource_rejects_cross_pool_resource_id() {
 
     // The resource must still exist under pool A.
     let list_resp = client
-        .get(format!("{}/pools/{pool_a_id}/resources", srv.base_url))
+        .get(format!("{}/pools/{first_pool_id}/resources", srv.base_url))
         .header("X-Tenant-Id", "t1")
         .send()
         .await

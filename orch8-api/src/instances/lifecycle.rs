@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use chrono::Utc;
 use uuid::Uuid;
 
+use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
@@ -36,6 +37,26 @@ fn mode_scoped_idempotency_key(key: Option<&str>, dry_run: bool) -> Option<Strin
             k.to_string()
         }
     })
+}
+
+/// Resolve the instance that won a concurrent create with the same
+/// idempotency key. `None` means the conflict was not eligible for idempotent
+/// recovery (for example, an omitted or empty key).
+async fn concurrent_idempotency_winner(
+    state: &AppState,
+    tenant_id: &TenantId,
+    idempotency_key: Option<&str>,
+) -> Result<Option<InstanceId>, ApiError> {
+    let Some(key) = idempotency_key.filter(|key| !key.is_empty()) else {
+        return Ok(None);
+    };
+    let instance = state
+        .storage
+        .find_by_idempotency_key(tenant_id, key)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::Conflict("idempotency key conflict without an instance".into()))?;
+    Ok(Some(instance.id))
 }
 
 /// Collect `metadata.<key>=<value>` query params into a flat JSON object used
@@ -171,7 +192,7 @@ pub async fn create_instance(
         context,
         concurrency_key: req.concurrency_key,
         max_concurrency: req.max_concurrency,
-        idempotency_key: effective_idem,
+        idempotency_key: effective_idem.clone(),
         session_id: None,
         parent_instance_id: None,
         budget: req.budget,
@@ -179,11 +200,31 @@ pub async fn create_instance(
         updated_at: now,
     };
 
-    state
-        .storage
-        .create_instance(&instance)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    // The preflight lookup above gives the common retry path a fast read, but
+    // it cannot make the operation atomic: a simultaneous request can insert
+    // the same key after this request observes no row. The database's unique
+    // index remains the authority; on that expected conflict, read the winner
+    // and return the same idempotent success response instead of leaking a
+    // spurious 409 to one of the callers.
+    match state.storage.create_instance(&instance).await {
+        Ok(()) => {}
+        Err(err @ StorageError::Conflict(_)) => {
+            if let Some(id) = concurrent_idempotency_winner(
+                &state,
+                &instance.tenant_id,
+                effective_idem.as_deref(),
+            )
+            .await?
+            {
+                return Ok((
+                    StatusCode::OK,
+                    Json(serde_json::json!({ "id": id, "deduplicated": true })),
+                ));
+            }
+            return Err(ApiError::from_storage(err, "instance"));
+        }
+        Err(e) => return Err(ApiError::from_storage(e, "instance")),
+    }
 
     // Surface dry-run mode in telemetry so simulated runs are distinguishable
     // from real ones (the flag is also queryable on the instance's
@@ -255,21 +296,23 @@ pub async fn create_instances_batch(
         sequence_ids.insert(r.sequence_id);
     }
 
-    // Validate all referenced sequences exist, keeping each one's optional
-    // `input_schema` and `tenant_id` for per-item checks below.
+    // Fetch every referenced sequence in one storage query instead of one
+    // round-trip per distinct ID. A batch may contain 10,000 instances, so
+    // the previous loop could otherwise turn validation alone into 10,000
+    // sequential database queries.
     let mut input_schemas: std::collections::HashMap<_, Option<serde_json::Value>> =
         std::collections::HashMap::new();
     let mut sequence_tenants: std::collections::HashMap<_, TenantId> =
         std::collections::HashMap::new();
-    for seq_id in &sequence_ids {
-        let seq = state
-            .storage
-            .get_sequence(*seq_id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "sequence"))?
-            .ok_or_else(|| ApiError::NotFound(format!("sequence {}", seq_id.into_uuid())))?;
-        sequence_tenants.insert(*seq_id, seq.tenant_id.clone());
-        input_schemas.insert(*seq_id, seq.input_schema);
+    let sequence_ids: Vec<_> = sequence_ids.into_iter().collect();
+    for seq in state
+        .storage
+        .get_sequences(&sequence_ids)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?
+    {
+        sequence_tenants.insert(seq.id, seq.tenant_id);
+        input_schemas.insert(seq.id, seq.input_schema);
     }
 
     // Validate each item's data against its sequence's input_schema (422) and

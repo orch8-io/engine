@@ -385,6 +385,13 @@ impl crate::SequenceStore for SqliteStorage {
         sequences::get(self, id).await
     }
 
+    async fn get_sequences(
+        &self,
+        ids: &[SequenceId],
+    ) -> Result<Vec<SequenceDefinition>, StorageError> {
+        sequences::get_many(self, ids).await
+    }
+
     async fn get_sequence_by_name(
         &self,
         tenant_id: &TenantId,
@@ -1995,7 +2002,9 @@ impl crate::TelemetryStore for SqliteStorage {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<(String, i64)>, StorageError> {
-        telemetry::query_telemetry_dashboard(self, query_type, tenant_id, start, end).await
+        Ok(telemetry::query_telemetry_dashboard(
+            self, query_type, tenant_id, start, end,
+        ))
     }
 
     async fn delete_old_telemetry_events(

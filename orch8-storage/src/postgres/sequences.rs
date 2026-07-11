@@ -63,6 +63,23 @@ pub(super) async fn get(
     row.map(SequenceRow::into_definition).transpose()
 }
 
+pub(super) async fn get_many(
+    store: &PostgresStorage,
+    ids: &[SequenceId],
+) -> Result<Vec<SequenceDefinition>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<_> = ids.iter().map(|id| id.into_uuid()).collect();
+    let rows = sqlx::query_as::<_, SequenceRow>(
+        "SELECT id, tenant_id, namespace, name, definition, version, deprecated, status, created_at FROM sequences WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(SequenceRow::into_definition).collect()
+}
+
 pub(super) async fn get_by_name(
     store: &PostgresStorage,
     tenant_id: &TenantId,
