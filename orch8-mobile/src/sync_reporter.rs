@@ -438,41 +438,17 @@ impl SyncReporter {
         let sent_approval_ids: Vec<i64> = approval_rows.iter().map(|(id, _)| *id).collect();
         let sent_delegation_ids: Vec<i64> = delegation_rows.iter().map(|(id, _)| *id).collect();
 
-        for id in &sent_status_ids {
-            if let Err(e) = sqlx::query("DELETE FROM sync_outbox WHERE id = ?")
-                .bind(id)
-                .execute(&self.pool)
-                .await
-            {
-                warn!(error = %e, id, "failed to delete sent status update");
-            }
+        let mut sent_outbox_ids = Vec::with_capacity(
+            sent_status_ids.len() + sent_approval_ids.len() + sent_delegation_ids.len(),
+        );
+        sent_outbox_ids.extend_from_slice(&sent_status_ids);
+        sent_outbox_ids.extend_from_slice(&sent_approval_ids);
+        sent_outbox_ids.extend_from_slice(&sent_delegation_ids);
+        if let Err(e) = delete_outbox_rows(&self.pool, &sent_outbox_ids).await {
+            warn!(error = %e, "failed to delete sent sync outbox rows");
         }
-        for id in &sent_approval_ids {
-            if let Err(e) = sqlx::query("DELETE FROM sync_outbox WHERE id = ?")
-                .bind(id)
-                .execute(&self.pool)
-                .await
-            {
-                warn!(error = %e, id, "failed to delete sent approval request");
-            }
-        }
-        for id in &sent_delegation_ids {
-            if let Err(e) = sqlx::query("DELETE FROM sync_outbox WHERE id = ?")
-                .bind(id)
-                .execute(&self.pool)
-                .await
-            {
-                warn!(error = %e, id, "failed to delete sent delegation");
-            }
-        }
-        for ack_id in &command_acks {
-            if let Err(e) = sqlx::query("DELETE FROM sync_command_acks WHERE command_id = ?")
-                .bind(ack_id)
-                .execute(&self.pool)
-                .await
-            {
-                warn!(error = %e, ack_id, "failed to delete sync command ack");
-            }
+        if let Err(e) = delete_command_acks(&self.pool, &command_acks).await {
+            warn!(error = %e, "failed to delete sync command acknowledgements");
         }
 
         // Process commands from server.
@@ -803,6 +779,34 @@ impl SyncReporter {
     }
 }
 
+async fn delete_outbox_rows(pool: &SqlitePool, ids: &[i64]) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut query = sqlx::QueryBuilder::new("DELETE FROM sync_outbox WHERE id IN (");
+    let mut separated = query.separated(",");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+    query.build().execute(pool).await?;
+    Ok(())
+}
+
+async fn delete_command_acks(pool: &SqlitePool, ids: &[String]) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut query = sqlx::QueryBuilder::new("DELETE FROM sync_command_acks WHERE command_id IN (");
+    let mut separated = query.separated(",");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+    query.build().execute(pool).await?;
+    Ok(())
+}
+
 async fn build_steps_payload(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -1104,5 +1108,37 @@ mod tests {
             1,
             "a redelivered command must not start a second instance"
         );
+    }
+
+    #[tokio::test]
+    async fn batch_cleanup_removes_only_the_acknowledged_rows() {
+        let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        sqlx::query(
+            "INSERT INTO sync_outbox (entry_type, instance_id, payload) VALUES ('status', 'i1', '{}'), ('approval', 'i2', '{}'), ('status', 'i3', '{}')",
+        )
+        .execute(&reporter.pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO sync_command_acks (command_id) VALUES ('a1'), ('a2'), ('a3')")
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+
+        delete_outbox_rows(&reporter.pool, &[1, 3]).await.unwrap();
+        delete_command_acks(&reporter.pool, &["a1".into(), "a3".into()])
+            .await
+            .unwrap();
+
+        let remaining_outbox: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_outbox")
+            .fetch_one(&reporter.pool)
+            .await
+            .unwrap();
+        let remaining_acks: Vec<String> =
+            sqlx::query_scalar("SELECT command_id FROM sync_command_acks ORDER BY command_id")
+                .fetch_all(&reporter.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_outbox, 1);
+        assert_eq!(remaining_acks, vec!["a2"]);
     }
 }

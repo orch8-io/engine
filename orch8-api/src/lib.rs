@@ -58,8 +58,11 @@ pub struct PaginatedResponse<T> {
 }
 
 impl<T: Serialize> PaginatedResponse<T> {
-    pub fn from_vec(items: Vec<T>, limit: u32) -> Self {
-        let has_more = u32::try_from(items.len()).unwrap_or(u32::MAX) >= limit && limit > 0;
+    pub fn from_vec(mut items: Vec<T>, limit: u32) -> Self {
+        let has_more = items.len() > limit as usize;
+        if has_more {
+            items.truncate(limit as usize);
+        }
         Self { items, has_more }
     }
 }
@@ -157,4 +160,20 @@ pub fn build_router(state: AppState) -> Router {
         // panics on overlapping routes) and would also place them behind
         // auth. The test harness mounts them separately.
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PaginatedResponse;
+
+    #[test]
+    fn paginated_response_marks_more_only_when_an_extra_row_was_fetched() {
+        let exact = PaginatedResponse::from_vec(vec![1, 2], 2);
+        assert!(!exact.has_more);
+        assert_eq!(exact.items, vec![1, 2]);
+
+        let extra = PaginatedResponse::from_vec(vec![1, 2, 3], 2);
+        assert!(extra.has_more);
+        assert_eq!(extra.items, vec![1, 2]);
+    }
 }

@@ -532,7 +532,7 @@ pub async fn list_instances(
         priority: None,
     };
 
-    let pagination = Pagination {
+    let mut pagination = Pagination {
         offset: q.offset,
         limit: q.limit,
         sort_ascending: false,
@@ -540,6 +540,7 @@ pub async fn list_instances(
     .capped();
 
     let limit = pagination.limit;
+    pagination.limit = limit.saturating_add(1);
     let instances = state
         .storage
         .list_instances(&filter, &pagination)

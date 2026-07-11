@@ -301,7 +301,7 @@ pub(crate) async fn list_sequences(
         .list_sequences(
             effective_tenant.as_ref(),
             effective_namespace.as_ref(),
-            limit,
+            limit.saturating_add(1),
             offset,
         )
         .await

@@ -153,15 +153,16 @@ pub async fn get_timeline(
 
     let limit = q.limit.clamp(1, MAX_TIMELINE_LIMIT);
 
-    let outputs = state
+    let mut outputs = state
         .storage
-        .get_outputs_page(instance_id, limit, q.offset)
+        .get_outputs_page(instance_id, limit.saturating_add(1), q.offset)
         .await
         .map_err(|e| ApiError::from_storage(e, "outputs"))?;
 
-    // Same has-more heuristic as `PaginatedResponse::from_vec`: a full page
-    // means there may be more rows.
-    let has_more = u32::try_from(outputs.len()).unwrap_or(u32::MAX) >= limit;
+    let has_more = outputs.len() > limit as usize;
+    if has_more {
+        outputs.truncate(limit as usize);
+    }
 
     let entries: Vec<TimelineEntry> = outputs
         .into_iter()
