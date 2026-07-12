@@ -308,11 +308,6 @@ pub(crate) async fn delete_resource(
         .await?
         .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
-    let resources = state.storage.list_pool_resources(pool_id).await?;
-    resources
-        .iter()
-        .find(|r| r.id == resource_id)
-        .ok_or_else(|| ApiError::NotFound("resource not found".into()))?;
     state.storage.delete_pool_resource(resource_id).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

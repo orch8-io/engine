@@ -326,7 +326,7 @@ pub async fn create_instances_batch(
             .get(&r.sequence_id)
             .cloned()
             .ok_or_else(|| {
-                ApiError::Internal(format!("instances[{i}]: sequence tenant missing"))
+                ApiError::NotFound(format!("instances[{i}]: sequence not found"))
             })?;
         if seq_tenant != item_tenant {
             return Err(ApiError::Forbidden(format!(
