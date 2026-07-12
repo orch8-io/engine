@@ -218,6 +218,12 @@ pub async fn run_case(
             seq_id,
             CreateInstanceOptions {
                 context,
+                // Pin the first fire to the virtual epoch. `create_instance`
+                // defaults this to the wall clock, which sits months past
+                // the fixed epoch and would inject a phantom virtual jump
+                // into `logical_duration_ms` (breaking any duration budget
+                // smaller than the wall offset).
+                next_fire_at: Some(opts.start_time),
                 ..Default::default()
             },
         )
@@ -261,6 +267,11 @@ pub async fn run_case(
             let now = clock.now();
             let target = match inst.next_fire_at {
                 Some(t) if t > now && !inst.state.is_terminal() => Some(t),
+                // Due but not yet claimed: that is pending work, not a dead
+                // end. Signal wakes stamp `next_fire_at` with the wall
+                // clock, which sits *behind* an already-jumped virtual
+                // clock — one more tick claims it. Bounded by `max_ticks`.
+                Some(_) if !inst.state.is_terminal() => continue,
                 _ => None,
             };
             match target {

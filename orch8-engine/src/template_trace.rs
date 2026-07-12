@@ -242,11 +242,15 @@ fn analyze_fallback_chain(
     (None, false, first_missing, first_null)
 }
 
-/// Redact a single resolved value: by the param name it lands in, or by
-/// its own shape.
+/// Redact a single resolved value: by the param path it lands in (ANY
+/// segment being sensitive redacts the entry — a value under
+/// `credentials.note` must not leak just because `note` is innocent), or
+/// by its own shape.
 fn redact_entry_value(param_path: &str, value: &Value, redaction: &RedactionPolicy) -> Value {
-    let leaf = param_path.rsplit('.').next().unwrap_or(param_path);
-    if redaction.is_sensitive_key(leaf) {
+    if param_path
+        .split('.')
+        .any(|segment| redaction.is_sensitive_key(segment))
+    {
         return Value::String(REDACTED.to_string());
     }
     if let Value::String(s) = value

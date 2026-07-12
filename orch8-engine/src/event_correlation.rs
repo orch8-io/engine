@@ -113,14 +113,24 @@ pub async fn register_wait(
     storage: &Arc<dyn StorageBackend>,
     mut wait: EventWait,
 ) -> Result<EventWait, StorageError> {
-    // Idempotent re-execution: if this (instance, block) already
-    // registered and was satisfied, keep that result.
+    // Idempotent re-execution: registration fires on every gate re-park
+    // (any signal can wake and re-park the instance) and again when the
+    // handler finally runs, each time with a freshly generated id. The
+    // stored row's identity and accumulated matches MUST survive that:
+    // the upsert keeps the original row id on conflict, so a wait that
+    // didn't adopt it would CAS against the wrong id, and resetting
+    // matched progress would strand already-consumed events, leaving an
+    // all-join that can never complete.
     if let Some(existing) = storage
         .get_event_wait(InstanceId::from_uuid(wait.instance_id), &wait.block_id)
         .await?
-        && existing.status == WaitStatus::Satisfied
     {
-        return Ok(existing);
+        if existing.status == WaitStatus::Satisfied {
+            return Ok(existing);
+        }
+        wait.id = existing.id;
+        wait.matched_names = existing.matched_names;
+        wait.matched_event_ids = existing.matched_event_ids;
     }
     storage.upsert_event_wait(&wait).await?;
 

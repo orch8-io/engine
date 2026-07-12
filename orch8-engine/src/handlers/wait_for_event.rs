@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 use tracing::debug;
 
 use orch8_types::error::StepError;
-use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
+use orch8_types::event_correlation::WaitStatus;
 
 use super::StepContext;
 use crate::event_correlation::register_wait;
@@ -109,6 +109,7 @@ mod tests {
 
     use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::context::ExecutionContext;
+    use orch8_types::event_correlation::JoinMode;
     use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
     async fn ctx(params: Value) -> StepContext {

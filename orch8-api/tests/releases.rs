@@ -362,18 +362,18 @@ async fn cohort_routing_is_deterministic_at_partial_percent() {
     post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
     post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 40})).await;
 
-    // Same cohort key (idempotency key) always lands on the same variant:
-    // creating with the same key dedupes, so use metadata cohort_key with
-    // distinct idempotency keys instead.
+    // Same cohort key always lands on the same variant. The cohort key
+    // must be the ONLY stable key on the request: a non-empty
+    // idempotency_key takes precedence as the cohort key, so passing
+    // distinct ones would make every instance its own cohort.
     let mut variants = Vec::new();
-    for attempt in 0..3 {
+    for _ in 0..3 {
         let (_, v) = post(
             &base,
             &client,
             "/instances",
             json!({
                 "sequence_id": fx.baseline_id, "tenant_id": "t1", "namespace": "default",
-                "idempotency_key": format!("det-{attempt}"),
                 "metadata": {"cohort_key": "customer-42"},
             }),
         )
