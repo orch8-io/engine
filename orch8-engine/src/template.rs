@@ -1841,7 +1841,7 @@ mod tests {
             &json!({}),
         )
         .unwrap();
-        assert!(result.as_str().unwrap().len() == 64);
+        assert_eq!(result.as_str().unwrap().len(), 64);
     }
 
     // --- round filter ---
@@ -2069,7 +2069,7 @@ mod tests {
         let seq = mk_seq(vec![lp]);
         let warnings = validate_sequence_templates(&seq);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].field == "condition");
+        assert_eq!(warnings[0].field, "condition");
     }
 
     // --- state.* template resolution tests ---

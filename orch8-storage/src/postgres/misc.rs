@@ -250,9 +250,7 @@ pub(super) async fn get_injected_blocks(
             .bind(instance_id.into_uuid())
             .fetch_optional(&store.pool)
             .await?;
-    Ok(row
-        .and_then(|(v,)| v)
-        .and_then(|v| if v.is_null() { None } else { Some(v) }))
+    Ok(row.and_then(|(v,)| v).filter(|v| !v.is_null()))
 }
 
 pub(super) async fn inject_blocks_at_position(
@@ -274,9 +272,7 @@ pub(super) async fn inject_blocks_at_position(
         .fetch_optional(&mut *tx)
         .await?;
 
-        let existing = row
-            .and_then(|(v,)| v)
-            .and_then(|v| if v.is_null() { None } else { Some(v) });
+        let existing = row.and_then(|(v,)| v).filter(|v| !v.is_null());
 
         let mut arr = existing
             .and_then(|v| v.as_array().cloned())
