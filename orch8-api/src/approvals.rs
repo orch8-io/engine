@@ -264,7 +264,7 @@ fn try_build_item(
 }
 
 /// Depth-first search over all steps in a sequence's block tree.
-fn find_step_by_id<'a>(
+pub(crate) fn find_step_by_id<'a>(
     seq: &'a orch8_types::sequence::SequenceDefinition,
     block_id: &orch8_types::ids::BlockId,
 ) -> Option<&'a orch8_types::sequence::StepDef> {

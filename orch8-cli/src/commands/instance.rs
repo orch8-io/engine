@@ -62,6 +62,10 @@ pub enum InstanceCmd {
         #[arg(long, default_value = "50")]
         limit: u32,
     },
+    /// Diagnose why an instance is not progressing (Stuck Instance
+    /// Doctor). Read-only: prints ranked explanations with evidence and
+    /// suggested (never auto-executed) recovery commands.
+    Diagnose { id: Uuid },
     /// Bulk update state for matching instances.
     BulkState {
         /// New state.
@@ -255,6 +259,20 @@ pub async fn run(
                 .await?;
             print_response(resp, format).await?;
         }
+        InstanceCmd::Diagnose { id } => {
+            let resp = client
+                .get(format!("{base}/instances/{id}/diagnosis"))
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                anyhow::bail!("diagnosis request failed: {}", resp.status());
+            }
+            let report: Value = resp.json().await?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                OutputFormat::Table => print_diagnosis(&report),
+            }
+        }
         InstanceCmd::BulkState {
             state,
             tenant_id,
@@ -277,4 +295,38 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// Render a diagnosis report for humans: state header, then each ranked
+/// diagnosis with its evidence and suggested commands.
+fn print_diagnosis(report: &Value) {
+    println!(
+        "instance {} is '{}'\n",
+        val_str(report, "instance_id"),
+        val_str(report, "state")
+    );
+    for d in report["diagnoses"].as_array().into_iter().flatten() {
+        println!(
+            "  [{} | {} | confidence: {}] {}",
+            val_str(d, "category"),
+            val_str(d, "health"),
+            val_str(d, "confidence"),
+            val_str(d, "code"),
+        );
+        println!("      {}", val_str(d, "summary"));
+        for ev in d["evidence"].as_array().into_iter().flatten() {
+            println!("      evidence: {} = {}", val_str(ev, "label"), val_str(ev, "summary"));
+        }
+        for rem in d["remediation"].as_array().into_iter().flatten() {
+            let risk = if rem["side_effect_risk"] == Value::Bool(true) {
+                " (may repeat side effects)"
+            } else {
+                ""
+            };
+            match rem["command"].as_str() {
+                Some(cmd) => println!("      action: {cmd}{risk}"),
+                None => println!("      action: {}{risk}", val_str(rem, "summary")),
+            }
+        }
+    }
 }

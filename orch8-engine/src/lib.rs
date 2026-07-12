@@ -7,6 +7,7 @@ pub mod cron;
 pub mod clock {
     pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
 }
+pub mod doctor;
 pub mod error;
 pub mod evaluator;
 pub mod expression;

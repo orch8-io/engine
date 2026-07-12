@@ -5,6 +5,7 @@ pub mod circuit_breakers;
 pub mod cluster;
 pub mod credentials;
 pub mod cron;
+pub mod diagnosis;
 pub mod error;
 pub mod health;
 pub mod input_schema;
@@ -117,6 +118,7 @@ fn api_routes() -> Router<AppState> {
         .merge(preflight::routes())
         .merge(approvals::routes())
         .merge(instances::routes())
+        .merge(diagnosis::routes())
         .merge(cron::routes())
         .merge(workers::routes())
         .merge(pools::routes())

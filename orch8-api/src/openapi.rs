@@ -59,6 +59,8 @@ use utoipa::OpenApi;
         crate::instances::prune_checkpoints,
         crate::instances::list_audit_log,
         crate::instances::inject_blocks,
+        // Diagnosis
+        crate::diagnosis::get_diagnosis,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -143,6 +145,10 @@ use utoipa::OpenApi;
         orch8_types::preflight::PreflightReport,
         orch8_types::preflight::PreflightCheck,
         orch8_types::preflight::PreflightStatus,
+        orch8_types::diagnosis::InstanceDiagnosisReport,
+        orch8_types::diagnosis::Diagnosis,
+        orch8_types::diagnosis::DiagnosisCategory,
+        orch8_types::diagnosis::DiagnosisHealth,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,
