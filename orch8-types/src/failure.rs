@@ -312,6 +312,87 @@ fn is_volatile_token(token: &str) -> bool {
     token.len() >= 16 && digits >= 4
 }
 
+/// Derive a structured envelope from a legacy human-readable error
+/// message. Used to lazily backfill envelopes for failures recorded
+/// before (or outside) structured error reporting; producers that know
+/// their error should construct [`FailureEnvelope`] directly instead.
+///
+/// Heuristics are deliberately conservative: unrecognized messages get
+/// `error_code = "unknown"`, which makes [`fingerprint`] fall back to the
+/// bounded normalized-message hash.
+#[must_use]
+pub fn envelope_from_message(
+    message: &str,
+    retryable: bool,
+    occurred_at: DateTime<Utc>,
+) -> FailureEnvelope {
+    let lower = message.to_ascii_lowercase();
+
+    // HTTP status extraction: "http 503", "status 429", "returned 502".
+    let status = extract_http_status(&lower);
+    if let Some(status) = status {
+        let class = match status {
+            401 | 403 => ErrorClass::Credential,
+            408 | 429 => ErrorClass::ExternalDependency,
+            400..=499 => ErrorClass::Application,
+            _ => ErrorClass::ExternalDependency,
+        };
+        return FailureEnvelope::new("HTTP_STATUS", class, message, retryable, occurred_at)
+            .with_external_status(status.to_string());
+    }
+
+    let (code, class) = if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline")
+    {
+        ("TIMEOUT", ErrorClass::Timeout)
+    } else if lower.contains("credential") || lower.contains("unauthorized") {
+        ("CREDENTIAL", ErrorClass::Credential)
+    } else if lower.contains("no compatible worker") || lower.contains("no worker") {
+        ("NO_WORKER", ErrorClass::Worker)
+    } else if lower.contains("circuit breaker") || lower.contains("breaker open") {
+        ("CIRCUIT_OPEN", ErrorClass::Policy)
+    } else if lower.contains("budget") {
+        ("BUDGET_EXCEEDED", ErrorClass::Policy)
+    } else if lower.contains("rate limit") || lower.contains("rate-limit") {
+        ("RATE_LIMITED", ErrorClass::Policy)
+    } else if lower.contains("blocked:") || lower.contains("url policy") {
+        ("URL_POLICY", ErrorClass::Policy)
+    } else if lower.contains("unknown handler")
+        || lower.contains("unknown template root")
+        || lower.contains("template")
+        || lower.contains("invalid params")
+        || lower.contains("schema")
+    {
+        ("CONFIGURATION", ErrorClass::Configuration)
+    } else if lower.contains("cancel") {
+        ("CANCELLED", ErrorClass::Cancelled)
+    } else if lower.contains("dns") || lower.contains("connect") || lower.contains("tls") {
+        ("TRANSPORT", ErrorClass::ExternalDependency)
+    } else {
+        ("unknown", ErrorClass::Application)
+    };
+    FailureEnvelope::new(code, class, message, retryable, occurred_at)
+}
+
+/// Find an HTTP status code in a lowercased message ("http 503",
+/// "status 429", "returned 404 not found").
+fn extract_http_status(lower: &str) -> Option<u16> {
+    for marker in ["http ", "status ", "returned "] {
+        if let Some(pos) = lower.find(marker) {
+            let rest = &lower[pos + marker.len()..];
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if digits.len() == 3
+                && let Ok(n) = digits.parse::<u16>()
+                && (100..=599).contains(&n)
+            {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
 /// FNV-1a 64-bit — small, dependency-free, stable across platforms.
 /// Suitable for grouping keys; not a security boundary.
 #[must_use]
@@ -554,6 +635,72 @@ mod tests {
     fn normalize_handles_empty_and_symbol_only() {
         assert_eq!(normalize_message(""), "");
         assert_eq!(normalize_message("!!!"), "!!!");
+    }
+
+    // --- envelope_from_message ---
+
+    #[test]
+    fn message_derivation_extracts_http_status() {
+        let e = envelope_from_message("http 503", true, t0());
+        assert_eq!(e.error_code, "HTTP_STATUS");
+        assert_eq!(e.error_class, ErrorClass::ExternalDependency);
+        assert_eq!(e.external_status.as_deref(), Some("503"));
+
+        let e = envelope_from_message("upstream returned 404 not found", false, t0());
+        assert_eq!(e.external_status.as_deref(), Some("404"));
+        assert_eq!(e.error_class, ErrorClass::Application);
+
+        let e = envelope_from_message("status 401 from api", false, t0());
+        assert_eq!(e.error_class, ErrorClass::Credential);
+
+        let e = envelope_from_message("status 429 too many requests", true, t0());
+        assert_eq!(e.error_class, ErrorClass::ExternalDependency);
+    }
+
+    #[test]
+    fn message_derivation_classifies_common_failures() {
+        let cases = [
+            ("request timed out after 30s", "TIMEOUT", ErrorClass::Timeout),
+            ("credential 'billing' is disabled", "CREDENTIAL", ErrorClass::Credential),
+            ("circuit breaker open for charge_card", "CIRCUIT_OPEN", ErrorClass::Policy),
+            ("budget exceeded: max_steps", "BUDGET_EXCEEDED", ErrorClass::Policy),
+            ("rate limit exhausted for mailbox:x", "RATE_LIMITED", ErrorClass::Policy),
+            ("unknown template root: bogus", "CONFIGURATION", ErrorClass::Configuration),
+            ("cancelled by operator", "CANCELLED", ErrorClass::Cancelled),
+            ("dns error: failed to resolve", "TRANSPORT", ErrorClass::ExternalDependency),
+        ];
+        for (msg, code, class) in cases {
+            let e = envelope_from_message(msg, false, t0());
+            assert_eq!(e.error_code, code, "{msg}");
+            assert_eq!(e.error_class, class, "{msg}");
+        }
+    }
+
+    #[test]
+    fn unrecognized_message_gets_unknown_code() {
+        let e = envelope_from_message("widget frobnication failed", false, t0());
+        assert_eq!(e.error_code, "unknown");
+        assert_eq!(e.error_class, ErrorClass::Application);
+        // Unknown code means fingerprint falls back to normalized message —
+        // two different unknown messages must group separately.
+        let e2 = envelope_from_message("database exploded", false, t0());
+        assert_ne!(
+            fingerprint(&scope(), &e).hash,
+            fingerprint(&scope(), &e2).hash
+        );
+    }
+
+    #[test]
+    fn http_status_extraction_ignores_non_status_numbers() {
+        // "returned 12345 rows" — not a 3-digit status.
+        let e = envelope_from_message("returned 12345 rows then failed", false, t0());
+        assert_eq!(e.error_code, "unknown");
+        // Volatile row counts must not split groups either.
+        let e2 = envelope_from_message("returned 99999 rows then failed", false, t0());
+        assert_eq!(
+            fingerprint(&scope(), &e).hash,
+            fingerprint(&scope(), &e2).hash
+        );
     }
 
     // --- fnv1a stability ---

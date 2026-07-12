@@ -61,6 +61,10 @@ pub enum InstanceCmd {
         tenant_id: Option<String>,
         #[arg(long, default_value = "50")]
         limit: u32,
+        /// Group failures by root-cause fingerprint instead of listing
+        /// individual instances.
+        #[arg(long)]
+        groups: bool,
     },
     /// Diagnose why an instance is not progressing (Stuck Instance
     /// Doctor). Read-only: prints ranked explanations with evidence and
@@ -247,17 +251,62 @@ pub async fn run(
                 .await?;
             print_response(resp, format).await?;
         }
-        InstanceCmd::Dlq { tenant_id, limit } => {
-            let mut params = vec![("limit", limit.to_string())];
-            if let Some(t) = &tenant_id {
-                params.push(("tenant_id", t.clone()));
+        InstanceCmd::Dlq {
+            tenant_id,
+            limit,
+            groups,
+        } => {
+            if groups {
+                let mut params: Vec<(&str, String)> = Vec::new();
+                if let Some(t) = &tenant_id {
+                    params.push(("tenant_id", t.clone()));
+                }
+                let resp = client
+                    .get(format!("{base}/instances/dlq/groups"))
+                    .query(&params)
+                    .send()
+                    .await?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("dlq groups request failed: {}", resp.status());
+                }
+                let body: Value = resp.json().await?;
+                match format {
+                    OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&body)?),
+                    OutputFormat::Table => {
+                        for g in body.as_array().into_iter().flatten() {
+                            println!(
+                                "[{}×] {} ({}) — {}",
+                                g["count"],
+                                val_str(g, "error_code"),
+                                val_str(g, "error_class"),
+                                val_str(g, "sample_message"),
+                            );
+                            println!(
+                                "     fingerprint: {}  blocks: {}  handlers: {}",
+                                val_str(g, "fingerprint"),
+                                g["blocks"],
+                                g["handlers"],
+                            );
+                            println!(
+                                "     first: {}  last: {}",
+                                humanize_time(&val_str(g, "first_occurrence")),
+                                humanize_time(&val_str(g, "last_occurrence")),
+                            );
+                        }
+                    }
+                }
+            } else {
+                let mut params = vec![("limit", limit.to_string())];
+                if let Some(t) = &tenant_id {
+                    params.push(("tenant_id", t.clone()));
+                }
+                let resp = client
+                    .get(format!("{base}/instances/dlq"))
+                    .query(&params)
+                    .send()
+                    .await?;
+                print_response(resp, format).await?;
             }
-            let resp = client
-                .get(format!("{base}/instances/dlq"))
-                .query(&params)
-                .send()
-                .await?;
-            print_response(resp, format).await?;
         }
         InstanceCmd::Diagnose { id } => {
             let resp = client

@@ -13,6 +13,7 @@ pub mod credential;
 pub mod cron;
 pub mod dedupe;
 pub mod diagnosis;
+pub mod dlq;
 pub mod encryption;
 pub mod error;
 pub mod execution;

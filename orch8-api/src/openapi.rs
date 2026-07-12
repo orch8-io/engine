@@ -64,6 +64,9 @@ use utoipa::OpenApi;
         // Template inspector
         crate::inspect::inspect_draft,
         crate::inspect::inspect_instance_block,
+        // DLQ root-cause groups
+        crate::dlq_groups::list_groups,
+        crate::dlq_groups::retry_group,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -163,6 +166,13 @@ use utoipa::OpenApi;
         orch8_types::webhook_delivery::WebhookDeliverySummary,
         orch8_types::webhook_delivery::DeliveryErrorClass,
         crate::webhook_outbox::RedeliverPreview,
+        orch8_types::dlq::DlqGroup,
+        orch8_types::dlq::DlqGroupRetryRequest,
+        orch8_types::dlq::DlqGroupRetryResponse,
+        orch8_types::dlq::DlqRetryMode,
+        orch8_types::failure::ErrorClass,
+        orch8_types::failure::FailureEnvelope,
+        orch8_types::failure::FailureFingerprint,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,
