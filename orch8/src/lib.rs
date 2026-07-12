@@ -82,6 +82,7 @@
 //! Expect breaking changes between minor versions until 1.0.
 
 mod builder;
+pub mod contract;
 mod engine;
 mod error;
 mod storage;

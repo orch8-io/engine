@@ -9,6 +9,7 @@
 //! (`- removed`). It never executes real handlers — safe to run anywhere.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,8 @@ use orch8::{
     Clock, CreateInstanceOptions, Engine, ExecutionContext, ManualClock, SequenceDefinition,
     SharedClock, Storage,
 };
+use orch8_types::contract::{ContractSuite, SuiteReport};
+use orch8_types::redaction::RedactionPolicy;
 
 use crate::OutputFormat;
 use crate::commands::dev::{block_handlers, next_advance_target};
@@ -36,6 +39,41 @@ pub enum TestCmd {
         #[arg(long)]
         against: i32,
     },
+    /// Run a workflow contract suite against a sequence definition, fully
+    /// offline: every handler is mocked and time is virtual.
+    Run {
+        /// Path to the contract suite (`<seq>.contracts.json`).
+        contract_file: PathBuf,
+        /// Path to the sequence definition. Defaults to the contract path
+        /// with `.contracts` removed (`checkout.contracts.json` →
+        /// `checkout.json`).
+        #[arg(long)]
+        sequence: Option<PathBuf>,
+        /// Recorded outputs fixture (JSON object `{block_id: output}`) for
+        /// mocks with `"type": "recorded"`.
+        #[arg(long)]
+        recorded: Option<PathBuf>,
+        /// Report format: human, json, or junit.
+        #[arg(long, default_value = "human")]
+        report: ReportFormat,
+    },
+    /// Record a draft contract fixture from an executed instance, with
+    /// secrets redacted. Review before committing — recorded values may
+    /// still contain domain data you don't want in git.
+    Record {
+        /// The instance to record.
+        instance_id: Uuid,
+        /// Output path (defaults to stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum ReportFormat {
+    Human,
+    Json,
+    Junit,
 }
 
 pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputFormat) -> Result<()> {
@@ -44,7 +82,228 @@ pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputForma
             instance_id,
             against,
         } => replay(client, base, instance_id, against).await,
+        TestCmd::Run {
+            contract_file,
+            sequence,
+            recorded,
+            report,
+        } => run_contracts(&contract_file, sequence.as_deref(), recorded.as_deref(), report).await,
+        TestCmd::Record { instance_id, out } => {
+            record(client, base, instance_id, out.as_deref()).await
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `orch8 test run`
+// ---------------------------------------------------------------------------
+
+/// Derive the sequence path from `<name>.contracts.json` → `<name>.json`.
+fn default_sequence_path(contract_path: &Path) -> Option<PathBuf> {
+    let name = contract_path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".contracts.json")?;
+    Some(contract_path.with_file_name(format!("{stem}.json")))
+}
+
+async fn run_contracts(
+    contract_file: &Path,
+    sequence: Option<&Path>,
+    recorded: Option<&Path>,
+    report_format: ReportFormat,
+) -> Result<()> {
+    let contract_raw = std::fs::read_to_string(contract_file)
+        .with_context(|| format!("reading {}", contract_file.display()))?;
+    let suite: ContractSuite =
+        serde_json::from_str(&contract_raw).context("contract file is not a valid suite")?;
+
+    let seq_path = match sequence {
+        Some(p) => p.to_path_buf(),
+        None => default_sequence_path(contract_file).context(
+            "cannot derive the sequence path (contract file does not end in `.contracts.json`); \
+             pass --sequence",
+        )?,
+    };
+    let seq_raw = std::fs::read_to_string(&seq_path)
+        .with_context(|| format!("reading {}", seq_path.display()))?;
+    let seq: SequenceDefinition =
+        serde_json::from_str(&seq_raw).context("sequence file is not a valid definition")?;
+
+    let mut opts = orch8::contract::RunOptions::default();
+    if let Some(recorded_path) = recorded {
+        let raw = std::fs::read_to_string(recorded_path)
+            .with_context(|| format!("reading {}", recorded_path.display()))?;
+        let map: HashMap<String, Value> =
+            serde_json::from_str(&raw).context("recorded outputs must be {block_id: output}")?;
+        opts.recorded_outputs = map;
+    }
+
+    let report = orch8::contract::run_suite(&seq, &suite, &opts).await?;
+
+    match report_format {
+        ReportFormat::Human => print_human_report(&report),
+        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        ReportFormat::Junit => println!("{}", junit_xml(&report)),
+    }
+
+    if report.passed {
+        Ok(())
+    } else {
+        // Non-zero exit for CI.
+        std::process::exit(1);
+    }
+}
+
+fn print_human_report(report: &SuiteReport) {
+    println!(
+        "contract suite for {} v{}\n",
+        report.sequence_name, report.sequence_version
+    );
+    for case in &report.cases {
+        let mark = if case.passed { "PASS" } else { "FAIL" };
+        println!(
+            "  [{mark}] {}  ({} ticks, {} ms logical, ended {})",
+            case.name, case.ticks, case.logical_duration_ms, case.final_state
+        );
+        for failure in &case.failures {
+            println!("         ✗ {failure}");
+        }
+    }
+    let failed = report.failed_cases().len();
+    let total = report.cases.len();
+    println!(
+        "\n{} of {total} cases passed{}",
+        total - failed,
+        if failed > 0 {
+            format!(", {failed} failed")
+        } else {
+            String::new()
+        }
+    );
+}
+
+/// Minimal JUnit XML so CI systems can ingest contract results.
+fn junit_xml(report: &SuiteReport) -> String {
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+    let failures = report.failed_cases().len();
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str(&format!(
+        "<testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\">\n",
+        escape(&format!(
+            "{} v{}",
+            report.sequence_name, report.sequence_version
+        )),
+        report.cases.len(),
+    ));
+    for case in &report.cases {
+        if case.passed {
+            out.push_str(&format!("  <testcase name=\"{}\"/>\n", escape(&case.name)));
+        } else {
+            out.push_str(&format!("  <testcase name=\"{}\">\n", escape(&case.name)));
+            for failure in &case.failures {
+                out.push_str(&format!(
+                    "    <failure message=\"{}\"/>\n",
+                    escape(failure)
+                ));
+            }
+            out.push_str("  </testcase>\n");
+        }
+    }
+    out.push_str("</testsuite>");
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `orch8 test record`
+// ---------------------------------------------------------------------------
+
+async fn record(
+    client: &Client,
+    base: &str,
+    instance_id: Uuid,
+    out: Option<&Path>,
+) -> Result<()> {
+    let inst = get_json(client, format!("{base}/instances/{instance_id}")).await?;
+    let seq_id = inst["sequence_id"]
+        .as_str()
+        .context("instance missing sequence_id")?;
+    let seq = get_json(client, format!("{base}/sequences/{seq_id}")).await?;
+    let outputs: Vec<Value> = get_json(client, format!("{base}/instances/{instance_id}/outputs"))
+        .await?
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    let draft = build_recorded_case(&inst, &seq, &outputs, &RedactionPolicy::default());
+    let rendered = serde_json::to_string_pretty(&draft)?;
+
+    match out {
+        Some(path) => {
+            anyhow::ensure!(
+                !path.exists(),
+                "{} already exists — refusing to overwrite; review and merge manually",
+                path.display()
+            );
+            std::fs::write(path, &rendered)
+                .with_context(|| format!("writing {}", path.display()))?;
+            eprintln!(
+                "draft contract written to {} — review it before committing.",
+                path.display()
+            );
+        }
+        None => println!("{rendered}"),
+    }
+    Ok(())
+}
+
+/// Assemble a draft one-case contract suite from a recorded run. Pure so it
+/// can be tested without a server.
+fn build_recorded_case(
+    inst: &Value,
+    seq: &Value,
+    outputs: &[Value],
+    redaction: &RedactionPolicy,
+) -> Value {
+    let mut executed: Vec<String> = Vec::new();
+    let mut mocks: Vec<Value> = Vec::new();
+    for o in outputs {
+        let Some(block_id) = o["block_id"].as_str() else {
+            continue;
+        };
+        if block_id.starts_with('_') {
+            continue;
+        }
+        if !executed.iter().any(|b| b == block_id) {
+            executed.push(block_id.to_string());
+            mocks.push(serde_json::json!({
+                "block": block_id,
+                "type": "success",
+                "output": redaction.redacted(&o["output"]),
+            }));
+        }
+    }
+
+    let state = inst["state"].as_str().unwrap_or("completed");
+    serde_json::json!({
+        "schema_version": 1,
+        "sequence_name": seq["name"],
+        "sequence_version": seq["version"],
+        "cases": [{
+            "name": format!("recorded from instance {}", inst["id"].as_str().unwrap_or("?")),
+            "description": "Draft recorded fixture — review values and tighten assertions.",
+            "input": redaction.redacted(&inst["context"]["data"]),
+            "mocks": mocks,
+            "expect": {
+                "terminal_state": state,
+                "path": {"traversed": executed, "ordered": true}
+            }
+        }]
+    })
 }
 
 /// Diff the blocks the recorded run produced against those the replay reached.
@@ -255,5 +514,119 @@ mod tests {
         assert_eq!(added, vec!["x".to_string(), "y".to_string()]);
         assert!(removed.is_empty());
         assert_eq!(matched, 0);
+    }
+
+    // --- contract run helpers ---
+
+    #[test]
+    fn default_sequence_path_strips_contracts_suffix() {
+        let p = default_sequence_path(Path::new("workflows/checkout.contracts.json")).unwrap();
+        assert_eq!(p, Path::new("workflows/checkout.json"));
+    }
+
+    #[test]
+    fn default_sequence_path_requires_contracts_suffix() {
+        assert!(default_sequence_path(Path::new("workflows/checkout.json")).is_none());
+        assert!(default_sequence_path(Path::new("checkout.contracts.yaml")).is_none());
+    }
+
+    fn sample_report(passed: bool) -> SuiteReport {
+        use orch8_types::contract::CaseReport;
+        SuiteReport {
+            sequence_name: "checkout <fast>".into(),
+            sequence_version: 2,
+            passed,
+            cases: vec![
+                CaseReport {
+                    name: "happy".into(),
+                    passed: true,
+                    failures: vec![],
+                    final_state: "completed".into(),
+                    executed_blocks: vec!["a".into()],
+                    handler_calls: std::collections::BTreeMap::new(),
+                    ticks: 4,
+                    logical_duration_ms: 12,
+                },
+                CaseReport {
+                    name: "declined & retried".into(),
+                    passed,
+                    failures: if passed {
+                        vec![]
+                    } else {
+                        vec!["expected terminal state \"failed\"".into()]
+                    },
+                    final_state: "completed".into(),
+                    executed_blocks: vec![],
+                    handler_calls: std::collections::BTreeMap::new(),
+                    ticks: 9,
+                    logical_duration_ms: 3000,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn junit_xml_escapes_and_counts_failures() {
+        let xml = junit_xml(&sample_report(false));
+        assert!(xml.contains("tests=\"2\" failures=\"1\""), "{xml}");
+        // Suite name is escaped.
+        assert!(xml.contains("checkout &lt;fast&gt;"), "{xml}");
+        // Failure message quotes are escaped.
+        assert!(xml.contains("&quot;failed&quot;"), "{xml}");
+        // Failed case has a nested <failure>, passing case is self-closing.
+        assert!(xml.contains("<testcase name=\"happy\"/>"), "{xml}");
+        assert!(xml.contains("<testcase name=\"declined &amp; retried\">"), "{xml}");
+    }
+
+    #[test]
+    fn junit_xml_all_passing_has_zero_failures() {
+        let xml = junit_xml(&sample_report(true));
+        assert!(xml.contains("failures=\"0\""), "{xml}");
+        assert!(!xml.contains("<failure"), "{xml}");
+    }
+
+    // --- record helpers ---
+
+    #[test]
+    fn build_recorded_case_redacts_and_orders() {
+        let inst = serde_json::json!({
+            "id": "0198aaaa-0000-7000-8000-000000000001",
+            "state": "completed",
+            "sequence_id": "s",
+            "context": {"data": {"card_token": "sk_live_secret", "amount": 100}}
+        });
+        let seq = serde_json::json!({"name": "checkout", "version": 3});
+        let outputs = vec![
+            serde_json::json!({"block_id": "validate", "output": {"ok": true}}),
+            serde_json::json!({"block_id": "_sla:x", "output": {}}),
+            serde_json::json!({"block_id": "charge", "output": {"api_key": "sk_live_abc", "charged": true}}),
+            // Duplicate row for a retried block must not duplicate the mock.
+            serde_json::json!({"block_id": "validate", "output": {"ok": true}}),
+        ];
+
+        let draft = build_recorded_case(&inst, &seq, &outputs, &RedactionPolicy::default());
+
+        // Parses as a valid suite.
+        let suite: ContractSuite = serde_json::from_value(draft.clone()).unwrap();
+        suite.validate().unwrap();
+
+        // Input fixture is redacted (token-named key).
+        assert_eq!(draft["cases"][0]["input"]["card_token"], "[REDACTED]");
+        assert_eq!(draft["cases"][0]["input"]["amount"], 100);
+
+        // Sentinel rows are skipped; path preserves first-execution order.
+        assert_eq!(
+            draft["cases"][0]["expect"]["path"]["traversed"],
+            serde_json::json!(["validate", "charge"])
+        );
+
+        // Mock outputs are redacted, one mock per block.
+        let mocks = draft["cases"][0]["mocks"].as_array().unwrap();
+        assert_eq!(mocks.len(), 2);
+        assert_eq!(mocks[1]["output"]["api_key"], "[REDACTED]");
+        assert_eq!(mocks[1]["output"]["charged"], true);
+
+        // Terminal state mirrors the recorded instance.
+        assert_eq!(draft["cases"][0]["expect"]["terminal_state"], "completed");
     }
 }
