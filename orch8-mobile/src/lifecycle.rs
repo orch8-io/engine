@@ -121,7 +121,7 @@ impl InstanceLifecycleManager {
         let instance = TaskInstance {
             id: instance_id,
             sequence_id: seq.id,
-            tenant_id: tenant,
+            tenant_id: tenant.clone(),
             namespace: ns,
             state: InstanceState::Scheduled,
             next_fire_at: Some(now),
