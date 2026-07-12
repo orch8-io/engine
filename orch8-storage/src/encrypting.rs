@@ -494,6 +494,14 @@ passthrough_impl! {
         // enabled. Still a pure pass-through, just one that must be listed.
         async fn replace_sequence(&self, old_id: orch8_types::ids::SequenceId, new: &orch8_types::sequence::SequenceDefinition) -> Result<(), StorageError>;
         async fn acquire_manifest_lock(&self, tenant_id: &str) -> Result<crate::ManifestLockGuard, StorageError>;
+        async fn create_release(&self, release: &orch8_types::release::WorkflowRelease) -> Result<(), StorageError>;
+        async fn get_release(&self, id: Uuid) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError>;
+        async fn list_releases(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError>;
+        async fn cas_release_state(&self, id: Uuid, expected: orch8_types::release::ReleaseState, next: orch8_types::release::ReleaseState, canary_percent: Option<u8>, canary_started_at: Option<chrono::DateTime<chrono::Utc>>) -> Result<bool, StorageError>;
+        async fn set_release_validation_summary(&self, id: Uuid, summary: &serde_json::Value) -> Result<(), StorageError>;
+        async fn record_release_decision(&self, decision: &orch8_types::release::ReleaseDecision) -> Result<(), StorageError>;
+        async fn list_release_decisions(&self, release_id: Uuid) -> Result<Vec<orch8_types::release::ReleaseDecision>, StorageError>;
+        async fn find_routing_release_for_sequence(&self, baseline_sequence_id: orch8_types::ids::SequenceId) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError>;
     }
 }
 

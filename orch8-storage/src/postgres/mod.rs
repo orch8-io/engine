@@ -29,6 +29,7 @@ mod signals;
 mod step_logs;
 mod telemetry;
 mod triggers;
+mod releases;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_commands;
@@ -249,6 +250,69 @@ impl crate::SequenceStore for PostgresStorage {
     // by the connection's `statement_timeout`, currently 30s) until the
     // first guard drops, which is the real mutual-exclusion semantics this
     // lock exists for.
+
+    async fn create_release(
+        &self,
+        release: &orch8_types::release::WorkflowRelease,
+    ) -> Result<(), StorageError> {
+        releases::create(self, release).await
+    }
+
+    async fn get_release(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError> {
+        releases::get(self, id).await
+    }
+
+    async fn list_releases(
+        &self,
+        tenant_id: Option<&TenantId>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError> {
+        releases::list(self, tenant_id, limit).await
+    }
+
+    async fn cas_release_state(
+        &self,
+        id: Uuid,
+        expected: orch8_types::release::ReleaseState,
+        next: orch8_types::release::ReleaseState,
+        canary_percent: Option<u8>,
+        canary_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool, StorageError> {
+        releases::cas_state(self, id, expected, next, canary_percent, canary_started_at).await
+    }
+
+    async fn set_release_validation_summary(
+        &self,
+        id: Uuid,
+        summary: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        releases::set_validation_summary(self, id, summary).await
+    }
+
+    async fn record_release_decision(
+        &self,
+        decision: &orch8_types::release::ReleaseDecision,
+    ) -> Result<(), StorageError> {
+        releases::record_decision(self, decision).await
+    }
+
+    async fn list_release_decisions(
+        &self,
+        release_id: Uuid,
+    ) -> Result<Vec<orch8_types::release::ReleaseDecision>, StorageError> {
+        releases::list_decisions(self, release_id).await
+    }
+
+    async fn find_routing_release_for_sequence(
+        &self,
+        baseline_sequence_id: SequenceId,
+    ) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError> {
+        releases::find_routing(self, baseline_sequence_id).await
+    }
+
     async fn acquire_manifest_lock(
         &self,
         tenant_id: &str,

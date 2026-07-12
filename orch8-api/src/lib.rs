@@ -23,6 +23,7 @@ pub mod pools;
 pub mod preflight;
 pub mod queue_dispatch;
 pub mod queue_routing;
+pub mod releases;
 pub mod request_id;
 pub mod rollback;
 pub mod security;
@@ -35,6 +36,7 @@ pub mod triggers;
 pub mod usage;
 pub mod webhook_outbox;
 pub mod webhooks;
+pub mod workbench;
 pub mod workers;
 
 use serde::Serialize;
@@ -117,12 +119,14 @@ pub fn builtin_handler_names() -> Vec<String> {
 fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(sequences::routes())
+        .merge(releases::routes())
         .merge(preflight::routes())
         .merge(approvals::routes())
         .merge(instances::routes())
         .merge(diagnosis::routes())
         .merge(dlq_groups::routes())
         .merge(inspect::routes())
+        .merge(workbench::routes())
         .merge(cron::routes())
         .merge(workers::routes())
         .merge(pools::routes())

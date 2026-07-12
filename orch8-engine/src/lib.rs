@@ -23,6 +23,7 @@ pub mod preload;
 pub mod push;
 pub mod queue_routing;
 pub mod recovery;
+pub mod release_diff;
 pub mod required_fields;
 pub mod scheduler;
 pub mod scheduling;

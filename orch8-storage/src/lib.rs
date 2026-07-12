@@ -164,6 +164,65 @@ pub trait SequenceStore: Send + Sync + 'static {
         self.create_sequence(new).await
     }
 
+    // === Workflow releases (release control plane) ===
+
+    /// Persist a new release (state `draft`).
+    async fn create_release(
+        &self,
+        release: &orch8_types::release::WorkflowRelease,
+    ) -> Result<(), StorageError>;
+
+    async fn get_release(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError>;
+
+    /// List releases, optionally filtered by tenant, newest first.
+    async fn list_releases(
+        &self,
+        tenant_id: Option<&TenantId>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError>;
+
+    /// Compare-and-swap state transition. Returns `false` when the
+    /// release was not in `expected` (a concurrent writer won) — the
+    /// caller must NOT treat that as success. Optionally updates
+    /// `canary_percent` and `canary_started_at` in the same write.
+    async fn cas_release_state(
+        &self,
+        id: Uuid,
+        expected: orch8_types::release::ReleaseState,
+        next: orch8_types::release::ReleaseState,
+        canary_percent: Option<u8>,
+        canary_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool, StorageError>;
+
+    /// Store the historical-validation summary on the release.
+    async fn set_release_validation_summary(
+        &self,
+        id: Uuid,
+        summary: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    /// Append one immutable audit decision.
+    async fn record_release_decision(
+        &self,
+        decision: &orch8_types::release::ReleaseDecision,
+    ) -> Result<(), StorageError>;
+
+    /// All decisions for a release, oldest first.
+    async fn list_release_decisions(
+        &self,
+        release_id: Uuid,
+    ) -> Result<Vec<orch8_types::release::ReleaseDecision>, StorageError>;
+
+    /// The release currently routing traffic for a baseline sequence
+    /// (state `canary` or `promoted`), if any.
+    async fn find_routing_release_for_sequence(
+        &self,
+        baseline_sequence_id: SequenceId,
+    ) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError>;
+
     // === Manifest advisory lock (Postgres only) ===
 
     /// Acquire a per-tenant advisory lock for the duration of a manifest

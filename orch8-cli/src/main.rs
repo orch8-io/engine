@@ -13,6 +13,7 @@ use commands::config::ConfigCmd;
 use commands::cron::CronCmd;
 use commands::dev::DevCmd;
 use commands::inspect_cmd::InspectCmd;
+use commands::release::ReleaseCmd;
 use commands::instance::InstanceCmd;
 use commands::sequence::SequenceCmd;
 use commands::templates::TemplatesCmd;
@@ -85,6 +86,9 @@ enum Commands {
     /// Inspect template resolution for a block (read-only).
     #[command(subcommand)]
     Inspect(InspectCmd),
+    /// Safe workflow releases: diff, validate, canary, promote, rollback.
+    #[command(subcommand)]
+    Release(ReleaseCmd),
     /// Checkpoint management.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
@@ -323,6 +327,7 @@ async fn main() -> Result<()> {
             commands::signal::run(&client, base, instance_id, signal_type, payload, format).await?;
         }
         Commands::Inspect(cmd) => commands::inspect_cmd::run(&client, base, cmd, format).await?,
+        Commands::Release(cmd) => commands::release::run(&client, base, cmd, format).await?,
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd, format).await?,
         Commands::Config(cmd) => commands::config::run(cmd)?,
         Commands::Init { dir, template } => commands::init::run(&dir, &template)?,

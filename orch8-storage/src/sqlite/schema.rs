@@ -583,6 +583,41 @@ CREATE TABLE IF NOT EXISTS step_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_step_logs_instance ON step_logs(instance_id, ts);
 
+-- Safe workflow releases (release control plane). State changes use
+-- compare-and-swap on `state`; decisions are the immutable audit trail.
+CREATE TABLE IF NOT EXISTS workflow_releases (
+    id                    TEXT PRIMARY KEY,
+    tenant_id             TEXT NOT NULL,
+    namespace             TEXT NOT NULL,
+    sequence_name         TEXT NOT NULL,
+    baseline_sequence_id  TEXT NOT NULL,
+    baseline_version      INTEGER NOT NULL,
+    candidate_sequence_id TEXT NOT NULL,
+    candidate_version     INTEGER NOT NULL,
+    state                 TEXT NOT NULL,
+    canary_percent        INTEGER NOT NULL DEFAULT 0,
+    gates                 TEXT NOT NULL DEFAULT '[]',
+    in_flight_policy      TEXT NOT NULL DEFAULT 'pin',
+    validation_summary    TEXT,
+    canary_started_at     TEXT,
+    created_at            TEXT NOT NULL,
+    updated_at            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_releases_tenant ON workflow_releases(tenant_id, state);
+CREATE INDEX IF NOT EXISTS idx_releases_baseline ON workflow_releases(baseline_sequence_id, state);
+
+CREATE TABLE IF NOT EXISTS release_decisions (
+    id         TEXT PRIMARY KEY,
+    release_id TEXT NOT NULL,
+    from_state TEXT NOT NULL,
+    to_state   TEXT NOT NULL,
+    actor      TEXT NOT NULL,
+    reason     TEXT NOT NULL,
+    decided_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_release_decisions_release
+    ON release_decisions(release_id, decided_at);
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -596,4 +631,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 20;
+pub(super) const SCHEMA_VERSION: i64 = 21;

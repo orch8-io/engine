@@ -123,12 +123,54 @@ pub async fn create_instance(
         ));
     }
 
+    // Canary routing: when a release is actively routing traffic for the
+    // requested (baseline) sequence, a deterministic cohort of new
+    // instances is created on the candidate version instead. Explicit
+    // version selection stays authoritative — a request targeting the
+    // candidate id directly never consults the release, and rollback
+    // instantly returns all new traffic here to the baseline.
+    let mut effective_sequence_id = req.sequence_id;
+    let mut release_annotation: Option<serde_json::Value> = None;
+    if let Ok(Some(release)) = state
+        .storage
+        .find_routing_release_for_sequence(req.sequence_id)
+        .await
+        && release.tenant_id == tenant_id
+    {
+        let cohort_key = req
+            .idempotency_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .or_else(|| {
+                req.metadata
+                    .get("cohort_key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+            })
+            // No stable key supplied: each instance is its own cohort.
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let effective_percent = if release.state == orch8_types::release::ReleaseState::Promoted {
+            100
+        } else {
+            release.canary_percent
+        };
+        let variant =
+            orch8_types::release::assign_variant(release.id, &cohort_key, effective_percent);
+        if variant == orch8_types::release::ReleaseVariant::Candidate {
+            effective_sequence_id = release.candidate_sequence_id;
+        }
+        release_annotation = Some(serde_json::json!({
+            "release_id": release.id,
+            "variant": variant,
+        }));
+    }
+
     // Resolve the target sequence up-front and surface "not found" as 404 —
     // otherwise the insert would bottom out on a Postgres FK violation and
     // bubble up as a generic 500.
     let sequence = state
         .storage
-        .get_sequence(req.sequence_id)
+        .get_sequence(effective_sequence_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
         .ok_or_else(|| ApiError::NotFound(format!("sequence {}", req.sequence_id.into_uuid())))?;
@@ -179,16 +221,28 @@ pub async fn create_instance(
         ));
     }
 
+    // Annotate the instance with its release routing decision so canary
+    // observations can attribute outcomes to a variant.
+    let mut metadata = req.metadata;
+    if let Some(annotation) = release_annotation {
+        if !metadata.is_object() {
+            metadata = serde_json::json!({});
+        }
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("release".to_string(), annotation);
+        }
+    }
+
     let instance = TaskInstance {
         id: InstanceId::new(),
-        sequence_id: req.sequence_id,
+        sequence_id: effective_sequence_id,
         tenant_id,
         namespace: req.namespace,
         state: InstanceState::Scheduled,
         next_fire_at: Some(req.next_fire_at.unwrap_or(now)),
         priority: req.priority,
         timezone: req.timezone,
-        metadata: req.metadata,
+        metadata,
         context,
         concurrency_key: req.concurrency_key,
         max_concurrency: req.max_concurrency,

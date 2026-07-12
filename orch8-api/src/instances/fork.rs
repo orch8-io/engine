@@ -202,6 +202,10 @@ pub async fn fork_instance(
         "forked_at_block".into(),
         serde_json::json!(req.from_block_id),
     );
+    // Sandbox marker: forks created in dry-run mode are isolated sandboxes —
+    // dashboards and tooling use this to visually separate them from
+    // production runs and to warn before re-running with real side effects.
+    metadata.insert("sandbox".into(), serde_json::json!(req.dry_run));
 
     let now = Utc::now();
     let fork = TaskInstance {

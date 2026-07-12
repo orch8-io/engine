@@ -308,6 +308,28 @@ pub(crate) async fn delete_resource(
         .await?
         .ok_or_else(|| ApiError::NotFound("pool not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &pool.tenant_id, &format!("pool {pool_id}"))?;
-    state.storage.delete_pool_resource(resource_id).await?;
+
+    // Delete only resources that belong to THIS pool — the pool id in the
+    // URL is part of the authorization scope, so a resource id owned by
+    // another pool must 404 and stay untouched (cross-pool guard).
+    // Idempotency is preserved for ids that are genuinely gone: re-deleting
+    // an already-deleted resource returns 204.
+    let resources = state.storage.list_pool_resources(pool_id).await?;
+    if resources.iter().any(|r| r.id == resource_id) {
+        state.storage.delete_pool_resource(resource_id).await?;
+        return Ok(axum::http::StatusCode::NO_CONTENT);
+    }
+    // Not in this pool: distinguish "already gone" (idempotent 204) from
+    // "belongs to a different pool" (404).
+    let sibling_pools = state.storage.list_resource_pools(&pool.tenant_id).await?;
+    for sibling in sibling_pools {
+        if sibling.id == pool_id {
+            continue;
+        }
+        let other = state.storage.list_pool_resources(sibling.id).await?;
+        if other.iter().any(|r| r.id == resource_id) {
+            return Err(ApiError::NotFound("resource not found".into()));
+        }
+    }
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

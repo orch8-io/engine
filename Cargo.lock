@@ -2985,6 +2985,7 @@ dependencies = [
  "jsonschema",
  "metrics-exporter-prometheus",
  "moka",
+ "orch8",
  "orch8-engine",
  "orch8-publisher",
  "orch8-push",

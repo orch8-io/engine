@@ -31,6 +31,7 @@ pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod rate_limit;
 pub mod redaction;
+pub mod release;
 pub mod rollback;
 pub mod sequence;
 pub mod session;

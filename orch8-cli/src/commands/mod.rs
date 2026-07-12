@@ -7,6 +7,7 @@ pub mod health;
 pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
+pub mod release;
 pub mod sequence;
 pub mod signal;
 pub mod templates;
