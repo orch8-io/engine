@@ -61,6 +61,9 @@ use utoipa::OpenApi;
         crate::instances::inject_blocks,
         // Diagnosis
         crate::diagnosis::get_diagnosis,
+        // Template inspector
+        crate::inspect::inspect_draft,
+        crate::inspect::inspect_instance_block,
         // Cron
         crate::cron::create_cron,
         crate::cron::get_cron,
@@ -149,6 +152,10 @@ use utoipa::OpenApi;
         orch8_types::diagnosis::Diagnosis,
         orch8_types::diagnosis::DiagnosisCategory,
         orch8_types::diagnosis::DiagnosisHealth,
+        orch8_types::template_trace::ResolutionTrace,
+        orch8_types::template_trace::ResolutionEntry,
+        orch8_types::template_trace::ResolutionStatus,
+        crate::inspect::InspectTemplateRequest,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,

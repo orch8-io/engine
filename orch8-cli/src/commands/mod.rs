@@ -5,6 +5,7 @@ pub mod dev;
 pub mod dev_server;
 pub mod health;
 pub mod init;
+pub mod inspect_cmd;
 pub mod instance;
 pub mod sequence;
 pub mod signal;

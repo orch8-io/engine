@@ -9,6 +9,7 @@ pub mod diagnosis;
 pub mod error;
 pub mod health;
 pub mod input_schema;
+pub mod inspect;
 pub mod instances;
 pub mod mcp_server;
 pub mod metrics;
@@ -119,6 +120,7 @@ fn api_routes() -> Router<AppState> {
         .merge(approvals::routes())
         .merge(instances::routes())
         .merge(diagnosis::routes())
+        .merge(inspect::routes())
         .merge(cron::routes())
         .merge(workers::routes())
         .merge(pools::routes())

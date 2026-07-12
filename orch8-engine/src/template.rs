@@ -129,7 +129,7 @@ fn resolve_string(
 /// (possibly with pipe filters) rather than containing multiple separate
 /// template expressions. We check that the content between the outer `{{ }}`
 /// doesn't contain unquoted `{{` which would indicate multiple expressions.
-fn is_single_template_expr(inner: &str) -> bool {
+pub(crate) fn is_single_template_expr(inner: &str) -> bool {
     let mut in_quote = false;
     let mut quote_char = ' ';
     let bytes = inner.as_bytes();
@@ -153,7 +153,7 @@ fn is_single_template_expr(inner: &str) -> bool {
 
 /// Find the position of `}}` that closes a template expression, skipping
 /// any `}}` that appear inside quoted strings (e.g. `replace('{{x}}', ...)`).
-fn find_closing_braces(s: &str) -> Option<usize> {
+pub(crate) fn find_closing_braces(s: &str) -> Option<usize> {
     let mut in_quote = false;
     let mut quote_char = ' ';
     let bytes = s.as_bytes();
@@ -229,7 +229,7 @@ fn resolve_path(
     Ok(result)
 }
 
-fn is_pipe_filter(s: &str) -> bool {
+pub(crate) fn is_pipe_filter(s: &str) -> bool {
     matches!(
         s,
         "upper" | "lower" | "trim" | "abs" | "url_encode" | "base64" | "base64_decode"
@@ -242,7 +242,7 @@ fn is_pipe_filter(s: &str) -> bool {
         || s.starts_with("round(")
 }
 
-fn split_pipe_segments(s: &str) -> Vec<&str> {
+pub(crate) fn split_pipe_segments(s: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut depth = 0u32;
     let mut start = 0;
@@ -541,7 +541,7 @@ fn unquote(s: &str) -> String {
     }
 }
 
-fn is_template_path(s: &str) -> bool {
+pub(crate) fn is_template_path(s: &str) -> bool {
     // Strip leading function call for paths like "json(outputs.x.y)"
     let inner = strip_function_call(s).unwrap_or(s);
     let root = inner.split('.').next().unwrap_or("");
@@ -559,7 +559,7 @@ fn is_template_path(s: &str) -> bool {
     )
 }
 
-fn try_resolve_single(
+pub(crate) fn try_resolve_single(
     path: &str,
     context: &ExecutionContext,
     outputs: &serde_json::Value,

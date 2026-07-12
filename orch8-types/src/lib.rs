@@ -36,6 +36,7 @@ pub mod session;
 pub mod signal;
 pub mod step_log;
 pub mod suggest;
+pub mod template_trace;
 pub mod trigger;
 pub mod webhook_outbox;
 pub mod worker;
