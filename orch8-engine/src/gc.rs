@@ -79,6 +79,9 @@ pub const EMIT_DEDUPE_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
 /// Default retention for `telemetry_events` rows (90 days).
 pub const TELEMETRY_EVENTS_DEFAULT_TTL: Duration = Duration::from_secs(7_776_000);
 
+/// Default retention for webhook delivery attempt rows (30 days).
+pub const WEBHOOK_ATTEMPTS_DEFAULT_TTL: Duration = Duration::from_secs(2_592_000);
+
 /// Default inactivity window after which a mobile device's `last_sync_at`
 /// causes it to be marked `active = false` (30 days). This updates a flag,
 /// it does not delete the device row.
@@ -148,6 +151,7 @@ pub async fn run_gc_loop_with_ttl(
                     sweep_mobile_approvals(storage.as_ref()),
                     sweep_mobile_commands(storage.as_ref()),
                     sweep_terminal_instances_opt(storage.as_ref(), instance_retention),
+                    sweep_webhook_attempts(storage.as_ref()),
                 );
             }
         }
@@ -216,6 +220,25 @@ async fn sweep_telemetry_events(storage: &dyn StorageBackend) {
             let kind = error_kind(&e);
             tracing::error!(error = %e, kind, "telemetry gc sweep failed");
             metrics::inc_with(metrics::GC_TELEMETRY_ERRORS, &[("kind", kind)]);
+        }
+    }
+}
+
+/// Delete webhook delivery attempt rows older than
+/// [`WEBHOOK_ATTEMPTS_DEFAULT_TTL`] so the delivery inspector's history
+/// stays bounded.
+async fn sweep_webhook_attempts(storage: &dyn StorageBackend) {
+    let ttl = chrono::Duration::from_std(WEBHOOK_ATTEMPTS_DEFAULT_TTL)
+        .unwrap_or_else(|_| chrono::Duration::zero());
+    let cutoff = chrono::Utc::now() - ttl;
+    match storage.delete_webhook_attempts_before(cutoff).await {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(count = n, "webhook attempt gc: deleted expired rows");
+        }
+        Err(e) => {
+            let kind = error_kind(&e);
+            tracing::error!(error = %e, kind, "webhook attempt gc sweep failed");
         }
     }
 }

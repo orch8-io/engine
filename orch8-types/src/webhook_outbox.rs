@@ -30,4 +30,9 @@ pub struct WebhookOutboxEntry {
     pub last_error: Option<String>,
     /// When the delivery was parked.
     pub created_at: DateTime<Utc>,
+    /// Links this parked entry to its attempt history (see
+    /// `webhook_delivery::WebhookDeliveryAttempt`). `None` for rows parked
+    /// before attempt tracking existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<Uuid>,
 }

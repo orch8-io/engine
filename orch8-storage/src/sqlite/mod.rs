@@ -54,6 +54,7 @@ mod signals;
 mod step_logs;
 mod telemetry;
 mod triggers;
+mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_commands;
 mod worker_version_pins;
@@ -1307,6 +1308,35 @@ impl crate::WorkerStore for SqliteStorage {
 
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError> {
         webhook_outbox::delete(self, id).await
+    }
+
+    async fn record_webhook_attempt(
+        &self,
+        attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt,
+    ) -> Result<(), StorageError> {
+        webhook_deliveries::record(self, attempt).await
+    }
+
+    async fn list_webhook_deliveries(
+        &self,
+        filter: &orch8_types::webhook_delivery::DeliveryFilter,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError> {
+        webhook_deliveries::list_deliveries(self, filter, limit).await
+    }
+
+    async fn get_webhook_delivery_attempts(
+        &self,
+        delivery_id: Uuid,
+    ) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliveryAttempt>, StorageError> {
+        webhook_deliveries::get_attempts(self, delivery_id).await
+    }
+
+    async fn delete_webhook_attempts_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError> {
+        webhook_deliveries::delete_before(self, cutoff).await
     }
 
     async fn create_queue_routing_rule(

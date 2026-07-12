@@ -16,6 +16,7 @@ fn row_to_entry(row: &sqlx::postgres::PgRow) -> WebhookOutboxEntry {
         attempts: row.get("attempts"),
         last_error: row.get("last_error"),
         created_at: row.get("created_at"),
+        delivery_id: row.get("delivery_id"),
     }
 }
 
@@ -25,8 +26,8 @@ pub(super) async fn park(
 ) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO webhook_outbox
-            (id, url, event_type, instance_id, payload, attempts, last_error, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+            (id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind(entry.id)
     .bind(&entry.url)
@@ -36,6 +37,7 @@ pub(super) async fn park(
     .bind(entry.attempts)
     .bind(&entry.last_error)
     .bind(entry.created_at)
+    .bind(entry.delivery_id)
     .execute(&store.pool)
     .await?;
     Ok(())
@@ -46,7 +48,7 @@ pub(super) async fn list(
     limit: u32,
 ) -> Result<Vec<WebhookOutboxEntry>, StorageError> {
     let rows = sqlx::query(
-        r"SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at
+        r"SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id
           FROM webhook_outbox ORDER BY created_at DESC LIMIT $1",
     )
     .bind(i64::from(limit))
@@ -60,7 +62,7 @@ pub(super) async fn get(
     id: Uuid,
 ) -> Result<Option<WebhookOutboxEntry>, StorageError> {
     let row = sqlx::query(
-        r"SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at
+        r"SELECT id, url, event_type, instance_id, payload, attempts, last_error, created_at, delivery_id
           FROM webhook_outbox WHERE id = $1",
     )
     .bind(id)

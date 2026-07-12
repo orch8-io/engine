@@ -1224,6 +1224,33 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// Remove a parked delivery (after a successful redelivery or a discard).
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
 
+    // === Webhook Delivery Attempts (delivery inspector) ===
+
+    /// Record one delivery attempt (bounded, redacted metadata only).
+    async fn record_webhook_attempt(
+        &self,
+        attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt,
+    ) -> Result<(), StorageError>;
+
+    /// List delivery summaries (grouped by `delivery_id`), newest first.
+    async fn list_webhook_deliveries(
+        &self,
+        filter: &orch8_types::webhook_delivery::DeliveryFilter,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
+
+    /// All attempts of one delivery, in attempt order.
+    async fn get_webhook_delivery_attempts(
+        &self,
+        delivery_id: Uuid,
+    ) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliveryAttempt>, StorageError>;
+
+    /// Retention: delete attempts older than `cutoff`; returns rows removed.
+    async fn delete_webhook_attempts_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError>;
+
     // === Queue Routing Rules ===
 
     /// Create a queue routing rule.

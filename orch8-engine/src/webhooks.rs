@@ -161,10 +161,57 @@ pub fn emit(config: &WebhookConfig, event: &WebhookEvent, cancel: &CancellationT
     }
 }
 
+/// Record one delivery attempt (best-effort — inspector data must never
+/// block or fail a delivery).
+async fn record_attempt(
+    delivery_id: uuid::Uuid,
+    url: &str,
+    event: &WebhookEvent,
+    attempt_number: i32,
+    started: std::time::Instant,
+    outcome: Result<u16, &str>,
+    signed: bool,
+) {
+    let Some(storage) = OUTBOX_STORAGE.get() else {
+        return;
+    };
+    let mut row = orch8_types::webhook_delivery::WebhookDeliveryAttempt {
+        id: uuid::Uuid::now_v7(),
+        delivery_id,
+        url: url.to_string(),
+        event_type: event.event_type.clone(),
+        instance_id: event.instance_id.map(InstanceId::into_uuid),
+        attempt_number,
+        attempted_at: Utc::now(),
+        duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+        success: false,
+        status_code: None,
+        error_class: None,
+        error_excerpt: None,
+        signed,
+    };
+    match outcome {
+        Ok(status) if status < 400 => {
+            row.success = true;
+            row.status_code = Some(i32::from(status));
+        }
+        Ok(status) => {
+            row.status_code = Some(i32::from(status));
+            row.set_error(&format!("http {status}"), Some(status));
+        }
+        Err(e) => row.set_error(e, None),
+    }
+    if let Err(e) = storage.record_webhook_attempt(&row).await {
+        debug!(error = %e, "failed to record webhook delivery attempt");
+    }
+}
+
 /// One full retry pass. Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)`
 /// after exhausting `max_retries` (or on shutdown). Does NOT park — callers
-/// decide what to do with a failure.
+/// decide what to do with a failure. Every attempt is recorded (bounded,
+/// redacted metadata) under `delivery_id` for the delivery inspector.
 async fn try_send(
+    delivery_id: uuid::Uuid,
     url: &str,
     event: &WebhookEvent,
     timeout: Duration,
@@ -173,20 +220,37 @@ async fn try_send(
     cancel: &CancellationToken,
 ) -> Result<(), String> {
     let body = serde_json::to_vec(event).map_err(|e| format!("serialize: {e}"))?;
+    let signed = secret.is_some();
 
     let mut last_error = String::from("no attempts made");
     for attempt in 0..=max_retries {
+        let attempt_number = i32::try_from(attempt + 1).unwrap_or(i32::MAX);
+        let started = std::time::Instant::now();
         match send_request(url, &body, timeout, secret).await {
             Ok(status) if status < 400 => {
+                record_attempt(delivery_id, url, event, attempt_number, started, Ok(status), signed)
+                    .await;
                 metrics::inc(metrics::WEBHOOKS_SENT);
                 debug!(url = %url, event_type = %event.event_type, "webhook delivered");
                 return Ok(());
             }
             Ok(status) => {
+                record_attempt(delivery_id, url, event, attempt_number, started, Ok(status), signed)
+                    .await;
                 last_error = format!("http {status}");
                 warn!(url = %url, status, attempt, "webhook returned error status");
             }
             Err(e) => {
+                record_attempt(
+                    delivery_id,
+                    url,
+                    event,
+                    attempt_number,
+                    started,
+                    Err(e.as_str()),
+                    signed,
+                )
+                .await;
                 warn!(url = %url, error = %e, attempt, "webhook request failed");
                 last_error = e;
             }
@@ -213,10 +277,12 @@ async fn send_with_retry(
     secret: Option<&str>,
     cancel: &CancellationToken,
 ) {
-    let last_error = match try_send(url, event, timeout, max_retries, secret, cancel).await {
-        Ok(()) => return,
-        Err(reason) => reason,
-    };
+    let delivery_id = uuid::Uuid::now_v7();
+    let last_error =
+        match try_send(delivery_id, url, event, timeout, max_retries, secret, cancel).await {
+            Ok(()) => return,
+            Err(reason) => reason,
+        };
 
     metrics::inc(metrics::WEBHOOKS_FAILED);
     error!(
@@ -236,6 +302,7 @@ async fn send_with_retry(
             attempts: i32::try_from(max_retries.saturating_add(1)).unwrap_or(i32::MAX),
             last_error: Some(last_error),
             created_at: Utc::now(),
+            delivery_id: Some(delivery_id),
         };
         match storage.park_webhook(&entry).await {
             Ok(()) => metrics::inc(metrics::WEBHOOKS_PARKED),
@@ -244,13 +311,23 @@ async fn send_with_retry(
     }
 }
 
+/// Whether a redelivery would be HMAC-signed (the wired outbox config has
+/// a secret). Used by the redelivery *preview* endpoint — the secret
+/// itself never leaves the engine.
+#[must_use]
+pub fn redelivery_will_sign() -> bool {
+    OUTBOX_CONFIG.get().is_some_and(|c| c.secret.is_some())
+}
+
 /// Redeliver a parked webhook to its original URL — one fresh retry pass using
-/// the engine's webhook config for signing. `Ok(())` means the caller should
-/// delete the outbox row; `Err(reason)` means it should stay parked.
+/// the engine's webhook config for signing. On success (`Ok(delivery_id)`)
+/// the caller should delete the outbox row; `Err(reason)` means it should
+/// stay parked. The returned id names the new attempt group recorded for
+/// the delivery inspector.
 pub async fn redeliver(
     entry: &WebhookOutboxEntry,
     cancel: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<uuid::Uuid, String> {
     let event: WebhookEvent =
         serde_json::from_value(entry.payload.clone()).map_err(|e| format!("bad payload: {e}"))?;
     let (timeout, max_retries, secret) = match OUTBOX_CONFIG.get() {
@@ -261,7 +338,10 @@ pub async fn redeliver(
         ),
         None => (Duration::from_secs(10), 3, None),
     };
+    // A redelivery is its own attempt group.
+    let delivery_id = uuid::Uuid::now_v7();
     try_send(
+        delivery_id,
         &entry.url,
         &event,
         timeout,
@@ -270,6 +350,7 @@ pub async fn redeliver(
         cancel,
     )
     .await
+    .map(|()| delivery_id)
 }
 
 /// Send an HTTP POST request via reqwest (TLS, connection pooling, proper HTTP).

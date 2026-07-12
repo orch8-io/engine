@@ -502,9 +502,33 @@ CREATE TABLE IF NOT EXISTS webhook_outbox (
     payload     TEXT NOT NULL,
     attempts    INTEGER NOT NULL DEFAULT 0,
     last_error  TEXT,
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    delivery_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_created ON webhook_outbox(created_at DESC);
+
+-- Webhook delivery attempt history (delivery inspector). One row per
+-- outbound attempt; delivery_id groups one delivery pass. Bounded,
+-- redacted metadata only — never payloads or response bodies.
+CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+    id             TEXT PRIMARY KEY,
+    delivery_id    TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    event_type     TEXT NOT NULL,
+    instance_id    TEXT,
+    attempt_number INTEGER NOT NULL,
+    attempted_at   TEXT NOT NULL,
+    duration_ms    INTEGER NOT NULL DEFAULT 0,
+    success        INTEGER NOT NULL DEFAULT 0 CHECK(success IN (0, 1)),
+    status_code    INTEGER,
+    error_class    TEXT,
+    error_excerpt  TEXT,
+    signed         INTEGER NOT NULL DEFAULT 0 CHECK(signed IN (0, 1))
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_attempts_delivery
+    ON webhook_delivery_attempts(delivery_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_webhook_attempts_time
+    ON webhook_delivery_attempts(attempted_at DESC);
 
 CREATE TABLE IF NOT EXISTS queue_routing_rules (
     id             TEXT PRIMARY KEY,
@@ -572,4 +596,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 19;
+pub(super) const SCHEMA_VERSION: i64 = 20;

@@ -1247,6 +1247,10 @@ passthrough_impl! {
     async fn list_webhook_outbox(&self, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn get_webhook_outbox(&self, id: Uuid) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn record_webhook_attempt(&self, attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt) -> Result<(), StorageError>;
+    async fn list_webhook_deliveries(&self, filter: &orch8_types::webhook_delivery::DeliveryFilter, limit: u32) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
+    async fn get_webhook_delivery_attempts(&self, delivery_id: Uuid) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliveryAttempt>, StorageError>;
+    async fn delete_webhook_attempts_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<u64, StorageError>;
     async fn create_queue_routing_rule(&self, rule: &orch8_types::queue_routing::QueueRoutingRule) -> Result<(), StorageError>;
     async fn list_queue_routing_rules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, handler_name: Option<&str>) -> Result<Vec<orch8_types::queue_routing::QueueRoutingRule>, StorageError>;
     async fn get_queue_routing_rule(&self, id: Uuid) -> Result<Option<orch8_types::queue_routing::QueueRoutingRule>, StorageError>;

@@ -21,6 +21,7 @@ fn mk_parked(url: &str) -> WebhookOutboxEntry {
         attempts: 4,
         last_error: Some("http 500".into()),
         created_at: chrono::Utc::now(),
+        delivery_id: None,
     }
 }
 

@@ -75,6 +75,9 @@ use utoipa::OpenApi;
         crate::webhook_outbox::list_outbox,
         crate::webhook_outbox::redeliver_outbox,
         crate::webhook_outbox::discard_outbox,
+        crate::webhook_outbox::redeliver_preview,
+        crate::webhook_outbox::list_deliveries,
+        crate::webhook_outbox::get_delivery,
         // Queue routing
         crate::queue_routing::create_rule,
         crate::queue_routing::list_rules,
@@ -156,6 +159,10 @@ use utoipa::OpenApi;
         orch8_types::template_trace::ResolutionEntry,
         orch8_types::template_trace::ResolutionStatus,
         crate::inspect::InspectTemplateRequest,
+        orch8_types::webhook_delivery::WebhookDeliveryAttempt,
+        orch8_types::webhook_delivery::WebhookDeliverySummary,
+        orch8_types::webhook_delivery::DeliveryErrorClass,
+        crate::webhook_outbox::RedeliverPreview,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,
