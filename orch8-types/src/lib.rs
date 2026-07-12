@@ -24,6 +24,7 @@ pub mod interceptor;
 pub mod output;
 pub mod plugin;
 pub mod pool;
+pub mod preflight;
 pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod rate_limit;

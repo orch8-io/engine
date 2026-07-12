@@ -17,6 +17,7 @@ pub mod interceptors;
 pub mod lifecycle;
 pub mod lint;
 pub mod metrics;
+pub mod preflight;
 pub mod preload;
 pub mod push;
 pub mod queue_routing;

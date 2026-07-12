@@ -44,6 +44,17 @@ pub enum SequenceCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run a readiness preflight: definition validity, lint, workers,
+    /// version pins, credentials, plugins, queues, and sub-sequences.
+    /// Exits non-zero unless the report is pass/warning (CI-friendly).
+    Preflight {
+        /// Stored sequence id to check.
+        #[arg(long, conflicts_with = "file")]
+        id: Option<Uuid>,
+        /// Local draft definition to check instead of a stored sequence.
+        #[arg(long, short)]
+        file: Option<PathBuf>,
+    },
 }
 
 /// The content fields that define a sequence's behavior — everything except
@@ -271,8 +282,75 @@ pub async fn run(
                 if dry_run { "to change" } else { "applied" }
             );
         }
+        SequenceCmd::Preflight { id, file } => {
+            let resp = match (id, file) {
+                (Some(id), None) => {
+                    client
+                        .get(format!("{base}/sequences/{id}/preflight"))
+                        .send()
+                        .await?
+                }
+                (None, Some(file)) => {
+                    let content = std::fs::read_to_string(&file)
+                        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
+                    let body: serde_json::Value = serde_json::from_str(&content)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+                    client
+                        .post(format!("{base}/sequences/preflight"))
+                        .json(&body)
+                        .send()
+                        .await?
+                }
+                _ => anyhow::bail!("pass exactly one of --id or --file"),
+            };
+            if !resp.status().is_success() {
+                anyhow::bail!("preflight request failed: {}", resp.status());
+            }
+            let report: serde_json::Value = resp.json().await?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                OutputFormat::Table => print_preflight_report(&report),
+            }
+            let overall = report["overall"].as_str().unwrap_or("unknown");
+            if !matches!(overall, "pass" | "warning") {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
+}
+
+/// Render a preflight report for humans: one line per check, findings
+/// indented with their remediation commands.
+fn print_preflight_report(report: &serde_json::Value) {
+    println!(
+        "preflight for {} v{} — overall: {}\n",
+        report["sequence_name"].as_str().unwrap_or("?"),
+        report["sequence_version"],
+        report["overall"].as_str().unwrap_or("?")
+    );
+    for check in report["checks"].as_array().into_iter().flatten() {
+        println!(
+            "  [{}] {}: {}",
+            check["status"].as_str().unwrap_or("?").to_uppercase(),
+            check["id"].as_str().unwrap_or("?"),
+            check["summary"].as_str().unwrap_or("")
+        );
+        for finding in check["findings"].as_array().into_iter().flatten() {
+            println!(
+                "      - {} {}",
+                finding["code"].as_str().unwrap_or(""),
+                finding["summary"].as_str().unwrap_or("")
+            );
+            for rem in finding["remediation"].as_array().into_iter().flatten() {
+                if let Some(cmd) = rem["command"].as_str() {
+                    println!("        fix: {cmd}");
+                } else if let Some(s) = rem["summary"].as_str() {
+                    println!("        fix: {s}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

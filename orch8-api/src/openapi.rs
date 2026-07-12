@@ -28,6 +28,9 @@ use utoipa::OpenApi;
         crate::sequences::list_sequence_versions,
         crate::sequences::list_sequences,
         crate::sequences::migrate_instance,
+        // Preflight
+        crate::preflight::preflight_draft,
+        crate::preflight::preflight_stored,
         // Instances
         crate::instances::create_instance,
         crate::instances::list_instances,
@@ -130,6 +133,16 @@ use utoipa::OpenApi;
         crate::pools::delete_resource,
     ),
     components(schemas(
+        // Findings & preflight
+        orch8_types::finding::Finding,
+        orch8_types::finding::FindingSeverity,
+        orch8_types::finding::Confidence,
+        orch8_types::finding::Evidence,
+        orch8_types::finding::Remediation,
+        orch8_types::finding::ResourceRef,
+        orch8_types::preflight::PreflightReport,
+        orch8_types::preflight::PreflightCheck,
+        orch8_types::preflight::PreflightStatus,
         // IDs
         orch8_types::ids::InstanceId,
         orch8_types::ids::SequenceId,

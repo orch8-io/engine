@@ -17,6 +17,7 @@ pub mod model_pricing;
 pub mod openapi;
 pub mod plugins;
 pub mod pools;
+pub mod preflight;
 pub mod queue_dispatch;
 pub mod queue_routing;
 pub mod request_id;
@@ -113,6 +114,7 @@ pub fn builtin_handler_names() -> Vec<String> {
 fn api_routes() -> Router<AppState> {
     Router::new()
         .merge(sequences::routes())
+        .merge(preflight::routes())
         .merge(approvals::routes())
         .merge(instances::routes())
         .merge(cron::routes())
