@@ -11,7 +11,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 orch8-engine = { path = "../orch8-engine", default-features = false, features = ["embedded"] }
 orch8-storage = { path = "../orch8-storage", default-features = false }
 orch8-types = { path = "../orch8-types" }
-uniffi = "0.29"
+uniffi = "0.32"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -28,7 +28,7 @@ sqlx = { workspace = true }
 rand = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.29", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
