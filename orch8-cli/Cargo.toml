@@ -30,6 +30,10 @@ orch8-api = { path = "../orch8-api" }
 orch8-storage = { path = "../orch8-storage" }
 orch8-engine = { path = "../orch8-engine" }
 orch8-push = { path = "../orch8-push" }
+orch8-publisher = { path = "../orch8-publisher" }
+ed25519-dalek = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
+base64 = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 

@@ -618,6 +618,45 @@ CREATE TABLE IF NOT EXISTS release_decisions (
 CREATE INDEX IF NOT EXISTS idx_release_decisions_release
     ON release_decisions(release_id, decided_at);
 
+-- Durable event correlation: inbox + wait registrations. Identity is
+-- (tenant, event_name, producer_event_id); consumption is one-consumer
+-- via the conditional UPDATE from 'pending'.
+CREATE TABLE IF NOT EXISTS event_inbox (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL,
+    event_name        TEXT NOT NULL,
+    producer_event_id TEXT NOT NULL,
+    correlation_key   TEXT NOT NULL,
+    payload           TEXT NOT NULL DEFAULT 'null',
+    status            TEXT NOT NULL DEFAULT 'pending',
+    consumed_by       TEXT,
+    received_at       TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_inbox_identity
+    ON event_inbox(tenant_id, event_name, producer_event_id);
+CREATE INDEX IF NOT EXISTS idx_event_inbox_correlation
+    ON event_inbox(tenant_id, correlation_key, status);
+CREATE INDEX IF NOT EXISTS idx_event_inbox_received
+    ON event_inbox(status, received_at);
+
+CREATE TABLE IF NOT EXISTS event_waits (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL,
+    instance_id       TEXT NOT NULL,
+    block_id          TEXT NOT NULL,
+    event_names       TEXT NOT NULL,
+    correlation_key   TEXT NOT NULL,
+    join_mode         TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'waiting',
+    matched_names     TEXT NOT NULL DEFAULT '[]',
+    matched_event_ids TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_waits_block
+    ON event_waits(instance_id, block_id);
+CREATE INDEX IF NOT EXISTS idx_event_waits_correlation
+    ON event_waits(tenant_id, correlation_key, status);
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -631,4 +670,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 21;
+pub(super) const SCHEMA_VERSION: i64 = 22;

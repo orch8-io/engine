@@ -670,6 +670,7 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "merge_state",
     "blob_put",
     "blob_get",
+    "wait_for_event",
 ];
 
 impl SequenceDefinition {

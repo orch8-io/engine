@@ -1069,6 +1069,83 @@ pub trait SignalStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<Signal>, StorageError>;
 
+    // === Durable event correlation ===
+
+    /// Insert an event. Returns `false` (and changes nothing) when the
+    /// `(tenant, event_name, producer_event_id)` identity already exists.
+    async fn ingest_event(
+        &self,
+        envelope: &orch8_types::event_correlation::EventEnvelope,
+    ) -> Result<bool, StorageError>;
+
+    async fn get_event(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
+    /// List events for a tenant, newest first, optionally by status.
+    async fn list_events(
+        &self,
+        tenant_id: &str,
+        status: Option<orch8_types::event_correlation::EventStatus>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
+    /// Pending events matching `(tenant, name ∈ names, correlation_key)`,
+    /// oldest first.
+    async fn find_pending_events(
+        &self,
+        tenant_id: &str,
+        event_names: &[String],
+        correlation_key: &str,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError>;
+
+    /// Consume events for `instance_id`: at-most-once via a conditional
+    /// update from `pending`. Returns how many were actually consumed —
+    /// callers must treat fewer-than-requested as a lost race.
+    async fn consume_events(
+        &self,
+        event_ids: &[Uuid],
+        instance_id: InstanceId,
+    ) -> Result<u64, StorageError>;
+
+    /// Create-or-replace the wait registered for `(instance, block)`.
+    async fn upsert_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<(), StorageError>;
+
+    async fn get_event_wait(
+        &self,
+        instance_id: InstanceId,
+        block_id: &str,
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError>;
+
+    /// Waiting registrations that listen for `event_name` under
+    /// `(tenant, correlation_key)`, oldest first.
+    async fn find_waiting_event_waits(
+        &self,
+        tenant_id: &str,
+        event_name: &str,
+        correlation_key: &str,
+    ) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError>;
+
+    /// Persist an updated wait iff its stored status is still
+    /// `expected_status` (CAS). Returns `false` when a concurrent writer
+    /// won.
+    async fn update_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        expected_status: orch8_types::event_correlation::WaitStatus,
+    ) -> Result<bool, StorageError>;
+
+    /// Retention: mark pending events received before `cutoff` as
+    /// expired. Returns rows affected.
+    async fn expire_events_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError>;
+
     /// Batch variant: fetch pending signals for multiple instances in one query.
     async fn get_pending_signals_batch(
         &self,

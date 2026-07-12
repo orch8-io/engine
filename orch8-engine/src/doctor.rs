@@ -54,6 +54,8 @@ pub struct InstanceDiagnosticContext {
     pub children: Option<Vec<TaskInstance>>,
     /// Block ids currently waiting for human input.
     pub pending_approval_blocks: Option<Vec<String>>,
+    /// Event waits registered by `wait_for_event` blocks of this instance.
+    pub event_waits: Option<Vec<orch8_types::event_correlation::EventWait>>,
 }
 
 impl InstanceDiagnosticContext {
@@ -70,6 +72,7 @@ impl InstanceDiagnosticContext {
             open_breakers: None,
             children: None,
             pending_approval_blocks: None,
+            event_waits: None,
         }
     }
 }
@@ -85,6 +88,7 @@ pub fn diagnose(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>) -> Instance
     } else {
         rule_sequence_missing(ctx, now, &mut diagnoses);
         rule_waiting_until(instance, now, &mut diagnoses);
+        rule_event_waits(ctx, now, &mut diagnoses);
         rule_pending_approval(ctx, now, &mut diagnoses);
         rule_paused(instance, now, &mut diagnoses);
         rule_worker_tasks(ctx, now, &mut diagnoses);
@@ -198,6 +202,57 @@ fn rule_waiting_until(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec
     }
 }
 
+/// `wait_for_event` blocks: report exactly which events are still
+/// missing for the join, with the correlation key as evidence.
+fn rule_event_waits(
+    ctx: &InstanceDiagnosticContext,
+    now: DateTime<Utc>,
+    out: &mut Vec<Diagnosis>,
+) {
+    let Some(waits) = &ctx.event_waits else {
+        return;
+    };
+    for wait in waits {
+        if wait.status != orch8_types::event_correlation::WaitStatus::Waiting {
+            continue;
+        }
+        let missing: Vec<&str> = wait
+            .event_names
+            .iter()
+            .filter(|n| !wait.matched_names.iter().any(|m| m == *n))
+            .map(String::as_str)
+            .collect();
+        out.push(Diagnosis {
+            category: DiagnosisCategory::DirectEvidence,
+            health: DiagnosisHealth::Expected,
+            finding: Finding::new(
+                "WAITING_EVENT",
+                FindingSeverity::Info,
+                format!(
+                    "block '{}' is waiting for event(s) [{}] with correlation key '{}'{}",
+                    wait.block_id,
+                    missing.join(", "),
+                    wait.correlation_key,
+                    if wait.matched_names.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (already matched: {})", wait.matched_names.join(", "))
+                    }
+                ),
+                Confidence::Certain,
+                now,
+            )
+            .with_evidence(
+                Evidence::new("correlation_key", wait.correlation_key.clone()).observed_at(now),
+            )
+            .with_remediation(Remediation::new(format!(
+                "deliver the missing event(s) via POST /events with correlation_key '{}'",
+                wait.correlation_key
+            ))),
+        });
+    }
+}
+
 fn rule_pending_approval(
     ctx: &InstanceDiagnosticContext,
     now: DateTime<Utc>,
@@ -206,7 +261,15 @@ fn rule_pending_approval(
     let Some(blocks) = &ctx.pending_approval_blocks else {
         return;
     };
+    let event_wait_blocks: Vec<&str> = ctx
+        .event_waits
+        .as_ref()
+        .map(|ws| ws.iter().map(|w| w.block_id.as_str()).collect())
+        .unwrap_or_default();
     for block in blocks {
+        if event_wait_blocks.contains(&block.as_str()) {
+            continue; // reported as WAITING_EVENT, not an approval
+        }
         out.push(Diagnosis {
             category: DiagnosisCategory::DirectEvidence,
             health: DiagnosisHealth::Expected,
@@ -810,6 +873,7 @@ mod tests {
             open_breakers: Some(vec![]),
             children: Some(vec![]),
             pending_approval_blocks: Some(vec![]),
+            event_waits: Some(vec![]),
         }
     }
 
@@ -1061,6 +1125,56 @@ mod tests {
                 .unwrap()
                 .contains("human_input:approve_payment")
         );
+    }
+
+    #[test]
+    fn event_wait_is_reported_as_waiting_event_not_approval() {
+        use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        // The gate makes the block look like a pending approval too — the
+        // event wait must take precedence.
+        ctx.pending_approval_blocks = Some(vec!["await_facts".into()]);
+        ctx.event_waits = Some(vec![EventWait {
+            id: uuid::Uuid::now_v7(),
+            tenant_id: "t1".into(),
+            instance_id: ctx.instance.id.into_uuid(),
+            block_id: "await_facts".into(),
+            event_names: vec!["payment_received".into(), "inventory_reserved".into()],
+            correlation_key: "order-42".into(),
+            join_mode: JoinMode::All,
+            status: WaitStatus::Waiting,
+            matched_names: vec!["inventory_reserved".into()],
+            matched_event_ids: vec![uuid::Uuid::now_v7()],
+            created_at: t0(),
+        }]);
+        let report = diagnose(&ctx, t0());
+        let d = &report.diagnoses[0];
+        assert_eq!(d.finding.code, "WAITING_EVENT");
+        assert!(d.finding.summary.contains("payment_received"), "{}", d.finding.summary);
+        assert!(d.finding.summary.contains("already matched: inventory_reserved"));
+        assert!(d.finding.summary.contains("order-42"));
+        assert!(!codes(&report).contains(&"PENDING_APPROVAL"), "{:?}", codes(&report));
+    }
+
+    #[test]
+    fn satisfied_event_wait_is_not_reported() {
+        use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        ctx.event_waits = Some(vec![EventWait {
+            id: uuid::Uuid::now_v7(),
+            tenant_id: "t1".into(),
+            instance_id: ctx.instance.id.into_uuid(),
+            block_id: "b".into(),
+            event_names: vec!["paid".into()],
+            correlation_key: "k".into(),
+            join_mode: JoinMode::Any,
+            status: WaitStatus::Satisfied,
+            matched_names: vec!["paid".into()],
+            matched_event_ids: vec![uuid::Uuid::now_v7()],
+            created_at: t0(),
+        }]);
+        let report = diagnose(&ctx, t0());
+        assert!(!codes(&report).contains(&"WAITING_EVENT"));
     }
 
     #[test]

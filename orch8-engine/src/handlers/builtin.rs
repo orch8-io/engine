@@ -311,6 +311,10 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("assert", handle_assert);
     registry.register("merge_state", handle_merge_state);
     registry.register("blob_put", super::blob::handle_blob_put);
+    registry.register(
+        "wait_for_event",
+        super::wait_for_event::handle_wait_for_event,
+    );
     registry.register("blob_get", super::blob::handle_blob_get);
 }
 

@@ -8,6 +8,7 @@ pub mod cron;
 pub mod diagnosis;
 pub mod dlq_groups;
 pub mod error;
+pub mod events;
 pub mod health;
 pub mod input_schema;
 pub mod inspect;
@@ -125,6 +126,7 @@ fn api_routes() -> Router<AppState> {
         .merge(instances::routes())
         .merge(diagnosis::routes())
         .merge(dlq_groups::routes())
+        .merge(events::routes())
         .merge(inspect::routes())
         .merge(workbench::routes())
         .merge(cron::routes())

@@ -29,8 +29,73 @@ pub fn lint_sequence(seq: &SequenceDefinition) -> Vec<LintWarning> {
     lint_output_references(seq, &all_ids, &mut warnings);
     lint_for_each_safety(seq, &mut warnings);
     lint_step_after_fail(seq, &mut warnings);
+    lint_event_waits(&seq.blocks, &mut warnings);
 
     warnings
+}
+
+/// `wait_for_event` relies on the step's `wait_for_input` gate to park
+/// the instance until the join is satisfied. Without it, the step
+/// registers the wait and immediately continues — almost never what the
+/// author intended.
+fn lint_event_waits(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>) {
+    fn walk(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>) {
+        for block in blocks {
+            match block {
+                BlockDefinition::Step(s) => {
+                    if s.handler == "wait_for_event"
+                        && let Some(def) = &s.wait_for_input
+                        && def.choices.is_some()
+                    {
+                        warnings.push(LintWarning {
+                            block_id: s.id.as_str().to_owned(),
+                            message: "wait_for_event steps must not define custom \
+                                      `wait_for_input.choices` — the event resume signal \
+                                      carries the default choice and would be rejected"
+                                .to_owned(),
+                        });
+                    }
+                    if s.handler == "wait_for_event" && s.wait_for_input.is_none() {
+                        warnings.push(LintWarning {
+                            block_id: s.id.as_str().to_owned(),
+                            message: "wait_for_event step has no `wait_for_input` — the \
+                                      instance will not pause for the events; add \
+                                      `\"wait_for_input\": {\"prompt\": \"...\"}` (and an \
+                                      optional timeout) to the step"
+                                .to_owned(),
+                        });
+                    }
+                }
+                BlockDefinition::Parallel(p) => p.branches.iter().for_each(|b| walk(b, warnings)),
+                BlockDefinition::Race(r) => r.branches.iter().for_each(|b| walk(b, warnings)),
+                BlockDefinition::Loop(l) => walk(&l.body, warnings),
+                BlockDefinition::ForEach(f) => walk(&f.body, warnings),
+                BlockDefinition::Router(r) => {
+                    for route in &r.routes {
+                        walk(&route.blocks, warnings);
+                    }
+                    if let Some(default) = &r.default {
+                        walk(default, warnings);
+                    }
+                }
+                BlockDefinition::TryCatch(t) => {
+                    walk(&t.try_block, warnings);
+                    walk(&t.catch_block, warnings);
+                    if let Some(f) = &t.finally_block {
+                        walk(f, warnings);
+                    }
+                }
+                BlockDefinition::ABSplit(a) => {
+                    for v in &a.variants {
+                        walk(&v.blocks, warnings);
+                    }
+                }
+                BlockDefinition::CancellationScope(c) => walk(&c.blocks, warnings),
+                BlockDefinition::SubSequence(_) => {}
+            }
+        }
+    }
+    walk(blocks, warnings);
 }
 
 fn collect_all_block_ids(blocks: &[BlockDefinition], ids: &mut HashSet<String>) {

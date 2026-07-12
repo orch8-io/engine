@@ -8,6 +8,7 @@
 
 pub mod cdn;
 pub mod manifest;
+pub mod package;
 pub mod publish;
 
 pub use cdn::{CdnBackend, CdnError, MemoryCdnBackend, S3CdnBackend};

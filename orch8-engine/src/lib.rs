@@ -10,6 +10,7 @@ pub mod clock {
 pub mod doctor;
 pub mod error;
 pub mod evaluator;
+pub mod event_correlation;
 pub mod expression;
 pub mod externalized;
 pub mod gc;

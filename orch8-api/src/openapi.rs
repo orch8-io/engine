@@ -64,6 +64,10 @@ use utoipa::OpenApi;
         // Template inspector
         crate::inspect::inspect_draft,
         crate::inspect::inspect_instance_block,
+        // Events
+        crate::events::ingest_event,
+        crate::events::list_events,
+        crate::events::get_event,
         // Workbench
         crate::workbench::get_workbench,
         crate::workbench::compare_runs,
@@ -204,6 +208,13 @@ use utoipa::OpenApi;
         orch8_types::release::DiffSeverity,
         crate::releases::CreateReleaseRequest,
         crate::releases::DiffRequest,
+        orch8_types::event_correlation::EventEnvelope,
+        orch8_types::event_correlation::EventStatus,
+        orch8_types::event_correlation::EventWait,
+        orch8_types::event_correlation::JoinMode,
+        orch8_types::event_correlation::WaitStatus,
+        orch8_types::event_correlation::IngestOutcome,
+        crate::events::IngestEventRequest,
         crate::workbench::ExecutionWorkbenchView,
         crate::workbench::WorkbenchEvent,
         crate::workbench::BlockOutputSummary,

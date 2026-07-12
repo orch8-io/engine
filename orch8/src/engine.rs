@@ -286,6 +286,31 @@ impl Engine {
         Ok(instances)
     }
 
+    /// Ingest an external event for durable correlation (see the
+    /// `wait_for_event` handler). Idempotent by `producer_event_id`:
+    /// re-sending the same id is a safe no-op reported as `duplicate`.
+    /// When the event satisfies a waiting block's join policy, the
+    /// waiting instance resumes on the next tick with the matched
+    /// payloads in `context.data[<block_id>]`.
+    pub async fn ingest_event(
+        &self,
+        event_name: &str,
+        producer_event_id: &str,
+        correlation_key: &str,
+        payload: serde_json::Value,
+    ) -> Result<orch8_types::event_correlation::IngestOutcome, Error> {
+        let envelope = orch8_engine::event_correlation::envelope(
+            self.inner.tenant.as_str(),
+            event_name,
+            producer_event_id,
+            correlation_key,
+            payload,
+        );
+        orch8_engine::event_correlation::ingest(&self.inner.storage, envelope)
+            .await
+            .map_err(Error::Storage)
+    }
+
     /// Send a signal to a live instance: `Pause`, `Resume`, `Cancel`,
     /// `UpdateContext`, or `Custom` (e.g. to resolve a `wait_for_input`
     /// step). Wakes the instance so the signal is processed on the next tick.

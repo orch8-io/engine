@@ -106,6 +106,19 @@ async fn collect_context(state: &AppState, instance: TaskInstance) -> InstanceDi
     ctx.pending_approval_blocks =
         collect_pending_approvals(state, &ctx, sequence.flatten().as_ref()).await;
 
+    // Event waits: for every block waiting on human input, check whether
+    // it is actually a `wait_for_event` registration so the doctor can
+    // report WAITING_EVENT with the missing event names.
+    if let Some(blocks) = ctx.pending_approval_blocks.clone() {
+        let mut waits = Vec::new();
+        for block in &blocks {
+            if let Ok(Some(wait)) = state.storage.get_event_wait(instance_id, block).await {
+                waits.push(wait);
+            }
+        }
+        ctx.event_waits = Some(waits);
+    }
+
     ctx
 }
 

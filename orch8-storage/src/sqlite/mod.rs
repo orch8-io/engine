@@ -54,6 +54,7 @@ mod signals;
 mod step_logs;
 mod telemetry;
 mod triggers;
+mod events;
 mod releases;
 mod webhook_deliveries;
 mod webhook_outbox;
@@ -1109,6 +1110,86 @@ impl crate::SignalStore for SqliteStorage {
 
     async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError> {
         signals::enqueue_if_active(self, signal).await
+    }
+
+
+    async fn ingest_event(
+        &self,
+        envelope: &orch8_types::event_correlation::EventEnvelope,
+    ) -> Result<bool, StorageError> {
+        events::ingest(self, envelope).await
+    }
+
+    async fn get_event(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::get(self, id).await
+    }
+
+    async fn list_events(
+        &self,
+        tenant_id: &str,
+        status: Option<orch8_types::event_correlation::EventStatus>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::list(self, tenant_id, status, limit).await
+    }
+
+    async fn find_pending_events(
+        &self,
+        tenant_id: &str,
+        event_names: &[String],
+        correlation_key: &str,
+    ) -> Result<Vec<orch8_types::event_correlation::EventEnvelope>, StorageError> {
+        events::find_pending(self, tenant_id, event_names, correlation_key).await
+    }
+
+    async fn consume_events(
+        &self,
+        event_ids: &[Uuid],
+        instance_id: InstanceId,
+    ) -> Result<u64, StorageError> {
+        events::consume(self, event_ids, instance_id).await
+    }
+
+    async fn upsert_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+    ) -> Result<(), StorageError> {
+        events::upsert_wait(self, wait).await
+    }
+
+    async fn get_event_wait(
+        &self,
+        instance_id: InstanceId,
+        block_id: &str,
+    ) -> Result<Option<orch8_types::event_correlation::EventWait>, StorageError> {
+        events::get_wait(self, instance_id, block_id).await
+    }
+
+    async fn find_waiting_event_waits(
+        &self,
+        tenant_id: &str,
+        event_name: &str,
+        correlation_key: &str,
+    ) -> Result<Vec<orch8_types::event_correlation::EventWait>, StorageError> {
+        events::find_waiting(self, tenant_id, event_name, correlation_key).await
+    }
+
+    async fn update_event_wait(
+        &self,
+        wait: &orch8_types::event_correlation::EventWait,
+        expected_status: orch8_types::event_correlation::WaitStatus,
+    ) -> Result<bool, StorageError> {
+        events::update_wait(self, wait, expected_status).await
+    }
+
+    async fn expire_events_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StorageError> {
+        events::expire_before(self, cutoff).await
     }
 
     async fn get_pending_signals(

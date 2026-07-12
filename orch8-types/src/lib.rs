@@ -16,6 +16,7 @@ pub mod diagnosis;
 pub mod dlq;
 pub mod encryption;
 pub mod error;
+pub mod event_correlation;
 pub mod execution;
 pub mod failure;
 pub mod filter;
