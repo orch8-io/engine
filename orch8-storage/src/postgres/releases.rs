@@ -1,4 +1,4 @@
-//! Workflow release storage (release control plane) — PostgreSQL.
+//! Workflow release storage (release control plane) — `PostgreSQL`.
 
 use std::str::FromStr;
 

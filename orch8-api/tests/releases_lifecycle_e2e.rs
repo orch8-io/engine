@@ -25,6 +25,7 @@ async fn setup() -> (TestServer, reqwest::Client, String) {
     (srv, client, base)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_sequence(
     base: &str,
     client: &reqwest::Client,
@@ -50,7 +51,11 @@ async fn publish_sequence(
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "publishing {name} v{version}");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "publishing {name} v{version}"
+    );
 }
 
 fn baseline_blocks() -> Value {
@@ -82,9 +87,28 @@ async fn publish_versions_with(
     let name = format!("release-seq-{}", Uuid::now_v7());
     let baseline_id = Uuid::now_v7();
     let candidate_id = Uuid::now_v7();
-    publish_sequence(base, client, "t1", "default", &name, baseline_id, 1, baseline_blocks()).await;
-    publish_sequence(base, client, "t1", "default", &name, candidate_id, 2, candidate_blocks)
-        .await;
+    publish_sequence(
+        base,
+        client,
+        "t1",
+        "default",
+        &name,
+        baseline_id,
+        1,
+        baseline_blocks(),
+    )
+    .await;
+    publish_sequence(
+        base,
+        client,
+        "t1",
+        "default",
+        &name,
+        candidate_id,
+        2,
+        candidate_blocks,
+    )
+    .await;
     Fixture {
         baseline_id,
         candidate_id,
@@ -110,7 +134,12 @@ async fn post_t(
     (status, value)
 }
 
-async fn post(base: &str, client: &reqwest::Client, path: &str, body: Value) -> (StatusCode, Value) {
+async fn post(
+    base: &str,
+    client: &reqwest::Client,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     post_t(base, client, "t1", path, body).await
 }
 
@@ -160,7 +189,13 @@ async fn create_release(
 /// Create a release and skip validation → `ready`.
 async fn ready_release(base: &str, client: &reqwest::Client, fx: &Fixture, gates: Value) -> String {
     let rid = create_release(base, client, fx, gates).await;
-    let (status, _) = post(base, client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
+    let (status, _) = post(
+        base,
+        client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     rid
 }
@@ -263,6 +298,7 @@ async fn plant_candidate_observations(
 
 /// Plant `n` terminal baseline-variant observations by rewriting the
 /// routing annotation (simulating the cohort that stayed on baseline).
+#[allow(clippy::too_many_arguments)]
 async fn plant_baseline_observations(
     srv: &TestServer,
     base: &str,
@@ -386,10 +422,28 @@ async fn create_rejects_cross_namespace_sequences() {
     let name = format!("cross-ns-{}", Uuid::now_v7());
     let baseline_id = Uuid::now_v7();
     let candidate_id = Uuid::now_v7();
-    publish_sequence(&base, &client, "t1", "default", &name, baseline_id, 1, baseline_blocks())
-        .await;
-    publish_sequence(&base, &client, "t1", "other", &name, candidate_id, 2, baseline_blocks())
-        .await;
+    publish_sequence(
+        &base,
+        &client,
+        "t1",
+        "default",
+        &name,
+        baseline_id,
+        1,
+        baseline_blocks(),
+    )
+    .await;
+    publish_sequence(
+        &base,
+        &client,
+        "t1",
+        "other",
+        &name,
+        candidate_id,
+        2,
+        baseline_blocks(),
+    )
+    .await;
     let (status, body) = post(
         &base,
         &client,
@@ -484,7 +538,13 @@ async fn release_creation_allowed_again_after_rollback() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 10).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = post(
         &base,
@@ -509,7 +569,13 @@ async fn canary_from_draft_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 10})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 10}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -518,7 +584,13 @@ async fn promote_from_draft_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -536,7 +608,13 @@ async fn rollback_from_draft_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -545,8 +623,13 @@ async fn validate_skip_moves_draft_to_ready() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 0);
     assert_eq!(report["matches"], 0);
@@ -561,10 +644,21 @@ async fn validate_twice_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, _) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -573,7 +667,13 @@ async fn promote_from_ready_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
     assert_eq!(release["state"], "ready");
@@ -593,7 +693,13 @@ async fn rollback_from_ready_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -602,8 +708,13 @@ async fn canary_from_ready_succeeds() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, release) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 25})).await;
+    let (status, release) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 25}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{release}");
     assert_eq!(release["state"], "canary");
     assert_eq!(release["canary_percent"], 25);
@@ -614,8 +725,13 @@ async fn canary_from_canary_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
-    let (status, _) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 50})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 50}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -628,8 +744,13 @@ async fn pause_then_resume_canary() {
     assert_eq!(status, StatusCode::OK, "{paused}");
     assert_eq!(paused["state"], "paused");
     // Paused → canary resumes.
-    let (status, resumed) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 25})).await;
+    let (status, resumed) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 25}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["state"], "canary");
 }
@@ -640,8 +761,13 @@ async fn resume_canary_can_change_percent() {
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 10).await;
     post(&base, &client, &format!("/releases/{rid}/pause"), json!({})).await;
-    let (status, resumed) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 90})).await;
+    let (status, resumed) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 90}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["canary_percent"], 90);
 }
@@ -652,8 +778,13 @@ async fn paused_rollback_succeeds() {
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
     post(&base, &client, &format!("/releases/{rid}/pause"), json!({})).await;
-    let (status, rolled) =
-        post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, rolled) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{rolled}");
     assert_eq!(rolled["state"], "rolled_back");
 }
@@ -664,7 +795,13 @@ async fn paused_promote_conflicts() {
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
     post(&base, &client, &format!("/releases/{rid}/pause"), json!({})).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
     assert_eq!(release["state"], "paused");
@@ -685,8 +822,13 @@ async fn canary_rollback_succeeds() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
-    let (status, rolled) =
-        post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, rolled) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{rolled}");
     assert_eq!(rolled["state"], "rolled_back");
 }
@@ -696,8 +838,13 @@ async fn promoted_release_is_frozen() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 100).await;
-    let (status, promoted) =
-        post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, promoted) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{promoted}");
     assert_eq!(promoted["state"], "promoted");
 
@@ -710,8 +857,7 @@ async fn promoted_release_is_frozen() {
         ("canary", json!({"percent": 50})),
         ("validate", json!({"skip": true})),
     ] {
-        let (status, resp) =
-            post(&base, &client, &format!("/releases/{rid}/{path}"), body).await;
+        let (status, resp) = post(&base, &client, &format!("/releases/{rid}/{path}"), body).await;
         assert_eq!(status, StatusCode::CONFLICT, "{path} after promote: {resp}");
     }
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
@@ -723,9 +869,21 @@ async fn double_promote_conflicts() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 100).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -734,12 +892,22 @@ async fn rollback_is_idempotent_with_single_decision() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
-    let (status, first) =
-        post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, first) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{first}");
     // Repeating the rollback is a 200 no-op, not a conflict.
-    let (status, second) =
-        post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    let (status, second) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["state"], "rolled_back");
 
@@ -758,16 +926,25 @@ async fn rolled_back_release_rejects_canary_and_promote() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 25).await;
-    post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
     for (path, body) in [
         ("canary", json!({"percent": 25})),
         ("promote", json!({})),
         ("pause", json!({})),
         ("validate", json!({"skip": true})),
     ] {
-        let (status, resp) =
-            post(&base, &client, &format!("/releases/{rid}/{path}"), body).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{path} after rollback: {resp}");
+        let (status, resp) = post(&base, &client, &format!("/releases/{rid}/{path}"), body).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{path} after rollback: {resp}"
+        );
     }
 }
 
@@ -782,17 +959,32 @@ async fn validate_with_matching_history_reports_matches() {
     let fx = publish_identical_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
     for i in 0..2 {
-        let id = spawn_instance(&base, &client, fx.baseline_id, &format!("hist-{i}"), json!({}))
-            .await;
+        let id = spawn_instance(
+            &base,
+            &client,
+            fx.baseline_id,
+            &format!("hist-{i}"),
+            json!({}),
+        )
+        .await;
         record_work_output(&srv, id).await;
         finish(&srv, id, InstanceState::Completed).await;
     }
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 2, "{report}");
     assert_eq!(report["matches"], 2, "{report}");
-    assert_eq!(report["divergences"].as_array().unwrap().len(), 0, "{report}");
+    assert_eq!(
+        report["divergences"].as_array().unwrap().len(),
+        0,
+        "{report}"
+    );
     assert_eq!(report["inconclusive"], 0, "{report}");
     assert_eq!(report["release_state"], "ready");
 }
@@ -806,8 +998,13 @@ async fn validate_reports_divergence_for_added_block() {
     record_work_output(&srv, id).await;
     finish(&srv, id, InstanceState::Completed).await;
 
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 1);
     assert_eq!(report["matches"], 0);
@@ -834,15 +1031,23 @@ async fn validate_reports_state_mismatch_divergence() {
     record_work_output(&srv, id).await;
     finish(&srv, id, InstanceState::Failed).await;
 
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     let divergences = report["divergences"].as_array().unwrap();
     assert_eq!(divergences.len(), 1, "{report}");
     assert_eq!(divergences[0]["recorded_state"], "failed", "{report}");
     assert_eq!(divergences[0]["replayed_state"], "completed", "{report}");
     assert_eq!(divergences[0]["blocks_added"].as_array().unwrap().len(), 0);
-    assert_eq!(divergences[0]["blocks_removed"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        divergences[0]["blocks_removed"].as_array().unwrap().len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -851,14 +1056,25 @@ async fn validate_sample_clamps_to_minimum_one() {
     let fx = publish_identical_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
     for i in 0..3 {
-        let id = spawn_instance(&base, &client, fx.baseline_id, &format!("clamp-lo-{i}"), json!({}))
-            .await;
+        let id = spawn_instance(
+            &base,
+            &client,
+            fx.baseline_id,
+            &format!("clamp-lo-{i}"),
+            json!({}),
+        )
+        .await;
         record_work_output(&srv, id).await;
         finish(&srv, id, InstanceState::Completed).await;
     }
     // sample=0 clamps to 1: exactly one replay despite 3 available runs.
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({"sample": 0})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"sample": 0}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 1, "{report}");
 }
@@ -871,12 +1087,23 @@ async fn validate_sample_clamps_to_maximum_fifty() {
     // 52 terminal runs, none with recorded outputs (each replay diverges,
     // and the divergence detail list is bounded at 20).
     for i in 0..52 {
-        let id = spawn_instance(&base, &client, fx.baseline_id, &format!("clamp-hi-{i}"), json!({}))
-            .await;
+        let id = spawn_instance(
+            &base,
+            &client,
+            fx.baseline_id,
+            &format!("clamp-hi-{i}"),
+            json!({}),
+        )
+        .await;
         finish(&srv, id, InstanceState::Completed).await;
     }
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({"sample": 9999})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"sample": 9999}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 50, "{report}");
     assert_eq!(report["matches"], 0, "{report}");
@@ -892,8 +1119,13 @@ async fn validate_with_no_history_still_concludes_ready() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    let (status, report) =
-        post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 0);
     assert_eq!(report["release_state"], "ready");
@@ -908,7 +1140,13 @@ async fn validation_summary_persisted_on_release() {
     record_work_output(&srv, id).await;
     finish(&srv, id, InstanceState::Completed).await;
 
-    post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
 
     let (status, release) = get(&base, &client, &format!("/releases/{rid}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -938,8 +1176,13 @@ async fn canary_percent_zero_is_rejected() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, _) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 0})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 0}),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     // And the release did not move.
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
@@ -951,8 +1194,13 @@ async fn canary_percent_over_hundred_is_rejected() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, _) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 101})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 101}),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -961,8 +1209,13 @@ async fn canary_percent_hundred_is_accepted_and_recorded() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = ready_release(&base, &client, &fx, json!([])).await;
-    let (status, release) =
-        post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 100})).await;
+    let (status, release) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 100}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{release}");
     assert_eq!(release["canary_percent"], 100);
     assert!(release["canary_started_at"].is_string(), "{release}");
@@ -1059,7 +1312,13 @@ async fn promoted_release_routes_all_new_instances_to_candidate() {
     let (srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 1).await;
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Even cohorts that were baseline at 1% now land on the candidate.
@@ -1073,7 +1332,11 @@ async fn promoted_release_routes_all_new_instances_to_candidate() {
         )
         .await;
         let stored = srv.storage.get_instance(id).await.unwrap().unwrap();
-        assert_eq!(stored.sequence_id.as_uuid(), &fx.candidate_id, "instance {i}");
+        assert_eq!(
+            stored.sequence_id.as_uuid(),
+            &fx.candidate_id,
+            "instance {i}"
+        );
         assert_eq!(stored.metadata["release"]["variant"], "candidate");
         assert_eq!(stored.metadata["release"]["release_id"], rid);
     }
@@ -1107,12 +1370,22 @@ async fn rollback_returns_traffic_to_baseline_without_annotation() {
     let stored = srv.storage.get_instance(during).await.unwrap().unwrap();
     assert_eq!(stored.sequence_id.as_uuid(), &fx.candidate_id);
 
-    post(&base, &client, &format!("/releases/{rid}/rollback"), json!({})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/rollback"),
+        json!({}),
+    )
+    .await;
 
     let after = spawn_instance(&base, &client, fx.baseline_id, "after-rollback", json!({})).await;
     let stored = srv.storage.get_instance(after).await.unwrap().unwrap();
     assert_eq!(stored.sequence_id.as_uuid(), &fx.baseline_id);
-    assert!(stored.metadata.get("release").is_none(), "{:?}", stored.metadata);
+    assert!(
+        stored.metadata.get("release").is_none(),
+        "{:?}",
+        stored.metadata
+    );
 }
 
 #[tokio::test]
@@ -1123,7 +1396,14 @@ async fn direct_candidate_targeting_bypasses_release_routing() {
     let fx = publish_versions(&base, &client).await;
     let _rid = canary_release(&base, &client, &fx, json!([]), 100).await;
 
-    let id = spawn_instance(&base, &client, fx.candidate_id, "direct-candidate", json!({})).await;
+    let id = spawn_instance(
+        &base,
+        &client,
+        fx.candidate_id,
+        "direct-candidate",
+        json!({}),
+    )
+    .await;
     let stored = srv.storage.get_instance(id).await.unwrap().unwrap();
     assert_eq!(stored.sequence_id.as_uuid(), &fx.candidate_id);
     assert!(
@@ -1146,7 +1426,13 @@ async fn evaluate_inconclusive_does_not_roll_back() {
     // looks terrible, but the sample is too small to conclude).
     plant_candidate_observations(&srv, &base, &client, &fx, "inc", 2, InstanceState::Failed).await;
 
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "inconclusive", "{eval}");
     assert_eq!(eval["auto_rolled_back"], false);
@@ -1160,12 +1446,26 @@ async fn evaluate_failing_gate_rolls_back_exactly_once() {
     let (srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.05, 3), 100).await;
-    plant_candidate_observations(&srv, &base, &client, &fx, "fail", 3, InstanceState::Failed)
-        .await;
-    plant_baseline_observations(&srv, &base, &client, &fx, &rid, "fail", 3, InstanceState::Completed)
-        .await;
+    plant_candidate_observations(&srv, &base, &client, &fx, "fail", 3, InstanceState::Failed).await;
+    plant_baseline_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        &rid,
+        "fail",
+        3,
+        InstanceState::Completed,
+    )
+    .await;
 
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "fail", "{eval}");
     assert_eq!(eval["candidate"]["total"], 3, "{eval}");
@@ -1176,7 +1476,13 @@ async fn evaluate_failing_gate_rolls_back_exactly_once() {
 
     // Re-evaluating repeatedly stays idempotent.
     for _ in 0..2 {
-        let (_, again) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+        let (_, again) = post(
+            &base,
+            &client,
+            &format!("/releases/{rid}/evaluate"),
+            json!({}),
+        )
+        .await;
         assert_eq!(again["auto_rolled_back"], false, "{again}");
         assert_eq!(again["release_state"], "rolled_back");
     }
@@ -1201,20 +1507,48 @@ async fn evaluate_passing_gate_keeps_canary_and_allows_promote() {
     let (srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.05, 3), 100).await;
-    plant_candidate_observations(&srv, &base, &client, &fx, "pass", 3, InstanceState::Completed)
-        .await;
-    plant_baseline_observations(&srv, &base, &client, &fx, &rid, "pass", 3, InstanceState::Completed)
-        .await;
+    plant_candidate_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        "pass",
+        3,
+        InstanceState::Completed,
+    )
+    .await;
+    plant_baseline_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        &rid,
+        "pass",
+        3,
+        InstanceState::Completed,
+    )
+    .await;
 
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "pass", "{eval}");
     assert_eq!(eval["auto_rolled_back"], false);
     assert_eq!(eval["release_state"], "canary");
 
     // With all gates passing, promotion needs no force.
-    let (status, promoted) =
-        post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, promoted) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{promoted}");
     assert_eq!(promoted["state"], "promoted");
 }
@@ -1224,10 +1558,24 @@ async fn evaluate_with_no_gates_reports_empty_and_never_rolls_back() {
     let (srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, json!([]), 100).await;
-    plant_candidate_observations(&srv, &base, &client, &fx, "nogate", 3, InstanceState::Failed)
-        .await;
+    plant_candidate_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        "nogate",
+        3,
+        InstanceState::Failed,
+    )
+    .await;
 
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"].as_array().unwrap().len(), 0, "{eval}");
     assert_eq!(eval["auto_rolled_back"], false);
@@ -1245,7 +1593,13 @@ async fn evaluate_ignores_instances_not_routed_by_the_release() {
     let direct = spawn_instance(&base, &client, fx.candidate_id, "direct-fail", json!({})).await;
     finish(&srv, direct, InstanceState::Failed).await;
 
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["candidate"]["total"], 0, "{eval}");
     assert_eq!(eval["baseline"]["total"], 0, "{eval}");
@@ -1258,18 +1612,37 @@ async fn evaluate_after_promotion_never_rolls_back() {
     let (srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.05, 2), 100).await;
-    let (status, _) =
-        post(&base, &client, &format!("/releases/{rid}/promote"), json!({"force": true})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({"force": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Outcomes recorded after promotion fail the gate on paper…
-    plant_candidate_observations(&srv, &base, &client, &fx, "post", 2, InstanceState::Failed)
-        .await;
-    plant_baseline_observations(&srv, &base, &client, &fx, &rid, "post", 2, InstanceState::Completed)
-        .await;
+    plant_candidate_observations(&srv, &base, &client, &fx, "post", 2, InstanceState::Failed).await;
+    plant_baseline_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        &rid,
+        "post",
+        2,
+        InstanceState::Completed,
+    )
+    .await;
 
     // …but a promoted release is frozen: no automatic rollback.
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "fail", "{eval}");
     assert_eq!(eval["auto_rolled_back"], false);
@@ -1295,7 +1668,13 @@ async fn promote_blocked_by_inconclusive_gates() {
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.05, 5), 100).await;
     // No observations at all: gates inconclusive → promotion refused.
-    let (status, body) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, body) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
     assert_eq!(release["state"], "canary");
@@ -1306,16 +1685,20 @@ async fn promote_force_overrides_inconclusive_gates() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.05, 5), 100).await;
-    let (status, promoted) =
-        post(&base, &client, &format!("/releases/{rid}/promote"), json!({"force": true})).await;
+    let (status, promoted) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({"force": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{promoted}");
     assert_eq!(promoted["state"], "promoted");
     // The audit trail marks the forced promotion.
     let (_, decisions) = get(&base, &client, &format!("/releases/{rid}/decisions")).await;
     assert!(
         decisions.as_array().unwrap().iter().any(|d| {
-            d["to_state"] == "promoted"
-                && d["reason"].as_str().unwrap().contains("forced")
+            d["to_state"] == "promoted" && d["reason"].as_str().unwrap().contains("forced")
         }),
         "{decisions:#?}"
     );
@@ -1327,10 +1710,25 @@ async fn promote_blocked_by_failing_gates() {
     let fx = publish_versions(&base, &client).await;
     let rid = canary_release(&base, &client, &fx, error_gate(0.0, 1), 100).await;
     plant_candidate_observations(&srv, &base, &client, &fx, "pf", 1, InstanceState::Failed).await;
-    plant_baseline_observations(&srv, &base, &client, &fx, &rid, "pf", 1, InstanceState::Completed)
-        .await;
+    plant_baseline_observations(
+        &srv,
+        &base,
+        &client,
+        &fx,
+        &rid,
+        "pf",
+        1,
+        InstanceState::Completed,
+    )
+    .await;
 
-    let (status, body) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, body) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     // Refusing promotion does not itself roll back.
     let (_, release) = get(&base, &client, &format!("/releases/{rid}")).await;
@@ -1346,11 +1744,35 @@ async fn decisions_audit_is_complete_and_ordered() {
     let (_srv, client, base) = setup().await;
     let fx = publish_versions(&base, &client).await;
     let rid = create_release(&base, &client, &fx, json!([])).await;
-    post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
-    post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 20})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 20}),
+    )
+    .await;
     post(&base, &client, &format!("/releases/{rid}/pause"), json!({})).await;
-    post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 40})).await;
-    post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 40}),
+    )
+    .await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
 
     let (status, decisions) = get(&base, &client, &format!("/releases/{rid}/decisions")).await;
     assert_eq!(status, StatusCode::OK);
@@ -1384,8 +1806,7 @@ async fn decisions_audit_is_complete_and_ordered() {
         assert_eq!(d["release_id"], rid.as_str(), "{d}");
         assert_eq!(d["actor"], "operator", "{d}");
         assert!(!d["reason"].as_str().unwrap().is_empty(), "{d}");
-        let at: chrono::DateTime<chrono::Utc> =
-            d["decided_at"].as_str().unwrap().parse().unwrap();
+        let at: chrono::DateTime<chrono::Utc> = d["decided_at"].as_str().unwrap().parse().unwrap();
         if let Some(p) = prev {
             assert!(at >= p, "decisions out of order: {decisions:#?}");
         }
@@ -1393,11 +1814,15 @@ async fn decisions_audit_is_complete_and_ordered() {
     }
     // The canary decisions record the requested percentages.
     assert!(
-        decisions.iter().any(|d| d["reason"].as_str().unwrap().contains("20%")),
+        decisions
+            .iter()
+            .any(|d| d["reason"].as_str().unwrap().contains("20%")),
         "{decisions:#?}"
     );
     assert!(
-        decisions.iter().any(|d| d["reason"].as_str().unwrap().contains("40%")),
+        decisions
+            .iter()
+            .any(|d| d["reason"].as_str().unwrap().contains("40%")),
         "{decisions:#?}"
     );
 }
@@ -1432,12 +1857,23 @@ async fn release_actions_are_tenant_isolated() {
         ("pause", json!({})),
         ("rollback", json!({})),
     ] {
-        let (status, resp) =
-            post_t(&base, &client, "intruder", &format!("/releases/{rid}/{path}"), body).await;
+        let (status, resp) = post_t(
+            &base,
+            &client,
+            "intruder",
+            &format!("/releases/{rid}/{path}"),
+            body,
+        )
+        .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {resp}");
     }
-    let (status, _) =
-        get_t(&base, &client, "intruder", &format!("/releases/{rid}/decisions")).await;
+    let (status, _) = get_t(
+        &base,
+        &client,
+        "intruder",
+        &format!("/releases/{rid}/decisions"),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = get_t(&base, &client, "intruder", &format!("/releases/{rid}/diff")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1476,9 +1912,28 @@ async fn list_releases_scoped_by_header_tenant() {
     let name = format!("t2-seq-{}", Uuid::now_v7());
     let b2 = Uuid::now_v7();
     let c2 = Uuid::now_v7();
-    publish_sequence(&base, &client, "t2", "default", &name, b2, 1, baseline_blocks()).await;
-    publish_sequence(&base, &client, "t2", "default", &name, c2, 2, candidate_blocks_with_extra())
-        .await;
+    publish_sequence(
+        &base,
+        &client,
+        "t2",
+        "default",
+        &name,
+        b2,
+        1,
+        baseline_blocks(),
+    )
+    .await;
+    publish_sequence(
+        &base,
+        &client,
+        "t2",
+        "default",
+        &name,
+        c2,
+        2,
+        candidate_blocks_with_extra(),
+    )
+    .await;
     let (status, r2) = post_t(
         &base,
         &client,
@@ -1502,7 +1957,10 @@ async fn list_releases_scoped_by_header_tenant() {
         .map(|r| r["id"].as_str().unwrap())
         .collect();
     assert!(t1_ids.contains(&rid1.as_str()), "{t1_list}");
-    assert!(!t1_ids.contains(&rid2.as_str()), "t2 release leaked: {t1_list}");
+    assert!(
+        !t1_ids.contains(&rid2.as_str()),
+        "t2 release leaked: {t1_list}"
+    );
 
     let (_, t2_list) = get_t(&base, &client, "t2", "/releases").await;
     let t2_ids: Vec<&str> = t2_list
@@ -1512,7 +1970,10 @@ async fn list_releases_scoped_by_header_tenant() {
         .map(|r| r["id"].as_str().unwrap())
         .collect();
     assert!(t2_ids.contains(&rid2.as_str()), "{t2_list}");
-    assert!(!t2_ids.contains(&rid1.as_str()), "t1 release leaked: {t2_list}");
+    assert!(
+        !t2_ids.contains(&rid1.as_str()),
+        "t1 release leaked: {t2_list}"
+    );
 }
 
 // ===========================================================================

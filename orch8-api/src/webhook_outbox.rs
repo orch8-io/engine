@@ -262,7 +262,7 @@ pub(crate) async fn redeliver_preview(
         .await
         .map_err(|e| ApiError::from_storage(e, "webhook_outbox"))?
         .ok_or_else(|| ApiError::NotFound(format!("webhook_outbox {id}")))?;
-    let payload_bytes = serde_json::to_vec(&entry.payload).map(|v| v.len()).unwrap_or(0);
+    let payload_bytes = serde_json::to_vec(&entry.payload).map_or(0, |v| v.len());
     Ok(Json(RedeliverPreview {
         url: entry.url,
         event_type: entry.event_type,

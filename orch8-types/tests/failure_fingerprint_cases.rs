@@ -74,7 +74,8 @@ fn all_classes() -> [ErrorClass; 9] {
 }
 
 fn is_lower_hex(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    s.chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
 // =====================================================================
@@ -108,7 +109,10 @@ fn error_class_as_str_policy() {
 
 #[test]
 fn error_class_as_str_external_dependency() {
-    assert_eq!(ErrorClass::ExternalDependency.as_str(), "external_dependency");
+    assert_eq!(
+        ErrorClass::ExternalDependency.as_str(),
+        "external_dependency"
+    );
 }
 
 #[test]
@@ -268,7 +272,13 @@ fn envelope_serde_omits_details_when_absent() {
 fn envelope_serde_includes_optionals_when_present() {
     let v = serde_json::to_value(full_envelope().with_details(json!({"k": 1}))).unwrap();
     let obj = v.as_object().unwrap();
-    for key in ["block_id", "handler", "external_status", "resource", "details"] {
+    for key in [
+        "block_id",
+        "handler",
+        "external_status",
+        "resource",
+        "details",
+    ] {
         assert!(obj.contains_key(key), "{key} should be present");
     }
 }
@@ -297,16 +307,14 @@ fn envelope_deserializes_without_optional_keys() {
 #[test]
 fn envelope_full_round_trip_preserves_everything() {
     let e = full_envelope().with_details(json!({"attempt": 2, "note": "x"}));
-    let back: FailureEnvelope =
-        serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+    let back: FailureEnvelope = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
     assert_eq!(back, e);
 }
 
 #[test]
 fn envelope_occurred_at_round_trips_exactly() {
     let e = minimal_envelope("X");
-    let back: FailureEnvelope =
-        serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+    let back: FailureEnvelope = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
     assert_eq!(back.occurred_at, t0());
 }
 
@@ -340,7 +348,10 @@ fn fingerprint_stable_across_construction_paths() {
         details: None,
         occurred_at: t0(),
     };
-    assert_eq!(fingerprint(&scope(), &built).hash, fingerprint(&scope(), &literal).hash);
+    assert_eq!(
+        fingerprint(&scope(), &built).hash,
+        fingerprint(&scope(), &literal).hash
+    );
 }
 
 #[test]
@@ -356,14 +367,20 @@ fn fingerprint_ignores_retryable_flag() {
     a.retryable = true;
     let mut b = full_envelope();
     b.retryable = false;
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
 fn fingerprint_ignores_details() {
     let a = full_envelope().with_details(json!({"attempt": 1}));
     let b = full_envelope().with_details(json!({"attempt": 99, "other": true}));
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -372,16 +389,26 @@ fn fingerprint_ignores_occurred_at() {
     a.occurred_at = t0();
     let mut b = full_envelope();
     b.occurred_at = t1();
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
 fn fingerprint_ignores_resource_display_name() {
     let a = full_envelope();
     let mut b = full_envelope();
-    b.resource = Some(ResourceRef::named("credential", "billing_key", "Billing key"));
+    b.resource = Some(ResourceRef::named(
+        "credential",
+        "billing_key",
+        "Billing key",
+    ));
     // The human-readable name is presentation-only; kind+id are identity.
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -390,7 +417,10 @@ fn fingerprint_with_specific_code_ignores_message_entirely() {
     a.message = "attempt 12 failed for 3f1c2b6a-0000-7000-8000-0000000000cc".into();
     let mut b = full_envelope();
     b.message = "completely different words".into();
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 // =====================================================================
@@ -400,7 +430,10 @@ fn fingerprint_with_specific_code_ignores_message_entirely() {
 #[test]
 fn fingerprint_differs_by_sequence_id() {
     let e = full_envelope();
-    assert_ne!(fingerprint(&scope(), &e).hash, fingerprint(&scope2(), &e).hash);
+    assert_ne!(
+        fingerprint(&scope(), &e).hash,
+        fingerprint(&scope2(), &e).hash
+    );
 }
 
 #[test]
@@ -426,7 +459,10 @@ fn fingerprint_differs_by_block_value() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.block_id = Some("refund".into());
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -434,7 +470,10 @@ fn fingerprint_differs_by_block_presence() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.block_id = None;
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -454,7 +493,10 @@ fn fingerprint_differs_by_handler_value() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.handler = Some("graphql_request".into());
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -462,7 +504,10 @@ fn fingerprint_differs_by_handler_presence() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.handler = None;
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -486,7 +531,10 @@ fn fingerprint_differs_by_error_code() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.error_code = "HTTP_TRANSPORT".into();
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -494,7 +542,10 @@ fn fingerprint_error_code_is_case_sensitive() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.error_code = "http_status".into();
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -502,7 +553,10 @@ fn fingerprint_differs_by_external_status_value() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.external_status = Some("502".into());
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -510,7 +564,10 @@ fn fingerprint_differs_by_external_status_presence() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.external_status = None;
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -518,7 +575,10 @@ fn fingerprint_differs_by_resource_kind() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.resource = Some(ResourceRef::new("queue", "billing_key"));
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -526,7 +586,10 @@ fn fingerprint_differs_by_resource_id() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.resource = Some(ResourceRef::new("credential", "other_key"));
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -534,7 +597,10 @@ fn fingerprint_differs_by_resource_presence() {
     let a = full_envelope();
     let mut b = full_envelope();
     b.resource = None;
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -545,7 +611,10 @@ fn fingerprint_differs_when_multiple_axes_change_together() {
     b.error_class = ErrorClass::Timeout;
     b.error_code = "TIMEOUT".into();
     b.external_status = None;
-    assert_ne!(fingerprint(&scope2(), &b).hash, fingerprint(&scope(), &a).hash);
+    assert_ne!(
+        fingerprint(&scope2(), &b).hash,
+        fingerprint(&scope(), &a).hash
+    );
 }
 
 #[test]
@@ -557,7 +626,10 @@ fn fingerprint_axis_swap_does_not_collide() {
     let mut b = minimal_envelope("X");
     b.block_id = Some("beta".into());
     b.handler = Some("alpha".into());
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 // =====================================================================
@@ -567,8 +639,14 @@ fn fingerprint_axis_swap_does_not_collide() {
 #[test]
 fn boundary_sequence_id_vs_version_is_unambiguous() {
     // "seq:a" + "v:11" must differ from "seq:a1" + "v:1".
-    let a = FingerprintScope { sequence_id: "a".into(), sequence_version: 11 };
-    let b = FingerprintScope { sequence_id: "a1".into(), sequence_version: 1 };
+    let a = FingerprintScope {
+        sequence_id: "a".into(),
+        sequence_version: 11,
+    };
+    let b = FingerprintScope {
+        sequence_id: "a1".into(),
+        sequence_version: 1,
+    };
     let e = minimal_envelope("X");
     assert_ne!(fingerprint(&a, &e).hash, fingerprint(&b, &e).hash);
 }
@@ -581,14 +659,20 @@ fn boundary_block_vs_handler_is_unambiguous() {
     let mut b = minimal_envelope("X");
     b.block_id = Some("charge".into());
     b.handler = Some("card".into());
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
 fn boundary_code_vs_status_is_unambiguous() {
     let a = minimal_envelope("HTTP5").with_external_status("03");
     let b = minimal_envelope("HTTP").with_external_status("503");
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -599,14 +683,20 @@ fn boundary_status_vs_resource_is_unambiguous() {
     let b = minimal_envelope("X")
         .with_external_status("503")
         .with_resource(ResourceRef::new("queue", "orders"));
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
 fn boundary_resource_kind_vs_id_is_unambiguous() {
     let a = minimal_envelope("X").with_resource(ResourceRef::new("queueor", "ders"));
     let b = minimal_envelope("X").with_resource(ResourceRef::new("queue", "orders"));
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 // =====================================================================
@@ -755,7 +845,10 @@ fn unknown_code_different_messages_split_groups() {
     a.message = "the widget melted".into();
     let mut b = minimal_envelope("unknown");
     b.message = "the gasket blew".into();
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -764,7 +857,10 @@ fn unknown_code_volatile_uuids_do_not_split_groups() {
     a.message = "lookup failed for 0198f0a2-1111-7000-8000-00000000aaaa".into();
     let mut b = minimal_envelope("unknown");
     b.message = "lookup failed for 0198f0a2-2222-7000-8000-00000000bbbb".into();
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -773,7 +869,10 @@ fn unknown_code_volatile_numbers_do_not_split_groups() {
     a.message = "gave up after 17 attempts and 2500 ms".into();
     let mut b = minimal_envelope("unknown");
     b.message = "gave up after 90 attempts and 123456 ms".into();
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -782,7 +881,10 @@ fn unknown_code_case_and_whitespace_do_not_split_groups() {
     a.message = "Connection   REFUSED by\tpeer".into();
     let mut b = minimal_envelope("unknown");
     b.message = "connection refused by peer".into();
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -792,7 +894,10 @@ fn unknown_code_messages_differing_past_256_chars_group_together() {
     a.message = format!("{base}alpha");
     let mut b = minimal_envelope("unknown");
     b.message = format!("{base}omega");
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -802,7 +907,10 @@ fn unknown_code_still_split_by_structural_axes() {
     a.message = "melted".into();
     let mut b = minimal_envelope("unknown").with_block("refund");
     b.message = "melted".into();
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 #[test]
@@ -813,7 +921,10 @@ fn unknown_vs_uppercase_unknown_codes_are_distinct_groups() {
     a.message = "melted".into();
     let mut b = minimal_envelope("UNKNOWN");
     b.message = "melted".into();
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 // =====================================================================
@@ -887,10 +998,7 @@ fn normalize_hex_run_8_chars_is_volatile() {
 
 #[test]
 fn normalize_hex_run_16_chars_is_volatile() {
-    assert_eq!(
-        normalize_message("addr deadbeefcafe1234 bad"),
-        "addr # bad"
-    );
+    assert_eq!(normalize_message("addr deadbeefcafe1234 bad"), "addr # bad");
 }
 
 #[test]
@@ -942,10 +1050,7 @@ fn normalize_long_mixed_alnum_id_is_volatile() {
 
 #[test]
 fn normalize_16_char_mixed_id_with_4_digits_is_volatile() {
-    assert_eq!(
-        normalize_message("key ghijklmnopqr1234 lost"),
-        "key # lost"
-    );
+    assert_eq!(normalize_message("key ghijklmnopqr1234 lost"), "key # lost");
 }
 
 #[test]
@@ -999,7 +1104,10 @@ fn normalize_s3_and_utf8_style_tokens_survive() {
 
 #[test]
 fn normalize_dashed_word_survives() {
-    assert_eq!(normalize_message("re-try the well-known path"), "re-try the well-known path");
+    assert_eq!(
+        normalize_message("re-try the well-known path"),
+        "re-try the well-known path"
+    );
 }
 
 #[test]
@@ -1096,7 +1204,10 @@ fn normalize_message_of_only_uuids_is_single_placeholder() {
 
 #[test]
 fn normalize_lowercases_ascii() {
-    assert_eq!(normalize_message("ERROR Failed BADLY"), "error failed badly");
+    assert_eq!(
+        normalize_message("ERROR Failed BADLY"),
+        "error failed badly"
+    );
 }
 
 #[test]
@@ -1201,12 +1312,18 @@ fn efm_status_403_is_credential_class() {
 
 #[test]
 fn efm_status_408_is_external_dependency_class() {
-    assert_eq!(efm("status 408").error_class, ErrorClass::ExternalDependency);
+    assert_eq!(
+        efm("status 408").error_class,
+        ErrorClass::ExternalDependency
+    );
 }
 
 #[test]
 fn efm_status_429_is_external_dependency_class() {
-    assert_eq!(efm("status 429").error_class, ErrorClass::ExternalDependency);
+    assert_eq!(
+        efm("status 429").error_class,
+        ErrorClass::ExternalDependency
+    );
 }
 
 #[test]
@@ -1231,17 +1348,26 @@ fn efm_status_499_is_application_class() {
 
 #[test]
 fn efm_status_500_is_external_dependency_class() {
-    assert_eq!(efm("status 500").error_class, ErrorClass::ExternalDependency);
+    assert_eq!(
+        efm("status 500").error_class,
+        ErrorClass::ExternalDependency
+    );
 }
 
 #[test]
 fn efm_status_503_is_external_dependency_class() {
-    assert_eq!(efm("status 503").error_class, ErrorClass::ExternalDependency);
+    assert_eq!(
+        efm("status 503").error_class,
+        ErrorClass::ExternalDependency
+    );
 }
 
 #[test]
 fn efm_status_599_is_external_dependency_class() {
-    assert_eq!(efm("status 599").error_class, ErrorClass::ExternalDependency);
+    assert_eq!(
+        efm("status 599").error_class,
+        ErrorClass::ExternalDependency
+    );
 }
 
 #[test]
@@ -1549,7 +1675,10 @@ fn efm_retryable_false_passthrough() {
 
 #[test]
 fn efm_occurred_at_passthrough() {
-    assert_eq!(envelope_from_message("timeout", false, t1()).occurred_at, t1());
+    assert_eq!(
+        envelope_from_message("timeout", false, t1()).occurred_at,
+        t1()
+    );
 }
 
 #[test]
@@ -1575,16 +1704,25 @@ fn efm_http_branch_sets_only_external_status() {
 fn efm_unknown_envelopes_fingerprint_by_normalized_message() {
     let a = efm("mystery failure in zone 12");
     let b = efm("mystery failure in zone 99");
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
     let c = efm("entirely different mystery");
-    assert_ne!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &c).hash);
+    assert_ne!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &c).hash
+    );
 }
 
 #[test]
 fn efm_http_status_envelopes_group_regardless_of_request_id() {
     let a = efm("http 503 (req-11111111)");
     let b = efm("http 503 (req-22222222)");
-    assert_eq!(fingerprint(&scope(), &a).hash, fingerprint(&scope(), &b).hash);
+    assert_eq!(
+        fingerprint(&scope(), &a).hash,
+        fingerprint(&scope(), &b).hash
+    );
 }
 
 // =====================================================================
@@ -1606,8 +1744,7 @@ fn retry_mode_deserializes_bulk() {
 #[test]
 fn retry_mode_round_trips() {
     for m in [DlqRetryMode::Sample, DlqRetryMode::Bulk] {
-        let back: DlqRetryMode =
-            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let back: DlqRetryMode = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(back, m);
     }
 }
@@ -1717,7 +1854,12 @@ fn retry_response_mode_serialized_snake_case() {
 fn sample_group() -> DlqGroup {
     DlqGroup {
         fingerprint: "deadbeefcafef00d".into(),
-        components: vec!["seq:s".into(), "v:1".into(), "class:timeout".into(), "code:TIMEOUT".into()],
+        components: vec![
+            "seq:s".into(),
+            "v:1".into(),
+            "class:timeout".into(),
+            "code:TIMEOUT".into(),
+        ],
         error_class: ErrorClass::Timeout,
         error_code: "TIMEOUT".into(),
         sample_message: "request timed out".into(),

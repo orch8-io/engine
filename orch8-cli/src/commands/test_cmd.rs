@@ -87,7 +87,15 @@ pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputForma
             sequence,
             recorded,
             report,
-        } => run_contracts(&contract_file, sequence.as_deref(), recorded.as_deref(), report).await,
+        } => {
+            run_contracts(
+                &contract_file,
+                sequence.as_deref(),
+                recorded.as_deref(),
+                report,
+            )
+            .await
+        }
         TestCmd::Record { instance_id, out } => {
             record(client, base, instance_id, out.as_deref()).await
         }
@@ -181,7 +189,7 @@ fn print_human_report(report: &SuiteReport) {
     );
 }
 
-/// Minimal JUnit XML so CI systems can ingest contract results.
+/// Minimal `JUnit` XML so CI systems can ingest contract results.
 fn junit_xml(report: &SuiteReport) -> String {
     fn escape(s: &str) -> String {
         s.replace('&', "&amp;")
@@ -189,27 +197,26 @@ fn junit_xml(report: &SuiteReport) -> String {
             .replace('>', "&gt;")
             .replace('"', "&quot;")
     }
+    use std::fmt::Write as _;
     let failures = report.failed_cases().len();
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    out.push_str(&format!(
-        "<testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\">\n",
+    let _ = writeln!(
+        out,
+        "<testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\">",
         escape(&format!(
             "{} v{}",
             report.sequence_name, report.sequence_version
         )),
         report.cases.len(),
-    ));
+    );
     for case in &report.cases {
         if case.passed {
-            out.push_str(&format!("  <testcase name=\"{}\"/>\n", escape(&case.name)));
+            let _ = writeln!(out, "  <testcase name=\"{}\"/>", escape(&case.name));
         } else {
-            out.push_str(&format!("  <testcase name=\"{}\">\n", escape(&case.name)));
+            let _ = writeln!(out, "  <testcase name=\"{}\">", escape(&case.name));
             for failure in &case.failures {
-                out.push_str(&format!(
-                    "    <failure message=\"{}\"/>\n",
-                    escape(failure)
-                ));
+                let _ = writeln!(out, "    <failure message=\"{}\"/>", escape(failure));
             }
             out.push_str("  </testcase>\n");
         }
@@ -222,12 +229,7 @@ fn junit_xml(report: &SuiteReport) -> String {
 // `orch8 test record`
 // ---------------------------------------------------------------------------
 
-async fn record(
-    client: &Client,
-    base: &str,
-    instance_id: Uuid,
-    out: Option<&Path>,
-) -> Result<()> {
+async fn record(client: &Client, base: &str, instance_id: Uuid, out: Option<&Path>) -> Result<()> {
     let inst = get_json(client, format!("{base}/instances/{instance_id}")).await?;
     let seq_id = inst["sequence_id"]
         .as_str()
@@ -575,7 +577,10 @@ mod tests {
         assert!(xml.contains("&quot;failed&quot;"), "{xml}");
         // Failed case has a nested <failure>, passing case is self-closing.
         assert!(xml.contains("<testcase name=\"happy\"/>"), "{xml}");
-        assert!(xml.contains("<testcase name=\"declined &amp; retried\">"), "{xml}");
+        assert!(
+            xml.contains("<testcase name=\"declined &amp; retried\">"),
+            "{xml}"
+        );
     }
 
     #[test]

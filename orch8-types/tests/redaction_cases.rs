@@ -550,7 +550,7 @@ fn redact_value_sensitive_key_replaces_array_value() {
 
 #[test]
 fn redact_value_sensitive_number_replaced() {
-    let mut v = json!({"otp": 123456});
+    let mut v = json!({"otp": 123_456});
     policy().redact_value(&mut v);
     assert_eq!(v["otp"], REDACTED);
 }
@@ -831,11 +831,7 @@ fn headers_duplicate_names_each_processed_independently() {
 
 #[test]
 fn headers_original_names_and_order_preserved() {
-    let out = policy().redact_headers(vec![
-        ("X-ZZZ", "1"),
-        ("Authorization", "x"),
-        ("X-AAA", "2"),
-    ]);
+    let out = policy().redact_headers(vec![("X-ZZZ", "1"), ("Authorization", "x"), ("X-AAA", "2")]);
     let names: Vec<&str> = out.iter().map(|(n, _)| n.as_str()).collect();
     // Names keep their original casing and their original order.
     assert_eq!(names, vec!["X-ZZZ", "Authorization", "X-AAA"]);
@@ -858,7 +854,10 @@ fn url_without_query_unchanged() {
 fn url_without_query_but_with_fragment_unchanged() {
     // No '?': the whole thing (fragment included) passes through verbatim.
     let p = policy();
-    assert_eq!(p.redact_url("https://x.com/p#token=abc"), "https://x.com/p#token=abc");
+    assert_eq!(
+        p.redact_url("https://x.com/p#token=abc"),
+        "https://x.com/p#token=abc"
+    );
 }
 
 #[test]
@@ -890,7 +889,10 @@ fn url_valueless_sensitive_param_passes_through() {
     // A bare "?token" pair has no '=' so no value exists to redact — the
     // textual pass leaves it untouched. Encode the actual behaviour.
     let p = policy();
-    assert_eq!(p.redact_url("https://x.com/p?token"), "https://x.com/p?token");
+    assert_eq!(
+        p.redact_url("https://x.com/p?token"),
+        "https://x.com/p?token"
+    );
 }
 
 #[test]
@@ -1008,9 +1010,7 @@ fn url_all_params_sensitive() {
 #[test]
 fn excerpt_json_structural_redaction_nested() {
     let p = policy();
-    let out = p.safe_excerpt(
-        r#"{"error":"denied","detail":{"api_key":"sk_live_x","code":403}}"#,
-    );
+    let out = p.safe_excerpt(r#"{"error":"denied","detail":{"api_key":"sk_live_x","code":403}}"#);
     assert!(out.contains("denied"));
     assert!(out.contains("403"));
     assert!(!out.contains("sk_live_x"));

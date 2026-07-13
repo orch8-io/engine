@@ -101,6 +101,7 @@ struct MockState {
 ///
 /// # Errors
 /// Returns an error only for infrastructure failures.
+#[allow(clippy::too_many_lines)] // one linear pipeline: mocks → engine → drive → evaluate
 pub async fn run_case(
     seq: &SequenceDefinition,
     unmocked_policy: UnmockedHandlerPolicy,
@@ -150,7 +151,9 @@ pub async fn run_case(
                     .get(&block_id)
                     .or_else(|| by_handler.get(&handler_name));
 
-                let mut guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut guard = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *guard.calls.entry(handler_name.clone()).or_insert(0) += 1;
                 let attempt = guard.attempts.entry(block_id.clone()).or_insert(0);
                 let attempt_index = *attempt as usize;
@@ -280,7 +283,9 @@ pub async fn run_case(
                     if let Some(max_ms) = case.max_logical_duration_ms {
                         let elapsed = jump_to - opts.start_time;
                         if elapsed
-                            > chrono::Duration::milliseconds(i64::try_from(max_ms).unwrap_or(i64::MAX))
+                            > chrono::Duration::milliseconds(
+                                i64::try_from(max_ms).unwrap_or(i64::MAX),
+                            )
                         {
                             duration_exceeded = true;
                             break;
@@ -314,7 +319,9 @@ pub async fn run_case(
     }
 
     let mock_state = {
-        let guard = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         MockState {
             calls: guard.calls.clone(),
             attempts: guard.attempts.clone(),
@@ -364,7 +371,9 @@ pub async fn run_case(
     }
     for skipped in &case.expect.skipped_blocks {
         if executed_blocks.contains(skipped) {
-            failures.push(format!("block '{skipped}' executed but was expected to be skipped"));
+            failures.push(format!(
+                "block '{skipped}' executed but was expected to be skipped"
+            ));
         }
     }
     for assertion in &case.expect.assertions {
@@ -441,6 +450,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[allow(clippy::needless_pass_by_value)]
     fn seq(blocks: Value) -> SequenceDefinition {
         serde_json::from_value(json!({
             "id": uuid::Uuid::now_v7(),
@@ -454,6 +464,7 @@ mod tests {
         .expect("valid sequence")
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn suite(cases: Value) -> ContractSuite {
         serde_json::from_value(json!({
             "sequence_name": "contract-test-seq",
@@ -531,7 +542,9 @@ mod tests {
         assert!(!report.passed);
         let failures = &report.cases[0].failures;
         assert!(
-            failures.iter().any(|f| f.contains("expected terminal state 'failed'")),
+            failures
+                .iter()
+                .any(|f| f.contains("expected terminal state 'failed'")),
             "{failures:?}"
         );
     }

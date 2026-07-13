@@ -175,7 +175,7 @@ impl Remediation {
 /// remediations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Finding {
-    /// Stable machine code, SCREAMING_SNAKE_CASE, e.g. `NO_COMPATIBLE_WORKER`.
+    /// Stable machine code, `SCREAMING_SNAKE_CASE`, e.g. `NO_COMPATIBLE_WORKER`.
     pub code: String,
     pub severity: FindingSeverity,
     /// One-sentence human-readable statement.
@@ -282,7 +282,10 @@ mod tests {
 
     #[test]
     fn confidence_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&Confidence::High).unwrap(), "\"high\"");
+        assert_eq!(
+            serde_json::to_string(&Confidence::High).unwrap(),
+            "\"high\""
+        );
     }
 
     #[test]
@@ -324,7 +327,10 @@ mod tests {
             Confidence::Certain,
             t0(),
         )
-        .with_evidence(Evidence::new("next_fire_at", "fires at 2026-07-12T00:00:00Z"));
+        .with_evidence(Evidence::new(
+            "next_fire_at",
+            "fires at 2026-07-12T00:00:00Z",
+        ));
 
         let json = serde_json::to_string(&f).unwrap();
         let back: Finding = serde_json::from_str(&json).unwrap();
@@ -333,13 +339,7 @@ mod tests {
 
     #[test]
     fn empty_collections_are_omitted_from_json() {
-        let f = Finding::new(
-            "X",
-            FindingSeverity::Info,
-            "s",
-            Confidence::Low,
-            t0(),
-        );
+        let f = Finding::new("X", FindingSeverity::Info, "s", Confidence::Low, t0());
         let v = serde_json::to_value(&f).unwrap();
         let obj = v.as_object().unwrap();
         assert!(!obj.contains_key("evidence"));
@@ -394,7 +394,13 @@ mod tests {
     #[test]
     fn rank_findings_is_deterministic_for_equal_rank() {
         let mk = |code: &str| {
-            Finding::new(code, FindingSeverity::Warning, "s", Confidence::Medium, t0())
+            Finding::new(
+                code,
+                FindingSeverity::Warning,
+                "s",
+                Confidence::Medium,
+                t0(),
+            )
         };
         let mut a = vec![mk("Z"), mk("A"), mk("M")];
         let mut b = vec![mk("M"), mk("Z"), mk("A")];

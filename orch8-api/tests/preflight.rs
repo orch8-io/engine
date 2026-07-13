@@ -5,6 +5,7 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[allow(clippy::needless_pass_by_value)]
 fn draft_sequence(tenant: &str, blocks: Value) -> Value {
     json!({
         "id": Uuid::now_v7(),

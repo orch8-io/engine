@@ -195,20 +195,14 @@ fn rule_waiting_until(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec
                 Confidence::Certain,
                 now,
             )
-            .with_evidence(
-                Evidence::new("next_fire_at", fire_at.to_rfc3339()).observed_at(now),
-            ),
+            .with_evidence(Evidence::new("next_fire_at", fire_at.to_rfc3339()).observed_at(now)),
         });
     }
 }
 
 /// `wait_for_event` blocks: report exactly which events are still
 /// missing for the join, with the correlation key as evidence.
-fn rule_event_waits(
-    ctx: &InstanceDiagnosticContext,
-    now: DateTime<Utc>,
-    out: &mut Vec<Diagnosis>,
-) {
+fn rule_event_waits(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>, out: &mut Vec<Diagnosis>) {
     let Some(waits) = &ctx.event_waits else {
         return;
     };
@@ -307,10 +301,8 @@ fn rule_paused(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec<Diagno
             now,
         )
         .with_remediation(
-            Remediation::new("raise the budget, then resume").with_command(format!(
-                "orch8 signal {} resume",
-                instance.id
-            )),
+            Remediation::new("raise the budget, then resume")
+                .with_command(format!("orch8 signal {} resume", instance.id)),
         );
         if let Some(breach) = instance.metadata.get("budget_breach") {
             finding = finding
@@ -341,6 +333,7 @@ fn rule_paused(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec<Diagno
     }
 }
 
+#[allow(clippy::too_many_lines)] // one diagnosis rule per task state, kept together
 fn rule_worker_tasks(
     ctx: &InstanceDiagnosticContext,
     now: DateTime<Utc>,
@@ -759,8 +752,10 @@ fn rule_waiting_external(
             now,
         )
         .with_remediation(
-            Remediation::new("deliver the expected signal")
-                .with_command(format!("orch8 signal {} custom:<name> '<payload>'", ctx.instance.id)),
+            Remediation::new("deliver the expected signal").with_command(format!(
+                "orch8 signal {} custom:<name> '<payload>'",
+                ctx.instance.id
+            )),
         ),
     });
 }
@@ -958,7 +953,13 @@ mod tests {
         let d = &report.diagnoses[0];
         assert_eq!(d.finding.code, "BUDGET_PAUSED");
         assert!(d.finding.evidence[0].summary.contains("max_steps"));
-        assert!(d.finding.remediation[0].command.as_deref().unwrap().contains("resume"));
+        assert!(
+            d.finding.remediation[0]
+                .command
+                .as_deref()
+                .unwrap()
+                .contains("resume")
+        );
     }
 
     #[test]
@@ -1070,7 +1071,11 @@ mod tests {
             .expect("breaker diagnosis");
         assert_eq!(d.category, DiagnosisCategory::DirectEvidence);
         assert_eq!(d.finding.confidence, Confidence::High);
-        assert!(d.finding.summary.contains("resume in"), "{}", d.finding.summary);
+        assert!(
+            d.finding.summary.contains("resume in"),
+            "{}",
+            d.finding.summary
+        );
     }
 
     #[test]
@@ -1150,10 +1155,22 @@ mod tests {
         let report = diagnose(&ctx, t0());
         let d = &report.diagnoses[0];
         assert_eq!(d.finding.code, "WAITING_EVENT");
-        assert!(d.finding.summary.contains("payment_received"), "{}", d.finding.summary);
-        assert!(d.finding.summary.contains("already matched: inventory_reserved"));
+        assert!(
+            d.finding.summary.contains("payment_received"),
+            "{}",
+            d.finding.summary
+        );
+        assert!(
+            d.finding
+                .summary
+                .contains("already matched: inventory_reserved")
+        );
         assert!(d.finding.summary.contains("order-42"));
-        assert!(!codes(&report).contains(&"PENDING_APPROVAL"), "{:?}", codes(&report));
+        assert!(
+            !codes(&report).contains(&"PENDING_APPROVAL"),
+            "{:?}",
+            codes(&report)
+        );
     }
 
     #[test]
@@ -1281,7 +1298,10 @@ mod tests {
         }]);
         let report = diagnose(&ctx, t0());
         assert_eq!(report.diagnoses[0].finding.code, "STALE_WORKER_CLAIM");
-        assert_eq!(report.diagnoses[0].category, DiagnosisCategory::DirectEvidence);
+        assert_eq!(
+            report.diagnoses[0].category,
+            DiagnosisCategory::DirectEvidence
+        );
     }
 
     #[test]

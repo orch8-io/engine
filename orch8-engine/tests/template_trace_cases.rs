@@ -4,9 +4,9 @@
 //!
 //! Organised by concern:
 //! 1. status per root (ok / null / missing / redacted / error)
-//! 2. fallback-chain provenance (source segment, fallback_used)
+//! 2. fallback-chain provenance (source segment, `fallback_used`)
 //! 3. string coercion flags for inline interpolation
-//! 4. result_type for every JSON type
+//! 4. `result_type` for every JSON type
 //! 5. nested param paths
 //! 6. multiple expressions per string / unbalanced braces
 //! 7. redaction (by leaf name, by value shape, aggregate)
@@ -38,6 +38,7 @@ fn ctx_cfg(data: Value, config: Value) -> ExecutionContext {
 }
 
 /// Trace `params` against `context.data` + `outputs` (no config, no state).
+#[allow(clippy::needless_pass_by_value)]
 fn trace(params: Value, data: Value, outputs: Value) -> ResolutionTrace {
     trace_params(
         "blk",
@@ -50,6 +51,7 @@ fn trace(params: Value, data: Value, outputs: Value) -> ResolutionTrace {
 }
 
 /// Trace against a config fixture only.
+#[allow(clippy::needless_pass_by_value)]
 fn trace_cfg(params: Value, config: Value) -> ResolutionTrace {
     trace_params(
         "blk",
@@ -62,6 +64,7 @@ fn trace_cfg(params: Value, config: Value) -> ResolutionTrace {
 }
 
 /// Trace against a state fixture (`None` = no state map at all).
+#[allow(clippy::needless_pass_by_value)]
 fn trace_state(params: Value, data: Value, state: Option<&Value>) -> ResolutionTrace {
     trace_params(
         "blk",
@@ -119,7 +122,11 @@ fn context_data_missing() {
 
 #[test]
 fn context_data_deep_missing_intermediate() {
-    let e = one("{{ context.data.a.b.c }}", json!({"a": {"x": 1}}), json!({}));
+    let e = one(
+        "{{ context.data.a.b.c }}",
+        json!({"a": {"x": 1}}),
+        json!({}),
+    );
     assert_eq!(e.status, ResolutionStatus::Missing);
 }
 
@@ -133,7 +140,10 @@ fn context_data_path_through_scalar_is_missing() {
 
 #[test]
 fn context_config_ok() {
-    let t = trace_cfg(json!({"v": "{{ context.config.region }}"}), json!({"region": "eu"}));
+    let t = trace_cfg(
+        json!({"v": "{{ context.config.region }}"}),
+        json!({"region": "eu"}),
+    );
     let e = entry(&t, "v");
     assert_eq!(e.status, ResolutionStatus::Ok);
     assert_eq!(e.value, Some(json!("eu")));
@@ -142,7 +152,10 @@ fn context_config_ok() {
 
 #[test]
 fn context_config_explicit_null() {
-    let t = trace_cfg(json!({"v": "{{ context.config.region }}"}), json!({"region": null}));
+    let t = trace_cfg(
+        json!({"v": "{{ context.config.region }}"}),
+        json!({"region": null}),
+    );
     assert_eq!(entry(&t, "v").status, ResolutionStatus::Null);
 }
 
@@ -306,7 +319,11 @@ fn state_deep_path() {
 #[test]
 fn state_redacted_by_leaf_name() {
     let state = json!({"k": "opaque"});
-    let t = trace_state(json!({"password": "{{ state.k }}"}), json!({}), Some(&state));
+    let t = trace_state(
+        json!({"password": "{{ state.k }}"}),
+        json!({}),
+        Some(&state),
+    );
     let e = entry(&t, "password");
     assert_eq!(e.status, ResolutionStatus::Redacted);
     assert_eq!(e.value, Some(json!(REDACTED)));
@@ -355,7 +372,12 @@ fn instance_id_root_resolves_to_empty_string_without_runtime_id() {
 fn unknown_root_is_error_with_message() {
     let e = one("{{ bogus.path }}", json!({}), json!({}));
     assert_eq!(e.status, ResolutionStatus::Error);
-    assert!(e.error.as_deref().unwrap().contains("unknown template root"));
+    assert!(
+        e.error
+            .as_deref()
+            .unwrap()
+            .contains("unknown template root")
+    );
 }
 
 #[test]
@@ -660,7 +682,11 @@ fn inline_bool_is_coerced() {
 
 #[test]
 fn inline_object_is_coerced() {
-    let e = one("obj: {{ context.data.o }}", json!({"o": {"a": 1}}), json!({}));
+    let e = one(
+        "obj: {{ context.data.o }}",
+        json!({"o": {"a": 1}}),
+        json!({}),
+    );
     assert!(e.coerced_to_string);
     assert_eq!(e.result_type.as_deref(), Some("object"));
 }
@@ -706,10 +732,7 @@ fn resolved_params_show_the_interpolated_string() {
         json!({"n": 42}),
         json!({}),
     );
-    assert_eq!(
-        t.resolved_params,
-        Some(json!({"msg": "total: 42 cents"}))
-    );
+    assert_eq!(t.resolved_params, Some(json!({"msg": "total: 42 cents"})));
 }
 
 // =====================================================================
@@ -793,7 +816,10 @@ fn objects_inside_arrays_inside_objects() {
         json!({"v": "traced"}),
         json!({}),
     );
-    assert_eq!(entry(&t, "req.headers.0.value").value, Some(json!("traced")));
+    assert_eq!(
+        entry(&t, "req.headers.0.value").value,
+        Some(json!("traced"))
+    );
 }
 
 #[test]
@@ -906,13 +932,21 @@ fn expressions_across_multiple_params_all_traced() {
 
 #[test]
 fn unbalanced_open_braces_produce_no_entries() {
-    let t = trace(json!({"v": "{{ context.data.a"}), json!({"a": 1}), json!({}));
+    let t = trace(
+        json!({"v": "{{ context.data.a"}),
+        json!({"a": 1}),
+        json!({}),
+    );
     assert!(t.entries.is_empty());
 }
 
 #[test]
 fn unbalanced_open_braces_kept_literal_in_resolved_params() {
-    let t = trace(json!({"v": "{{ context.data.a"}), json!({"a": 1}), json!({}));
+    let t = trace(
+        json!({"v": "{{ context.data.a"}),
+        json!({"a": 1}),
+        json!({}),
+    );
     assert_eq!(t.resolved_params, Some(json!({"v": "{{ context.data.a"})));
 }
 
@@ -997,7 +1031,10 @@ fn authorization_leaf_redacted() {
         json!({"k": "Basic x"}),
         json!({}),
     );
-    assert_eq!(entry(&t, "authorization").status, ResolutionStatus::Redacted);
+    assert_eq!(
+        entry(&t, "authorization").status,
+        ResolutionStatus::Redacted
+    );
 }
 
 #[test]
@@ -1007,7 +1044,10 @@ fn client_secret_leaf_redacted() {
         json!({"k": "s"}),
         json!({}),
     );
-    assert_eq!(entry(&t, "client_secret").status, ResolutionStatus::Redacted);
+    assert_eq!(
+        entry(&t, "client_secret").status,
+        ResolutionStatus::Redacted
+    );
 }
 
 #[test]
@@ -1246,7 +1286,11 @@ fn sensitive_leaf_with_null_value_reports_null_not_redacted() {
 
 #[test]
 fn sensitive_leaf_missing_reports_missing_not_redacted() {
-    let t = trace(json!({"api_key": "{{ context.data.k }}"}), json!({}), json!({}));
+    let t = trace(
+        json!({"api_key": "{{ context.data.k }}"}),
+        json!({}),
+        json!({}),
+    );
     assert_eq!(entry(&t, "api_key").status, ResolutionStatus::Missing);
 }
 
@@ -1371,19 +1415,31 @@ fn array_index_navigation() {
 
 #[test]
 fn array_index_zero() {
-    let e = one("{{ context.data.items.0 }}", json!({"items": [7]}), json!({}));
+    let e = one(
+        "{{ context.data.items.0 }}",
+        json!({"items": [7]}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!(7)));
 }
 
 #[test]
 fn array_index_out_of_range_is_missing() {
-    let e = one("{{ context.data.items.5 }}", json!({"items": [1, 2]}), json!({}));
+    let e = one(
+        "{{ context.data.items.5 }}",
+        json!({"items": [1, 2]}),
+        json!({}),
+    );
     assert_eq!(e.status, ResolutionStatus::Missing);
 }
 
 #[test]
 fn non_numeric_key_into_array_is_missing() {
-    let e = one("{{ context.data.items.first }}", json!({"items": [1]}), json!({}));
+    let e = one(
+        "{{ context.data.items.first }}",
+        json!({"items": [1]}),
+        json!({}),
+    );
     assert_eq!(e.status, ResolutionStatus::Missing);
 }
 
@@ -1413,20 +1469,32 @@ fn array_index_into_outputs() {
 
 #[test]
 fn filter_upper() {
-    let e = one("{{ context.data.s | upper }}", json!({"s": "bob"}), json!({}));
+    let e = one(
+        "{{ context.data.s | upper }}",
+        json!({"s": "bob"}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!("BOB")));
     assert_eq!(e.source.as_deref(), Some("context.data.s"));
 }
 
 #[test]
 fn filter_lower() {
-    let e = one("{{ context.data.s | lower }}", json!({"s": "LOUD"}), json!({}));
+    let e = one(
+        "{{ context.data.s | lower }}",
+        json!({"s": "LOUD"}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!("loud")));
 }
 
 #[test]
 fn filter_trim() {
-    let e = one("{{ context.data.s | trim }}", json!({"s": "  pad  "}), json!({}));
+    let e = one(
+        "{{ context.data.s | trim }}",
+        json!({"s": "  pad  "}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!("pad")));
 }
 
@@ -1450,7 +1518,11 @@ fn filter_url_encode() {
 
 #[test]
 fn filter_base64() {
-    let e = one("{{ context.data.s | base64 }}", json!({"s": "hello"}), json!({}));
+    let e = one(
+        "{{ context.data.s | base64 }}",
+        json!({"s": "hello"}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!("aGVsbG8=")));
 }
 
@@ -1546,7 +1618,11 @@ fn filter_default_not_applied_when_value_present() {
 
 #[test]
 fn filter_default_with_numeric_literal_is_typed() {
-    let e = one("{{ context.data.absent | default(42) }}", json!({}), json!({}));
+    let e = one(
+        "{{ context.data.absent | default(42) }}",
+        json!({}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!(42.0)));
     assert_eq!(e.result_type.as_deref(), Some("number"));
 }
@@ -1637,17 +1713,22 @@ fn filter_split() {
 
 #[test]
 fn filter_round() {
+    // An arbitrary decimal (not a math constant) exercising round(2).
     let e = one(
         "{{ context.data.n | round(2) }}",
-        json!({"n": 3.14159}),
+        json!({"n": 12.3456}),
         json!({}),
     );
-    assert_eq!(e.value, Some(json!(3.14)));
+    assert_eq!(e.value, Some(json!(12.35)));
 }
 
 #[test]
 fn filter_round_to_integer() {
-    let e = one("{{ context.data.n | round(0) }}", json!({"n": 2.5}), json!({}));
+    let e = one(
+        "{{ context.data.n | round(0) }}",
+        json!({"n": 2.5}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!(3.0)));
 }
 
@@ -1742,7 +1823,11 @@ fn unknown_pipe_word_ignored_when_base_present() {
 
 #[test]
 fn json_function_stringifies() {
-    let e = one("{{ json(context.data.o) }}", json!({"o": {"a": 1}}), json!({}));
+    let e = one(
+        "{{ json(context.data.o) }}",
+        json!({"o": {"a": 1}}),
+        json!({}),
+    );
     assert_eq!(e.status, ResolutionStatus::Ok);
     assert_eq!(e.value, Some(json!("{\"a\":1}")));
     assert_eq!(e.result_type.as_deref(), Some("string"));
@@ -1750,9 +1835,17 @@ fn json_function_stringifies() {
 
 #[test]
 fn len_function_on_array_and_string() {
-    let e = one("{{ len(context.data.items) }}", json!({"items": [1, 2, 3]}), json!({}));
+    let e = one(
+        "{{ len(context.data.items) }}",
+        json!({"items": [1, 2, 3]}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!(3)));
-    let e = one("{{ len(context.data.s) }}", json!({"s": "hello"}), json!({}));
+    let e = one(
+        "{{ len(context.data.s) }}",
+        json!({"s": "hello"}),
+        json!({}),
+    );
     assert_eq!(e.value, Some(json!(5)));
 }
 

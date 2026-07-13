@@ -139,12 +139,10 @@ async fn resumes_after_both_events_in_either_order() {
     let outputs = engine.block_outputs(inst).await.unwrap();
     let wait_output = outputs
         .iter()
-        .filter(|o| o.block_id.as_str() == "await_order_facts")
-        .next_back()
+        .rfind(|o| o.block_id.as_str() == "await_order_facts")
         .expect("wait block output");
     assert_eq!(
-        wait_output.output["events"]["payment_received"]["payload"]["amount"],
-        100,
+        wait_output.output["events"]["payment_received"]["payload"]["amount"], 100,
         "{}",
         wait_output.output
     );
@@ -163,7 +161,12 @@ async fn events_arriving_before_the_workflow_still_resume_it() {
         .await
         .unwrap();
     engine
-        .ingest_event("inventory_reserved", "i-1", "order-9", serde_json::json!({}))
+        .ingest_event(
+            "inventory_reserved",
+            "i-1",
+            "order-9",
+            serde_json::json!({}),
+        )
         .await
         .unwrap();
 
@@ -217,7 +220,12 @@ async fn events_for_a_different_order_never_resume() {
         .await
         .unwrap();
     engine
-        .ingest_event("inventory_reserved", "i-b", "order-B", serde_json::json!({}))
+        .ingest_event(
+            "inventory_reserved",
+            "i-b",
+            "order-B",
+            serde_json::json!({}),
+        )
         .await
         .unwrap();
     for _ in 0..10 {

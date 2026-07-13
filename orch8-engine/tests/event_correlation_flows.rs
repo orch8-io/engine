@@ -1,6 +1,6 @@
 //! End-to-end tests for the durable event correlation service layer:
 //! `ingest` / `register_wait` / `parse_wait_params` / `envelope` driven
-//! against a real SQLite in-memory `StorageBackend`.
+//! against a real `SQLite` in-memory `StorageBackend`.
 //!
 //! This IS the full ingestion pipeline: producer-id dedup, wait matching,
 //! at-most-once consumption, join satisfaction, and resume-signal
@@ -239,7 +239,9 @@ async fn dedup_replay_does_not_advance_count_join() {
 #[tokio::test]
 async fn any_wait_before_event_satisfies() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
     let outcome = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
@@ -257,7 +259,9 @@ async fn any_event_before_wait_satisfies_at_registration() {
     ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Satisfied);
     assert_eq!(w.matched_names, vec!["paid".to_string()]);
     let events = s.list_events("t1", None, 10).await.unwrap();
@@ -268,7 +272,9 @@ async fn any_event_before_wait_satisfies_at_registration() {
 async fn any_multi_name_wait_satisfied_by_either_name() {
     for name in ["a", "b"] {
         let s = store().await;
-        let w = register_wait(&s, wait(&["a", "b"], JoinMode::Any)).await.unwrap();
+        let w = register_wait(&s, wait(&["a", "b"], JoinMode::Any))
+            .await
+            .unwrap();
         let outcome = ingest(&s, envelope("t1", name, "p-1", "order-1", json!({})))
             .await
             .unwrap();
@@ -280,7 +286,9 @@ async fn any_multi_name_wait_satisfied_by_either_name() {
 #[tokio::test]
 async fn all_wait_before_events_order_a_then_b() {
     let s = store().await;
-    register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     let first = ingest(&s, envelope("t1", "a", "p-a", "order-1", json!({})))
         .await
         .unwrap();
@@ -295,7 +303,9 @@ async fn all_wait_before_events_order_a_then_b() {
 #[tokio::test]
 async fn all_wait_before_events_order_b_then_a() {
     let s = store().await;
-    register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     let first = ingest(&s, envelope("t1", "b", "p-b", "order-1", json!({})))
         .await
         .unwrap();
@@ -315,9 +325,14 @@ async fn all_both_events_before_wait_satisfies_at_registration() {
     ingest(&s, envelope("t1", "b", "p-b", "order-1", json!({})))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Satisfied);
-    let consumed = s.list_events("t1", Some(EventStatus::Consumed), 10).await.unwrap();
+    let consumed = s
+        .list_events("t1", Some(EventStatus::Consumed), 10)
+        .await
+        .unwrap();
     assert_eq!(consumed.len(), 2);
 }
 
@@ -327,7 +342,9 @@ async fn all_mixed_a_pre_b_post() {
     ingest(&s, envelope("t1", "a", "p-a", "order-1", json!({})))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
     assert_eq!(w.matched_names, vec!["a".to_string()]);
     let outcome = ingest(&s, envelope("t1", "b", "p-b", "order-1", json!({})))
@@ -342,7 +359,9 @@ async fn all_mixed_b_pre_a_post() {
     ingest(&s, envelope("t1", "b", "p-b", "order-1", json!({})))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    let w = register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
     assert_eq!(w.matched_names, vec!["b".to_string()]);
     let outcome = ingest(&s, envelope("t1", "a", "p-a", "order-1", json!({})))
@@ -354,7 +373,9 @@ async fn all_mixed_b_pre_a_post() {
 #[tokio::test]
 async fn all_duplicate_second_event_of_same_name_stays_pending() {
     let s = store().await;
-    register_wait(&s, wait(&["a", "b"], JoinMode::All)).await.unwrap();
+    register_wait(&s, wait(&["a", "b"], JoinMode::All))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "a", "p-a1", "order-1", json!({})))
         .await
         .unwrap();
@@ -364,7 +385,10 @@ async fn all_duplicate_second_event_of_same_name_stays_pending() {
         .unwrap();
     assert!(!outcome.satisfied);
     assert_eq!(outcome.matched_wait, None);
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].producer_event_id, "p-a2");
 }
@@ -407,16 +431,22 @@ async fn count_all_events_pre_registration() {
 async fn count_drain_stops_at_satisfaction_leaving_excess_pending() {
     let s = store().await;
     for i in 0..3 {
-        ingest(&s, envelope("t1", "reading", &format!("r-{i}"), "order-1", json!({})))
-            .await
-            .unwrap();
+        ingest(
+            &s,
+            envelope("t1", "reading", &format!("r-{i}"), "order-1", json!({})),
+        )
+        .await
+        .unwrap();
     }
     let w = register_wait(&s, wait(&["reading"], JoinMode::Count { count: 2 }))
         .await
         .unwrap();
     assert_eq!(w.status, WaitStatus::Satisfied);
     // Only 2 of 3 consumed; the third stays available for others.
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
 }
 
@@ -464,7 +494,9 @@ async fn count_three_not_satisfied_by_two() {
 #[tokio::test]
 async fn correlation_key_isolation_wait_untouched() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     let outcome = ingest(&s, envelope("t1", "paid", "p-9", "order-OTHER", json!({})))
         .await
         .unwrap();
@@ -481,11 +513,16 @@ async fn correlation_key_isolation_wait_untouched() {
 #[tokio::test]
 async fn correlation_key_isolation_event_stays_pending() {
     let s = store().await;
-    register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "paid", "p-9", "order-OTHER", json!({})))
         .await
         .unwrap();
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].correlation_key, "order-OTHER");
 }
@@ -496,14 +533,18 @@ async fn correlation_key_isolation_at_registration_drain() {
     ingest(&s, envelope("t1", "paid", "p-9", "order-OTHER", json!({})))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
 }
 
 #[tokio::test]
 async fn tenant_isolation_on_ingest() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     let outcome = ingest(&s, envelope("t2", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
@@ -523,16 +564,23 @@ async fn tenant_isolation_at_registration_drain() {
         .await
         .unwrap();
     // Wait in t1 must not drain t2's event.
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
-    let t2_pending = s.list_events("t2", Some(EventStatus::Pending), 10).await.unwrap();
+    let t2_pending = s
+        .list_events("t2", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(t2_pending.len(), 1);
 }
 
 #[tokio::test]
 async fn same_key_different_tenants_both_satisfiable() {
     let s = store().await;
-    let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     let mut other = wait(&["paid"], JoinMode::Any);
     other.tenant_id = "t2".into();
     let w2 = register_wait(&s, other).await.unwrap();
@@ -595,7 +643,10 @@ async fn second_event_satisfies_second_wait() {
     assert_eq!(o2.matched_wait, Some(w2.id));
     assert!(o2.satisfied);
     // Each event is attributed to its own consumer.
-    let consumed = s.list_events("t1", Some(EventStatus::Consumed), 10).await.unwrap();
+    let consumed = s
+        .list_events("t1", Some(EventStatus::Consumed), 10)
+        .await
+        .unwrap();
     assert_eq!(consumed.len(), 2);
     let consumers: Vec<Option<Uuid>> = consumed.iter().map(|e| e.consumed_by).collect();
     assert!(consumers.contains(&Some(w1.instance_id)));
@@ -605,7 +656,9 @@ async fn second_event_satisfies_second_wait() {
 #[tokio::test]
 async fn consumed_event_not_drained_by_later_registration() {
     let s = store().await;
-    let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
@@ -627,7 +680,10 @@ async fn cancelled_wait_is_never_matched() {
         .await
         .unwrap();
     assert_eq!(outcome.matched_wait, None);
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
 }
 
@@ -820,14 +876,21 @@ async fn consume_then_reconsume_returns_zero() {
     assert_eq!(s.consume_events(&[event_id], consumer).await.unwrap(), 1);
     assert_eq!(s.consume_events(&[event_id], consumer).await.unwrap(), 0);
     // A different would-be consumer also gets zero.
-    assert_eq!(s.consume_events(&[event_id], InstanceId::new()).await.unwrap(), 0);
+    assert_eq!(
+        s.consume_events(&[event_id], InstanceId::new())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn consume_unknown_event_id_returns_zero() {
     let s = store().await;
     assert_eq!(
-        s.consume_events(&[Uuid::now_v7()], InstanceId::new()).await.unwrap(),
+        s.consume_events(&[Uuid::now_v7()], InstanceId::new())
+            .await
+            .unwrap(),
         0
     );
 }
@@ -862,11 +925,17 @@ async fn consume_marks_consumer_attribution() {
 #[tokio::test]
 async fn update_event_wait_cas_stale_expected_returns_false() {
     let s = store().await;
-    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     // Stored status is Waiting; expecting Satisfied is stale.
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
-    assert!(!s.update_event_wait(&updated, WaitStatus::Satisfied).await.unwrap());
+    assert!(
+        !s.update_event_wait(&updated, WaitStatus::Satisfied)
+            .await
+            .unwrap()
+    );
     // The row is untouched.
     let stored = s
         .get_event_wait(InstanceId::from_uuid(registered.instance_id), "wait_block")
@@ -879,10 +948,16 @@ async fn update_event_wait_cas_stale_expected_returns_false() {
 #[tokio::test]
 async fn update_event_wait_cas_matching_expected_returns_true() {
     let s = store().await;
-    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
-    assert!(s.update_event_wait(&updated, WaitStatus::Waiting).await.unwrap());
+    assert!(
+        s.update_event_wait(&updated, WaitStatus::Waiting)
+            .await
+            .unwrap()
+    );
     let stored = s
         .get_event_wait(InstanceId::from_uuid(registered.instance_id), "wait_block")
         .await
@@ -894,14 +969,20 @@ async fn update_event_wait_cas_matching_expected_returns_true() {
 #[tokio::test]
 async fn update_event_wait_cas_fails_after_satisfaction() {
     let s = store().await;
-    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let registered = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
     // Now stored as Satisfied: a writer still expecting Waiting loses.
     let mut updated = registered.clone();
     updated.status = WaitStatus::Cancelled;
-    assert!(!s.update_event_wait(&updated, WaitStatus::Waiting).await.unwrap());
+    assert!(
+        !s.update_event_wait(&updated, WaitStatus::Waiting)
+            .await
+            .unwrap()
+    );
     let stored = s
         .get_event_wait(InstanceId::from_uuid(registered.instance_id), "wait_block")
         .await
@@ -914,7 +995,11 @@ async fn update_event_wait_cas_fails_after_satisfaction() {
 async fn update_event_wait_unknown_id_returns_false() {
     let s = store().await;
     let unknown = wait(&["paid"], JoinMode::Any);
-    assert!(!s.update_event_wait(&unknown, WaitStatus::Waiting).await.unwrap());
+    assert!(
+        !s.update_event_wait(&unknown, WaitStatus::Waiting)
+            .await
+            .unwrap()
+    );
 }
 
 // ============================================================================
@@ -927,7 +1012,9 @@ async fn expire_touches_only_pending_events() {
     ingest(&s, envelope("t1", "old", "o-1", "k", json!({})))
         .await
         .unwrap();
-    register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
@@ -937,10 +1024,16 @@ async fn expire_touches_only_pending_events() {
         .await
         .unwrap();
     assert_eq!(expired, 1);
-    let expired_rows = s.list_events("t1", Some(EventStatus::Expired), 10).await.unwrap();
+    let expired_rows = s
+        .list_events("t1", Some(EventStatus::Expired), 10)
+        .await
+        .unwrap();
     assert_eq!(expired_rows.len(), 1);
     assert_eq!(expired_rows[0].event_name, "old");
-    let consumed = s.list_events("t1", Some(EventStatus::Consumed), 10).await.unwrap();
+    let consumed = s
+        .list_events("t1", Some(EventStatus::Consumed), 10)
+        .await
+        .unwrap();
     assert_eq!(consumed.len(), 1);
 }
 
@@ -956,7 +1049,9 @@ async fn expire_boundary_is_strictly_before_cutoff() {
     assert_eq!(s.expire_events_before(t0).await.unwrap(), 0);
     // One second later: expired.
     assert_eq!(
-        s.expire_events_before(t0 + chrono::Duration::seconds(1)).await.unwrap(),
+        s.expire_events_before(t0 + chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
         1
     );
 }
@@ -972,7 +1067,10 @@ async fn expire_with_early_cutoff_touches_nothing() {
         .await
         .unwrap();
     assert_eq!(expired, 0);
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
 }
 
@@ -985,7 +1083,9 @@ async fn expired_event_not_drained_by_new_wait() {
     s.expire_events_before(Utc::now() + chrono::Duration::hours(1))
         .await
         .unwrap();
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(w.status, WaitStatus::Waiting);
 }
 
@@ -1007,7 +1107,9 @@ async fn expire_is_idempotent() {
 #[tokio::test]
 async fn list_events_filters_by_status() {
     let s = store().await;
-    register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
@@ -1015,15 +1117,24 @@ async fn list_events_filters_by_status() {
         .await
         .unwrap();
 
-    let pending = s.list_events("t1", Some(EventStatus::Pending), 10).await.unwrap();
+    let pending = s
+        .list_events("t1", Some(EventStatus::Pending), 10)
+        .await
+        .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].event_name, "loose");
-    let consumed = s.list_events("t1", Some(EventStatus::Consumed), 10).await.unwrap();
+    let consumed = s
+        .list_events("t1", Some(EventStatus::Consumed), 10)
+        .await
+        .unwrap();
     assert_eq!(consumed.len(), 1);
     assert_eq!(consumed[0].event_name, "paid");
     let all = s.list_events("t1", None, 10).await.unwrap();
     assert_eq!(all.len(), 2);
-    let expired = s.list_events("t1", Some(EventStatus::Expired), 10).await.unwrap();
+    let expired = s
+        .list_events("t1", Some(EventStatus::Expired), 10)
+        .await
+        .unwrap();
     assert!(expired.is_empty());
 }
 
@@ -1045,9 +1156,12 @@ async fn list_events_is_tenant_scoped() {
 async fn list_events_respects_limit() {
     let s = store().await;
     for i in 0..5 {
-        ingest(&s, envelope("t1", "paid", &format!("p-{i}"), "k", json!({})))
-            .await
-            .unwrap();
+        ingest(
+            &s,
+            envelope("t1", "paid", &format!("p-{i}"), "k", json!({})),
+        )
+        .await
+        .unwrap();
     }
     assert_eq!(s.list_events("t1", None, 3).await.unwrap().len(), 3);
     assert_eq!(s.list_events("t1", None, 10).await.unwrap().len(), 5);
@@ -1094,7 +1208,9 @@ async fn get_event_miss_returns_none() {
 #[tokio::test]
 async fn get_event_wait_miss_unknown_block() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert!(
         s.get_event_wait(InstanceId::from_uuid(w.instance_id), "no_such_block")
             .await
@@ -1106,7 +1222,9 @@ async fn get_event_wait_miss_unknown_block() {
 #[tokio::test]
 async fn get_event_wait_miss_unknown_instance() {
     let s = store().await;
-    register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     assert!(
         s.get_event_wait(InstanceId::new(), "wait_block")
             .await
@@ -1147,7 +1265,10 @@ async fn find_pending_events_excludes_consumed_and_other_keys() {
         .unwrap();
     s.consume_events(&[id1], InstanceId::new()).await.unwrap();
 
-    let found = s.find_pending_events("t1", &["a".to_string()], "k").await.unwrap();
+    let found = s
+        .find_pending_events("t1", &["a".to_string()], "k")
+        .await
+        .unwrap();
     assert!(found.is_empty());
     let other = s
         .find_pending_events("t1", &["a".to_string()], "OTHER")
@@ -1162,36 +1283,70 @@ async fn find_pending_events_empty_names_finds_nothing() {
     ingest(&s, envelope("t1", "a", "p-1", "k", json!({})))
         .await
         .unwrap();
-    assert!(s.find_pending_events("t1", &[], "k").await.unwrap().is_empty());
+    assert!(
+        s.find_pending_events("t1", &[], "k")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn find_waiting_event_waits_filters_by_name() {
     let s = store().await;
-    register_wait(&s, wait(&["a"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["a"], JoinMode::Any))
+        .await
+        .unwrap();
     assert_eq!(
-        s.find_waiting_event_waits("t1", "a", "order-1").await.unwrap().len(),
+        s.find_waiting_event_waits("t1", "a", "order-1")
+            .await
+            .unwrap()
+            .len(),
         1
     );
-    assert!(s.find_waiting_event_waits("t1", "b", "order-1").await.unwrap().is_empty());
+    assert!(
+        s.find_waiting_event_waits("t1", "b", "order-1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn find_waiting_event_waits_filters_by_key_and_tenant() {
     let s = store().await;
-    register_wait(&s, wait(&["a"], JoinMode::Any)).await.unwrap();
-    assert!(s.find_waiting_event_waits("t1", "a", "OTHER").await.unwrap().is_empty());
-    assert!(s.find_waiting_event_waits("t2", "a", "order-1").await.unwrap().is_empty());
+    register_wait(&s, wait(&["a"], JoinMode::Any))
+        .await
+        .unwrap();
+    assert!(
+        s.find_waiting_event_waits("t1", "a", "OTHER")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        s.find_waiting_event_waits("t2", "a", "order-1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn find_waiting_event_waits_excludes_satisfied() {
     let s = store().await;
-    register_wait(&s, wait(&["a"], JoinMode::Any)).await.unwrap();
+    register_wait(&s, wait(&["a"], JoinMode::Any))
+        .await
+        .unwrap();
     ingest(&s, envelope("t1", "a", "p-1", "order-1", json!({})))
         .await
         .unwrap();
-    assert!(s.find_waiting_event_waits("t1", "a", "order-1").await.unwrap().is_empty());
+    assert!(
+        s.find_waiting_event_waits("t1", "a", "order-1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1206,7 +1361,10 @@ async fn find_waiting_event_waits_oldest_first() {
     let new_id = new.id;
     register_wait(&s, new).await.unwrap();
 
-    let waits = s.find_waiting_event_waits("t1", "a", "order-1").await.unwrap();
+    let waits = s
+        .find_waiting_event_waits("t1", "a", "order-1")
+        .await
+        .unwrap();
     let ids: Vec<Uuid> = waits.iter().map(|w| w.id).collect();
     assert_eq!(ids, vec![old_id, new_id]);
 }
@@ -1215,6 +1373,7 @@ async fn find_waiting_event_waits_oldest_first() {
 // parse_wait_params
 // ============================================================================
 
+#[allow(clippy::needless_pass_by_value)]
 fn parse(params: serde_json::Value) -> Result<EventWait, String> {
     parse_wait_params(&params, "t1", Uuid::now_v7(), "blk")
 }
@@ -1242,7 +1401,10 @@ async fn parse_missing_events_errors() {
 async fn parse_blank_string_events_errors() {
     for events in ["", "   ", "\t\n"] {
         let err = parse(json!({"events": events, "correlation_key": "k"})).unwrap_err();
-        assert_eq!(err, "'events' (string or array) is required", "events={events:?}");
+        assert_eq!(
+            err, "'events' (string or array) is required",
+            "events={events:?}"
+        );
     }
 }
 
@@ -1261,7 +1423,12 @@ async fn parse_empty_array_events_errors() {
 
 #[tokio::test]
 async fn parse_array_with_non_string_entry_errors() {
-    for bad in [json!(["a", 1]), json!([null]), json!([{"n": "a"}]), json!([["a"]])] {
+    for bad in [
+        json!(["a", 1]),
+        json!([null]),
+        json!([{"n": "a"}]),
+        json!([["a"]]),
+    ] {
         let err = parse(json!({"events": bad, "correlation_key": "k"})).unwrap_err();
         assert_eq!(err, "'events' must be a non-empty array of strings");
     }
@@ -1325,26 +1492,33 @@ async fn parse_join_any() {
 
 #[tokio::test]
 async fn parse_join_count_valid() {
-    let w = parse(json!({"events": "r", "correlation_key": "k", "join": "count", "count": 3}))
-        .unwrap();
+    let w =
+        parse(json!({"events": "r", "correlation_key": "k", "join": "count", "count": 3})).unwrap();
     assert_eq!(w.join_mode, JoinMode::Count { count: 3 });
 }
 
 #[tokio::test]
 async fn parse_join_count_missing_count_errors() {
-    let err =
-        parse(json!({"events": "r", "correlation_key": "k", "join": "count"})).unwrap_err();
+    let err = parse(json!({"events": "r", "correlation_key": "k", "join": "count"})).unwrap_err();
     assert_eq!(err, "join 'count' requires a positive 'count'");
 }
 
 #[tokio::test]
 async fn parse_join_count_invalid_values_error() {
-    for bad in [json!(0), json!(-1), json!(2.5), json!("3"), json!(4_294_967_296_u64)] {
-        let err = parse(
-            json!({"events": "r", "correlation_key": "k", "join": "count", "count": bad}),
-        )
-        .unwrap_err();
-        assert_eq!(err, "join 'count' requires a positive 'count'", "count={bad}");
+    for bad in [
+        json!(0),
+        json!(-1),
+        json!(2.5),
+        json!("3"),
+        json!(4_294_967_296_u64),
+    ] {
+        let err =
+            parse(json!({"events": "r", "correlation_key": "k", "join": "count", "count": bad}))
+                .unwrap_err();
+        assert_eq!(
+            err, "join 'count' requires a positive 'count'",
+            "count={bad}"
+        );
     }
 }
 
@@ -1359,8 +1533,7 @@ async fn parse_join_count_u32_max_ok() {
 
 #[tokio::test]
 async fn parse_unknown_join_errors() {
-    let err =
-        parse(json!({"events": "r", "correlation_key": "k", "join": "quorum"})).unwrap_err();
+    let err = parse(json!({"events": "r", "correlation_key": "k", "join": "quorum"})).unwrap_err();
     assert_eq!(err, "unknown join mode 'quorum'");
 }
 
@@ -1429,9 +1602,12 @@ async fn satisfaction_enqueues_resume_signal_for_waiting_instance() {
     let registered = register_wait(&s, w).await.unwrap();
     assert_eq!(registered.status, WaitStatus::Waiting);
 
-    let outcome = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({"amt": 9})))
-        .await
-        .unwrap();
+    let outcome = ingest(
+        &s,
+        envelope("t1", "paid", "p-1", "order-1", json!({"amt": 9})),
+    )
+    .await
+    .unwrap();
     assert!(outcome.satisfied);
 
     let signals = s.get_pending_signals(instance_id).await.unwrap();
@@ -1442,7 +1618,10 @@ async fn satisfaction_enqueues_resume_signal_for_waiting_instance() {
         SignalType::Custom("human_input:wait_block".to_string())
     );
     assert_eq!(signal.payload["value"], json!("yes"));
-    assert_eq!(signal.payload["event_wait"], json!(registered.id.to_string()));
+    assert_eq!(
+        signal.payload["event_wait"],
+        json!(registered.id.to_string())
+    );
     assert!(!signal.delivered);
     assert_eq!(signal.instance_id, instance_id);
 }
@@ -1518,7 +1697,9 @@ async fn missing_instance_row_is_tolerated() {
     // The storage-only path: no instance exists at all. Satisfaction must
     // still complete without error and persist the wait as satisfied.
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
     let outcome = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
         .await
         .unwrap();
@@ -1598,7 +1779,9 @@ async fn independent_orders_progress_independently() {
 #[tokio::test]
 async fn full_pipeline_dedup_then_match_then_consume_exactly_once() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+    let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+        .await
+        .unwrap();
 
     // Producer sends the same logical event three times.
     let o1 = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
@@ -1619,17 +1802,27 @@ async fn full_pipeline_dedup_then_match_then_consume_exactly_once() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].status, EventStatus::Consumed);
     assert_eq!(events[0].consumed_by, Some(w.instance_id));
-    assert_eq!(s.consume_events(&[events[0].id], InstanceId::new()).await.unwrap(), 0);
+    assert_eq!(
+        s.consume_events(&[events[0].id], InstanceId::new())
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
 async fn wait_progress_is_durable_across_reads() {
     let s = store().await;
-    let w = register_wait(&s, wait(&["a", "b", "c"], JoinMode::All)).await.unwrap();
+    let w = register_wait(&s, wait(&["a", "b", "c"], JoinMode::All))
+        .await
+        .unwrap();
     for name in ["c", "a"] {
-        ingest(&s, envelope("t1", name, &format!("p-{name}"), "order-1", json!({})))
-            .await
-            .unwrap();
+        ingest(
+            &s,
+            envelope("t1", name, &format!("p-{name}"), "order-1", json!({})),
+        )
+        .await
+        .unwrap();
     }
     let stored = s
         .get_event_wait(InstanceId::from_uuid(w.instance_id), "wait_block")

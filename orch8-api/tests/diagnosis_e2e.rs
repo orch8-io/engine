@@ -84,7 +84,7 @@ impl Env {
         .await
     }
 
-    /// Create an instance through the public API (tenant_id, sequence_id and
+    /// Create an instance through the public API (`tenant_id`, `sequence_id` and
     /// namespace are the required body fields).
     async fn create_instance(&self, seq_id: &str, extra: Value) -> String {
         let mut body = json!({
@@ -195,7 +195,11 @@ fn mk_task(instance_id: &str, block: &str, handler: &str, state: WorkerTaskState
     }
 }
 
-fn mk_registration(handler: &str, version: Option<&str>, tenant: Option<&str>) -> WorkerRegistration {
+fn mk_registration(
+    handler: &str,
+    version: Option<&str>,
+    tenant: Option<&str>,
+) -> WorkerRegistration {
     WorkerRegistration {
         worker_id: "w-1".into(),
         handler_name: handler.to_string(),
@@ -458,7 +462,10 @@ async fn waiting_instance_with_future_timer_has_no_external_event_guess() {
     let report = env.diagnose(&inst).await;
     let cs = codes(&report);
     assert!(cs.contains(&"WAITING_UNTIL".to_string()), "{cs:?}");
-    assert!(!cs.contains(&"WAITING_EXTERNAL_EVENT".to_string()), "{cs:?}");
+    assert!(
+        !cs.contains(&"WAITING_EXTERNAL_EVENT".to_string()),
+        "{cs:?}"
+    );
 }
 
 // ===========================================================================
@@ -517,7 +524,12 @@ async fn budget_paused_breach_metadata_becomes_evidence() {
     let report = env.diagnose(&inst).await;
     let d = find(&report, "BUDGET_PAUSED");
     assert_eq!(d["evidence"][0]["label"], "budget_breach");
-    assert!(d["evidence"][0]["summary"].as_str().unwrap().contains("max_steps"));
+    assert!(
+        d["evidence"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("max_steps")
+    );
 }
 
 #[tokio::test]
@@ -661,7 +673,12 @@ async fn version_pin_above_live_worker_blocks_pickup() {
     let report = env.diagnose(&inst).await;
     let d = find(&report, "WORKER_BELOW_VERSION_PIN");
     assert_eq!(d["evidence"][0]["label"], "live_workers");
-    assert!(d["evidence"][0]["summary"].as_str().unwrap().contains("1.0.0"));
+    assert!(
+        d["evidence"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("1.0.0")
+    );
 }
 
 #[tokio::test]
@@ -687,7 +704,10 @@ async fn satisfied_version_pin_allows_pickup() {
     let report = env.diagnose(&inst).await;
     let cs = codes(&report);
     assert!(cs.contains(&"WAITING_WORKER_PICKUP".to_string()), "{cs:?}");
-    assert!(!cs.contains(&"WORKER_BELOW_VERSION_PIN".to_string()), "{cs:?}");
+    assert!(
+        !cs.contains(&"WORKER_BELOW_VERSION_PIN".to_string()),
+        "{cs:?}"
+    );
 }
 
 #[tokio::test]
@@ -712,7 +732,10 @@ async fn version_pin_of_other_tenant_is_ignored() {
         .unwrap();
     let report = env.diagnose(&inst).await;
     let cs = codes(&report);
-    assert!(!cs.contains(&"WORKER_BELOW_VERSION_PIN".to_string()), "{cs:?}");
+    assert!(
+        !cs.contains(&"WORKER_BELOW_VERSION_PIN".to_string()),
+        "{cs:?}"
+    );
     assert!(cs.contains(&"WAITING_WORKER_PICKUP".to_string()), "{cs:?}");
 }
 
@@ -723,7 +746,11 @@ async fn registration_outside_liveness_window_is_invisible() {
     let inst = waiting_with_pending_task(&env, "charge_card").await;
     let mut reg = mk_registration("charge_card", None, None);
     reg.last_seen_at = Utc::now() - Duration::minutes(10);
-    env.srv.storage.upsert_worker_registration(&reg).await.unwrap();
+    env.srv
+        .storage
+        .upsert_worker_registration(&reg)
+        .await
+        .unwrap();
     let report = env.diagnose(&inst).await;
     assert!(codes(&report).contains(&"NO_COMPATIBLE_WORKER".to_string()));
 }
@@ -841,7 +868,10 @@ async fn open_breaker_for_uninvolved_handler_ranks_last_as_health_warning() {
     assert_eq!(d["confidence"], "low");
     // Ranked below the probable cause (WAITING_EXTERNAL_EVENT).
     let cs = codes(&report);
-    let ext = cs.iter().position(|c| c == "WAITING_EXTERNAL_EVENT").unwrap();
+    let ext = cs
+        .iter()
+        .position(|c| c == "WAITING_EXTERNAL_EVENT")
+        .unwrap();
     let brk = cs.iter().position(|c| c == "OPEN_CIRCUIT_BREAKER").unwrap();
     assert!(ext < brk, "{cs:?}");
 }
@@ -926,7 +956,10 @@ async fn waiting_child_evidence_names_the_child_id() {
     let report = env.diagnose(&parent).await;
     let d = find(&report, "WAITING_CHILD");
     assert!(
-        d["evidence"][0]["summary"].as_str().unwrap().contains(&child_id),
+        d["evidence"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains(&child_id),
         "{d}"
     );
 }
@@ -958,7 +991,10 @@ async fn non_waiting_parent_gets_no_child_diagnosis() {
     let report = env.diagnose(&parent).await;
     let cs = codes(&report);
     assert!(!cs.contains(&"WAITING_CHILD".to_string()), "{cs:?}");
-    assert!(!cs.contains(&"CHILDREN_DONE_PARENT_WAITING".to_string()), "{cs:?}");
+    assert!(
+        !cs.contains(&"CHILDREN_DONE_PARENT_WAITING".to_string()),
+        "{cs:?}"
+    );
 }
 
 // ===========================================================================
@@ -1120,7 +1156,10 @@ async fn registered_event_wait_reports_waiting_event_with_missing_names() {
     let d = find(&report, "WAITING_EVENT");
     let summary = d["summary"].as_str().unwrap();
     assert!(summary.contains("payment_received"), "{summary}");
-    assert!(summary.contains("already matched: inventory_reserved"), "{summary}");
+    assert!(
+        summary.contains("already matched: inventory_reserved"),
+        "{summary}"
+    );
     assert!(summary.contains("order-42"), "{summary}");
     assert_eq!(d["evidence"][0]["label"], "correlation_key");
 }
@@ -1275,11 +1314,7 @@ async fn report_state_and_generated_at_reflect_diagnosis_time() {
     let before = Utc::now();
     let report = env.diagnose(&inst).await;
     assert_eq!(report["state"], "waiting");
-    let generated: DateTime<Utc> = report["generated_at"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let generated: DateTime<Utc> = report["generated_at"].as_str().unwrap().parse().unwrap();
     assert!(generated >= before - Duration::seconds(5));
     assert!(generated <= Utc::now() + Duration::seconds(5));
 }

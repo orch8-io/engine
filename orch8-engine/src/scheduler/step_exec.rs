@@ -565,8 +565,7 @@ pub(super) async fn execute_step_block(
             // BEFORE parking — the handler only runs after the gate is
             // satisfied, so without this the instance would park with
             // nothing listening for its events.
-            crate::event_correlation::register_wait_before_park(storage, instance, step_def)
-                .await;
+            crate::event_correlation::register_wait_before_park(storage, instance, step_def).await;
             crate::lifecycle::transition_instance(
                 storage.as_ref(),
                 instance_id,

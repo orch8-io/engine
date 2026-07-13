@@ -76,19 +76,15 @@ pub struct EventEnvelope {
 /// Join policies for multi-event waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case", tag = "mode")]
+#[derive(Default)]
 pub enum JoinMode {
     /// Resume on the first matching event.
     Any,
     /// Resume once every named event has arrived (in any order).
+    #[default]
     All,
     /// Resume once `count` matching events arrived.
     Count { count: u32 },
-}
-
-impl Default for JoinMode {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// Wait registration lifecycle.
@@ -295,7 +291,10 @@ mod tests {
 
     #[test]
     fn join_mode_serde_shapes() {
-        assert_eq!(serde_json::to_string(&JoinMode::Any).unwrap(), r#"{"mode":"any"}"#);
+        assert_eq!(
+            serde_json::to_string(&JoinMode::Any).unwrap(),
+            r#"{"mode":"any"}"#
+        );
         assert_eq!(
             serde_json::to_string(&JoinMode::Count { count: 2 }).unwrap(),
             r#"{"mode":"count","count":2}"#
@@ -307,7 +306,8 @@ mod tests {
     #[test]
     fn envelope_round_trips() {
         let e = event("payment_received");
-        let back: EventEnvelope = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        let back: EventEnvelope =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
         assert_eq!(back, e);
     }
 }

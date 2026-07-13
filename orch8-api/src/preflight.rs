@@ -167,7 +167,10 @@ async fn collect_inventory(state: &AppState, tenant: &TenantId) -> RuntimeInvent
             .collect()
     });
 
-    let queue_dispatch = storage.list_queue_dispatch(Some(tenant.as_str())).await.ok();
+    let queue_dispatch = storage
+        .list_queue_dispatch(Some(tenant.as_str()))
+        .await
+        .ok();
 
     let routing_rules = storage
         .list_queue_routing_rules(Some(tenant), None)

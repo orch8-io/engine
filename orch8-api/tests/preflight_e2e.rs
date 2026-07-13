@@ -2,7 +2,7 @@
 //!
 //! Exercises `POST /sequences/preflight` (draft) and
 //! `GET /sequences/{id}/preflight` (stored) against the full axum router
-//! with in-memory SQLite, seeding runtime state (workers, pins,
+//! with in-memory `SQLite`, seeding runtime state (workers, pins,
 //! credentials, plugins, queue dispatch, routing rules, sub-sequences)
 //! directly through the storage traits.
 
@@ -25,6 +25,7 @@ use orch8_types::worker::{WorkerRegistration, WorkerVersionPin};
 // helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::needless_pass_by_value)]
 fn draft(tenant: &str, name: &str, blocks: Value) -> Value {
     json!({
         "id": Uuid::now_v7(),
@@ -241,7 +242,12 @@ async fn missing_worker_finding_carries_resource_and_remediation() {
     assert_eq!(f["affected_resource"]["kind"], "handler");
     assert_eq!(f["affected_resource"]["id"], "charge_card");
     assert_eq!(f["severity"], "error");
-    assert!(f["remediation"][0]["summary"].as_str().unwrap().contains("worker"));
+    assert!(
+        f["remediation"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("worker")
+    );
 }
 
 #[tokio::test]
@@ -466,7 +472,15 @@ async fn stale_worker_registration_still_fails() {
 #[tokio::test]
 async fn worker_scoped_to_other_tenant_fails() {
     let srv = spawn_test_server().await;
-    seed_worker(&srv, "charge_card", None, None, Some("other-tenant"), Utc::now()).await;
+    seed_worker(
+        &srv,
+        "charge_card",
+        None,
+        None,
+        Some("other-tenant"),
+        Utc::now(),
+    )
+    .await;
     let body = draft("t1", "pf-w3", json!([step("x", "charge_card")]));
     let report = preflight(&srv, "t1", &body).await;
     assert_eq!(check(&report, "handlers_have_workers")["status"], "fail");
@@ -587,7 +601,14 @@ async fn disabled_credential_fails() {
 #[tokio::test]
 async fn expired_credential_fails() {
     let srv = spawn_test_server().await;
-    seed_credential(&srv, "t1", "stripe", true, Some(Utc::now() - Duration::hours(2))).await;
+    seed_credential(
+        &srv,
+        "t1",
+        "stripe",
+        true,
+        Some(Utc::now() - Duration::hours(2)),
+    )
+    .await;
     let report = preflight(&srv, "t1", &cred_draft("t1", "pf-c3", "stripe")).await;
     let c = check(&report, "credentials_present");
     assert_eq!(c["status"], "fail");
@@ -597,7 +618,14 @@ async fn expired_credential_fails() {
 #[tokio::test]
 async fn credential_with_future_expiry_passes() {
     let srv = spawn_test_server().await;
-    seed_credential(&srv, "t1", "stripe", true, Some(Utc::now() + Duration::days(30))).await;
+    seed_credential(
+        &srv,
+        "t1",
+        "stripe",
+        true,
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
     let report = preflight(&srv, "t1", &cred_draft("t1", "pf-c4", "stripe")).await;
     assert_eq!(check(&report, "credentials_present")["status"], "pass");
 }
@@ -830,7 +858,12 @@ async fn production_sub_sequence_passes() {
     // Created sequences default to production status.
     let target = draft("t1", "child-prod", json!([noop_step("a")]));
     create_sequence(&srv, "t1", &target).await;
-    let report = preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s2", "child-prod", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s2", "child-prod", None),
+    )
+    .await;
     assert_eq!(check(&report, "sub_sequences_available")["status"], "pass");
 }
 
@@ -840,7 +873,12 @@ async fn draft_only_sub_sequence_warns() {
     let target = draft("t1", "child-draft", json!([noop_step("a")]));
     let id = create_sequence(&srv, "t1", &target).await;
     set_status(&srv, id, "draft").await;
-    let report = preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s3", "child-draft", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s3", "child-draft", None),
+    )
+    .await;
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c["status"], "warning");
     assert_eq!(finding_codes(c), vec!["SUB_SEQUENCE_DRAFT_ONLY"]);
@@ -853,7 +891,12 @@ async fn unpublished_sub_sequence_fails() {
     let target = draft("t1", "child-unpub", json!([noop_step("a")]));
     let id = create_sequence(&srv, "t1", &target).await;
     set_status(&srv, id, "unpublished").await;
-    let report = preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s4", "child-unpub", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s4", "child-unpub", None),
+    )
+    .await;
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c["status"], "fail");
     assert_eq!(finding_codes(c), vec!["SUB_SEQUENCE_UNPUBLISHED"]);
@@ -865,7 +908,12 @@ async fn staging_sub_sequence_passes() {
     let target = draft("t1", "child-staging", json!([noop_step("a")]));
     let id = create_sequence(&srv, "t1", &target).await;
     set_status(&srv, id, "staging").await;
-    let report = preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s5", "child-staging", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s5", "child-staging", None),
+    )
+    .await;
     assert_eq!(check(&report, "sub_sequences_available")["status"], "pass");
 }
 
@@ -874,7 +922,12 @@ async fn version_filter_mismatch_fails_as_missing() {
     let srv = spawn_test_server().await;
     let target = draft("t1", "child-v1", json!([noop_step("a")]));
     create_sequence(&srv, "t1", &target).await;
-    let report = preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s6", "child-v1", Some(7))).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s6", "child-v1", Some(7)),
+    )
+    .await;
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c["status"], "fail");
     assert_eq!(finding_codes(c), vec!["SUB_SEQUENCE_MISSING"]);
@@ -885,8 +938,12 @@ async fn version_filter_match_passes() {
     let srv = spawn_test_server().await;
     let target = draft("t1", "child-vmatch", json!([noop_step("a")]));
     create_sequence(&srv, "t1", &target).await;
-    let report =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s7", "child-vmatch", Some(1))).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s7", "child-vmatch", Some(1)),
+    )
+    .await;
     assert_eq!(check(&report, "sub_sequences_available")["status"], "pass");
 }
 
@@ -906,8 +963,12 @@ async fn other_tenants_sub_sequence_is_invisible() {
     let srv = spawn_test_server().await;
     let target = draft("other-tenant", "child-foreign", json!([noop_step("a")]));
     create_sequence(&srv, "other-tenant", &target).await;
-    let report =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s9", "child-foreign", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s9", "child-foreign", None),
+    )
+    .await;
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c["status"], "fail");
     assert_eq!(finding_codes(c), vec!["SUB_SEQUENCE_MISSING"]);
@@ -923,8 +984,12 @@ async fn draft_version_plus_production_version_passes() {
     v2["id"] = json!(Uuid::now_v7());
     v2["version"] = json!(2);
     create_sequence(&srv, "t1", &v2).await;
-    let report =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s10", "child-mixed", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s10", "child-mixed", None),
+    )
+    .await;
     assert_eq!(check(&report, "sub_sequences_available")["status"], "pass");
 }
 
@@ -938,8 +1003,12 @@ async fn version_pinned_to_draft_version_warns_despite_production_sibling() {
     v2["version"] = json!(2);
     let v2_id = create_sequence(&srv, "t1", &v2).await;
     set_status(&srv, v2_id, "draft").await;
-    let report =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-s11", "child-pinned", Some(2))).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-s11", "child-pinned", Some(2)),
+    )
+    .await;
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c["status"], "warning");
     assert_eq!(finding_codes(c), vec!["SUB_SEQUENCE_DRAFT_ONLY"]);
@@ -971,7 +1040,15 @@ async fn stored_sequence_preflight_reports_failures() {
 #[tokio::test]
 async fn stored_sequence_preflight_passes_when_runtime_is_ready() {
     let srv = spawn_test_server().await;
-    seed_worker(&srv, "external_thing", None, Some("1.0.0"), None, Utc::now()).await;
+    seed_worker(
+        &srv,
+        "external_thing",
+        None,
+        Some("1.0.0"),
+        None,
+        Utc::now(),
+    )
+    .await;
     let body = draft("t1", "pf-stored2", json!([step("x", "external_thing")]));
     let id = create_sequence(&srv, "t1", &body).await;
 
@@ -1198,13 +1275,21 @@ async fn warning_report_is_distinct_from_fail_in_overall() {
     let target = draft("t1", "child-warn", json!([noop_step("a")]));
     let id = create_sequence(&srv, "t1", &target).await;
     set_status(&srv, id, "draft").await;
-    let report =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-warnonly", "child-warn", None)).await;
+    let report = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-warnonly", "child-warn", None),
+    )
+    .await;
     assert_eq!(report["overall"], "warning");
 
     // Same reference but unpublished → fail.
     set_status(&srv, id, "unpublished").await;
-    let report2 =
-        preflight(&srv, "t1", &sub_ref_draft("t1", "pf-failonly", "child-warn", None)).await;
+    let report2 = preflight(
+        &srv,
+        "t1",
+        &sub_ref_draft("t1", "pf-failonly", "child-warn", None),
+    )
+    .await;
     assert_eq!(report2["overall"], "fail");
 }

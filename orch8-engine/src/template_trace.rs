@@ -149,12 +149,7 @@ fn trace_expression(
     // The production resolver computes the final value (fallbacks + pipe
     // filters included).
     let single = format!("{{{{ {expression} }}}}");
-    let resolved = template::resolve_with_state(
-        &Value::String(single),
-        context,
-        outputs,
-        state,
-    );
+    let resolved = template::resolve_with_state(&Value::String(single), context, outputs, state);
 
     // Provenance: which fallback segment fires first?
     let (source, fallback_used, base_missing, base_null) =
@@ -169,9 +164,10 @@ fn trace_expression(
             if value.is_null() {
                 entry.status = if base_missing {
                     ResolutionStatus::Missing
-                } else if base_null {
-                    ResolutionStatus::Null
                 } else {
+                    // Explicit null (or a filter produced null): either
+                    // way the caller sees a genuine null value.
+                    let _ = base_null;
                     ResolutionStatus::Null
                 };
                 entry.value = Some(Value::Null);
@@ -223,12 +219,7 @@ fn analyze_fallback_chain(
                         first_null = true;
                     }
                 }
-                Ok(None) => {
-                    if i == 0 {
-                        first_missing = true;
-                    }
-                }
-                Err(_) => {
+                Ok(None) | Err(_) => {
                     if i == 0 {
                         first_missing = true;
                     }
@@ -236,7 +227,12 @@ fn analyze_fallback_chain(
             }
         } else {
             // A quoted/bare literal default.
-            return (Some("literal".to_string()), i > 0, first_missing, first_null);
+            return (
+                Some("literal".to_string()),
+                i > 0,
+                first_missing,
+                first_null,
+            );
         }
     }
     (None, false, first_missing, first_null)
@@ -284,6 +280,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn trace(params: Value, data: Value, outputs: Value) -> ResolutionTrace {
         trace_params(
             "blk",
@@ -392,7 +389,12 @@ mod tests {
         let t = trace(json!({"v": "{{ bogus.path }}"}), json!({}), json!({}));
         let e = entry(&t, "v");
         assert_eq!(e.status, ResolutionStatus::Error);
-        assert!(e.error.as_deref().unwrap().contains("unknown template root"));
+        assert!(
+            e.error
+                .as_deref()
+                .unwrap()
+                .contains("unknown template root")
+        );
         assert!(e.value.is_none());
     }
 

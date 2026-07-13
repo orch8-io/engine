@@ -364,7 +364,11 @@ fn print_diagnosis(report: &Value) {
         );
         println!("      {}", val_str(d, "summary"));
         for ev in d["evidence"].as_array().into_iter().flatten() {
-            println!("      evidence: {} = {}", val_str(ev, "label"), val_str(ev, "summary"));
+            println!(
+                "      evidence: {} = {}",
+                val_str(ev, "label"),
+                val_str(ev, "summary")
+            );
         }
         for rem in d["remediation"].as_array().into_iter().flatten() {
             let risk = if rem["side_effect_risk"] == Value::Bool(true) {

@@ -59,7 +59,12 @@ classify_case!(
     None,
     Dns
 );
-classify_case!(classify_dns_resolve_host, "failed to resolve host", None, Dns);
+classify_case!(
+    classify_dns_resolve_host,
+    "failed to resolve host",
+    None,
+    Dns
+);
 classify_case!(
     classify_dns_curl_style_resolve,
     "curl: (6) could not resolve host: example.com",
@@ -73,11 +78,31 @@ classify_case!(
     Dns
 );
 classify_case!(classify_dns_uppercase, "DNS LOOKUP FAILED", None, Dns);
-classify_case!(classify_dns_mixed_case_resolve, "cannot Resolve address", None, Dns);
-classify_case!(classify_dns_dnssec_embedded, "dnssec validation failed", None, Dns);
+classify_case!(
+    classify_dns_mixed_case_resolve,
+    "cannot Resolve address",
+    None,
+    Dns
+);
+classify_case!(
+    classify_dns_dnssec_embedded,
+    "dnssec validation failed",
+    None,
+    Dns
+);
 // "resolve" embedded in a larger word still matches (substring matching).
-classify_case!(classify_dns_unresolved_embedded, "unresolved symbol in handler", None, Dns);
-classify_case!(classify_dns_resolved_embedded, "resolved the promise twice", None, Dns);
+classify_case!(
+    classify_dns_unresolved_embedded,
+    "unresolved symbol in handler",
+    None,
+    Dns
+);
+classify_case!(
+    classify_dns_resolved_embedded,
+    "resolved the promise twice",
+    None,
+    Dns
+);
 // "resolution" does NOT contain "resolve" (no 'v') — conservative fallthrough.
 classify_case!(
     classify_dns_name_resolution_is_other,
@@ -90,19 +115,49 @@ classify_case!(
 // classify_error: Connect
 // ---------------------------------------------------------------------------
 
-classify_case!(classify_connect_refused, "connection refused", None, Connect);
+classify_case!(
+    classify_connect_refused,
+    "connection refused",
+    None,
+    Connect
+);
 classify_case!(
     classify_connect_reqwest_tcp_refused,
     "error trying to connect: tcp connect error: Connection refused (os error 61)",
     None,
     Connect
 );
-classify_case!(classify_connect_reset_by_peer, "connection reset by peer", None, Connect);
-classify_case!(classify_connect_aborted_no_shutdown, "connection aborted", None, Connect);
+classify_case!(
+    classify_connect_reset_by_peer,
+    "connection reset by peer",
+    None,
+    Connect
+);
+classify_case!(
+    classify_connect_aborted_no_shutdown,
+    "connection aborted",
+    None,
+    Connect
+);
 classify_case!(classify_connect_broken_pipe, "broken pipe", None, Connect);
-classify_case!(classify_connect_broken_pipe_os_error, "os error 32: Broken pipe", None, Connect);
-classify_case!(classify_connect_uppercase, "CONNECTION RESET", None, Connect);
-classify_case!(classify_connect_failed_to_connect, "failed to connect to host", None, Connect);
+classify_case!(
+    classify_connect_broken_pipe_os_error,
+    "os error 32: Broken pipe",
+    None,
+    Connect
+);
+classify_case!(
+    classify_connect_uppercase,
+    "CONNECTION RESET",
+    None,
+    Connect
+);
+classify_case!(
+    classify_connect_failed_to_connect,
+    "failed to connect to host",
+    None,
+    Connect
+);
 classify_case!(
     classify_connect_closed_before_complete,
     "connection closed before message completed",
@@ -110,16 +165,36 @@ classify_case!(
     Connect
 );
 // "connect" embedded inside bigger words still matches.
-classify_case!(classify_connect_reconnect_embedded, "unable to reconnect", None, Connect);
-classify_case!(classify_connect_disconnected_embedded, "disconnected from server", None, Connect);
+classify_case!(
+    classify_connect_reconnect_embedded,
+    "unable to reconnect",
+    None,
+    Connect
+);
+classify_case!(
+    classify_connect_disconnected_embedded,
+    "disconnected from server",
+    None,
+    Connect
+);
 // "refused" alone (without "connect"/"connection refused") is NOT enough.
-classify_case!(classify_connect_refused_alone_is_other, "https://example.com refused", None, Other);
+classify_case!(
+    classify_connect_refused_alone_is_other,
+    "https://example.com refused",
+    None,
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: TLS
 // ---------------------------------------------------------------------------
 
-classify_case!(classify_tls_cert_expired, "invalid peer certificate: Expired", None, Tls);
+classify_case!(
+    classify_tls_cert_expired,
+    "invalid peer certificate: Expired",
+    None,
+    Tls
+);
 classify_case!(
     classify_tls_cert_unknown_issuer,
     "invalid peer certificate: UnknownIssuer",
@@ -133,11 +208,26 @@ classify_case!(
     None,
     Tls
 );
-classify_case!(classify_tls_cert_verify_failed, "certificate verify failed", None, Tls);
+classify_case!(
+    classify_tls_cert_verify_failed,
+    "certificate verify failed",
+    None,
+    Tls
+);
 classify_case!(classify_tls_uppercase, "TLS ERROR", None, Tls);
 classify_case!(classify_tls_handshake_alone, "handshake failure", None, Tls);
-classify_case!(classify_tls_self_signed_cert, "self-signed certificate in chain", None, Tls);
-classify_case!(classify_tls_hostname_mismatch, "hostname mismatch in certificate", None, Tls);
+classify_case!(
+    classify_tls_self_signed_cert,
+    "self-signed certificate in chain",
+    None,
+    Tls
+);
+classify_case!(
+    classify_tls_hostname_mismatch,
+    "hostname mismatch in certificate",
+    None,
+    Tls
+);
 classify_case!(
     classify_tls_close_notify_beats_connect,
     "peer closed connection without sending TLS close_notify",
@@ -145,31 +235,76 @@ classify_case!(
     Tls
 );
 // "handshake timed out" — TLS branch is checked before Timeout.
-classify_case!(classify_tls_handshake_timed_out, "handshake timed out", None, Tls);
+classify_case!(
+    classify_tls_handshake_timed_out,
+    "handshake timed out",
+    None,
+    Tls
+);
 classify_case!(classify_tls_timed_out, "tls timed out", None, Tls);
 // "ssl" hidden inside ordinary words still matches (documenting actual behavior).
-classify_case!(classify_tls_ssl_embedded_crossly, "peer answered crossly", None, Tls);
-classify_case!(classify_tls_ssl_embedded_misslabeled, "misslabeled endpoint", None, Tls);
+classify_case!(
+    classify_tls_ssl_embedded_crossly,
+    "peer answered crossly",
+    None,
+    Tls
+);
+classify_case!(
+    classify_tls_ssl_embedded_misslabeled,
+    "misslabeled endpoint",
+    None,
+    Tls
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: Timeout
 // ---------------------------------------------------------------------------
 
-classify_case!(classify_timeout_operation_timed_out, "operation timed out", None, Timeout);
+classify_case!(
+    classify_timeout_operation_timed_out,
+    "operation timed out",
+    None,
+    Timeout
+);
 classify_case!(
     classify_timeout_reqwest_sending,
     "error sending request for url (https://slow.example/hook): operation timed out",
     None,
     Timeout
 );
-classify_case!(classify_timeout_request_timeout, "request timeout", None, Timeout);
-classify_case!(classify_timeout_waiting, "timeout waiting for response", None, Timeout);
+classify_case!(
+    classify_timeout_request_timeout,
+    "request timeout",
+    None,
+    Timeout
+);
+classify_case!(
+    classify_timeout_waiting,
+    "timeout waiting for response",
+    None,
+    Timeout
+);
 classify_case!(classify_timeout_uppercase, "TIMED OUT", None, Timeout);
 // Timeout branch precedes Connect: "connect timeout" is a Timeout.
-classify_case!(classify_timeout_beats_connect, "connect timeout", None, Timeout);
-classify_case!(classify_timeout_during_connect, "timeout during connect", None, Timeout);
+classify_case!(
+    classify_timeout_beats_connect,
+    "connect timeout",
+    None,
+    Timeout
+);
+classify_case!(
+    classify_timeout_during_connect,
+    "timeout during connect",
+    None,
+    Timeout
+);
 // "deadline has elapsed" carries no recognized keyword — conservative Other.
-classify_case!(classify_timeout_deadline_is_other, "deadline has elapsed", None, Other);
+classify_case!(
+    classify_timeout_deadline_is_other,
+    "deadline has elapsed",
+    None,
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: RedirectRejected
@@ -181,8 +316,18 @@ classify_case!(
     None,
     RedirectRejected
 );
-classify_case!(classify_redirect_too_many, "too many redirects", None, RedirectRejected);
-classify_case!(classify_redirect_loop, "redirect loop detected", None, RedirectRejected);
+classify_case!(
+    classify_redirect_too_many,
+    "too many redirects",
+    None,
+    RedirectRejected
+);
+classify_case!(
+    classify_redirect_loop,
+    "redirect loop detected",
+    None,
+    RedirectRejected
+);
 classify_case!(
     classify_redirect_uppercase,
     "REDIRECT to disallowed scheme",
@@ -196,7 +341,12 @@ classify_case!(
     None,
     RedirectRejected
 );
-classify_case!(classify_redirect_timed_out, "redirect timed out", None, RedirectRejected);
+classify_case!(
+    classify_redirect_timed_out,
+    "redirect timed out",
+    None,
+    RedirectRejected
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: Serialization
@@ -214,7 +364,12 @@ classify_case!(
     None,
     Serialization
 );
-classify_case!(classify_serialize_uppercase, "could not SERIALIZE json", None, Serialization);
+classify_case!(
+    classify_serialize_uppercase,
+    "could not SERIALIZE json",
+    None,
+    Serialization
+);
 // "serialized" contains "serialize" — still matches.
 classify_case!(
     classify_serialize_embedded_past_tense,
@@ -247,7 +402,12 @@ classify_case!(
     None,
     Aborted
 );
-classify_case!(classify_aborted_uppercase, "ABORTED BY SHUTDOWN", None, Aborted);
+classify_case!(
+    classify_aborted_uppercase,
+    "ABORTED BY SHUTDOWN",
+    None,
+    Aborted
+);
 // Aborted is the very first string branch — beats everything else.
 classify_case!(
     classify_aborted_beats_connect,
@@ -269,12 +429,27 @@ classify_case!(classify_aborted_bare_is_other, "aborted", None, Other);
 // ---------------------------------------------------------------------------
 
 classify_case!(classify_http_503, "http 503", None, HttpStatus);
-classify_case!(classify_http_404_text, "http 404 not found", None, HttpStatus);
+classify_case!(
+    classify_http_404_text,
+    "http 404 not found",
+    None,
+    HttpStatus
+);
 classify_case!(classify_http_uppercase, "HTTP 500", None, HttpStatus);
 classify_case!(classify_http_mixed_case, "HtTp 502", None, HttpStatus);
 // Only a *prefix* "http " counts.
-classify_case!(classify_http_leading_space_is_other, " http 503", None, Other);
-classify_case!(classify_http_midstring_is_other, "got http 200 response", None, Other);
+classify_case!(
+    classify_http_leading_space_is_other,
+    " http 503",
+    None,
+    Other
+);
+classify_case!(
+    classify_http_midstring_is_other,
+    "got http 200 response",
+    None,
+    Other
+);
 classify_case!(
     classify_http_error_prefix_is_other,
     "error: http 502 bad gateway",
@@ -282,7 +457,12 @@ classify_case!(
     Other
 );
 // "https://" has no space after "http" — no match anywhere.
-classify_case!(classify_https_url_is_other, "https://example.com unreachable", None, Other);
+classify_case!(
+    classify_https_url_is_other,
+    "https://example.com unreachable",
+    None,
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: ResponseTooLarge
@@ -300,20 +480,55 @@ classify_case!(
     None,
     ResponseTooLarge
 );
-classify_case!(classify_too_large_any_order, "large body received", None, ResponseTooLarge);
-classify_case!(classify_too_large_uppercase, "BODY TOO LARGE", None, ResponseTooLarge);
+classify_case!(
+    classify_too_large_any_order,
+    "large body received",
+    None,
+    ResponseTooLarge
+);
+classify_case!(
+    classify_too_large_uppercase,
+    "BODY TOO LARGE",
+    None,
+    ResponseTooLarge
+);
 // Needs BOTH "body" and "large".
-classify_case!(classify_large_without_body_is_other, "payload too large", None, Other);
-classify_case!(classify_body_without_large_is_other, "body exceeded limit", None, Other);
+classify_case!(
+    classify_large_without_body_is_other,
+    "payload too large",
+    None,
+    Other
+);
+classify_case!(
+    classify_body_without_large_is_other,
+    "body exceeded limit",
+    None,
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: Other / never-classified strings
 // ---------------------------------------------------------------------------
 
 classify_case!(classify_empty_is_other, "", None, Other);
-classify_case!(classify_gremlins_is_other, "mysterious gremlins", None, Other);
-classify_case!(classify_channel_closed_is_other, "channel closed", None, Other);
-classify_case!(classify_scheme_is_other, "invalid URL, scheme is not allowed", None, Other);
+classify_case!(
+    classify_gremlins_is_other,
+    "mysterious gremlins",
+    None,
+    Other
+);
+classify_case!(
+    classify_channel_closed_is_other,
+    "channel closed",
+    None,
+    Other
+);
+classify_case!(
+    classify_scheme_is_other,
+    "invalid URL, scheme is not allowed",
+    None,
+    Other
+);
 // `classify_error` never produces these classes — they are set by policy code.
 classify_case!(
     classify_signature_words_are_other,
@@ -321,21 +536,71 @@ classify_case!(
     None,
     Other
 );
-classify_case!(classify_policy_words_are_other, "internal policy blocked", None, Other);
+classify_case!(
+    classify_policy_words_are_other,
+    "internal policy blocked",
+    None,
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // classify_error: status-code dominance
 // ---------------------------------------------------------------------------
 
-classify_case!(classify_status_400_dominates, "connection refused", Some(400), HttpStatus);
-classify_case!(classify_status_404_dominates, "dns error", Some(404), HttpStatus);
-classify_case!(classify_status_429_dominates, "timed out", Some(429), HttpStatus);
-classify_case!(classify_status_499_dominates, "tls handshake eof", Some(499), HttpStatus);
-classify_case!(classify_status_500_dominates, "redirect loop", Some(500), HttpStatus);
-classify_case!(classify_status_503_dominates, "anything", Some(503), HttpStatus);
-classify_case!(classify_status_599_dominates, "broken pipe", Some(599), HttpStatus);
-classify_case!(classify_status_max_u16_dominates, "gremlins", Some(u16::MAX), HttpStatus);
-classify_case!(classify_status_400_with_empty_error, "", Some(400), HttpStatus);
+classify_case!(
+    classify_status_400_dominates,
+    "connection refused",
+    Some(400),
+    HttpStatus
+);
+classify_case!(
+    classify_status_404_dominates,
+    "dns error",
+    Some(404),
+    HttpStatus
+);
+classify_case!(
+    classify_status_429_dominates,
+    "timed out",
+    Some(429),
+    HttpStatus
+);
+classify_case!(
+    classify_status_499_dominates,
+    "tls handshake eof",
+    Some(499),
+    HttpStatus
+);
+classify_case!(
+    classify_status_500_dominates,
+    "redirect loop",
+    Some(500),
+    HttpStatus
+);
+classify_case!(
+    classify_status_503_dominates,
+    "anything",
+    Some(503),
+    HttpStatus
+);
+classify_case!(
+    classify_status_599_dominates,
+    "broken pipe",
+    Some(599),
+    HttpStatus
+);
+classify_case!(
+    classify_status_max_u16_dominates,
+    "gremlins",
+    Some(u16::MAX),
+    HttpStatus
+);
+classify_case!(
+    classify_status_400_with_empty_error,
+    "",
+    Some(400),
+    HttpStatus
+);
 classify_case!(
     classify_status_dominates_aborted_by_shutdown,
     "aborted by shutdown",
@@ -343,12 +608,42 @@ classify_case!(
     HttpStatus
 );
 // Statuses below 400 do NOT force HttpStatus — the message decides.
-classify_case!(classify_status_0_falls_through, "connection refused", Some(0), Connect);
-classify_case!(classify_status_100_falls_through, "operation timed out", Some(100), Timeout);
-classify_case!(classify_status_200_falls_through, "connection reset", Some(200), Connect);
-classify_case!(classify_status_301_falls_through, "dns error", Some(301), Dns);
-classify_case!(classify_status_399_falls_through, "connection refused", Some(399), Connect);
-classify_case!(classify_status_200_unknown_error_is_other, "gremlins", Some(200), Other);
+classify_case!(
+    classify_status_0_falls_through,
+    "connection refused",
+    Some(0),
+    Connect
+);
+classify_case!(
+    classify_status_100_falls_through,
+    "operation timed out",
+    Some(100),
+    Timeout
+);
+classify_case!(
+    classify_status_200_falls_through,
+    "connection reset",
+    Some(200),
+    Connect
+);
+classify_case!(
+    classify_status_301_falls_through,
+    "dns error",
+    Some(301),
+    Dns
+);
+classify_case!(
+    classify_status_399_falls_through,
+    "connection refused",
+    Some(399),
+    Connect
+);
+classify_case!(
+    classify_status_200_unknown_error_is_other,
+    "gremlins",
+    Some(200),
+    Other
+);
 
 // ---------------------------------------------------------------------------
 // DeliveryErrorClass: as_str / serde parity
@@ -361,7 +656,10 @@ macro_rules! class_parity {
             let class = DeliveryErrorClass::$class;
             assert_eq!(class.as_str(), $label);
             // Serialize matches as_str.
-            assert_eq!(serde_json::to_string(&class).unwrap(), format!("\"{}\"", $label));
+            assert_eq!(
+                serde_json::to_string(&class).unwrap(),
+                format!("\"{}\"", $label)
+            );
             // Deserialize from the label round-trips.
             let back: DeliveryErrorClass =
                 serde_json::from_str(&format!("\"{}\"", $label)).unwrap();
@@ -374,14 +672,22 @@ class_parity!(parity_dns, Dns, "dns");
 class_parity!(parity_connect, Connect, "connect");
 class_parity!(parity_tls, Tls, "tls");
 class_parity!(parity_timeout, Timeout, "timeout");
-class_parity!(parity_redirect_rejected, RedirectRejected, "redirect_rejected");
+class_parity!(
+    parity_redirect_rejected,
+    RedirectRejected,
+    "redirect_rejected"
+);
 class_parity!(parity_http_status, HttpStatus, "http_status");
 class_parity!(
     parity_signature_configuration,
     SignatureConfiguration,
     "signature_configuration"
 );
-class_parity!(parity_response_too_large, ResponseTooLarge, "response_too_large");
+class_parity!(
+    parity_response_too_large,
+    ResponseTooLarge,
+    "response_too_large"
+);
 class_parity!(parity_internal_policy, InternalPolicy, "internal_policy");
 class_parity!(parity_serialization, Serialization, "serialization");
 class_parity!(parity_aborted, Aborted, "aborted");
@@ -485,7 +791,10 @@ fn set_error_truncates_max_plus_one() {
     assert!(excerpt.ends_with(ELLIPSIS));
     // 512 kept bytes + 3-byte ellipsis.
     assert_eq!(excerpt.len(), MAX_ERROR_EXCERPT_LEN + ELLIPSIS.len_utf8());
-    assert_eq!(excerpt.strip_suffix(ELLIPSIS).unwrap(), &input[..MAX_ERROR_EXCERPT_LEN]);
+    assert_eq!(
+        excerpt.strip_suffix(ELLIPSIS).unwrap(),
+        &input[..MAX_ERROR_EXCERPT_LEN]
+    );
 }
 
 #[test]
@@ -725,7 +1034,10 @@ fn attempt_omits_absent_optionals_in_json() {
 fn attempt_includes_present_optionals_in_json() {
     let a = full_attempt();
     let value = serde_json::to_value(&a).unwrap();
-    assert_eq!(value["instance_id"], a.instance_id.unwrap().to_string().as_str());
+    assert_eq!(
+        value["instance_id"],
+        a.instance_id.unwrap().to_string().as_str()
+    );
     assert_eq!(value["status_code"], 503);
     assert_eq!(value["error_class"], "http_status");
     assert_eq!(value["error_excerpt"], "http 503");

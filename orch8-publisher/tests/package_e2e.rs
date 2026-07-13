@@ -14,10 +14,9 @@ use rand_core::OsRng;
 use serde_json::json;
 
 use orch8_publisher::package::{
-    PACKAGE_FORMAT_VERSION, PackageError, PackageManifest, PackageRequirements, SignedPackage,
-    TrustLevel, TrustPolicy, build_package, check_trust, check_upgrade, content_hash,
-    contract_files, install_namespace, parse_version, sequence_files, validate_package_name,
-    verify_package,
+    PackageError, PackageManifest, PackageRequirements, SignedPackage, TrustLevel, TrustPolicy,
+    build_package, check_trust, check_upgrade, content_hash, contract_files, install_namespace,
+    parse_version, sequence_files, validate_package_name, verify_package,
 };
 use orch8_types::contract::{
     CONTRACT_SCHEMA_VERSION, ContractCase, ContractSuite, Expectations, MockDef, MockPolicy,
@@ -105,7 +104,9 @@ fn contract_suite(sequence_name: &str, handler: &str, case_names: &[&str]) -> Co
                 mocks: vec![MockDef {
                     handler: Some(handler.to_string()),
                     block: None,
-                    policy: MockPolicy::Success { output: json!({"ok": true}) },
+                    policy: MockPolicy::Success {
+                        output: json!({"ok": true}),
+                    },
                 }],
                 signals: vec![],
                 expect: Expectations::default(),
@@ -160,7 +161,10 @@ fn package_files() -> BTreeMap<String, String> {
         "contracts/refund.contracts.json".to_string(),
         contract_json("refund", "charge_card", &["full refund"]),
     );
-    f.insert("README.md".to_string(), "# Acme Checkout Package".to_string());
+    f.insert(
+        "README.md".to_string(),
+        "# Acme Checkout Package".to_string(),
+    );
     f
 }
 
@@ -370,7 +374,10 @@ fn e2e_lifecycle_across_segment_counts() {
     check_upgrade("1.0.1", "1.1").unwrap();
     let pkg = wire_round_trip(&build_signed("acme/checkout", "1.1", &key()));
     verify_package(&pkg).unwrap();
-    assert_eq!(parse_version(&pkg.archive.manifest.version).unwrap(), vec![1, 1]);
+    assert_eq!(
+        parse_version(&pkg.archive.manifest.version).unwrap(),
+        vec![1, 1]
+    );
 }
 
 #[test]
@@ -397,7 +404,10 @@ fn e2e_downgrade_error_surfaces_both_versions() {
     let wire = serde_json::to_vec(&pkg).unwrap();
     let err = install_pipeline(&wire, &trusting(&pkg), &["1.1.0"], &[]).unwrap_err();
     match err {
-        PackageError::Downgrade { installed, incoming } => {
+        PackageError::Downgrade {
+            installed,
+            incoming,
+        } => {
             assert_eq!(installed, "1.1.0");
             assert_eq!(incoming, "1.0.5");
         }
@@ -473,7 +483,9 @@ fn e2e_tampered_content_hash_in_wire_text() {
 fn e2e_recomputed_hash_with_stale_signature_over_wire() {
     let pkg = build_signed("acme/checkout", "1.0.0", &key());
     let mut back = wire_round_trip(&pkg);
-    back.archive.files.insert("README.md".into(), "# Evil".into());
+    back.archive
+        .files
+        .insert("README.md".into(), "# Evil".into());
     back.content_hash = content_hash(&back.archive).unwrap();
     let bad = wire_round_trip(&back);
     assert_eq!(verify_package(&bad), Err(PackageError::BadSignature));
@@ -494,7 +506,10 @@ fn e2e_corrupted_signature_base64_in_wire_text() {
     let bad = tamper_wire(&pkg, |v| {
         v["signature"] = json!("@@not@@base64@@");
     });
-    assert!(matches!(verify_package(&bad), Err(PackageError::Invalid(_))));
+    assert!(matches!(
+        verify_package(&bad),
+        Err(PackageError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -513,7 +528,10 @@ fn e2e_tampered_format_version_in_wire_text() {
     let bad = tamper_wire(&pkg, |v| {
         v["archive"]["format_version"] = json!(2);
     });
-    assert_eq!(verify_package(&bad), Err(PackageError::UnsupportedFormat(2)));
+    assert_eq!(
+        verify_package(&bad),
+        Err(PackageError::UnsupportedFormat(2))
+    );
 }
 
 #[test]
@@ -618,7 +636,10 @@ fn e2e_rotated_package_full_pipeline_with_updated_policy() {
 fn e2e_requirements_survive_wire_round_trip() {
     let pkg = wire_round_trip(&build_signed("acme/checkout", "1.0.0", &key()));
     let req = &pkg.archive.manifest.requirements;
-    assert_eq!(req.handlers, vec!["charge_card".to_string(), "send_email".to_string()]);
+    assert_eq!(
+        req.handlers,
+        vec!["charge_card".to_string(), "send_email".to_string()]
+    );
     assert_eq!(req.credentials, vec!["stripe_key".to_string()]);
     assert!(req.plugins.is_empty());
     assert_eq!(req.queues, vec!["billing".to_string()]);
@@ -656,7 +677,13 @@ fn e2e_preflight_passes_when_everything_available() {
 #[test]
 fn e2e_min_engine_version_gate_via_parse_version() {
     let pkg = wire_round_trip(&build_signed("acme/checkout", "1.0.0", &key()));
-    let required = pkg.archive.manifest.requirements.min_engine_version.clone().unwrap();
+    let required = pkg
+        .archive
+        .manifest
+        .requirements
+        .min_engine_version
+        .clone()
+        .unwrap();
     let required = parse_version(&required).unwrap();
     // Engine 0.7.1 satisfies min 0.6.0; engine 0.5.9 does not.
     assert!(parse_version("0.7.1").unwrap() >= required);
@@ -669,7 +696,10 @@ fn e2e_empty_requirement_lists_are_omitted_from_wire() {
     let pkg = build_signed("acme/checkout", "1.0.0", &key());
     let value: serde_json::Value = serde_json::to_value(&pkg).unwrap();
     let req = &value["archive"]["manifest"]["requirements"];
-    assert!(req.get("plugins").is_none(), "empty plugins should be omitted: {req}");
+    assert!(
+        req.get("plugins").is_none(),
+        "empty plugins should be omitted: {req}"
+    );
     assert!(req.get("handlers").is_some());
 }
 
@@ -698,8 +728,8 @@ fn e2e_packaged_sequences_parse_as_sequence_definitions() {
     let seqs = sequence_files(&pkg.archive);
     assert_eq!(seqs.len(), 3);
     for (path, raw) in seqs {
-        let def: SequenceDefinition = serde_json::from_str(raw)
-            .unwrap_or_else(|e| panic!("{path} failed to parse: {e}"));
+        let def: SequenceDefinition =
+            serde_json::from_str(raw).unwrap_or_else(|e| panic!("{path} failed to parse: {e}"));
         assert!(!def.blocks.is_empty(), "{path} has no blocks");
     }
 }
@@ -738,9 +768,11 @@ fn e2e_packaged_contracts_parse_and_validate_as_contract_suites() {
     let contracts = contract_files(&pkg.archive);
     assert_eq!(contracts.len(), 2);
     for (path, raw) in contracts {
-        let suite: ContractSuite = serde_json::from_str(raw)
-            .unwrap_or_else(|e| panic!("{path} failed to parse: {e}"));
-        suite.validate().unwrap_or_else(|e| panic!("{path} invalid: {e}"));
+        let suite: ContractSuite =
+            serde_json::from_str(raw).unwrap_or_else(|e| panic!("{path} failed to parse: {e}"));
+        suite
+            .validate()
+            .unwrap_or_else(|e| panic!("{path} invalid: {e}"));
         assert!(!suite.cases.is_empty());
     }
 }
@@ -828,7 +860,12 @@ fn e2e_namespace_decisions_for_many_names() {
 
 #[test]
 fn e2e_namespaces_unique_across_publishers_and_packages() {
-    let names = ["acme/checkout", "globex/checkout", "acme/refunds", "globex/refunds"];
+    let names = [
+        "acme/checkout",
+        "globex/checkout",
+        "acme/refunds",
+        "globex/refunds",
+    ];
     let mut namespaces: Vec<String> = names.iter().map(|n| install_namespace(n)).collect();
     namespaces.sort();
     namespaces.dedup();
@@ -887,7 +924,10 @@ fn e2e_pipeline_happy_path_all_stages() {
 
 #[test]
 fn e2e_pipeline_rejects_unreadable_wire() {
-    let policy = TrustPolicy { trusted_keys: vec![], allow_untrusted: true };
+    let policy = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: true,
+    };
     let err = install_pipeline(b"not json at all", &policy, &[], &[]).unwrap_err();
     assert!(matches!(err, PackageError::Invalid(_)));
 }
@@ -899,7 +939,10 @@ fn e2e_pipeline_rejects_tampered_before_trust_and_upgrade() {
     bad.archive.manifest.description = "tampered".into();
     let wire = serde_json::to_vec(&bad).unwrap();
     // Downgrade situation AND untrusted policy AND tampered: Tampered wins.
-    let policy = TrustPolicy { trusted_keys: vec![], allow_untrusted: false };
+    let policy = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: false,
+    };
     assert_eq!(
         install_pipeline(&wire, &policy, &["9.0.0"], &[]),
         Err(PackageError::Tampered)
@@ -911,7 +954,10 @@ fn e2e_pipeline_rejects_untrusted_before_upgrade_check() {
     let pkg = build_signed("acme/checkout", "1.0.0", &key());
     let wire = serde_json::to_vec(&pkg).unwrap();
     // Also a downgrade — but trust is decided first.
-    let policy = TrustPolicy { trusted_keys: vec![], allow_untrusted: false };
+    let policy = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: false,
+    };
     assert_eq!(
         install_pipeline(&wire, &policy, &["9.0.0"], &[]),
         Err(PackageError::UntrustedPublisher)
@@ -935,7 +981,10 @@ fn e2e_pipeline_unsupported_format_halts_first() {
         v["archive"]["format_version"] = json!(42);
     });
     let wire = serde_json::to_vec(&bad).unwrap();
-    let policy = TrustPolicy { trusted_keys: vec![], allow_untrusted: false };
+    let policy = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: false,
+    };
     assert_eq!(
         install_pipeline(&wire, &policy, &["9.0.0"], &[]),
         Err(PackageError::UnsupportedFormat(42))
@@ -969,7 +1018,10 @@ fn e2e_pipeline_local_namespaces_do_not_conflict() {
 fn e2e_pipeline_untrusted_opt_in_completes_with_untrusted_level() {
     let pkg = build_signed("acme/checkout", "1.0.0", &key());
     let wire = serde_json::to_vec(&pkg).unwrap();
-    let policy = TrustPolicy { trusted_keys: vec![], allow_untrusted: true };
+    let policy = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: true,
+    };
     let outcome = install_pipeline(&wire, &policy, &[], &[]).unwrap();
     assert_eq!(outcome.trust, TrustLevel::UntrustedAllowed);
     assert_eq!(outcome.installed_sequences, 3);
@@ -981,7 +1033,8 @@ fn e2e_pipeline_upgrade_replaces_into_same_namespace() {
     let k = key();
     let v1 = build_signed("acme/checkout", "1.0.0", &k);
     let v2 = build_signed("acme/checkout", "2.0.0", &k);
-    let out1 = install_pipeline(&serde_json::to_vec(&v1).unwrap(), &trusting(&v1), &[], &[]).unwrap();
+    let out1 =
+        install_pipeline(&serde_json::to_vec(&v1).unwrap(), &trusting(&v1), &[], &[]).unwrap();
     let out2 = install_pipeline(
         &serde_json::to_vec(&v2).unwrap(),
         &trusting(&v2),
@@ -1007,7 +1060,10 @@ fn e2e_pipeline_full_realistic_story() {
     assert_eq!(received.archive.manifest.publisher, "Acme");
 
     // 3. First install requires the untrusted opt-in (key not yet pinned).
-    let strict = TrustPolicy { trusted_keys: vec![], allow_untrusted: false };
+    let strict = TrustPolicy {
+        trusted_keys: vec![],
+        allow_untrusted: false,
+    };
     assert_eq!(
         install_pipeline(&wire_v1, &strict, &[], &["default"]),
         Err(PackageError::UntrustedPublisher)
@@ -1024,7 +1080,10 @@ fn e2e_pipeline_full_realistic_story() {
         let _: SequenceDefinition = serde_json::from_str(raw).unwrap();
     }
     for (_, raw) in contract_files(&received.archive) {
-        serde_json::from_str::<ContractSuite>(raw).unwrap().validate().unwrap();
+        serde_json::from_str::<ContractSuite>(raw)
+            .unwrap()
+            .validate()
+            .unwrap();
     }
 
     // 6. v1.1.0 upgrade sails through; a later v1.0.2 does not.

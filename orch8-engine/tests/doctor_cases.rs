@@ -310,7 +310,11 @@ fn timer_firing_exactly_now_is_not_waiting_until() {
     let mut inst = instance(InstanceState::Scheduled);
     inst.next_fire_at = Some(t0()); // fire_at > now is required
     let report = diagnose(&full_ctx(inst), t0());
-    assert!(!codes(&report).contains(&"WAITING_UNTIL"), "{:?}", codes(&report));
+    assert!(
+        !codes(&report).contains(&"WAITING_UNTIL"),
+        "{:?}",
+        codes(&report)
+    );
 }
 
 #[test]
@@ -537,7 +541,11 @@ fn no_compatible_worker_defaults_queue_name_to_default() {
     ctx.worker_tasks = Some(vec![task(WorkerTaskState::Pending, "charge_card", 10)]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "NO_COMPATIBLE_WORKER");
-    assert!(d.finding.summary.contains("queue: default"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("queue: default"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -548,7 +556,11 @@ fn no_compatible_worker_reports_custom_queue_name() {
     ctx.worker_tasks = Some(vec![t]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "NO_COMPATIBLE_WORKER");
-    assert!(d.finding.summary.contains("queue: payments"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("queue: payments"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -577,11 +589,7 @@ fn registration_scoped_to_other_tenant_does_not_match() {
 fn registration_with_empty_tenant_matches_any_tenant() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.worker_tasks = Some(vec![task(WorkerTaskState::Pending, "charge_card", 10)]);
-    ctx.worker_registrations = Some(vec![registration_for_tenant(
-        "charge_card",
-        None,
-        Some(""),
-    )]);
+    ctx.worker_registrations = Some(vec![registration_for_tenant("charge_card", None, Some(""))]);
     let report = diagnose(&ctx, t0());
     assert!(codes(&report).contains(&"WAITING_WORKER_PICKUP"));
 }
@@ -745,8 +753,16 @@ fn worker_not_claiming_reports_queue_and_age() {
     ctx.worker_registrations = Some(vec![registration("charge_card", None)]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WORKER_NOT_CLAIMING");
-    assert!(d.finding.summary.contains("10m 0s"), "{}", d.finding.summary);
-    assert!(d.finding.summary.contains("priority"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("10m 0s"),
+        "{}",
+        d.finding.summary
+    );
+    assert!(
+        d.finding.summary.contains("priority"),
+        "{}",
+        d.finding.summary
+    );
     assert_eq!(d.finding.evidence[0].label, "task_created_at");
 }
 
@@ -860,8 +876,16 @@ fn stale_claim_names_the_worker_and_age() {
     ctx.worker_tasks = Some(vec![t]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "STALE_WORKER_CLAIM");
-    assert!(d.finding.summary.contains("worker-42"), "{}", d.finding.summary);
-    assert!(d.finding.summary.contains("15m 0s"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("worker-42"),
+        "{}",
+        d.finding.summary
+    );
+    assert!(
+        d.finding.summary.contains("15m 0s"),
+        "{}",
+        d.finding.summary
+    );
     assert!(d.finding.remediation[0].side_effect_risk);
 }
 
@@ -979,7 +1003,11 @@ fn breaker_with_elapsed_cooldown_omits_resume_text() {
     ctx.open_breakers = Some(vec![b]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "OPEN_CIRCUIT_BREAKER");
-    assert!(!d.finding.summary.contains("resume in"), "{}", d.finding.summary);
+    assert!(
+        !d.finding.summary.contains("resume in"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -1062,7 +1090,11 @@ fn waiting_parent_with_live_child_reports_waiting_child() {
     assert_eq!(d.category, DiagnosisCategory::DirectEvidence);
     assert_eq!(d.health, DiagnosisHealth::Expected);
     assert_eq!(d.finding.confidence, Confidence::High);
-    assert!(d.finding.summary.contains("1 child"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("1 child"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -1077,7 +1109,11 @@ fn waiting_child_evidence_lists_child_ids() {
     assert_eq!(d.finding.evidence[0].label, "children");
     assert!(d.finding.evidence[0].summary.contains(&id1));
     assert!(d.finding.evidence[0].summary.contains(&id2));
-    assert!(d.finding.summary.contains("2 child"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("2 child"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -1090,7 +1126,11 @@ fn mixed_children_counts_only_live_ones() {
     ]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WAITING_CHILD");
-    assert!(d.finding.summary.contains("1 child"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("1 child"),
+        "{}",
+        d.finding.summary
+    );
     assert!(!codes(&report).contains(&"CHILDREN_DONE_PARENT_WAITING"));
 }
 
@@ -1168,7 +1208,11 @@ fn stale_signal_count_appears_in_summary() {
     ctx.pending_signals = Some(vec![signal(120), signal(600), signal(3600)]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "SIGNALS_NOT_CONSUMED");
-    assert!(d.finding.summary.contains("3 signal(s)"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("3 signal(s)"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -1177,7 +1221,11 @@ fn mixed_signal_ages_count_only_stale_ones() {
     ctx.pending_signals = Some(vec![signal(10), signal(59), signal(300)]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "SIGNALS_NOT_CONSUMED");
-    assert!(d.finding.summary.contains("1 signal(s)"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("1 signal(s)"),
+        "{}",
+        d.finding.summary
+    );
 }
 
 #[test]
@@ -1296,7 +1344,11 @@ fn waiting_event_reports_only_missing_names() {
     )]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WAITING_EVENT");
-    assert!(d.finding.summary.contains("[shipped]"), "{}", d.finding.summary);
+    assert!(
+        d.finding.summary.contains("[shipped]"),
+        "{}",
+        d.finding.summary
+    );
     assert!(d.finding.summary.contains("already matched: paid"));
     assert_eq!(d.finding.confidence, Confidence::Certain);
     assert_eq!(d.category, DiagnosisCategory::DirectEvidence);
@@ -1308,7 +1360,11 @@ fn waiting_event_without_matches_omits_matched_annotation() {
     ctx.event_waits = Some(vec![wait("gate", WaitStatus::Waiting, &["paid"], &[])]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WAITING_EVENT");
-    assert!(!d.finding.summary.contains("already matched"), "{}", d.finding.summary);
+    assert!(
+        !d.finding.summary.contains("already matched"),
+        "{}",
+        d.finding.summary
+    );
     assert!(d.finding.summary.contains("[paid]"));
 }
 
@@ -1327,7 +1383,12 @@ fn waiting_event_evidence_and_remediation_carry_correlation_key() {
 #[test]
 fn satisfied_event_wait_is_not_reported() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Satisfied, &["paid"], &["paid"])]);
+    ctx.event_waits = Some(vec![wait(
+        "gate",
+        WaitStatus::Satisfied,
+        &["paid"],
+        &["paid"],
+    )]);
     let report = diagnose(&ctx, t0());
     assert!(!codes(&report).contains(&"WAITING_EVENT"));
 }
@@ -1357,7 +1418,12 @@ fn non_waiting_event_wait_still_masks_approval_for_its_block() {
     // satisfied one) claims the block, so it is not reported as an approval.
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.pending_approval_blocks = Some(vec!["gate".into()]);
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Satisfied, &["paid"], &["paid"])]);
+    ctx.event_waits = Some(vec![wait(
+        "gate",
+        WaitStatus::Satisfied,
+        &["paid"],
+        &["paid"],
+    )]);
     let report = diagnose(&ctx, t0());
     let cs = codes(&report);
     assert!(!cs.contains(&"WAITING_EVENT"), "{cs:?}");
@@ -1580,7 +1646,7 @@ fn missing_sequence_on_terminal_instance_is_not_reported() {
 // EVIDENCE_INCOMPLETE (each uncollected section + combos)
 // ===========================================================================
 
-/// Assert EVIDENCE_INCOMPLETE mentions `expected` and none of the others.
+/// Assert `EVIDENCE_INCOMPLETE` mentions `expected` and none of the others.
 fn assert_only_missing(ctx: &InstanceDiagnosticContext, expected: &str) {
     const ALL: &[&str] = &[
         "sequence",
@@ -1703,7 +1769,11 @@ fn uncollected_version_pins_do_not_trigger_evidence_incomplete() {
     let mut ctx = full_ctx(instance(InstanceState::Scheduled));
     ctx.version_pins = None;
     let report = diagnose(&ctx, t0());
-    assert!(!codes(&report).contains(&"EVIDENCE_INCOMPLETE"), "{:?}", codes(&report));
+    assert!(
+        !codes(&report).contains(&"EVIDENCE_INCOMPLETE"),
+        "{:?}",
+        codes(&report)
+    );
 }
 
 #[test]
@@ -1711,7 +1781,11 @@ fn uncollected_event_waits_do_not_trigger_evidence_incomplete() {
     let mut ctx = full_ctx(instance(InstanceState::Scheduled));
     ctx.event_waits = None;
     let report = diagnose(&ctx, t0());
-    assert!(!codes(&report).contains(&"EVIDENCE_INCOMPLETE"), "{:?}", codes(&report));
+    assert!(
+        !codes(&report).contains(&"EVIDENCE_INCOMPLETE"),
+        "{:?}",
+        codes(&report)
+    );
 }
 
 #[test]
@@ -1776,7 +1850,10 @@ fn bare_context_reports_no_blocker_plus_incomplete_evidence() {
         &InstanceDiagnosticContext::new(instance(InstanceState::Scheduled)),
         t0(),
     );
-    assert_eq!(codes(&report), vec!["EVIDENCE_INCOMPLETE", "NO_BLOCKER_FOUND"]);
+    assert_eq!(
+        codes(&report),
+        vec!["EVIDENCE_INCOMPLETE", "NO_BLOCKER_FOUND"]
+    );
 }
 
 // ===========================================================================
@@ -1805,8 +1882,16 @@ fn rank_sorts_by_category_first() {
 fn rank_breaks_category_ties_by_descending_confidence() {
     let mut ds = vec![
         diag_of("LOW", DiagnosisCategory::DirectEvidence, Confidence::Low),
-        diag_of("CERTAIN", DiagnosisCategory::DirectEvidence, Confidence::Certain),
-        diag_of("MEDIUM", DiagnosisCategory::DirectEvidence, Confidence::Medium),
+        diag_of(
+            "CERTAIN",
+            DiagnosisCategory::DirectEvidence,
+            Confidence::Certain,
+        ),
+        diag_of(
+            "MEDIUM",
+            DiagnosisCategory::DirectEvidence,
+            Confidence::Medium,
+        ),
         diag_of("HIGH", DiagnosisCategory::DirectEvidence, Confidence::High),
     ];
     rank_diagnoses(&mut ds);
@@ -1818,7 +1903,11 @@ fn rank_breaks_category_ties_by_descending_confidence() {
 fn rank_breaks_confidence_ties_by_ascending_code() {
     let mut ds = vec![
         diag_of("ZULU", DiagnosisCategory::ProbableCause, Confidence::Medium),
-        diag_of("ALPHA", DiagnosisCategory::ProbableCause, Confidence::Medium),
+        diag_of(
+            "ALPHA",
+            DiagnosisCategory::ProbableCause,
+            Confidence::Medium,
+        ),
         diag_of("MIKE", DiagnosisCategory::ProbableCause, Confidence::Medium),
     ];
     rank_diagnoses(&mut ds);
@@ -1859,7 +1948,11 @@ fn rank_handles_empty_and_singleton_slices() {
     rank_diagnoses(&mut empty);
     assert!(empty.is_empty());
 
-    let mut one = vec![diag_of("X", DiagnosisCategory::HealthWarning, Confidence::Low)];
+    let mut one = vec![diag_of(
+        "X",
+        DiagnosisCategory::HealthWarning,
+        Confidence::Low,
+    )];
     rank_diagnoses(&mut one);
     assert_eq!(one[0].finding.code, "X");
 }
@@ -1888,8 +1981,14 @@ fn report_ranks_probable_cause_above_health_warning() {
     ctx.open_breakers = Some(vec![breaker("t1", "unrelated", BreakerState::Open)]);
     let report = diagnose(&ctx, t0());
     let cs = codes(&report);
-    let pos_ext = cs.iter().position(|c| *c == "WAITING_EXTERNAL_EVENT").unwrap();
-    let pos_brk = cs.iter().position(|c| *c == "OPEN_CIRCUIT_BREAKER").unwrap();
+    let pos_ext = cs
+        .iter()
+        .position(|c| *c == "WAITING_EXTERNAL_EVENT")
+        .unwrap();
+    let pos_brk = cs
+        .iter()
+        .position(|c| *c == "OPEN_CIRCUIT_BREAKER")
+        .unwrap();
     assert!(pos_ext < pos_brk, "{cs:?}");
 }
 
@@ -1902,7 +2001,11 @@ fn certain_codes_within_direct_evidence_sort_alphabetically() {
     ctx.pending_approval_blocks = Some(vec!["gate".into()]);
     let report = diagnose(&ctx, t0());
     let cs = codes(&report);
-    assert_eq!(&cs[..2], &["PENDING_APPROVAL", "SEQUENCE_MISSING"], "{cs:?}");
+    assert_eq!(
+        &cs[..2],
+        &["PENDING_APPROVAL", "SEQUENCE_MISSING"],
+        "{cs:?}"
+    );
 }
 
 #[test]

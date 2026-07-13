@@ -352,6 +352,7 @@ pub(crate) struct ValidationReport {
         (status = 409, description = "Release is not in draft"),
     )
 )]
+#[allow(clippy::too_many_lines)] // CAS → sample → replay loop → summary → CAS, one linear pipeline
 pub(crate) async fn validate_release(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -361,8 +362,15 @@ pub(crate) async fn validate_release(
     let release = load_release(&state, &tenant_ctx, id).await?;
 
     if req.skip {
-        transition(&state, &release, ReleaseState::Draft, ReleaseState::Ready, "operator",
-            "validation explicitly skipped").await?;
+        transition(
+            &state,
+            &release,
+            ReleaseState::Draft,
+            ReleaseState::Ready,
+            "operator",
+            "validation explicitly skipped",
+        )
+        .await?;
         return Ok(Json(ValidationReport {
             replayed: 0,
             matches: 0,
@@ -373,8 +381,15 @@ pub(crate) async fn validate_release(
     }
 
     // CAS into validating so two concurrent validations cannot both run.
-    transition(&state, &release, ReleaseState::Draft, ReleaseState::Validating, "operator",
-        "historical validation started").await?;
+    transition(
+        &state,
+        &release,
+        ReleaseState::Draft,
+        ReleaseState::Validating,
+        "operator",
+        "historical validation started",
+    )
+    .await?;
 
     let candidate = fetch_sequence(
         &state,
@@ -424,7 +439,8 @@ pub(crate) async fn validate_release(
         let mut recorded_blocks: Vec<String> = Vec::new();
         for o in &outputs {
             let bid = o.block_id.as_str();
-            if bid.starts_with('_') || o.output_ref.as_deref() == Some("__error__")
+            if bid.starts_with('_')
+                || o.output_ref.as_deref() == Some("__error__")
                 || o.output_ref.as_deref() == Some("__retry__")
             {
                 continue;
@@ -696,7 +712,13 @@ pub(crate) async fn evaluate_release(
         // decision; a concurrent evaluate simply observes rolled_back.
         let ok = state
             .storage
-            .cas_release_state(id, ReleaseState::Canary, ReleaseState::RolledBack, None, None)
+            .cas_release_state(
+                id,
+                ReleaseState::Canary,
+                ReleaseState::RolledBack,
+                None,
+                None,
+            )
             .await
             .map_err(|e| ApiError::from_storage(e, "release"))?;
         if ok {
@@ -820,8 +842,19 @@ pub(crate) async fn promote_release(
             )));
         }
     }
-    transition(&state, &release, ReleaseState::Canary, ReleaseState::Promoted, "operator",
-        if req.force { "promoted (forced)" } else { "promoted: all gates pass" }).await?;
+    transition(
+        &state,
+        &release,
+        ReleaseState::Canary,
+        ReleaseState::Promoted,
+        "operator",
+        if req.force {
+            "promoted (forced)"
+        } else {
+            "promoted: all gates pass"
+        },
+    )
+    .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
     Ok(Json(fresh))
 }
@@ -836,8 +869,15 @@ pub(crate) async fn pause_release(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
-    transition(&state, &release, ReleaseState::Canary, ReleaseState::Paused, "operator",
-        "canary paused").await?;
+    transition(
+        &state,
+        &release,
+        ReleaseState::Canary,
+        ReleaseState::Paused,
+        "operator",
+        "canary paused",
+    )
+    .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
     Ok(Json(fresh))
 }
@@ -870,8 +910,15 @@ pub(crate) async fn rollback_release(
             )));
         }
     };
-    transition(&state, &release, from, ReleaseState::RolledBack, "operator",
-        "rolled back by operator").await?;
+    transition(
+        &state,
+        &release,
+        from,
+        ReleaseState::RolledBack,
+        "operator",
+        "rolled back by operator",
+    )
+    .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
     Ok(Json(fresh))
 }

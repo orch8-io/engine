@@ -244,7 +244,10 @@ mod tests {
             classify_error("serialize: key must be a string", None),
             DeliveryErrorClass::Serialization
         );
-        assert_eq!(classify_error("http 503", None), DeliveryErrorClass::HttpStatus);
+        assert_eq!(
+            classify_error("http 503", None),
+            DeliveryErrorClass::HttpStatus
+        );
         assert_eq!(
             classify_error("mysterious gremlins", None),
             DeliveryErrorClass::Other

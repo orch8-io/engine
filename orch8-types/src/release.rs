@@ -45,7 +45,10 @@ impl ReleaseState {
             (Self::Draft, Self::Validating | Self::Ready | Self::Failed)
                 | (Self::Validating, Self::Ready | Self::Failed)
                 | (Self::Ready, Self::Canary | Self::Failed)
-                | (Self::Canary, Self::Promoted | Self::Paused | Self::RolledBack)
+                | (
+                    Self::Canary,
+                    Self::Promoted | Self::Paused | Self::RolledBack
+                )
                 | (Self::Paused, Self::Canary | Self::RolledBack)
         )
     }
@@ -219,9 +222,7 @@ pub fn assign_variant(release_id: Uuid, cohort_key: &str, canary_percent: u8) ->
 // ---------------------------------------------------------------------------
 
 /// How much a semantic-diff change matters, ordered.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSeverity {
     /// Cosmetic / metadata only.
@@ -237,7 +238,7 @@ pub enum DiffSeverity {
 /// One semantic difference between two sequence versions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct DiffEntry {
-    /// Stable category code, snake_case (`block_added`,
+    /// Stable category code, `snake_case` (`block_added`,
     /// `handler_changed`, `input_schema_narrowed`, ...).
     pub category: String,
     pub severity: DiffSeverity,
@@ -320,9 +321,7 @@ pub fn evaluate_gates(
                 && candidate.total >= u64::from(gate.min_sample);
             let baseline_rate = baseline.rate(gate.metric);
             let candidate_rate = candidate.rate(gate.metric);
-            let verdict = if !enough {
-                GateVerdict::Inconclusive
-            } else {
+            let verdict = if enough {
                 match (baseline_rate, candidate_rate) {
                     (Some(b), Some(c)) => {
                         if c - b > gate.max_regression {
@@ -333,6 +332,8 @@ pub fn evaluate_gates(
                     }
                     _ => GateVerdict::Inconclusive,
                 }
+            } else {
+                GateVerdict::Inconclusive
             };
             GateEvaluation {
                 gate: gate.clone(),
@@ -380,7 +381,10 @@ mod tests {
                 S::RolledBack,
                 S::Failed,
             ] {
-                assert!(!terminal.can_transition_to(next), "{terminal:?} -> {next:?}");
+                assert!(
+                    !terminal.can_transition_to(next),
+                    "{terminal:?} -> {next:?}"
+                );
             }
         }
         // No skipping validation outcome straight to canary.
@@ -473,7 +477,10 @@ mod tests {
         for i in 0..50 {
             let key = format!("k{i}");
             assert_eq!(assign_variant(release, &key, 0), ReleaseVariant::Baseline);
-            assert_eq!(assign_variant(release, &key, 100), ReleaseVariant::Candidate);
+            assert_eq!(
+                assign_variant(release, &key, 100),
+                ReleaseVariant::Candidate
+            );
         }
     }
 
@@ -486,6 +493,7 @@ mod tests {
                 assign_variant(release, &format!("cohort-{i}"), 30) == ReleaseVariant::Candidate
             })
             .count();
+        #[allow(clippy::cast_precision_loss)]
         let share = candidates as f64 / f64::from(n);
         assert!((0.25..=0.35).contains(&share), "share was {share}");
     }
@@ -501,7 +509,10 @@ mod tests {
             .iter()
             .filter(|k| assign_variant(r1, k, 50) == assign_variant(r2, k, 50))
             .count();
-        assert!((20..=80).contains(&same), "suspicious correlation: {same}/100");
+        assert!(
+            (20..=80).contains(&same),
+            "suspicious correlation: {same}/100"
+        );
     }
 
     // --- gates ---
@@ -569,8 +580,18 @@ mod tests {
             max_regression: 0.01,
             min_sample: 10,
         }];
-        let baseline = VariantStats { total: 100, completed: 95, failed: 0, cancelled: 5 };
-        let candidate = VariantStats { total: 100, completed: 80, failed: 0, cancelled: 20 };
+        let baseline = VariantStats {
+            total: 100,
+            completed: 95,
+            failed: 0,
+            cancelled: 5,
+        };
+        let candidate = VariantStats {
+            total: 100,
+            completed: 80,
+            failed: 0,
+            cancelled: 20,
+        };
         let evals = evaluate_gates(&gates, baseline, candidate);
         assert_eq!(evals[0].verdict, GateVerdict::Fail);
     }

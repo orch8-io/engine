@@ -28,9 +28,7 @@ pub enum DiagnosisHealth {
 
 /// How strongly the evidence points at this explanation. Used as the
 /// primary ranking key.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosisCategory {
     /// Direct evidence of the current blocker.
@@ -102,19 +100,42 @@ mod tests {
     #[test]
     fn ranking_puts_direct_evidence_first_then_confidence() {
         let mut ds = vec![
-            diag("HEALTH", DiagnosisCategory::HealthWarning, Confidence::Certain),
-            diag("PROBABLE_HI", DiagnosisCategory::ProbableCause, Confidence::High),
-            diag("DIRECT", DiagnosisCategory::DirectEvidence, Confidence::Medium),
-            diag("PROBABLE_LO", DiagnosisCategory::ProbableCause, Confidence::Low),
+            diag(
+                "HEALTH",
+                DiagnosisCategory::HealthWarning,
+                Confidence::Certain,
+            ),
+            diag(
+                "PROBABLE_HI",
+                DiagnosisCategory::ProbableCause,
+                Confidence::High,
+            ),
+            diag(
+                "DIRECT",
+                DiagnosisCategory::DirectEvidence,
+                Confidence::Medium,
+            ),
+            diag(
+                "PROBABLE_LO",
+                DiagnosisCategory::ProbableCause,
+                Confidence::Low,
+            ),
         ];
         rank_diagnoses(&mut ds);
         let codes: Vec<&str> = ds.iter().map(|d| d.finding.code.as_str()).collect();
-        assert_eq!(codes, vec!["DIRECT", "PROBABLE_HI", "PROBABLE_LO", "HEALTH"]);
+        assert_eq!(
+            codes,
+            vec!["DIRECT", "PROBABLE_HI", "PROBABLE_LO", "HEALTH"]
+        );
     }
 
     #[test]
     fn diagnosis_serializes_finding_fields_flattened() {
-        let d = diag("WAITING_UNTIL", DiagnosisCategory::DirectEvidence, Confidence::Certain);
+        let d = diag(
+            "WAITING_UNTIL",
+            DiagnosisCategory::DirectEvidence,
+            Confidence::Certain,
+        );
         let v = serde_json::to_value(&d).unwrap();
         // Finding fields appear at the top level of the diagnosis object.
         assert_eq!(v["code"], "WAITING_UNTIL");

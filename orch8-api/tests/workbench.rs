@@ -125,8 +125,18 @@ async fn workbench_joins_and_redacts() {
         .json()
         .await
         .unwrap();
-    let ids1: Vec<&str> = view["events"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
-    let ids2: Vec<&str> = view2["events"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    let ids1: Vec<&str> = view["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
+    let ids2: Vec<&str> = view2["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids1, ids2);
 
     // Tenant isolation.
@@ -250,7 +260,12 @@ async fn fork_carries_sandbox_marker() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        resp.text().await
+    );
     // Re-fetch to inspect the fork's metadata.
     let forks: Vec<Value> = Vec::new();
     drop(forks);

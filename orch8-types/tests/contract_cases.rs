@@ -8,10 +8,10 @@
 use std::collections::BTreeMap;
 
 use orch8_types::contract::{
-    Assertion, AssertionOp, AssertionSubject, CallCountExpectation, CaseReport,
-    CONTRACT_SCHEMA_VERSION, ContractCase, ContractSuite, ExpectedTerminalState, MockDef,
-    MockOutcome, MockPolicy, PathExpectation, SuiteReport, UnmockedHandlerPolicy,
-    check_call_counts, check_op, check_path, evaluate_assertion, resolve_path,
+    Assertion, AssertionOp, AssertionSubject, CONTRACT_SCHEMA_VERSION, CallCountExpectation,
+    CaseReport, ContractCase, ContractSuite, ExpectedTerminalState, MockDef, MockOutcome,
+    MockPolicy, PathExpectation, SuiteReport, UnmockedHandlerPolicy, check_call_counts, check_op,
+    check_path, evaluate_assertion, resolve_path,
 };
 use serde_json::{Value, json};
 
@@ -65,10 +65,7 @@ fn path_expect(items: &[&str], ordered: bool) -> PathExpectation {
 }
 
 fn calls_map(pairs: &[(&str, u32)]) -> BTreeMap<String, u32> {
-    pairs
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), *v))
-        .collect()
+    pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
 }
 
 fn cc(handler: &str, min: u32, max: Option<u32>) -> CallCountExpectation {
@@ -108,7 +105,10 @@ fn minimal_suite_defaults_schema_version() {
 
 #[test]
 fn minimal_suite_defaults_unmocked_policy_to_fail() {
-    assert_eq!(minimal_suite().unmocked_handlers, UnmockedHandlerPolicy::Fail);
+    assert_eq!(
+        minimal_suite().unmocked_handlers,
+        UnmockedHandlerPolicy::Fail
+    );
 }
 
 #[test]
@@ -202,8 +202,7 @@ fn case_description_round_trips() {
         "expect": {}
     }));
     assert_eq!(case.description.as_deref(), Some("checks the refund path"));
-    let re: ContractCase =
-        serde_json::from_value(serde_json::to_value(&case).unwrap()).unwrap();
+    let re: ContractCase = serde_json::from_value(serde_json::to_value(&case).unwrap()).unwrap();
     assert_eq!(re, case);
 }
 
@@ -276,7 +275,10 @@ fn mock_failure_retryable_explicit_round_trips() {
     assert_eq!(re, mock);
     assert!(matches!(
         re.policy,
-        MockPolicy::Failure { retryable: true, .. }
+        MockPolicy::Failure {
+            retryable: true,
+            ..
+        }
     ));
 }
 
@@ -318,15 +320,19 @@ fn mock_attempts_outcomes_round_trip() {
             retryable: false
         }
     );
-    assert_eq!(attempts[2], MockOutcome::Success { output: json!({"n": 3}) });
+    assert_eq!(
+        attempts[2],
+        MockOutcome::Success {
+            output: json!({"n": 3})
+        }
+    );
     let re: MockDef = serde_json::from_value(serde_json::to_value(&mock).unwrap()).unwrap();
     assert_eq!(re, mock);
 }
 
 #[test]
 fn mock_unknown_policy_type_rejected() {
-    let res: Result<MockDef, _> =
-        serde_json::from_value(json!({"handler": "h", "type": "chaos"}));
+    let res: Result<MockDef, _> = serde_json::from_value(json!({"handler": "h", "type": "chaos"}));
     assert!(res.is_err());
 }
 
@@ -376,8 +382,7 @@ fn signal_fixture_round_trips_with_payload() {
         ],
         "expect": {}
     }));
-    let re: ContractCase =
-        serde_json::from_value(serde_json::to_value(&case).unwrap()).unwrap();
+    let re: ContractCase = serde_json::from_value(serde_json::to_value(&case).unwrap()).unwrap();
     assert_eq!(re, case);
     assert_eq!(re.signals[0].payload["value"], json!("yes"));
 }
@@ -442,19 +447,39 @@ fn assertion_context_subject_shape_parses() {
         "op": "not_exists"
     }))
     .unwrap();
-    assert_eq!(a.subject, AssertionSubject::Context { path: "user.id".into() });
+    assert_eq!(
+        a.subject,
+        AssertionSubject::Context {
+            path: "user.id".into()
+        }
+    );
     assert_eq!(a.op, AssertionOp::NotExists);
 }
 
 #[test]
 fn every_assertion_op_tag_parses() {
     let shapes = [
-        (json!({"context": {"path": "x"}, "op": "equals", "value": 1}), "equals"),
+        (
+            json!({"context": {"path": "x"}, "op": "equals", "value": 1}),
+            "equals",
+        ),
         (json!({"context": {"path": "x"}, "op": "exists"}), "exists"),
-        (json!({"context": {"path": "x"}, "op": "not_exists"}), "not_exists"),
-        (json!({"context": {"path": "x"}, "op": "contains", "value": "a"}), "contains"),
-        (json!({"context": {"path": "x"}, "op": "in_range", "min": 0.0}), "in_range"),
-        (json!({"context": {"path": "x"}, "op": "has_type", "expected": "array"}), "has_type"),
+        (
+            json!({"context": {"path": "x"}, "op": "not_exists"}),
+            "not_exists",
+        ),
+        (
+            json!({"context": {"path": "x"}, "op": "contains", "value": "a"}),
+            "contains",
+        ),
+        (
+            json!({"context": {"path": "x"}, "op": "in_range", "min": 0.0}),
+            "in_range",
+        ),
+        (
+            json!({"context": {"path": "x"}, "op": "has_type", "expected": "array"}),
+            "has_type",
+        ),
     ];
     for (shape, tag) in shapes {
         let a: Assertion = serde_json::from_value(shape).unwrap_or_else(|e| {
@@ -589,8 +614,7 @@ fn suite_report_round_trips() {
         passed: false,
         cases: vec![case_report("a", true), case_report("b", false)],
     };
-    let re: SuiteReport =
-        serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+    let re: SuiteReport = serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
     assert_eq!(re, report);
 }
 
@@ -695,7 +719,11 @@ fn case_rejects_mock_without_target() {
         "mocks": [{"type": "success", "output": {}}],
         "expect": {}
     }));
-    assert!(case.validate().unwrap_err().contains("either 'handler' or 'block'"));
+    assert!(
+        case.validate()
+            .unwrap_err()
+            .contains("either 'handler' or 'block'")
+    );
 }
 
 #[test]
@@ -860,7 +888,11 @@ fn case_rejects_capitalized_has_type() {
             {"context": {"path": "x"}, "op": "has_type", "expected": "String"}
         ]}
     }));
-    assert!(case.validate().unwrap_err().contains("unknown type 'String'"));
+    assert!(
+        case.validate()
+            .unwrap_err()
+            .contains("unknown type 'String'")
+    );
 }
 
 #[test]
@@ -1085,7 +1117,14 @@ fn exists_accepts_falsey_but_present_values() {
 
 #[test]
 fn not_exists_rejects_every_non_null_value() {
-    for v in [json!(0), json!(""), json!(false), json!([]), json!({}), json!("null")] {
+    for v in [
+        json!(0),
+        json!(""),
+        json!(false),
+        json!([]),
+        json!({}),
+        json!("null"),
+    ] {
         assert!(
             check_op(&AssertionOp::NotExists, Some(&v)).is_err(),
             "{v} should violate not_exists"
@@ -1215,8 +1254,16 @@ fn in_range_handles_negative_bounds() {
     check_op(&op, Some(&json!(-5))).unwrap();
     check_op(&op, Some(&json!(-10))).unwrap();
     check_op(&op, Some(&json!(-1))).unwrap();
-    assert!(check_op(&op, Some(&json!(0))).unwrap_err().contains("above"));
-    assert!(check_op(&op, Some(&json!(-11))).unwrap_err().contains("below"));
+    assert!(
+        check_op(&op, Some(&json!(0)))
+            .unwrap_err()
+            .contains("above")
+    );
+    assert!(
+        check_op(&op, Some(&json!(-11)))
+            .unwrap_err()
+            .contains("below")
+    );
 }
 
 #[test]
@@ -1433,7 +1480,9 @@ fn assertion_context_error_is_prefixed_with_path() {
 fn assertion_context_empty_path_reads_whole_data() {
     let data = json!({"only": "this"});
     let a = Assertion {
-        subject: AssertionSubject::Context { path: String::new() },
+        subject: AssertionSubject::Context {
+            path: String::new(),
+        },
         op: eq_op(data.clone()),
     };
     evaluate_assertion(&a, &BTreeMap::new(), &data).unwrap();
@@ -1455,7 +1504,9 @@ fn assertion_contains_applies_to_output_subject() {
 #[test]
 fn assertion_in_range_applies_to_context_subject() {
     let a = Assertion {
-        subject: AssertionSubject::Context { path: "score".into() },
+        subject: AssertionSubject::Context {
+            path: "score".into(),
+        },
         op: range_op(Some(0.0), Some(100.0)),
     };
     evaluate_assertion(&a, &BTreeMap::new(), &json!({"score": 88})).unwrap();
@@ -1561,8 +1612,7 @@ fn exact_count_window_passes() {
 
 #[test]
 fn zero_max_fails_when_handler_was_called() {
-    let err =
-        check_call_counts(&[cc("h", 0, Some(0))], &calls_map(&[("h", 1)])).unwrap_err();
+    let err = check_call_counts(&[cc("h", 0, Some(0))], &calls_map(&[("h", 1)])).unwrap_err();
     assert!(err.contains("at most 0"), "{err}");
 }
 

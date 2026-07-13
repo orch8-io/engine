@@ -89,6 +89,7 @@ fn build_metadata_filter(
         (status = 200, description = "Deduplicated (idempotency key match)", body = serde_json::Value),
     )
 )]
+#[allow(clippy::too_many_lines)] // validation → release routing → idempotency → insert, one linear pipeline
 pub async fn create_instance(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -379,9 +380,7 @@ pub async fn create_instances_batch(
         let seq_tenant = sequence_tenants
             .get(&r.sequence_id)
             .cloned()
-            .ok_or_else(|| {
-                ApiError::NotFound(format!("instances[{i}]: sequence not found"))
-            })?;
+            .ok_or_else(|| ApiError::NotFound(format!("instances[{i}]: sequence not found")))?;
         if seq_tenant != item_tenant {
             return Err(ApiError::Forbidden(format!(
                 "instances[{i}]: sequence does not belong to the caller's tenant"

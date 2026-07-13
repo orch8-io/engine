@@ -78,7 +78,7 @@ fn archive_with_paths(paths: &[&str]) -> PackageArchive {
     }
 }
 
-fn assert_invalid(result: Result<(), PackageError>) {
+fn assert_invalid(result: &Result<(), PackageError>) {
     assert!(
         matches!(result, Err(PackageError::Invalid(_))),
         "expected Invalid, got {result:?}"
@@ -157,126 +157,129 @@ fn name_valid_long_segments() {
 
 #[test]
 fn name_rejects_uppercase_in_publisher() {
-    assert_invalid(validate_package_name("Acme/checkout"));
+    assert_invalid(&validate_package_name("Acme/checkout"));
 }
 
 #[test]
 fn name_rejects_uppercase_in_package() {
-    assert_invalid(validate_package_name("acme/Checkout"));
+    assert_invalid(&validate_package_name("acme/Checkout"));
 }
 
 #[test]
 fn name_rejects_uppercase_mid_segment() {
-    assert_invalid(validate_package_name("acme/chEckout"));
+    assert_invalid(&validate_package_name("acme/chEckout"));
 }
 
 #[test]
 fn name_rejects_all_uppercase() {
-    assert_invalid(validate_package_name("ACME/CHECKOUT"));
+    assert_invalid(&validate_package_name("ACME/CHECKOUT"));
 }
 
 #[test]
 fn name_rejects_space_in_publisher() {
-    assert_invalid(validate_package_name("ac me/checkout"));
+    assert_invalid(&validate_package_name("ac me/checkout"));
 }
 
 #[test]
 fn name_rejects_space_in_package() {
-    assert_invalid(validate_package_name("acme/check out"));
+    assert_invalid(&validate_package_name("acme/check out"));
 }
 
 #[test]
 fn name_rejects_leading_space() {
-    assert_invalid(validate_package_name(" acme/checkout"));
+    assert_invalid(&validate_package_name(" acme/checkout"));
 }
 
 #[test]
 fn name_rejects_trailing_space() {
-    assert_invalid(validate_package_name("acme/checkout "));
+    assert_invalid(&validate_package_name("acme/checkout "));
 }
 
 #[test]
 fn name_rejects_dots_in_publisher() {
-    assert_invalid(validate_package_name("a.b/c"));
+    assert_invalid(&validate_package_name("a.b/c"));
 }
 
 #[test]
 fn name_rejects_dots_in_package() {
-    assert_invalid(validate_package_name("a/b.c"));
+    assert_invalid(&validate_package_name("a/b.c"));
 }
 
 #[test]
 fn name_rejects_unicode_cyrillic_lookalike() {
     // U+0430 CYRILLIC SMALL LETTER A — visually identical to 'a'.
-    assert_invalid(validate_package_name("\u{430}cme/checkout"));
+    assert_invalid(&validate_package_name("\u{430}cme/checkout"));
 }
 
 #[test]
 fn name_rejects_unicode_accented() {
-    assert_invalid(validate_package_name("caf\u{e9}/menu"));
+    assert_invalid(&validate_package_name("caf\u{e9}/menu"));
 }
 
 #[test]
 fn name_rejects_emoji() {
-    assert_invalid(validate_package_name("acme/\u{1f680}"));
+    assert_invalid(&validate_package_name("acme/\u{1f680}"));
 }
 
 #[test]
 fn name_rejects_empty_string() {
-    assert_invalid(validate_package_name(""));
+    assert_invalid(&validate_package_name(""));
 }
 
 #[test]
 fn name_rejects_missing_slash() {
-    assert_invalid(validate_package_name("checkout"));
+    assert_invalid(&validate_package_name("checkout"));
 }
 
 #[test]
 fn name_rejects_empty_publisher() {
-    assert_invalid(validate_package_name("/checkout"));
+    assert_invalid(&validate_package_name("/checkout"));
 }
 
 #[test]
 fn name_rejects_empty_package() {
-    assert_invalid(validate_package_name("acme/"));
+    assert_invalid(&validate_package_name("acme/"));
 }
 
 #[test]
 fn name_rejects_lone_slash() {
-    assert_invalid(validate_package_name("/"));
+    assert_invalid(&validate_package_name("/"));
 }
 
 #[test]
 fn name_rejects_three_segments() {
-    assert_invalid(validate_package_name("a/b/c"));
+    assert_invalid(&validate_package_name("a/b/c"));
 }
 
 #[test]
 fn name_rejects_four_segments() {
-    assert_invalid(validate_package_name("a/b/c/d"));
+    assert_invalid(&validate_package_name("a/b/c/d"));
 }
 
 #[test]
 fn name_rejects_double_slash() {
     // "a//b" splits into three parts — treated as 3+ segments.
-    assert_invalid(validate_package_name("a//b"));
+    assert_invalid(&validate_package_name("a//b"));
 }
 
 #[test]
 fn name_rejects_trailing_slash() {
-    assert_invalid(validate_package_name("a/b/"));
+    assert_invalid(&validate_package_name("a/b/"));
 }
 
 #[test]
 fn name_rejects_leading_slash_two_segments() {
-    assert_invalid(validate_package_name("/a/b"));
+    assert_invalid(&validate_package_name("/a/b"));
 }
 
 #[test]
 fn name_error_message_mentions_offender() {
     let err = validate_package_name("Acme/checkout").unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("Acme"), "message should name the bad segment: {msg}");
+    assert!(
+        msg.contains("Acme"),
+        "message should name the bad segment: {msg}"
+    );
 }
 
 #[test]
@@ -592,7 +595,10 @@ fn upgrade_invalid_incoming_is_invalid_not_downgrade() {
 fn upgrade_downgrade_error_carries_both_versions() {
     let err = check_upgrade("2.0.0", "1.0.0").unwrap_err();
     match err {
-        PackageError::Downgrade { installed, incoming } => {
+        PackageError::Downgrade {
+            installed,
+            incoming,
+        } => {
             assert_eq!(installed, "2.0.0");
             assert_eq!(incoming, "1.0.0");
         }
@@ -627,7 +633,10 @@ fn hash_is_deterministic() {
 fn hash_is_64_lowercase_hex_chars() {
     let h = content_hash(&base_archive()).unwrap();
     assert_eq!(h.len(), 64);
-    assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(
+        h.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    );
 }
 
 #[test]
@@ -645,7 +654,10 @@ fn hash_ignores_file_insertion_order() {
     arch_a.files = forward;
     let mut arch_b = base_archive();
     arch_b.files = reverse;
-    assert_eq!(content_hash(&arch_a).unwrap(), content_hash(&arch_b).unwrap());
+    assert_eq!(
+        content_hash(&arch_a).unwrap(),
+        content_hash(&arch_b).unwrap()
+    );
 }
 
 fn hash_of(mutate: impl FnOnce(&mut PackageArchive)) -> String {
@@ -656,22 +668,34 @@ fn hash_of(mutate: impl FnOnce(&mut PackageArchive)) -> String {
 
 #[test]
 fn hash_sensitive_to_manifest_name() {
-    assert_ne!(hash_of(|_| {}), hash_of(|a| a.manifest.name = "acme/other".into()));
+    assert_ne!(
+        hash_of(|_| {}),
+        hash_of(|a| a.manifest.name = "acme/other".into())
+    );
 }
 
 #[test]
 fn hash_sensitive_to_manifest_version() {
-    assert_ne!(hash_of(|_| {}), hash_of(|a| a.manifest.version = "1.0.1".into()));
+    assert_ne!(
+        hash_of(|_| {}),
+        hash_of(|a| a.manifest.version = "1.0.1".into())
+    );
 }
 
 #[test]
 fn hash_sensitive_to_description() {
-    assert_ne!(hash_of(|_| {}), hash_of(|a| a.manifest.description = "x".into()));
+    assert_ne!(
+        hash_of(|_| {}),
+        hash_of(|a| a.manifest.description = "x".into())
+    );
 }
 
 #[test]
 fn hash_sensitive_to_publisher_label() {
-    assert_ne!(hash_of(|_| {}), hash_of(|a| a.manifest.publisher = "Evil".into()));
+    assert_ne!(
+        hash_of(|_| {}),
+        hash_of(|a| a.manifest.publisher = "Evil".into())
+    );
 }
 
 #[test]
@@ -986,16 +1010,19 @@ fn verify_round_trip_ok() {
 #[test]
 fn verify_detects_tampered_file_content() {
     let mut pkg = build();
-    pkg.archive
-        .files
-        .insert("sequences/checkout.json".into(), r#"{"name":"evil"}"#.into());
+    pkg.archive.files.insert(
+        "sequences/checkout.json".into(),
+        r#"{"name":"evil"}"#.into(),
+    );
     assert_eq!(verify_package(&pkg), Err(PackageError::Tampered));
 }
 
 #[test]
 fn verify_detects_added_file() {
     let mut pkg = build();
-    pkg.archive.files.insert("payload.sh".into(), "rm -rf /".into());
+    pkg.archive
+        .files
+        .insert("payload.sh".into(), "rm -rf /".into());
     assert_eq!(verify_package(&pkg), Err(PackageError::Tampered));
 }
 
@@ -1098,7 +1125,9 @@ fn verify_detects_tampered_hash_field() {
 #[test]
 fn verify_forged_hash_with_stale_signature_is_bad_signature() {
     let mut pkg = build();
-    pkg.archive.files.insert("README.md".into(), "# Evil".into());
+    pkg.archive
+        .files
+        .insert("README.md".into(), "# Evil".into());
     pkg.content_hash = content_hash(&pkg.archive).unwrap();
     assert_eq!(verify_package(&pkg), Err(PackageError::BadSignature));
 }
@@ -1133,14 +1162,20 @@ fn verify_swapped_public_key_rejected() {
 fn verify_rejects_format_version_zero() {
     let mut pkg = build();
     pkg.archive.format_version = 0;
-    assert_eq!(verify_package(&pkg), Err(PackageError::UnsupportedFormat(0)));
+    assert_eq!(
+        verify_package(&pkg),
+        Err(PackageError::UnsupportedFormat(0))
+    );
 }
 
 #[test]
 fn verify_rejects_format_version_two() {
     let mut pkg = build();
     pkg.archive.format_version = 2;
-    assert_eq!(verify_package(&pkg), Err(PackageError::UnsupportedFormat(2)));
+    assert_eq!(
+        verify_package(&pkg),
+        Err(PackageError::UnsupportedFormat(2))
+    );
 }
 
 #[test]
@@ -1159,14 +1194,20 @@ fn verify_format_check_precedes_tamper_check() {
     let mut pkg = build();
     pkg.archive.format_version = 7;
     pkg.archive.files.insert("evil".into(), "x".into());
-    assert_eq!(verify_package(&pkg), Err(PackageError::UnsupportedFormat(7)));
+    assert_eq!(
+        verify_package(&pkg),
+        Err(PackageError::UnsupportedFormat(7))
+    );
 }
 
 #[test]
 fn verify_rejects_non_base64_public_key() {
     let mut pkg = build();
     pkg.public_key = "not base64!!!".into();
-    assert!(matches!(verify_package(&pkg), Err(PackageError::Invalid(_))));
+    assert!(matches!(
+        verify_package(&pkg),
+        Err(PackageError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -1181,14 +1222,20 @@ fn verify_rejects_wrong_length_public_key() {
 fn verify_rejects_empty_public_key() {
     let mut pkg = build();
     pkg.public_key = String::new();
-    assert!(matches!(verify_package(&pkg), Err(PackageError::Invalid(_))));
+    assert!(matches!(
+        verify_package(&pkg),
+        Err(PackageError::Invalid(_))
+    ));
 }
 
 #[test]
 fn verify_rejects_non_base64_signature() {
     let mut pkg = build();
     pkg.signature = "%%%not-base64%%%".into();
-    assert!(matches!(verify_package(&pkg), Err(PackageError::Invalid(_))));
+    assert!(matches!(
+        verify_package(&pkg),
+        Err(PackageError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -1203,7 +1250,10 @@ fn verify_rejects_wrong_length_signature() {
 fn verify_rejects_empty_signature() {
     let mut pkg = build();
     pkg.signature = String::new();
-    assert!(matches!(verify_package(&pkg), Err(PackageError::Invalid(_))));
+    assert!(matches!(
+        verify_package(&pkg),
+        Err(PackageError::Invalid(_))
+    ));
 }
 
 #[test]
@@ -1264,7 +1314,10 @@ fn trust_untrusted_denied_by_default_policy() {
         trusted_keys: vec![],
         allow_untrusted: false,
     };
-    assert_eq!(check_trust(&pkg, &policy), Err(PackageError::UntrustedPublisher));
+    assert_eq!(
+        check_trust(&pkg, &policy),
+        Err(PackageError::UntrustedPublisher)
+    );
 }
 
 #[test]
@@ -1287,7 +1340,10 @@ fn trust_wrong_keys_only_denied() {
         ],
         allow_untrusted: false,
     };
-    assert_eq!(check_trust(&pkg, &policy), Err(PackageError::UntrustedPublisher));
+    assert_eq!(
+        check_trust(&pkg, &policy),
+        Err(PackageError::UntrustedPublisher)
+    );
 }
 
 #[test]
@@ -1318,7 +1374,10 @@ fn trust_key_comparison_is_exact_string_match() {
         trusted_keys: vec![format!(" {}", pkg.public_key)],
         allow_untrusted: false,
     };
-    assert_eq!(check_trust(&pkg, &policy), Err(PackageError::UntrustedPublisher));
+    assert_eq!(
+        check_trust(&pkg, &policy),
+        Err(PackageError::UntrustedPublisher)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,7 +1449,11 @@ fn selection_includes_nested_contract_paths() {
 
 #[test]
 fn selection_excludes_readme_from_both() {
-    let a = archive_with_paths(&["README.md", "sequences/a.json", "contracts/a.contracts.json"]);
+    let a = archive_with_paths(&[
+        "README.md",
+        "sequences/a.json",
+        "contracts/a.contracts.json",
+    ]);
     let seq_paths: Vec<&String> = sequence_files(&a).into_iter().map(|(p, _)| p).collect();
     let con_paths: Vec<&String> = contract_files(&a).into_iter().map(|(p, _)| p).collect();
     assert!(!seq_paths.iter().any(|p| p.as_str() == "README.md"));
@@ -1414,13 +1477,15 @@ fn selection_sequence_files_include_contract_style_names_under_sequences() {
 
 #[test]
 fn selection_results_are_sorted_by_path() {
-    let a = archive_with_paths(&[
-        "sequences/z.json",
-        "sequences/a.json",
-        "sequences/m.json",
-    ]);
-    let picked: Vec<&str> = sequence_files(&a).into_iter().map(|(p, _)| p.as_str()).collect();
-    assert_eq!(picked, vec!["sequences/a.json", "sequences/m.json", "sequences/z.json"]);
+    let a = archive_with_paths(&["sequences/z.json", "sequences/a.json", "sequences/m.json"]);
+    let picked: Vec<&str> = sequence_files(&a)
+        .into_iter()
+        .map(|(p, _)| p.as_str())
+        .collect();
+    assert_eq!(
+        picked,
+        vec!["sequences/a.json", "sequences/m.json", "sequences/z.json"]
+    );
 }
 
 #[test]
@@ -1433,7 +1498,10 @@ fn selection_empty_when_no_matching_files() {
 #[test]
 fn selection_returns_file_content() {
     let mut f = BTreeMap::new();
-    f.insert("sequences/a.json".to_string(), r#"{"name":"a"}"#.to_string());
+    f.insert(
+        "sequences/a.json".to_string(),
+        r#"{"name":"a"}"#.to_string(),
+    );
     let a = PackageArchive {
         format_version: PACKAGE_FORMAT_VERSION,
         manifest: manifest("acme/x", "1.0.0"),

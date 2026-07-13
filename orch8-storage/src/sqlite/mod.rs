@@ -33,6 +33,7 @@ mod circuit_breakers;
 mod cluster;
 mod credentials;
 mod cron;
+mod events;
 mod execution_tree;
 mod externalized;
 mod helpers;
@@ -46,6 +47,7 @@ mod pools;
 mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
+mod releases;
 mod rollback;
 mod schema;
 mod sequences;
@@ -54,8 +56,6 @@ mod signals;
 mod step_logs;
 mod telemetry;
 mod triggers;
-mod events;
-mod releases;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_commands;
@@ -439,7 +439,6 @@ impl crate::SequenceStore for SqliteStorage {
     async fn delete_sequence(&self, id: SequenceId) -> Result<(), StorageError> {
         sequences::delete(self, id).await
     }
-
 
     async fn create_release(
         &self,
@@ -1111,7 +1110,6 @@ impl crate::SignalStore for SqliteStorage {
     async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError> {
         signals::enqueue_if_active(self, signal).await
     }
-
 
     async fn ingest_event(
         &self,

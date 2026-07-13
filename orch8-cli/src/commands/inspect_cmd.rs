@@ -63,12 +63,13 @@ pub async fn run(client: &Client, base: &str, cmd: InspectCmd, format: OutputFor
                 let mut url =
                     format!("{base}/instances/{instance_id}/blocks/{block}/resolved-input");
                 if let Some(at) = &at_block {
-                    url.push_str(&format!("?at_block={at}"));
+                    use std::fmt::Write as _;
+                    let _ = write!(url, "?at_block={at}");
                 }
                 client.get(url).send().await?
             } else {
-                let seq_path = sequence_file
-                    .context("pass --instance <id> or --sequence-file <path>")?;
+                let seq_path =
+                    sequence_file.context("pass --instance <id> or --sequence-file <path>")?;
                 let seq_raw = std::fs::read_to_string(&seq_path)
                     .with_context(|| format!("failed to read {}", seq_path.display()))?;
                 let sequence: Value = serde_json::from_str(&seq_raw)

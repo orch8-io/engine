@@ -10,6 +10,7 @@ fn seq(blocks: Value) -> SequenceDefinition {
     seq_with_schema(blocks, None)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn seq_with_schema(blocks: Value, input_schema: Option<Value>) -> SequenceDefinition {
     let mut v = json!({
         "id": uuid::Uuid::now_v7(),
@@ -49,7 +50,10 @@ fn entry_for<'a>(diff: &'a SemanticDiff, category: &str, block: &str) -> &'a Dif
 }
 
 fn count(diff: &SemanticDiff, category: &str) -> usize {
-    diff.entries.iter().filter(|e| e.category == category).count()
+    diff.entries
+        .iter()
+        .filter(|e| e.category == category)
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +86,10 @@ fn added_llm_call_block_is_side_effect_risk() {
     let old = seq(json!([step("a", "noop")]));
     let new = seq(json!([step("a", "noop"), step("gen", "llm_call")]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "block_added").severity, DiffSeverity::SideEffectRisk);
+    assert_eq!(
+        entry(&diff, "block_added").severity,
+        DiffSeverity::SideEffectRisk
+    );
 }
 
 #[test]
@@ -91,7 +98,10 @@ fn added_external_handler_block_is_side_effect_risk() {
     let old = seq(json!([step("a", "noop")]));
     let new = seq(json!([step("a", "noop"), step("x", "my_custom_worker")]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "block_added").severity, DiffSeverity::SideEffectRisk);
+    assert_eq!(
+        entry(&diff, "block_added").severity,
+        DiffSeverity::SideEffectRisk
+    );
 }
 
 #[test]
@@ -105,8 +115,14 @@ fn multiple_added_blocks_each_get_an_entry() {
     ]));
     let diff = semantic_diff(&old, &new);
     assert_eq!(count(&diff, "block_added"), 3, "{:#?}", diff.entries);
-    assert_eq!(entry_for(&diff, "block_added", "b").severity, DiffSeverity::Behavioral);
-    assert_eq!(entry_for(&diff, "block_added", "c").severity, DiffSeverity::Behavioral);
+    assert_eq!(
+        entry_for(&diff, "block_added", "b").severity,
+        DiffSeverity::Behavioral
+    );
+    assert_eq!(
+        entry_for(&diff, "block_added", "c").severity,
+        DiffSeverity::Behavioral
+    );
     assert_eq!(
         entry_for(&diff, "block_added", "d").severity,
         DiffSeverity::SideEffectRisk
@@ -132,10 +148,16 @@ fn removed_block_is_behavioral_and_names_handler() {
 fn removed_side_effecting_block_is_still_behavioral() {
     // Actual behavior: removal severity does not escalate for
     // side-effecting handlers — the step simply stops running.
-    let old = seq(json!([step("keep", "noop"), step("charge", "http_request")]));
+    let old = seq(json!([
+        step("keep", "noop"),
+        step("charge", "http_request")
+    ]));
     let new = seq(json!([step("keep", "noop")]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "block_removed").severity, DiffSeverity::Behavioral);
+    assert_eq!(
+        entry(&diff, "block_removed").severity,
+        DiffSeverity::Behavioral
+    );
 }
 
 #[test]
@@ -143,13 +165,23 @@ fn renamed_block_reports_removed_and_added() {
     let old = seq(json!([step("old_name", "transform")]));
     let new = seq(json!([step("new_name", "transform")]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "block_removed").block_id.as_deref(), Some("old_name"));
-    assert_eq!(entry(&diff, "block_added").block_id.as_deref(), Some("new_name"));
+    assert_eq!(
+        entry(&diff, "block_removed").block_id.as_deref(),
+        Some("old_name")
+    );
+    assert_eq!(
+        entry(&diff, "block_added").block_id.as_deref(),
+        Some("new_name")
+    );
 }
 
 #[test]
 fn multiple_removed_blocks_each_get_an_entry() {
-    let old = seq(json!([step("a", "noop"), step("b", "log"), step("c", "transform")]));
+    let old = seq(json!([
+        step("a", "noop"),
+        step("b", "log"),
+        step("c", "transform")
+    ]));
     let new = seq(json!([step("a", "noop")]));
     let diff = semantic_diff(&old, &new);
     assert_eq!(count(&diff, "block_removed"), 2);
@@ -182,7 +214,11 @@ fn reorder_inside_parallel_branch_detected() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"blocks_reordered"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"blocks_reordered"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -200,24 +236,44 @@ fn swapping_parallel_branches_is_a_reorder() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"blocks_reordered"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"blocks_reordered"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
 fn insertion_between_blocks_is_not_a_reorder() {
     let old = seq(json!([step("a", "noop"), step("b", "noop")]));
-    let new = seq(json!([step("a", "noop"), step("mid", "log"), step("b", "noop")]));
+    let new = seq(json!([
+        step("a", "noop"),
+        step("mid", "log"),
+        step("b", "noop")
+    ]));
     let diff = semantic_diff(&old, &new);
-    assert!(!categories(&diff).contains(&"blocks_reordered"), "{:#?}", diff.entries);
+    assert!(
+        !categories(&diff).contains(&"blocks_reordered"),
+        "{:#?}",
+        diff.entries
+    );
     assert!(categories(&diff).contains(&"block_added"));
 }
 
 #[test]
 fn removal_alone_is_not_a_reorder() {
-    let old = seq(json!([step("a", "noop"), step("b", "noop"), step("c", "noop")]));
+    let old = seq(json!([
+        step("a", "noop"),
+        step("b", "noop"),
+        step("c", "noop")
+    ]));
     let new = seq(json!([step("a", "noop"), step("c", "noop")]));
     let diff = semantic_diff(&old, &new);
-    assert!(!categories(&diff).contains(&"blocks_reordered"), "{:#?}", diff.entries);
+    assert!(
+        !categories(&diff).contains(&"blocks_reordered"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -255,32 +311,51 @@ fn params_change_on_pure_handler_is_behavioral() {
     let old = seq(json!([{"type": "step", "id": "a", "handler": "transform", "params": {"v": 1}}]));
     let new = seq(json!([{"type": "step", "id": "a", "handler": "transform", "params": {"v": 2}}]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").severity, DiffSeverity::Behavioral);
+    assert_eq!(
+        entry(&diff, "params_changed").severity,
+        DiffSeverity::Behavioral
+    );
 }
 
 #[test]
 fn params_change_on_side_effecting_handler_is_side_effect_risk() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"url": "x"}}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"url": "y"}}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"url": "x"}}]),
+    );
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"url": "y"}}]),
+    );
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").severity, DiffSeverity::SideEffectRisk);
+    assert_eq!(
+        entry(&diff, "params_changed").severity,
+        DiffSeverity::SideEffectRisk
+    );
 }
 
 #[test]
 fn params_change_on_external_handler_is_side_effect_risk() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "acme_worker", "params": {"n": 1}}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "acme_worker", "params": {"n": 2}}]));
+    let old =
+        seq(json!([{"type": "step", "id": "a", "handler": "acme_worker", "params": {"n": 1}}]));
+    let new =
+        seq(json!([{"type": "step", "id": "a", "handler": "acme_worker", "params": {"n": 2}}]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").severity, DiffSeverity::SideEffectRisk);
+    assert_eq!(
+        entry(&diff, "params_changed").severity,
+        DiffSeverity::SideEffectRisk
+    );
 }
 
 #[test]
 fn params_severity_follows_new_handler_when_handler_also_changes() {
     let old = seq(json!([{"type": "step", "id": "a", "handler": "transform", "params": {"v": 1}}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"v": 2}}]));
+    let new =
+        seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {"v": 2}}]));
     let diff = semantic_diff(&old, &new);
     assert!(categories(&diff).contains(&"handler_changed"));
-    assert_eq!(entry(&diff, "params_changed").severity, DiffSeverity::SideEffectRisk);
+    assert_eq!(
+        entry(&diff, "params_changed").severity,
+        DiffSeverity::SideEffectRisk
+    );
 }
 
 #[test]
@@ -290,7 +365,10 @@ fn deeply_nested_param_value_change_detected() {
     let new = seq(json!([{"type": "step", "id": "a", "handler": "transform",
         "params": {"outer": {"inner": {"list": [1, 2, 4]}}}}]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").block_id.as_deref(), Some("a"));
+    assert_eq!(
+        entry(&diff, "params_changed").block_id.as_deref(),
+        Some("a")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -300,8 +378,10 @@ fn deeply_nested_param_value_change_detected() {
 #[test]
 fn queue_added_detected() {
     let old = seq(json!([step("a", "noop")]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "queue_name": "priority"}]));
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "queue_name": "priority"}]),
+    );
     let diff = semantic_diff(&old, &new);
     let e = entry(&diff, "queue_changed");
     assert_eq!(e.severity, DiffSeverity::Behavioral);
@@ -310,8 +390,10 @@ fn queue_added_detected() {
 
 #[test]
 fn queue_removed_detected() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "queue_name": "priority"}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "queue_name": "priority"}]),
+    );
     let new = seq(json!([step("a", "noop")]));
     let diff = semantic_diff(&old, &new);
     assert!(categories(&diff).contains(&"queue_changed"));
@@ -319,13 +401,21 @@ fn queue_removed_detected() {
 
 #[test]
 fn queue_value_change_detected() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "queue_name": "fast"}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "queue_name": "slow"}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "queue_name": "fast"}]),
+    );
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "queue_name": "slow"}]),
+    );
     let diff = semantic_diff(&old, &new);
     let e = entry(&diff, "queue_changed");
-    assert!(e.summary.contains("fast") && e.summary.contains("slow"), "{}", e.summary);
+    assert!(
+        e.summary.contains("fast") && e.summary.contains("slow"),
+        "{}",
+        e.summary
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -334,11 +424,10 @@ fn queue_value_change_detected() {
 
 /// Build (old, new) sequences with three steps per timing field:
 /// `add` gains the field, `del` loses it, `chg` changes its value.
+#[allow(clippy::needless_pass_by_value)]
 fn timing_pair(field: &str, v1: Value, v2: Value) -> (SequenceDefinition, SequenceDefinition) {
     let plain = |id: &str| json!({"type": "step", "id": id, "handler": "noop", "params": {}});
-    let with = |id: &str, v: &Value| {
-        json!({"type": "step", "id": id, "handler": "noop", "params": {}, field: v})
-    };
+    let with = |id: &str, v: &Value| json!({"type": "step", "id": id, "handler": "noop", "params": {}, field: v});
     let old = seq(json!([plain("add"), with("del", &v1), with("chg", &v1)]));
     let new = seq(json!([with("add", &v1), plain("del"), with("chg", &v2)]));
     (old, new)
@@ -414,16 +503,23 @@ fn timing_summaries_name_the_field() {
 #[test]
 fn rate_limit_key_added_detected() {
     let old = seq(json!([step("a", "noop")]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "rate_limit_key": "provider-api"}]));
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "rate_limit_key": "provider-api"}]),
+    );
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "rate_limit_changed").severity, DiffSeverity::Behavioral);
+    assert_eq!(
+        entry(&diff, "rate_limit_changed").severity,
+        DiffSeverity::Behavioral
+    );
 }
 
 #[test]
 fn rate_limit_key_removed_detected() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "rate_limit_key": "provider-api"}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "rate_limit_key": "provider-api"}]),
+    );
     let new = seq(json!([step("a", "noop")]));
     let diff = semantic_diff(&old, &new);
     assert!(categories(&diff).contains(&"rate_limit_changed"));
@@ -431,12 +527,19 @@ fn rate_limit_key_removed_detected() {
 
 #[test]
 fn rate_limit_key_value_change_detected() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "rate_limit_key": "k1"}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "rate_limit_key": "k2"}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "rate_limit_key": "k1"}]),
+    );
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "rate_limit_key": "k2"}]),
+    );
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "rate_limit_changed").block_id.as_deref(), Some("a"));
+    assert_eq!(
+        entry(&diff, "rate_limit_changed").block_id.as_deref(),
+        Some("a")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -446,8 +549,10 @@ fn rate_limit_key_value_change_detected() {
 #[test]
 fn approval_gate_added_says_now_requires() {
     let old = seq(json!([step("a", "noop")]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "wait_for_input": {"prompt": "approve?"}}]));
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "wait_for_input": {"prompt": "approve?"}}]),
+    );
     let diff = semantic_diff(&old, &new);
     let e = entry(&diff, "approval_gate_changed");
     assert_eq!(e.severity, DiffSeverity::Behavioral);
@@ -456,8 +561,10 @@ fn approval_gate_added_says_now_requires() {
 
 #[test]
 fn approval_gate_removed_says_no_longer_requires() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "wait_for_input": {"prompt": "approve?"}}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "wait_for_input": {"prompt": "approve?"}}]),
+    );
     let new = seq(json!([step("a", "noop")]));
     let diff = semantic_diff(&old, &new);
     let e = entry(&diff, "approval_gate_changed");
@@ -471,20 +578,32 @@ fn approval_gate_removed_says_no_longer_requires() {
 #[test]
 fn fallback_handler_added_detected() {
     let old = seq(json!([step("a", "http_request")]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
-        "fallback_handler": "log"}]));
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
+        "fallback_handler": "log"}]),
+    );
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "fallback_changed").severity, DiffSeverity::Behavioral);
+    assert_eq!(
+        entry(&diff, "fallback_changed").severity,
+        DiffSeverity::Behavioral
+    );
 }
 
 #[test]
 fn fallback_handler_value_change_detected() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
-        "fallback_handler": "log"}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
-        "fallback_handler": "noop"}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
+        "fallback_handler": "log"}]),
+    );
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "http_request", "params": {},
+        "fallback_handler": "noop"}]),
+    );
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "fallback_changed").block_id.as_deref(), Some("a"));
+    assert_eq!(
+        entry(&diff, "fallback_changed").block_id.as_deref(),
+        Some("a")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -525,7 +644,11 @@ fn router_route_added_flags_router_changed_and_new_blocks() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"router_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"router_changed"),
+        "{:#?}",
+        diff.entries
+    );
     assert_eq!(entry(&diff, "block_added").block_id.as_deref(), Some("s2"));
 }
 
@@ -537,7 +660,11 @@ fn identical_router_produces_no_router_entry() {
         ]}
     ]);
     let diff = semantic_diff(&seq(blocks.clone()), &seq(blocks));
-    assert!(!categories(&diff).contains(&"router_changed"), "{:#?}", diff.entries);
+    assert!(
+        !categories(&diff).contains(&"router_changed"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -552,8 +679,15 @@ fn router_removed_entirely_reports_inner_steps_not_router_changed() {
     ]));
     let new = seq(json!([step("keep", "noop")]));
     let diff = semantic_diff(&old, &new);
-    assert!(!categories(&diff).contains(&"router_changed"), "{:#?}", diff.entries);
-    assert_eq!(entry(&diff, "block_removed").block_id.as_deref(), Some("s1"));
+    assert!(
+        !categories(&diff).contains(&"router_changed"),
+        "{:#?}",
+        diff.entries
+    );
+    assert_eq!(
+        entry(&diff, "block_removed").block_id.as_deref(),
+        Some("s1")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +729,11 @@ fn ab_variant_rename_counts_as_weights_change() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"ab_weights_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"ab_weights_changed"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -655,7 +793,11 @@ fn sub_sequence_unpinned_to_pinned_version_detected() {
         {"type": "sub_sequence", "id": "child", "sequence_name": "refund", "version": 3, "input": {}}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"sub_sequence_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"sub_sequence_changed"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -664,7 +806,11 @@ fn identical_sub_sequence_produces_no_entry() {
         {"type": "sub_sequence", "id": "child", "sequence_name": "refund", "version": 1, "input": {}}
     ]);
     let diff = semantic_diff(&seq(blocks.clone()), &seq(blocks));
-    assert!(!categories(&diff).contains(&"sub_sequence_changed"), "{:#?}", diff.entries);
+    assert!(
+        !categories(&diff).contains(&"sub_sequence_changed"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -703,7 +849,11 @@ fn renamed_producer_breaks_stale_reference() {
          "params": {"v": "{{ outputs.fetch.data }}"}}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"missing_output_reference"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"missing_output_reference"),
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -796,7 +946,12 @@ fn multiple_dangling_references_each_reported() {
         {"type": "step", "id": "u2", "handler": "noop", "params": {"v": "{{ outputs.p2.x }}"}}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(count(&diff, "missing_output_reference"), 2, "{:#?}", diff.entries);
+    assert_eq!(
+        count(&diff, "missing_output_reference"),
+        2,
+        "{:#?}",
+        diff.entries
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -864,7 +1019,12 @@ fn each_new_credential_gets_its_own_entry() {
          "params": {"k1": "credentials://cred_one", "k2": "credentials://cred_two"}}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(count(&diff, "credential_requirement_added"), 2, "{:#?}", diff.entries);
+    assert_eq!(
+        count(&diff, "credential_requirement_added"),
+        2,
+        "{:#?}",
+        diff.entries
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +1037,10 @@ fn one_step() -> Value {
 
 #[test]
 fn input_schema_narrowed_is_incompatible_and_lists_fields() {
-    let old = seq_with_schema(one_step(), Some(json!({"type": "object", "required": ["email"]})));
+    let old = seq_with_schema(
+        one_step(),
+        Some(json!({"type": "object", "required": ["email"]})),
+    );
     let new = seq_with_schema(
         one_step(),
         Some(json!({"type": "object", "required": ["email", "phone"]})),
@@ -886,7 +1049,11 @@ fn input_schema_narrowed_is_incompatible_and_lists_fields() {
     let e = entry(&diff, "input_schema_narrowed");
     assert_eq!(e.severity, DiffSeverity::Incompatible);
     assert!(e.summary.contains("phone"), "{}", e.summary);
-    assert!(!e.summary.contains("email, "), "only new fields: {}", e.summary);
+    assert!(
+        !e.summary.contains("email, "),
+        "only new fields: {}",
+        e.summary
+    );
 }
 
 #[test]
@@ -920,7 +1087,10 @@ fn identical_input_schemas_produce_no_entry() {
 #[test]
 fn adding_schema_with_required_fields_is_narrowing() {
     let old = seq(one_step());
-    let new = seq_with_schema(one_step(), Some(json!({"type": "object", "required": ["email"]})));
+    let new = seq_with_schema(
+        one_step(),
+        Some(json!({"type": "object", "required": ["email"]})),
+    );
     let diff = semantic_diff(&old, &new);
     let e = entry(&diff, "input_schema_narrowed");
     assert_eq!(e.severity, DiffSeverity::Incompatible);
@@ -932,16 +1102,27 @@ fn adding_schema_without_required_fields_is_only_changed() {
     let old = seq(one_step());
     let new = seq_with_schema(one_step(), Some(json!({"type": "object"})));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"input_schema_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"input_schema_changed"),
+        "{:#?}",
+        diff.entries
+    );
     assert!(!categories(&diff).contains(&"input_schema_narrowed"));
 }
 
 #[test]
 fn removing_schema_is_changed_not_narrowed() {
-    let old = seq_with_schema(one_step(), Some(json!({"type": "object", "required": ["email"]})));
+    let old = seq_with_schema(
+        one_step(),
+        Some(json!({"type": "object", "required": ["email"]})),
+    );
     let new = seq(one_step());
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"input_schema_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"input_schema_changed"),
+        "{:#?}",
+        diff.entries
+    );
     assert!(!categories(&diff).contains(&"input_schema_narrowed"));
 }
 
@@ -951,7 +1132,10 @@ fn widening_required_fields_is_changed_not_narrowed() {
         one_step(),
         Some(json!({"type": "object", "required": ["email", "phone"]})),
     );
-    let new = seq_with_schema(one_step(), Some(json!({"type": "object", "required": ["email"]})));
+    let new = seq_with_schema(
+        one_step(),
+        Some(json!({"type": "object", "required": ["email"]})),
+    );
     let diff = semantic_diff(&old, &new);
     assert!(categories(&diff).contains(&"input_schema_changed"));
     assert!(!categories(&diff).contains(&"input_schema_narrowed"));
@@ -1028,7 +1212,12 @@ fn entries_with_equal_severity_sorted_by_category_then_block() {
     let diff = semantic_diff(&old, &new);
     let cats = categories(&diff);
     // Both behavioral → alphabetical category order.
-    assert_eq!(cats, vec!["queue_changed", "timeout_changed"], "{:#?}", diff.entries);
+    assert_eq!(
+        cats,
+        vec!["queue_changed", "timeout_changed"],
+        "{:#?}",
+        diff.entries
+    );
 }
 
 #[test]
@@ -1042,10 +1231,14 @@ fn max_severity_matches_first_entry() {
 
 #[test]
 fn max_severity_behavioral_for_pure_changes_only() {
-    let old = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "timeout": 1000}]));
-    let new = seq(json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
-        "timeout": 2000}]));
+    let old = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "timeout": 1000}]),
+    );
+    let new = seq(
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {},
+        "timeout": 2000}]),
+    );
     let diff = semantic_diff(&old, &new);
     assert_eq!(diff.max_severity, Some(DiffSeverity::Behavioral));
 }
@@ -1110,7 +1303,10 @@ fn params_change_inside_loop_body_detected() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").block_id.as_deref(), Some("poll"));
+    assert_eq!(
+        entry(&diff, "params_changed").block_id.as_deref(),
+        Some("poll")
+    );
 }
 
 #[test]
@@ -1162,7 +1358,10 @@ fn block_removed_from_try_catch_finally_detected() {
          "catch_block": [step("recover", "log")]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "block_removed").block_id.as_deref(), Some("cleanup"));
+    assert_eq!(
+        entry(&diff, "block_removed").block_id.as_deref(),
+        Some("cleanup")
+    );
 }
 
 #[test]
@@ -1178,7 +1377,10 @@ fn params_change_inside_for_each_body_detected() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "params_changed").block_id.as_deref(), Some("each"));
+    assert_eq!(
+        entry(&diff, "params_changed").block_id.as_deref(),
+        Some("each")
+    );
 }
 
 #[test]
@@ -1196,7 +1398,10 @@ fn queue_change_inside_cancellation_scope_detected() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert_eq!(entry(&diff, "queue_changed").block_id.as_deref(), Some("final"));
+    assert_eq!(
+        entry(&diff, "queue_changed").block_id.as_deref(),
+        Some("final")
+    );
 }
 
 #[test]
@@ -1263,5 +1468,9 @@ fn sub_sequence_nested_in_parallel_retarget_detected() {
         ]}
     ]));
     let diff = semantic_diff(&old, &new);
-    assert!(categories(&diff).contains(&"sub_sequence_changed"), "{:#?}", diff.entries);
+    assert!(
+        categories(&diff).contains(&"sub_sequence_changed"),
+        "{:#?}",
+        diff.entries
+    );
 }

@@ -26,6 +26,7 @@ fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 7, 11, 0, 0, 0).unwrap()
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn seq_in(tenant: &str, namespace: &str, blocks: Value) -> SequenceDefinition {
     serde_json::from_value(json!({
         "id": uuid::Uuid::now_v7(),
@@ -267,7 +268,10 @@ fn empty_catch_block_is_lint_warning() {
         &full_inventory(),
         t0(),
     );
-    assert_eq!(check(&report, "lint_clean").status, PreflightStatus::Warning);
+    assert_eq!(
+        check(&report, "lint_clean").status,
+        PreflightStatus::Warning
+    );
 }
 
 #[test]
@@ -397,7 +401,11 @@ fn every_builtin_handler_passes_without_any_worker() {
     // Each builtin gets its own single-step sequence so one failure names
     // the culprit precisely.
     for handler in BUILTIN_HANDLER_NAMES {
-        let report = run_preflight(&seq(json!([step("only", handler)])), &full_inventory(), t0());
+        let report = run_preflight(
+            &seq(json!([step("only", handler)])),
+            &full_inventory(),
+            t0(),
+        );
         assert_eq!(
             check(&report, "handlers_have_workers").status,
             PreflightStatus::Pass,
@@ -433,7 +441,11 @@ fn builtin_handler_list_is_nontrivial() {
 
 #[test]
 fn external_handler_without_worker_fails_with_full_finding_shape() {
-    let report = run_preflight(&seq(json!([step("pay", "charge_card")])), &full_inventory(), t0());
+    let report = run_preflight(
+        &seq(json!([step("pay", "charge_card")])),
+        &full_inventory(),
+        t0(),
+    );
     let c = check(&report, "handlers_have_workers");
     assert_eq!(c.status, PreflightStatus::Fail);
     let f = &c.findings[0];
@@ -450,7 +462,10 @@ fn external_handler_without_worker_fails_with_full_finding_shape() {
 #[test]
 fn one_missing_handler_used_by_two_blocks_yields_one_finding_naming_both() {
     let report = run_preflight(
-        &seq(json!([step("first", "custom_x"), step("second", "custom_x")])),
+        &seq(json!([
+            step("first", "custom_x"),
+            step("second", "custom_x")
+        ])),
         &full_inventory(),
         t0(),
     );
@@ -806,7 +821,10 @@ fn enabled_plugin_passes_both_plugin_and_handler_checks() {
         enabled: true,
     }]);
     let report = run_preflight(&seq(json!([step("x", "sentiment")])), &inv, t0());
-    assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Pass);
+    assert_eq!(
+        check(&report, "plugins_enabled").status,
+        PreflightStatus::Pass
+    );
     assert_eq!(
         check(&report, "handlers_have_workers").status,
         PreflightStatus::Pass
@@ -889,7 +907,10 @@ fn disabled_plugin_in_nested_catch_block_is_detected() {
         &inv,
         t0(),
     );
-    assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Fail);
+    assert_eq!(
+        check(&report, "plugins_enabled").status,
+        PreflightStatus::Fail
+    );
 }
 
 #[test]
@@ -900,7 +921,10 @@ fn unreferenced_disabled_plugin_is_harmless() {
         enabled: false,
     }]);
     let report = run_preflight(&seq(json!([noop_step("a")])), &inv, t0());
-    assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Pass);
+    assert_eq!(
+        check(&report, "plugins_enabled").status,
+        PreflightStatus::Pass
+    );
 }
 
 #[test]
@@ -918,7 +942,10 @@ fn disabled_plugin_shadowing_a_builtin_name_still_reports() {
         check(&report, "handlers_have_workers").status,
         PreflightStatus::Pass
     );
-    assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Fail);
+    assert_eq!(
+        check(&report, "plugins_enabled").status,
+        PreflightStatus::Fail
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,7 +1028,11 @@ fn credential_expiring_exactly_now_is_already_expired() {
 #[test]
 fn credential_expired_one_second_ago_fails() {
     let mut inv = full_inventory();
-    inv.credentials = Some(vec![cred("stripe", true, Some(t0() - Duration::seconds(1)))]);
+    inv.credentials = Some(vec![cred(
+        "stripe",
+        true,
+        Some(t0() - Duration::seconds(1)),
+    )]);
     let report = run_preflight(&cred_seq("credentials://stripe"), &inv, t0());
     assert_eq!(
         check(&report, "credentials_present").status,
@@ -1012,7 +1043,11 @@ fn credential_expired_one_second_ago_fails() {
 #[test]
 fn credential_expiring_one_second_in_future_passes() {
     let mut inv = full_inventory();
-    inv.credentials = Some(vec![cred("stripe", true, Some(t0() + Duration::seconds(1)))]);
+    inv.credentials = Some(vec![cred(
+        "stripe",
+        true,
+        Some(t0() + Duration::seconds(1)),
+    )]);
     let report = run_preflight(&cred_seq("credentials://stripe"), &inv, t0());
     assert_eq!(
         check(&report, "credentials_present").status,
@@ -1080,7 +1115,11 @@ fn credential_field_suffix_is_stripped_for_lookup() {
 
 #[test]
 fn missing_credential_with_field_suffix_reports_bare_id() {
-    let report = run_preflight(&cred_seq("credentials://vault/token"), &full_inventory(), t0());
+    let report = run_preflight(
+        &cred_seq("credentials://vault/token"),
+        &full_inventory(),
+        t0(),
+    );
     let c = check(&report, "credentials_present");
     assert_eq!(
         c.findings[0].affected_resource.as_ref().unwrap().id,
@@ -1133,7 +1172,10 @@ fn credential_ref_in_parallel_branch_is_collected() {
     let report = run_preflight(&s, &full_inventory(), t0());
     let c = check(&report, "credentials_present");
     assert_eq!(c.status, PreflightStatus::Fail);
-    assert_eq!(c.findings[0].affected_resource.as_ref().unwrap().id, "par-cred");
+    assert_eq!(
+        c.findings[0].affected_resource.as_ref().unwrap().id,
+        "par-cred"
+    );
 }
 
 #[test]
@@ -1241,7 +1283,11 @@ fn queue_seq(queue: &str) -> SequenceDefinition {
 
 #[test]
 fn no_explicit_queues_pass_even_without_queue_inventory() {
-    let report = run_preflight(&seq(json!([noop_step("a")])), &RuntimeInventory::default(), t0());
+    let report = run_preflight(
+        &seq(json!([noop_step("a")])),
+        &RuntimeInventory::default(),
+        t0(),
+    );
     let c = check(&report, "queues_consumable");
     assert_eq!(c.status, PreflightStatus::Pass);
     assert!(c.summary.contains("no explicit queue targets"));
@@ -1411,7 +1457,10 @@ fn queue_name_on_nested_step_is_collected() {
     let report = run_preflight(&s, &full_inventory(), t0());
     let c = check(&report, "queues_consumable");
     assert_eq!(c.status, PreflightStatus::Warning);
-    assert_eq!(c.findings[0].affected_resource.as_ref().unwrap().id, "nested-q");
+    assert_eq!(
+        c.findings[0].affected_resource.as_ref().unwrap().id,
+        "nested-q"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,7 +1554,12 @@ fn draft_only_sub_sequence_warns() {
 #[test]
 fn unpublished_only_sub_sequence_fails() {
     let mut inv = full_inventory();
-    inv.sequences = Some(vec![sub("child", "default", 1, SequenceStatus::Unpublished)]);
+    inv.sequences = Some(vec![sub(
+        "child",
+        "default",
+        1,
+        SequenceStatus::Unpublished,
+    )]);
     let report = run_preflight(&sub_seq_ref("child", None), &inv, t0());
     let c = check(&report, "sub_sequences_available");
     assert_eq!(c.status, PreflightStatus::Fail);
@@ -1582,7 +1636,12 @@ fn version_pin_to_nonexistent_version_fails_as_missing() {
 #[test]
 fn unpinned_ref_matches_any_version() {
     let mut inv = full_inventory();
-    inv.sequences = Some(vec![sub("child", "default", 42, SequenceStatus::Production)]);
+    inv.sequences = Some(vec![sub(
+        "child",
+        "default",
+        42,
+        SequenceStatus::Production,
+    )]);
     let report = run_preflight(&sub_seq_ref("child", None), &inv, t0());
     assert_eq!(
         check(&report, "sub_sequences_available").status,
@@ -1716,7 +1775,11 @@ fn fully_clean_sequence_is_pass_and_ready() {
 #[test]
 fn default_inventory_yields_unknown_overall_for_builtin_sequence() {
     // Every inventory-backed check is unknown; unknown is never success.
-    let report = run_preflight(&seq(json!([noop_step("a")])), &RuntimeInventory::default(), t0());
+    let report = run_preflight(
+        &seq(json!([noop_step("a")])),
+        &RuntimeInventory::default(),
+        t0(),
+    );
     assert_eq!(report.overall, PreflightStatus::Unknown);
     assert!(!report.is_ready());
 }
@@ -1727,8 +1790,14 @@ fn unknown_outranks_warning_in_overall() {
     let mut inv = full_inventory();
     inv.plugins = None;
     let report = run_preflight(&queue_seq("orphan"), &inv, t0());
-    assert_eq!(check(&report, "queues_consumable").status, PreflightStatus::Warning);
-    assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Unknown);
+    assert_eq!(
+        check(&report, "queues_consumable").status,
+        PreflightStatus::Warning
+    );
+    assert_eq!(
+        check(&report, "plugins_enabled").status,
+        PreflightStatus::Unknown
+    );
     assert_eq!(report.overall, PreflightStatus::Unknown);
     assert!(!report.is_ready());
 }
@@ -1849,7 +1918,14 @@ fn report_new_overall_is_max_of_check_statuses() {
 
 #[test]
 fn is_ready_semantics_per_status() {
-    let mk = |s| PreflightReport::new("s", 1, vec![PreflightCheck::with_status("c", s, "s", vec![])], t0());
+    let mk = |s| {
+        PreflightReport::new(
+            "s",
+            1,
+            vec![PreflightCheck::with_status("c", s, "s", vec![])],
+            t0(),
+        )
+    };
     assert!(mk(PreflightStatus::Pass).is_ready());
     assert!(mk(PreflightStatus::Warning).is_ready());
     assert!(!mk(PreflightStatus::Unknown).is_ready());
@@ -1867,7 +1943,10 @@ fn preflight_check_pass_constructor_shape() {
 
 #[test]
 fn statuses_serialize_snake_case() {
-    assert_eq!(serde_json::to_string(&PreflightStatus::Pass).unwrap(), "\"pass\"");
+    assert_eq!(
+        serde_json::to_string(&PreflightStatus::Pass).unwrap(),
+        "\"pass\""
+    );
     assert_eq!(
         serde_json::to_string(&PreflightStatus::Warning).unwrap(),
         "\"warning\""
@@ -1876,7 +1955,10 @@ fn statuses_serialize_snake_case() {
         serde_json::to_string(&PreflightStatus::Unknown).unwrap(),
         "\"unknown\""
     );
-    assert_eq!(serde_json::to_string(&PreflightStatus::Fail).unwrap(), "\"fail\"");
+    assert_eq!(
+        serde_json::to_string(&PreflightStatus::Fail).unwrap(),
+        "\"fail\""
+    );
 }
 
 #[test]

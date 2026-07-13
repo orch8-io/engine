@@ -50,7 +50,11 @@ pub(crate) async fn get_diagnosis(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let ctx = collect_context(&state, instance).await;
     Ok(Json(diagnose(&ctx, Utc::now())))

@@ -47,7 +47,11 @@ pub async fn ingest(
     }
 
     let waits = storage
-        .find_waiting_event_waits(&envelope.tenant_id, &envelope.event_name, &envelope.correlation_key)
+        .find_waiting_event_waits(
+            &envelope.tenant_id,
+            &envelope.event_name,
+            &envelope.correlation_key,
+        )
         .await?;
     for mut wait in waits {
         if !wait.record_match(&envelope) {
@@ -70,7 +74,10 @@ pub async fn ingest(
         if satisfied {
             wait.status = WaitStatus::Satisfied;
         }
-        if !storage.update_event_wait(&wait, WaitStatus::Waiting).await? {
+        if !storage
+            .update_event_wait(&wait, WaitStatus::Waiting)
+            .await?
+        {
             // The wait moved concurrently (cancelled / satisfied by a
             // sibling event). The event stays consumed and attributed —
             // log rather than un-consume: replaying it elsewhere would
@@ -152,13 +159,15 @@ pub async fn register_wait(
             // Lost the race for this event — roll the local match back.
             wait.matched_event_ids.retain(|id| *id != event.id);
             wait.matched_names.retain(|n| n != &event.event_name);
-            continue;
         }
     }
     if wait.is_satisfied() {
         wait.status = WaitStatus::Satisfied;
     }
-    if !storage.update_event_wait(&wait, WaitStatus::Waiting).await? {
+    if !storage
+        .update_event_wait(&wait, WaitStatus::Waiting)
+        .await?
+    {
         // Concurrent ingestion satisfied it between upsert and update —
         // re-read the authoritative row.
         if let Some(fresh) = storage
@@ -206,7 +215,10 @@ async fn resume_waiting_instance(
     // Wake a parked instance so the signal is handled promptly.
     let instance_id = InstanceId::from_uuid(wait.instance_id);
     if let Ok(Some(instance)) = storage.get_instance(instance_id).await
-        && matches!(instance.state, InstanceState::Waiting | InstanceState::Scheduled)
+        && matches!(
+            instance.state,
+            InstanceState::Waiting | InstanceState::Scheduled
+        )
     {
         let _ = storage
             .update_instance_state(instance_id, instance.state, Some(Utc::now()))
@@ -375,13 +387,19 @@ mod tests {
     #[tokio::test]
     async fn duplicate_producer_id_is_discarded() {
         let s = store().await;
-        let first = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({"n": 1})))
-            .await
-            .unwrap();
+        let first = ingest(
+            &s,
+            envelope("t1", "paid", "p-1", "order-1", json!({"n": 1})),
+        )
+        .await
+        .unwrap();
         assert!(!first.duplicate);
-        let second = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({"n": 2})))
-            .await
-            .unwrap();
+        let second = ingest(
+            &s,
+            envelope("t1", "paid", "p-1", "order-1", json!({"n": 2})),
+        )
+        .await
+        .unwrap();
         assert!(second.duplicate);
         // Only one row exists, with the first payload.
         let events = s.list_events("t1", None, 10).await.unwrap();
@@ -392,25 +410,34 @@ mod tests {
     #[tokio::test]
     async fn same_producer_id_different_tenant_is_not_a_duplicate() {
         let s = store().await;
-        assert!(!ingest(&s, envelope("t1", "paid", "p-1", "o", json!({})))
-            .await
-            .unwrap()
-            .duplicate);
-        assert!(!ingest(&s, envelope("t2", "paid", "p-1", "o", json!({})))
-            .await
-            .unwrap()
-            .duplicate);
+        assert!(
+            !ingest(&s, envelope("t1", "paid", "p-1", "o", json!({})))
+                .await
+                .unwrap()
+                .duplicate
+        );
+        assert!(
+            !ingest(&s, envelope("t2", "paid", "p-1", "o", json!({})))
+                .await
+                .unwrap()
+                .duplicate
+        );
     }
 
     #[tokio::test]
     async fn wait_before_event_matches_and_satisfies() {
         let s = store().await;
-        let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
-        assert_eq!(w.status, WaitStatus::Waiting);
-
-        let outcome = ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({"amt": 5})))
+        let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
             .await
             .unwrap();
+        assert_eq!(w.status, WaitStatus::Waiting);
+
+        let outcome = ingest(
+            &s,
+            envelope("t1", "paid", "p-1", "order-1", json!({"amt": 5})),
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome.matched_wait, Some(w.id));
         assert!(outcome.satisfied);
 
@@ -436,7 +463,9 @@ mod tests {
         ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
             .await
             .unwrap();
-        let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+        let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+            .await
+            .unwrap();
         assert_eq!(w.status, WaitStatus::Satisfied);
         let events = s.list_events("t1", None, 10).await.unwrap();
         assert_eq!(events[0].status, EventStatus::Consumed);
@@ -446,9 +475,12 @@ mod tests {
     async fn all_join_resumes_only_after_both_in_either_order() {
         let s = store().await;
         // First event arrives before the wait...
-        ingest(&s, envelope("t1", "inventory_reserved", "i-1", "order-1", json!({})))
-            .await
-            .unwrap();
+        ingest(
+            &s,
+            envelope("t1", "inventory_reserved", "i-1", "order-1", json!({})),
+        )
+        .await
+        .unwrap();
         let w = register_wait(
             &s,
             wait(&["payment_received", "inventory_reserved"], JoinMode::All),
@@ -489,7 +521,9 @@ mod tests {
     #[tokio::test]
     async fn correlation_key_isolates_orders() {
         let s = store().await;
-        let w = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+        let w = register_wait(&s, wait(&["paid"], JoinMode::Any))
+            .await
+            .unwrap();
         // Same event name, different order: must not match.
         let outcome = ingest(&s, envelope("t1", "paid", "p-9", "order-OTHER", json!({})))
             .await
@@ -506,7 +540,9 @@ mod tests {
     #[tokio::test]
     async fn tenant_isolation_never_crosses() {
         let s = store().await;
-        register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+        register_wait(&s, wait(&["paid"], JoinMode::Any))
+            .await
+            .unwrap();
         // Same name + key, wrong tenant.
         let outcome = ingest(&s, envelope("t2", "paid", "p-1", "order-1", json!({})))
             .await
@@ -517,7 +553,9 @@ mod tests {
     #[tokio::test]
     async fn one_event_consumed_by_at_most_one_wait() {
         let s = store().await;
-        let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+        let w1 = register_wait(&s, wait(&["paid"], JoinMode::Any))
+            .await
+            .unwrap();
         let mut second = wait(&["paid"], JoinMode::Any);
         second.instance_id = uuid::Uuid::now_v7();
         second.block_id = "other_block".into();
@@ -556,7 +594,9 @@ mod tests {
         ingest(&s, envelope("t1", "old", "o-1", "k", json!({})))
             .await
             .unwrap();
-        register_wait(&s, wait(&["paid"], JoinMode::Any)).await.unwrap();
+        register_wait(&s, wait(&["paid"], JoinMode::Any))
+            .await
+            .unwrap();
         ingest(&s, envelope("t1", "paid", "p-1", "order-1", json!({})))
             .await
             .unwrap();
@@ -567,7 +607,10 @@ mod tests {
             .unwrap();
         // The consumed event is untouched; only the pending one expires.
         assert_eq!(expired, 1);
-        let events = s.list_events("t1", Some(EventStatus::Expired), 10).await.unwrap();
+        let events = s
+            .list_events("t1", Some(EventStatus::Expired), 10)
+            .await
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_name, "old");
     }

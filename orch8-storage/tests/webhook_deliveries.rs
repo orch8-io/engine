@@ -1,11 +1,9 @@
-//! Integration tests for the webhook delivery attempt store (SQLite).
+//! Integration tests for the webhook delivery attempt store (`SQLite`).
 
 use chrono::{Duration, Utc};
 use orch8_storage::WorkerStore;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_types::webhook_delivery::{
-    DeliveryErrorClass, DeliveryFilter, WebhookDeliveryAttempt,
-};
+use orch8_types::webhook_delivery::{DeliveryErrorClass, DeliveryFilter, WebhookDeliveryAttempt};
 use uuid::Uuid;
 
 async fn store() -> SqliteStorage {
@@ -47,11 +45,17 @@ async fn record_and_fetch_attempts_in_order() {
     let attempts = s.get_webhook_delivery_attempts(delivery).await.unwrap();
     assert_eq!(attempts.len(), 3);
     assert_eq!(
-        attempts.iter().map(|a| a.attempt_number).collect::<Vec<_>>(),
+        attempts
+            .iter()
+            .map(|a| a.attempt_number)
+            .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
     assert!(attempts[2].success);
-    assert_eq!(attempts[0].error_class, Some(DeliveryErrorClass::HttpStatus));
+    assert_eq!(
+        attempts[0].error_class,
+        Some(DeliveryErrorClass::HttpStatus)
+    );
     assert_eq!(attempts[0].error_excerpt.as_deref(), Some("http 503"));
     assert!(attempts[0].signed);
 }
@@ -62,10 +66,16 @@ async fn summaries_aggregate_per_delivery() {
     let failed = Uuid::now_v7();
     let delivered = Uuid::now_v7();
     for n in 1..=3 {
-        s.record_webhook_attempt(&attempt(failed, n, false)).await.unwrap();
+        s.record_webhook_attempt(&attempt(failed, n, false))
+            .await
+            .unwrap();
     }
-    s.record_webhook_attempt(&attempt(delivered, 1, false)).await.unwrap();
-    s.record_webhook_attempt(&attempt(delivered, 2, true)).await.unwrap();
+    s.record_webhook_attempt(&attempt(delivered, 1, false))
+        .await
+        .unwrap();
+    s.record_webhook_attempt(&attempt(delivered, 2, true))
+        .await
+        .unwrap();
 
     let all = s
         .list_webhook_deliveries(&DeliveryFilter::default(), 100)
@@ -92,7 +102,9 @@ async fn summaries_filter_by_outcome_and_event_type() {
     let s = store().await;
     let failed = Uuid::now_v7();
     let delivered = Uuid::now_v7();
-    s.record_webhook_attempt(&attempt(failed, 1, false)).await.unwrap();
+    s.record_webhook_attempt(&attempt(failed, 1, false))
+        .await
+        .unwrap();
     let mut other = attempt(delivered, 1, true);
     other.event_type = "instance.completed".into();
     s.record_webhook_attempt(&other).await.unwrap();
@@ -144,7 +156,9 @@ async fn retention_deletes_only_old_attempts() {
     let mut old = attempt(delivery, 1, false);
     old.attempted_at = Utc::now() - Duration::days(60);
     s.record_webhook_attempt(&old).await.unwrap();
-    s.record_webhook_attempt(&attempt(delivery, 2, true)).await.unwrap();
+    s.record_webhook_attempt(&attempt(delivery, 2, true))
+        .await
+        .unwrap();
 
     let removed = s
         .delete_webhook_attempts_before(Utc::now() - Duration::days(30))

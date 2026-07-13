@@ -27,7 +27,12 @@ async fn create_sequence(base: &str, client: &reqwest::Client, blocks: Value) ->
     id
 }
 
-async fn create_instance(base: &str, client: &reqwest::Client, seq_id: &str, extra: Value) -> String {
+async fn create_instance(
+    base: &str,
+    client: &reqwest::Client,
+    seq_id: &str,
+    extra: Value,
+) -> String {
     let mut body = json!({
         "tenant_id": "t1",
         "sequence_id": seq_id,

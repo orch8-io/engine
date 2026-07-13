@@ -142,10 +142,7 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                     {
                         facts.sub_sequences.insert(
                             id.to_string(),
-                            (
-                                name.to_string(),
-                                map.get("version").and_then(Value::as_i64),
-                            ),
+                            (name.to_string(), map.get("version").and_then(Value::as_i64)),
                         );
                     }
                 }
@@ -170,16 +167,18 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
         }
     }
     let mut facts = SequenceFacts::default();
-    if let Ok(v) = serde_json::to_value(seq) {
-        if let Some(blocks) = v.get("blocks") {
-            walk(blocks, &mut facts);
-        }
+    if let Ok(v) = serde_json::to_value(seq)
+        && let Some(blocks) = v.get("blocks")
+    {
+        walk(blocks, &mut facts);
     }
     facts
 }
 
 fn str_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    map.get(key).and_then(Value::as_str).map(ToString::to_string)
+    map.get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 /// Record `outputs.<block>` references inside a step's params.
@@ -195,9 +194,7 @@ fn collect_output_refs(step_id: &str, params: &Value, facts: &mut SequenceFacts)
                         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
                         .collect();
                     if !referenced.is_empty() {
-                        facts
-                            .output_refs
-                            .push((step_id.to_string(), referenced));
+                        facts.output_refs.push((step_id.to_string(), referenced));
                     }
                     rest = after;
                 }
@@ -221,19 +218,23 @@ fn collect_output_refs(step_id: &str, params: &Value, facts: &mut SequenceFacts)
 /// Compute the semantic diff from `baseline` to `candidate`.
 #[must_use]
 #[allow(clippy::too_many_lines)]
-pub fn semantic_diff(baseline: &SequenceDefinition, candidate: &SequenceDefinition) -> SemanticDiff {
+pub fn semantic_diff(
+    baseline: &SequenceDefinition,
+    candidate: &SequenceDefinition,
+) -> SemanticDiff {
     let old = collect(baseline);
     let new = collect(candidate);
     let mut entries: Vec<DiffEntry> = Vec::new();
 
-    let mut push = |category: &str, severity: DiffSeverity, block: Option<&str>, summary: String| {
-        entries.push(DiffEntry {
-            category: category.to_string(),
-            severity,
-            block_id: block.map(ToString::to_string),
-            summary,
-        });
-    };
+    let mut push =
+        |category: &str, severity: DiffSeverity, block: Option<&str>, summary: String| {
+            entries.push(DiffEntry {
+                category: category.to_string(),
+                severity,
+                block_id: block.map(ToString::to_string),
+                summary,
+            });
+        };
 
     // --- removed / added blocks ---
     for (id, facts) in &old.steps {
@@ -335,14 +336,21 @@ pub fn semantic_diff(baseline: &SequenceDefinition, candidate: &SequenceDefiniti
             ("timeout_changed", &old_step.timeout, &new_step.timeout),
             ("deadline_changed", &old_step.deadline, &new_step.deadline),
             ("delay_changed", &old_step.delay, &new_step.delay),
-            ("send_window_changed", &old_step.send_window, &new_step.send_window),
+            (
+                "send_window_changed",
+                &old_step.send_window,
+                &new_step.send_window,
+            ),
         ] {
             if old_v != new_v {
                 push(
                     field,
                     DiffSeverity::Behavioral,
                     Some(id),
-                    format!("step '{id}' {} configuration changed", field.trim_end_matches("_changed")),
+                    format!(
+                        "step '{id}' {} configuration changed",
+                        field.trim_end_matches("_changed")
+                    ),
                 );
             }
         }
@@ -517,6 +525,7 @@ mod tests {
         seq_with_schema(blocks, None)
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn seq_with_schema(blocks: Value, input_schema: Option<Value>) -> SequenceDefinition {
         let mut v = json!({
             "id": uuid::Uuid::now_v7(),
@@ -565,7 +574,10 @@ mod tests {
             {"type": "step", "id": "fresh", "handler": "transform", "params": {}}
         ]));
         let diff = semantic_diff(&old, &new);
-        assert_eq!(entry(&diff, "block_removed").block_id.as_deref(), Some("gone"));
+        assert_eq!(
+            entry(&diff, "block_removed").block_id.as_deref(),
+            Some("gone")
+        );
         let added = entry(&diff, "block_added");
         assert_eq!(added.block_id.as_deref(), Some("fresh"));
         // transform has no side effects → behavioral only.
@@ -582,7 +594,10 @@ mod tests {
             {"type": "step", "id": "charge", "handler": "http_request", "params": {}}
         ]));
         let diff = semantic_diff(&old, &new);
-        assert_eq!(entry(&diff, "block_added").severity, DiffSeverity::SideEffectRisk);
+        assert_eq!(
+            entry(&diff, "block_added").severity,
+            DiffSeverity::SideEffectRisk
+        );
         assert_eq!(diff.max_severity, Some(DiffSeverity::SideEffectRisk));
     }
 
@@ -596,7 +611,10 @@ mod tests {
             {"type": "step", "id": "x", "handler": "custom_worker_thing", "params": {}}
         ]));
         let diff = semantic_diff(&old, &new);
-        assert_eq!(entry(&diff, "block_added").severity, DiffSeverity::SideEffectRisk);
+        assert_eq!(
+            entry(&diff, "block_added").severity,
+            DiffSeverity::SideEffectRisk
+        );
     }
 
     #[test]
@@ -632,12 +650,12 @@ mod tests {
         let old = seq(json!([
             {"type": "step", "id": "a", "handler": "noop", "params": {},
              "retry": {"max_attempts": 3, "initial_backoff": 1000, "max_backoff": 5000},
-             "timeout": 30000}
+             "timeout": 30_000}
         ]));
         let new = seq(json!([
             {"type": "step", "id": "a", "handler": "noop", "params": {},
              "retry": {"max_attempts": 5, "initial_backoff": 1000, "max_backoff": 5000},
-             "timeout": 60000, "deadline": 120000}
+             "timeout": 60_000, "deadline": 120_000}
         ]));
         let diff = semantic_diff(&old, &new);
         let cats = categories(&diff);
@@ -812,6 +830,10 @@ mod tests {
              "wait_for_input": {"prompt": "approve?"}}
         ]));
         let diff = semantic_diff(&old, &new);
-        assert!(entry(&diff, "approval_gate_changed").summary.contains("now requires"));
+        assert!(
+            entry(&diff, "approval_gate_changed")
+                .summary
+                .contains("now requires")
+        );
     }
 }

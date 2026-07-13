@@ -66,6 +66,7 @@ pub enum ReleaseCmd {
     Decisions { id: Uuid },
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(client: &Client, base: &str, cmd: ReleaseCmd, format: OutputFormat) -> Result<()> {
     match cmd {
         ReleaseCmd::Create {

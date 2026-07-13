@@ -48,14 +48,27 @@ async fn record(srv: &TestServer, attempt: &WebhookDeliveryAttempt) {
 
 /// Record a whole delivery group: `fails` failed attempts, optionally
 /// followed by a success. Returns the delivery id.
-async fn record_group(srv: &TestServer, base: DateTime<Utc>, fails: i32, then_success: bool) -> Uuid {
+async fn record_group(
+    srv: &TestServer,
+    base: DateTime<Utc>,
+    fails: i32,
+    then_success: bool,
+) -> Uuid {
     let delivery = Uuid::now_v7();
     for n in 1..=fails {
-        record(srv, &failed_attempt(delivery, n, base + Duration::seconds(i64::from(n)))).await;
+        record(
+            srv,
+            &failed_attempt(delivery, n, base + Duration::seconds(i64::from(n))),
+        )
+        .await;
     }
     if then_success {
         let n = fails + 1;
-        record(srv, &mk_attempt(delivery, n, true, base + Duration::seconds(i64::from(n)))).await;
+        record(
+            srv,
+            &mk_attempt(delivery, n, true, base + Duration::seconds(i64::from(n))),
+        )
+        .await;
     }
     delivery
 }
@@ -68,7 +81,12 @@ async fn list_deliveries(srv: &TestServer, query: &[(&str, &str)]) -> Vec<Value>
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    resp.json::<Value>().await.unwrap().as_array().unwrap().clone()
+    resp.json::<Value>()
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 async fn deliveries_status(srv: &TestServer, query: &[(&str, &str)]) -> StatusCode {
@@ -88,7 +106,12 @@ async fn get_timeline(srv: &TestServer, delivery: Uuid) -> Vec<Value> {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    resp.json::<Value>().await.unwrap().as_array().unwrap().clone()
+    resp.json::<Value>()
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 fn mk_parked(url: &str, delivery_id: Option<Uuid>) -> WebhookOutboxEntry {
@@ -111,7 +134,10 @@ fn mk_parked(url: &str, delivery_id: Option<Uuid>) -> WebhookOutboxEntry {
 
 async fn get_preview(srv: &TestServer, id: Uuid) -> (StatusCode, Value) {
     let resp = reqwest::Client::new()
-        .get(format!("{}/webhooks/outbox/{id}/redeliver-preview", srv.v1_url()))
+        .get(format!(
+            "{}/webhooks/outbox/{id}/redeliver-preview",
+            srv.v1_url()
+        ))
         .send()
         .await
         .unwrap();
@@ -200,7 +226,11 @@ async fn delivered_is_true_if_any_attempt_succeeded_even_mid_group() {
     let delivery = Uuid::now_v7();
     let base = Utc::now();
     record(&srv, &mk_attempt(delivery, 1, true, base)).await;
-    record(&srv, &failed_attempt(delivery, 2, base + Duration::seconds(1))).await;
+    record(
+        &srv,
+        &failed_attempt(delivery, 2, base + Duration::seconds(1)),
+    )
+    .await;
 
     let rows = list_deliveries(&srv, &[]).await;
     assert_eq!(rows.len(), 1);
@@ -216,7 +246,11 @@ async fn summary_first_and_last_timestamps_span_the_group() {
     let first_at = base;
     let last_at = base + Duration::seconds(30);
     record(&srv, &failed_attempt(delivery, 1, first_at)).await;
-    record(&srv, &failed_attempt(delivery, 2, base + Duration::seconds(10))).await;
+    record(
+        &srv,
+        &failed_attempt(delivery, 2, base + Duration::seconds(10)),
+    )
+    .await;
     record(&srv, &failed_attempt(delivery, 3, last_at)).await;
 
     let rows = list_deliveries(&srv, &[]).await;
@@ -413,8 +447,14 @@ async fn filter_delivered_splits_mixed_population() {
     for i in 3..5 {
         record_group(&srv, base + Duration::seconds(i * 10), 1, false).await;
     }
-    assert_eq!(list_deliveries(&srv, &[("delivered", "true")]).await.len(), 3);
-    assert_eq!(list_deliveries(&srv, &[("delivered", "false")]).await.len(), 2);
+    assert_eq!(
+        list_deliveries(&srv, &[("delivered", "true")]).await.len(),
+        3
+    );
+    assert_eq!(
+        list_deliveries(&srv, &[("delivered", "false")]).await.len(),
+        2
+    );
     assert_eq!(list_deliveries(&srv, &[]).await.len(), 5);
 }
 
@@ -482,8 +522,17 @@ async fn filter_error_class_uses_final_attempt_class() {
     record(&srv, &second).await;
 
     // The group's final class is timeout, so a connect filter misses it.
-    assert!(list_deliveries(&srv, &[("error_class", "connect")]).await.is_empty());
-    assert_eq!(list_deliveries(&srv, &[("error_class", "timeout")]).await.len(), 1);
+    assert!(
+        list_deliveries(&srv, &[("error_class", "connect")])
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        list_deliveries(&srv, &[("error_class", "timeout")])
+            .await
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -684,7 +733,10 @@ async fn limit_truncates_to_newest_n() {
     let newest = record_group(&srv, base + Duration::seconds(20), 1, false).await;
 
     let rows = list_deliveries(&srv, &[("limit", "2")]).await;
-    let ids: Vec<&str> = rows.iter().map(|r| r["delivery_id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["delivery_id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids, vec![newest.to_string(), mid.to_string()]);
     assert!(!ids.contains(&oldest.to_string().as_str()));
 }
@@ -807,7 +859,10 @@ async fn timeline_orders_by_attempt_number_regardless_of_insert_order() {
     }
 
     let attempts = get_timeline(&srv, delivery).await;
-    let numbers: Vec<i64> = attempts.iter().map(|a| a["attempt_number"].as_i64().unwrap()).collect();
+    let numbers: Vec<i64> = attempts
+        .iter()
+        .map(|a| a["attempt_number"].as_i64().unwrap())
+        .collect();
     assert_eq!(numbers, vec![1, 2, 3]);
 }
 
@@ -818,7 +873,11 @@ async fn timeline_ordering_ignores_attempted_at() {
     let srv = spawn_test_server().await;
     let delivery = Uuid::now_v7();
     let base = Utc::now();
-    record(&srv, &failed_attempt(delivery, 1, base + Duration::seconds(100))).await;
+    record(
+        &srv,
+        &failed_attempt(delivery, 1, base + Duration::seconds(100)),
+    )
+    .await;
     record(&srv, &failed_attempt(delivery, 2, base)).await;
 
     let attempts = get_timeline(&srv, delivery).await;
@@ -830,7 +889,11 @@ async fn timeline_ordering_ignores_attempted_at() {
 async fn timeline_unknown_delivery_is_404() {
     let srv = spawn_test_server().await;
     let resp = reqwest::Client::new()
-        .get(format!("{}/webhooks/deliveries/{}", srv.v1_url(), Uuid::now_v7()))
+        .get(format!(
+            "{}/webhooks/deliveries/{}",
+            srv.v1_url(),
+            Uuid::now_v7()
+        ))
         .send()
         .await
         .unwrap();
@@ -873,7 +936,10 @@ async fn timeline_transport_error_attempt_omits_status_code() {
 
     let attempts = get_timeline(&srv, delivery).await;
     let obj = attempts[0].as_object().unwrap();
-    assert!(!obj.contains_key("status_code"), "transport errors carry no status");
+    assert!(
+        !obj.contains_key("status_code"),
+        "transport errors carry no status"
+    );
     assert_eq!(attempts[0]["error_class"], "connect");
     assert_eq!(attempts[0]["error_excerpt"], "connection refused");
 }
@@ -926,7 +992,10 @@ async fn timeline_preserves_per_attempt_durations() {
     }
 
     let attempts = get_timeline(&srv, delivery).await;
-    let durations: Vec<i64> = attempts.iter().map(|a| a["duration_ms"].as_i64().unwrap()).collect();
+    let durations: Vec<i64> = attempts
+        .iter()
+        .map(|a| a["duration_ms"].as_i64().unwrap())
+        .collect();
     assert_eq!(durations, vec![0, 1500, 42]);
 }
 
@@ -1017,7 +1086,10 @@ async fn preview_includes_previous_delivery_id_when_linked() {
 
     let (status, preview) = get_preview(&srv, entry.id).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(preview["previous_delivery_id"], delivery.to_string().as_str());
+    assert_eq!(
+        preview["previous_delivery_id"],
+        delivery.to_string().as_str()
+    );
 }
 
 #[tokio::test]
@@ -1029,7 +1101,10 @@ async fn preview_omits_previous_delivery_id_when_unlinked() {
     let (status, preview) = get_preview(&srv, entry.id).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        !preview.as_object().unwrap().contains_key("previous_delivery_id"),
+        !preview
+            .as_object()
+            .unwrap()
+            .contains_key("previous_delivery_id"),
         "unlinked rows must omit previous_delivery_id"
     );
 }
@@ -1076,7 +1151,13 @@ async fn preview_is_non_destructive() {
     assert_eq!(status, StatusCode::OK);
 
     // Row is still parked (storage) and still listed (API).
-    assert!(srv.storage.get_webhook_outbox(entry.id).await.unwrap().is_some());
+    assert!(
+        srv.storage
+            .get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
     let resp = reqwest::Client::new()
         .get(format!("{}/webhooks/outbox", srv.v1_url()))
         .send()
@@ -1111,7 +1192,11 @@ async fn preview_links_to_inspectable_delivery_timeline() {
     let delivery = Uuid::now_v7();
     let base = Utc::now();
     record(&srv, &failed_attempt(delivery, 1, base)).await;
-    record(&srv, &failed_attempt(delivery, 2, base + Duration::seconds(1))).await;
+    record(
+        &srv,
+        &failed_attempt(delivery, 2, base + Duration::seconds(1)),
+    )
+    .await;
 
     let mut entry = mk_parked("https://story.example.com/hook", Some(delivery));
     entry.attempts = 2;
@@ -1194,7 +1279,10 @@ async fn outbox_entry_fields_round_trip_through_api() {
     assert_eq!(row["event_type"], DEFAULT_EVENT);
     assert_eq!(row["attempts"], 9);
     assert_eq!(row["last_error"], "connection refused");
-    assert_eq!(row["instance_id"], entry.instance_id.unwrap().to_string().as_str());
+    assert_eq!(
+        row["instance_id"],
+        entry.instance_id.unwrap().to_string().as_str()
+    );
     assert_eq!(row["payload"], entry.payload);
 }
 
@@ -1231,7 +1319,11 @@ async fn outbox_discard_removes_only_target_row() {
 async fn outbox_discard_unknown_id_is_no_content() {
     let srv = spawn_test_server().await;
     let resp = reqwest::Client::new()
-        .delete(format!("{}/webhooks/outbox/{}", srv.v1_url(), Uuid::now_v7()))
+        .delete(format!(
+            "{}/webhooks/outbox/{}",
+            srv.v1_url(),
+            Uuid::now_v7()
+        ))
         .send()
         .await
         .unwrap();

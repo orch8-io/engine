@@ -291,7 +291,11 @@ async fn workbench_unknown_instance_404() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let resp = client
-        .get(format!("{}/instances/{}/workbench", srv.v1_url(), Uuid::now_v7()))
+        .get(format!(
+            "{}/instances/{}/workbench",
+            srv.v1_url(),
+            Uuid::now_v7()
+        ))
         .header("X-Tenant-Id", "t1")
         .send()
         .await
@@ -446,7 +450,10 @@ async fn workbench_equal_timestamp_same_kind_ordered_by_id() {
         .collect();
     let mut expected = ids.clone();
     expected.sort();
-    assert_eq!(output_event_ids, expected, "same-ts same-kind ties break by id");
+    assert_eq!(
+        output_event_ids, expected,
+        "same-ts same-kind ties break by id"
+    );
 }
 
 #[tokio::test]
@@ -457,7 +464,15 @@ async fn workbench_kind_rank_state_transition_before_output_at_equal_ts() {
     let ts = past_ts(0);
     // Insert the output FIRST so ordering cannot come from insertion order.
     record_output_full(&srv, inst, "a", json!({}), None, 1, ts).await;
-    seed_audit(&srv, inst, "state_transition", Some("scheduled"), Some("running"), ts).await;
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("scheduled"),
+        Some("running"),
+        ts,
+    )
+    .await;
 
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let events = view["events"].as_array().unwrap();
@@ -506,7 +521,15 @@ async fn workbench_kind_rank_full_chain_at_equal_ts() {
     seed_log(&srv, inst, "a", "log line", ts).await;
     record_output_full(&srv, inst, "a", json!({}), None, 1, ts).await;
     seed_audit(&srv, inst, "signal_received", None, None, ts).await;
-    seed_audit(&srv, inst, "state_transition", Some("scheduled"), Some("running"), ts).await;
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("scheduled"),
+        Some("running"),
+        ts,
+    )
+    .await;
 
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let kinds: Vec<&str> = view["events"]
@@ -516,7 +539,10 @@ async fn workbench_kind_rank_full_chain_at_equal_ts() {
         .take(4)
         .map(|e| e["kind"].as_str().unwrap())
         .collect();
-    assert_eq!(kinds, vec!["state_transition", "audit", "block_output", "log"]);
+    assert_eq!(
+        kinds,
+        vec!["state_transition", "audit", "block_output", "log"]
+    );
 }
 
 #[tokio::test]
@@ -527,7 +553,15 @@ async fn workbench_events_sorted_by_timestamp_first() {
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     seed_log(&srv, inst, "a", "early log", past_ts(0)).await;
-    seed_audit(&srv, inst, "state_transition", Some("scheduled"), Some("running"), past_ts(10)).await;
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("scheduled"),
+        Some("running"),
+        past_ts(10),
+    )
+    .await;
 
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let events = view["events"].as_array().unwrap();
@@ -540,7 +574,15 @@ async fn workbench_state_transition_summary_includes_arrow() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
-    seed_audit(&srv, inst, "state_transition", Some("scheduled"), Some("running"), past_ts(0)).await;
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("scheduled"),
+        Some("running"),
+        past_ts(0),
+    )
+    .await;
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let summary = view["events"][0]["summary"].as_str().unwrap();
     assert_eq!(summary, "state_transition: scheduled → running");
@@ -569,7 +611,11 @@ async fn workbench_long_log_message_truncated_in_summary() {
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let summary = view["events"][0]["summary"].as_str().unwrap();
     assert!(summary.ends_with('…'), "long messages get an ellipsis");
-    assert!(summary.len() < 300, "summary is bounded, got {}", summary.len());
+    assert!(
+        summary.len() < 300,
+        "summary is bounded, got {}",
+        summary.len()
+    );
 }
 
 #[tokio::test]
@@ -578,12 +624,26 @@ async fn workbench_output_events_have_block_id_audit_events_do_not() {
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     record_output_full(&srv, inst, "a", json!({}), None, 1, past_ts(1)).await;
-    seed_audit(&srv, inst, "state_transition", Some("scheduled"), Some("running"), past_ts(0)).await;
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("scheduled"),
+        Some("running"),
+        past_ts(0),
+    )
+    .await;
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let events = view["events"].as_array().unwrap();
-    let audit_ev = events.iter().find(|e| e["kind"] == "state_transition").unwrap();
+    let audit_ev = events
+        .iter()
+        .find(|e| e["kind"] == "state_transition")
+        .unwrap();
     let output_ev = events.iter().find(|e| e["kind"] == "block_output").unwrap();
-    assert!(audit_ev.get("block_id").is_none(), "audit events omit block_id");
+    assert!(
+        audit_ev.get("block_id").is_none(),
+        "audit events omit block_id"
+    );
     assert_eq!(output_ev["block_id"], "a");
     assert!(
         output_ev["summary"].as_str().unwrap().contains("attempt 1"),
@@ -601,7 +661,16 @@ async fn workbench_limit_1_returns_single_event_and_truncated_flag() {
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     for (i, block) in ["a", "b"].iter().enumerate() {
-        record_output_full(&srv, inst, block, json!({}), None, 1, past_ts(i as i64)).await;
+        record_output_full(
+            &srv,
+            inst,
+            block,
+            json!({}),
+            None,
+            1,
+            past_ts(i64::try_from(i).unwrap()),
+        )
+        .await;
     }
     let view = get_workbench(&srv.v1_url(), &client, inst, "?limit=1").await;
     assert_eq!(view["events"].as_array().unwrap().len(), 1);
@@ -637,8 +706,7 @@ async fn workbench_limit_exactly_event_count_not_truncated() {
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     record_output_full(&srv, inst, "a", json!({}), None, 1, past_ts(0)).await;
     // Discover the actual total first (creation may add audit events).
-    let total = get_workbench(&srv.v1_url(), &client, inst, "")
-        .await["events"]
+    let total = get_workbench(&srv.v1_url(), &client, inst, "").await["events"]
         .as_array()
         .unwrap()
         .len();
@@ -653,7 +721,16 @@ async fn workbench_limit_one_below_count_truncates_in_order() {
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     for i in 0..4 {
-        record_output_full(&srv, inst, &format!("blk{i}"), json!({}), None, 1, past_ts(i)).await;
+        record_output_full(
+            &srv,
+            inst,
+            &format!("blk{i}"),
+            json!({}),
+            None,
+            1,
+            past_ts(i),
+        )
+        .await;
     }
     let full = event_ids(&get_workbench(&srv.v1_url(), &client, inst, "").await);
     let limit = full.len() - 1;
@@ -747,8 +824,16 @@ async fn workbench_error_ref_classified_as_error() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let (_, inst) = fixture(&srv, &client, json!({})).await;
-    record_output_full(&srv, inst, "a", json!({"err": "boom"}), Some("__error__"), 2, Utc::now())
-        .await;
+    record_output_full(
+        &srv,
+        inst,
+        "a",
+        json!({"err": "boom"}),
+        Some("__error__"),
+        2,
+        Utc::now(),
+    )
+    .await;
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let out = &view["outputs"][0];
     assert_eq!(out["status"], "error");
@@ -780,7 +865,16 @@ async fn workbench_plain_and_externalized_outputs_classified_ok() {
     let (_, inst) = fixture(&srv, &client, json!({})).await;
     record_output_full(&srv, inst, "a", json!({"v": 1}), None, 1, past_ts(0)).await;
     // An externalized reference that is NOT a sentinel is still "ok".
-    record_output_full(&srv, inst, "b", json!(null), Some("ext:blob:key1"), 1, past_ts(1)).await;
+    record_output_full(
+        &srv,
+        inst,
+        "b",
+        json!(null),
+        Some("ext:blob:key1"),
+        1,
+        past_ts(1),
+    )
+    .await;
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let outputs = view["outputs"].as_array().unwrap();
     assert_eq!(outputs.len(), 2);
@@ -797,7 +891,10 @@ async fn workbench_output_summaries_never_carry_payload() {
     record_output(&srv, inst, "a", json!({"very_unique_payload_marker": 42})).await;
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let out = &view["outputs"][0];
-    assert!(out.get("output").is_none(), "payload must stay behind the detail endpoint");
+    assert!(
+        out.get("output").is_none(),
+        "payload must stay behind the detail endpoint"
+    );
     assert!(!view.to_string().contains("very_unique_payload_marker"));
     // Sizes and timestamps ARE exposed.
     assert_eq!(out["output_size"], 10);
@@ -814,7 +911,10 @@ async fn workbench_multiple_attempts_all_listed() {
     let view = get_workbench(&srv.v1_url(), &client, inst, "").await;
     let outputs = view["outputs"].as_array().unwrap();
     assert_eq!(outputs.len(), 2, "every attempt row is summarised");
-    let statuses: Vec<&str> = outputs.iter().map(|o| o["status"].as_str().unwrap()).collect();
+    let statuses: Vec<&str> = outputs
+        .iter()
+        .map(|o| o["status"].as_str().unwrap())
+        .collect();
     assert!(statuses.contains(&"retry"));
     assert!(statuses.contains(&"ok"));
 }
@@ -873,8 +973,26 @@ async fn compare_differing_outputs_on_shared_blocks() {
     let (left, right) = compare_fixture(&srv, &client).await;
     record_output_full(&srv, left, "same", json!({"v": 1}), None, 1, past_ts(0)).await;
     record_output_full(&srv, right, "same", json!({"v": 1}), None, 1, past_ts(0)).await;
-    record_output_full(&srv, left, "diff", json!({"v": "left"}), None, 1, past_ts(1)).await;
-    record_output_full(&srv, right, "diff", json!({"v": "right"}), None, 1, past_ts(1)).await;
+    record_output_full(
+        &srv,
+        left,
+        "diff",
+        json!({"v": "left"}),
+        None,
+        1,
+        past_ts(1),
+    )
+    .await;
+    record_output_full(
+        &srv,
+        right,
+        "diff",
+        json!({"v": "right"}),
+        None,
+        1,
+        past_ts(1),
+    )
+    .await;
 
     let cmp = get_compare(&srv.v1_url(), &client, left, right).await;
     assert_eq!(str_vec(&cmp["differing_outputs"]), vec!["diff"]);
@@ -890,7 +1008,16 @@ async fn compare_retry_rows_ignored_entirely() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let (left, right) = compare_fixture(&srv, &client).await;
-    record_output_full(&srv, left, "flaky", json!({}), Some("__retry__"), 1, past_ts(0)).await;
+    record_output_full(
+        &srv,
+        left,
+        "flaky",
+        json!({}),
+        Some("__retry__"),
+        1,
+        past_ts(0),
+    )
+    .await;
     record_output_full(&srv, right, "flaky", json!({"v": 1}), None, 1, past_ts(0)).await;
 
     let cmp = get_compare(&srv.v1_url(), &client, left, right).await;
@@ -935,8 +1062,16 @@ async fn compare_error_rows_count_as_executed() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let (left, right) = compare_fixture(&srv, &client).await;
-    record_output_full(&srv, left, "boom", json!({"error": "x"}), Some("__error__"), 1, past_ts(0))
-        .await;
+    record_output_full(
+        &srv,
+        left,
+        "boom",
+        json!({"error": "x"}),
+        Some("__error__"),
+        1,
+        past_ts(0),
+    )
+    .await;
 
     let cmp = get_compare(&srv.v1_url(), &client, left, right).await;
     assert_eq!(str_vec(&cmp["only_left"]), vec!["boom"]);
@@ -948,7 +1083,16 @@ async fn compare_sentinel_rows_excluded() {
     let client = reqwest::Client::new();
     let (left, right) = compare_fixture(&srv, &client).await;
     record_output_full(&srv, left, "_claim", json!({}), None, 1, past_ts(0)).await;
-    record_output_full(&srv, right, "_other_sentinel", json!({}), None, 1, past_ts(0)).await;
+    record_output_full(
+        &srv,
+        right,
+        "_other_sentinel",
+        json!({}),
+        None,
+        1,
+        past_ts(0),
+    )
+    .await;
 
     let cmp = get_compare(&srv.v1_url(), &client, left, right).await;
     assert_eq!(cmp["only_left"], json!([]));
@@ -1006,7 +1150,11 @@ async fn compare_unknown_left_404() {
     let client = reqwest::Client::new();
     let (_, right) = compare_fixture(&srv, &client).await;
     let resp = client
-        .get(format!("{}/instances/{}/compare/{right}", srv.v1_url(), Uuid::now_v7()))
+        .get(format!(
+            "{}/instances/{}/compare/{right}",
+            srv.v1_url(),
+            Uuid::now_v7()
+        ))
         .header("X-Tenant-Id", "t1")
         .send()
         .await
@@ -1020,7 +1168,11 @@ async fn compare_unknown_right_404() {
     let client = reqwest::Client::new();
     let (left, _) = compare_fixture(&srv, &client).await;
     let resp = client
-        .get(format!("{}/instances/{left}/compare/{}", srv.v1_url(), Uuid::now_v7()))
+        .get(format!(
+            "{}/instances/{left}/compare/{}",
+            srv.v1_url(),
+            Uuid::now_v7()
+        ))
         .header("X-Tenant-Id", "t1")
         .send()
         .await
@@ -1087,7 +1239,7 @@ async fn compare_execution_order_preserved_in_only_lists() {
 // ===========================================================================
 
 /// Three-step fixture with one recorded output on "fetch":
-/// fetch(noop, recorded) → charge(llm_call) → log_it(log).
+/// fetch(noop, recorded) → `charge(llm_call)` → `log_it(log)`.
 async fn preview_fixture(srv: &TestServer, client: &reqwest::Client) -> Uuid {
     let base = srv.v1_url();
     let seq = publish(
@@ -1112,7 +1264,10 @@ async fn fork_preview_from_first_block_reexecutes_everything() {
     let inst = preview_fixture(&srv, &client).await;
     let preview = get_fork_preview(&srv.v1_url(), &client, inst, "fetch").await;
     assert_eq!(preview["copied_blocks"], json!([]));
-    assert_eq!(str_vec(&preview["re_executed_blocks"]), vec!["fetch", "charge", "log_it"]);
+    assert_eq!(
+        str_vec(&preview["re_executed_blocks"]),
+        vec!["fetch", "charge", "log_it"]
+    );
     assert_eq!(preview["from_block_id"], "fetch");
 }
 
@@ -1123,7 +1278,10 @@ async fn fork_preview_from_middle_block_copies_recorded_prefix() {
     let inst = preview_fixture(&srv, &client).await;
     let preview = get_fork_preview(&srv.v1_url(), &client, inst, "charge").await;
     assert_eq!(str_vec(&preview["copied_blocks"]), vec!["fetch"]);
-    assert_eq!(str_vec(&preview["re_executed_blocks"]), vec!["charge", "log_it"]);
+    assert_eq!(
+        str_vec(&preview["re_executed_blocks"]),
+        vec!["charge", "log_it"]
+    );
 }
 
 #[tokio::test]
@@ -1135,7 +1293,10 @@ async fn fork_preview_from_last_block() {
     // "fetch" recorded → copied; "charge" is pre-fork but never recorded →
     // it must land in the re-executed set, not silently vanish.
     assert_eq!(str_vec(&preview["copied_blocks"]), vec!["fetch"]);
-    assert_eq!(str_vec(&preview["re_executed_blocks"]), vec!["charge", "log_it"]);
+    assert_eq!(
+        str_vec(&preview["re_executed_blocks"]),
+        vec!["charge", "log_it"]
+    );
 }
 
 #[tokio::test]
@@ -1318,7 +1479,10 @@ async fn fork_preview_benign_builtins_not_flagged() {
     .await;
     let inst = spawn_instance(&base, &client, seq, json!({})).await;
     let preview = get_fork_preview(&base, &client, inst, "n").await;
-    assert_eq!(str_vec(&preview["re_executed_blocks"]), vec!["n", "l", "t", "z"]);
+    assert_eq!(
+        str_vec(&preview["re_executed_blocks"]),
+        vec!["n", "l", "t", "z"]
+    );
     assert_eq!(preview["side_effect_blocks"], json!([]));
 }
 
@@ -1505,7 +1669,11 @@ async fn forked_instance_workbench_shows_copied_output_and_sandbox_context() {
     let view = get_workbench(&base, &client, fork_id, "").await;
     assert_eq!(view["instance_id"], fork_id.to_string());
     let outputs = view["outputs"].as_array().unwrap();
-    assert_eq!(outputs.len(), 1, "copied output visible on the fork: {view}");
+    assert_eq!(
+        outputs.len(),
+        1,
+        "copied output visible on the fork: {view}"
+    );
     assert_eq!(outputs[0]["block_id"], "a");
     assert_eq!(view["context_data"]["customer"], "ada");
 }

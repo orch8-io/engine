@@ -48,13 +48,23 @@ const SENSITIVE_EXACT_KEYS: &[&str] = &["auth", "key", "pass", "pwd", "jwt", "si
 
 /// Well-known secret value prefixes (checked case-sensitively, as issued).
 const SECRET_VALUE_PREFIXES: &[&str] = &[
-    "sk_live_", "sk_test_", "rk_live_", "rk_test_", // Stripe
-    "ghp_", "gho_", "ghu_", "ghs_", "github_pat_",  // GitHub
-    "xoxb-", "xoxp-", "xoxa-", "xoxs-",             // Slack
-    "AKIA",                                          // AWS access key id
-    "sk-ant-",                                       // Anthropic
-    "sk-proj-",                                      // OpenAI
-    "glpat-",                                        // GitLab
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "rk_test_", // Stripe
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_", // GitHub
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxs-",    // Slack
+    "AKIA",     // AWS access key id
+    "sk-ant-",  // Anthropic
+    "sk-proj-", // OpenAI
+    "glpat-",   // GitLab
     "Bearer ",
 ];
 
@@ -131,10 +141,8 @@ impl RedactionPolicy {
                     self.redact_value(item);
                 }
             }
-            Value::String(s) => {
-                if self.is_secret_shaped(s) {
-                    *s = REDACTED.to_string();
-                }
+            Value::String(s) if self.is_secret_shaped(s) => {
+                *s = REDACTED.to_string();
             }
             _ => {}
         }
@@ -322,7 +330,12 @@ mod tests {
     #[test]
     fn ordinary_values_are_not_secret_shaped() {
         let p = policy();
-        for v in ["hello world", "customer-42", "https://example.com", "eyJ but not a jwt"] {
+        for v in [
+            "hello world",
+            "customer-42",
+            "https://example.com",
+            "eyJ but not a jwt",
+        ] {
             assert!(!p.is_secret_shaped(v), "{v} should not be secret-shaped");
         }
     }
@@ -426,7 +439,10 @@ mod tests {
     #[test]
     fn url_without_query_is_unchanged() {
         let p = policy();
-        assert_eq!(p.redact_url("https://example.com/path"), "https://example.com/path");
+        assert_eq!(
+            p.redact_url("https://example.com/path"),
+            "https://example.com/path"
+        );
     }
 
     #[test]

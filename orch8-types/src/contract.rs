@@ -307,7 +307,7 @@ impl ContractCase {
                 }
                 (Some(_), Some(_)) => {
                     return Err(
-                        "mock must set exactly one of 'handler' or 'block', not both".to_string()
+                        "mock must set exactly one of 'handler' or 'block', not both".to_string(),
                     );
                 }
                 _ => {}
@@ -334,12 +334,15 @@ impl ContractCase {
             return Err("path expectation with empty traversed list".to_string());
         }
         for a in &self.expect.assertions {
-            if let AssertionOp::InRange { min: None, max: None } = a.op {
+            if let AssertionOp::InRange {
+                min: None,
+                max: None,
+            } = a.op
+            {
                 return Err("in_range assertion with neither min nor max".to_string());
             }
             if let AssertionOp::HasType { expected } = &a.op {
-                const TYPES: &[&str] =
-                    &["string", "number", "boolean", "array", "object", "null"];
+                const TYPES: &[&str] = &["string", "number", "boolean", "array", "object", "null"];
                 if !TYPES.contains(&expected.as_str()) {
                     return Err(format!("has_type assertion with unknown type '{expected}'"));
                 }
@@ -390,7 +393,9 @@ pub fn check_op(op: &AssertionOp, actual: Option<&serde_json::Value>) -> Result<
             None => Err(format!("expected {value}, but path is absent")),
         },
         AssertionOp::Exists => match actual {
-            Some(Value::Null) | None => Err("expected value to exist, but it is absent/null".into()),
+            Some(Value::Null) | None => {
+                Err("expected value to exist, but it is absent/null".into())
+            }
             Some(_) => Ok(()),
         },
         AssertionOp::NotExists => match actual {
@@ -477,8 +482,10 @@ pub fn evaluate_assertion(
             check_op(&assertion.op, resolve_path(output, path))
                 .map_err(|e| format!("output.{block}.{path}: {e}"))
         }
-        AssertionSubject::Context { path } => check_op(&assertion.op, resolve_path(context_data, path))
-            .map_err(|e| format!("context.{path}: {e}")),
+        AssertionSubject::Context { path } => {
+            check_op(&assertion.op, resolve_path(context_data, path))
+                .map_err(|e| format!("context.{path}: {e}"))
+        }
     }
 }
 
@@ -490,16 +497,16 @@ pub fn check_path(expect: &PathExpectation, executed_in_order: &[String]) -> Res
     if expect.ordered {
         let mut cursor = 0usize;
         for want in &expect.traversed {
-            let found = executed_in_order[cursor..]
-                .iter()
-                .position(|b| b == want);
+            let found = executed_in_order[cursor..].iter().position(|b| b == want);
             match found {
                 Some(offset) => cursor += offset + 1,
                 None => {
                     return if executed_in_order.contains(want) {
                         Err(format!("block '{want}' executed out of expected order"))
                     } else {
-                        Err(format!("expected block '{want}' to execute, but it did not"))
+                        Err(format!(
+                            "expected block '{want}' to execute, but it did not"
+                        ))
                     };
                 }
             }
@@ -508,7 +515,9 @@ pub fn check_path(expect: &PathExpectation, executed_in_order: &[String]) -> Res
     } else {
         for want in &expect.traversed {
             if !executed_in_order.contains(want) {
-                return Err(format!("expected block '{want}' to execute, but it did not"));
+                return Err(format!(
+                    "expected block '{want}' to execute, but it did not"
+                ));
             }
         }
         Ok(())
@@ -688,7 +697,12 @@ mod tests {
     fn validate_rejects_duplicate_case_names() {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases.push(suite.cases[0].clone());
-        assert!(suite.validate().unwrap_err().contains("duplicate case name"));
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .contains("duplicate case name")
+        );
     }
 
     #[test]
@@ -699,7 +713,12 @@ mod tests {
             block: None,
             policy: MockPolicy::Recorded,
         });
-        assert!(suite.validate().unwrap_err().contains("either 'handler' or 'block'"));
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .contains("either 'handler' or 'block'")
+        );
     }
 
     #[test]
@@ -727,11 +746,14 @@ mod tests {
     #[test]
     fn validate_rejects_inverted_call_count_bounds() {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
-        suite.cases[0].expect.call_counts.push(CallCountExpectation {
-            handler: "h".into(),
-            min: 3,
-            max: Some(1),
-        });
+        suite.cases[0]
+            .expect
+            .call_counts
+            .push(CallCountExpectation {
+                handler: "h".into(),
+                min: 3,
+                max: Some(1),
+            });
         assert!(suite.validate().unwrap_err().contains("min 3 > max 1"));
     }
 
@@ -740,9 +762,17 @@ mod tests {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases[0].expect.assertions.push(Assertion {
             subject: AssertionSubject::Context { path: "x".into() },
-            op: AssertionOp::InRange { min: None, max: None },
+            op: AssertionOp::InRange {
+                min: None,
+                max: None,
+            },
         });
-        assert!(suite.validate().unwrap_err().contains("neither min nor max"));
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .contains("neither min nor max")
+        );
     }
 
     #[test]
@@ -750,9 +780,16 @@ mod tests {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases[0].expect.assertions.push(Assertion {
             subject: AssertionSubject::Context { path: "x".into() },
-            op: AssertionOp::HasType { expected: "integer".into() },
+            op: AssertionOp::HasType {
+                expected: "integer".into(),
+            },
         });
-        assert!(suite.validate().unwrap_err().contains("unknown type 'integer'"));
+        assert!(
+            suite
+                .validate()
+                .unwrap_err()
+                .contains("unknown type 'integer'")
+        );
     }
 
     // --- resolve_path ---
@@ -788,25 +825,26 @@ mod tests {
     #[test]
     fn equals_matches_deeply() {
         check_op(
-            &AssertionOp::Equals { value: json!({"a": [1, 2]}) },
+            &AssertionOp::Equals {
+                value: json!({"a": [1, 2]}),
+            },
             Some(&json!({"a": [1, 2]})),
         )
         .unwrap();
         assert!(
-            check_op(
-                &AssertionOp::Equals { value: json!(1) },
-                Some(&json!(2))
-            )
-            .unwrap_err()
-            .contains("expected 1, got 2")
+            check_op(&AssertionOp::Equals { value: json!(1) }, Some(&json!(2)))
+                .unwrap_err()
+                .contains("expected 1, got 2")
         );
     }
 
     #[test]
     fn equals_on_absent_path_fails() {
-        assert!(check_op(&AssertionOp::Equals { value: json!(1) }, None)
-            .unwrap_err()
-            .contains("absent"));
+        assert!(
+            check_op(&AssertionOp::Equals { value: json!(1) }, None)
+                .unwrap_err()
+                .contains("absent")
+        );
     }
 
     #[test]
@@ -834,19 +872,48 @@ mod tests {
 
     #[test]
     fn in_range_checks_bounds_inclusively() {
-        let op = AssertionOp::InRange { min: Some(1.0), max: Some(3.0) };
+        let op = AssertionOp::InRange {
+            min: Some(1.0),
+            max: Some(3.0),
+        };
         check_op(&op, Some(&json!(1))).unwrap();
         check_op(&op, Some(&json!(3.0))).unwrap();
-        assert!(check_op(&op, Some(&json!(0.5))).unwrap_err().contains("below"));
-        assert!(check_op(&op, Some(&json!(3.1))).unwrap_err().contains("above"));
-        assert!(check_op(&op, Some(&json!("nan"))).unwrap_err().contains("expected a number"));
+        assert!(
+            check_op(&op, Some(&json!(0.5)))
+                .unwrap_err()
+                .contains("below")
+        );
+        assert!(
+            check_op(&op, Some(&json!(3.1)))
+                .unwrap_err()
+                .contains("above")
+        );
+        assert!(
+            check_op(&op, Some(&json!("nan")))
+                .unwrap_err()
+                .contains("expected a number")
+        );
         assert!(check_op(&op, None).is_err());
     }
 
     #[test]
     fn in_range_half_open() {
-        check_op(&AssertionOp::InRange { min: Some(5.0), max: None }, Some(&json!(1e9))).unwrap();
-        check_op(&AssertionOp::InRange { min: None, max: Some(5.0) }, Some(&json!(-1e9))).unwrap();
+        check_op(
+            &AssertionOp::InRange {
+                min: Some(5.0),
+                max: None,
+            },
+            Some(&json!(1e9)),
+        )
+        .unwrap();
+        check_op(
+            &AssertionOp::InRange {
+                min: None,
+                max: Some(5.0),
+            },
+            Some(&json!(-1e9)),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -859,12 +926,23 @@ mod tests {
             ("object", json!({})),
             ("null", json!(null)),
         ] {
-            check_op(&AssertionOp::HasType { expected: ty.into() }, Some(&val)).unwrap();
+            check_op(
+                &AssertionOp::HasType {
+                    expected: ty.into(),
+                },
+                Some(&val),
+            )
+            .unwrap();
         }
         assert!(
-            check_op(&AssertionOp::HasType { expected: "string".into() }, Some(&json!(1)))
-                .unwrap_err()
-                .contains("got 'number'")
+            check_op(
+                &AssertionOp::HasType {
+                    expected: "string".into()
+                },
+                Some(&json!(1))
+            )
+            .unwrap_err()
+            .contains("got 'number'")
         );
     }
 
@@ -873,9 +951,15 @@ mod tests {
     #[test]
     fn assertion_reads_block_outputs() {
         let mut outputs = BTreeMap::new();
-        outputs.insert("charge".to_string(), json!({"charged": true, "amount": 100}));
+        outputs.insert(
+            "charge".to_string(),
+            json!({"charged": true, "amount": 100}),
+        );
         let a = Assertion {
-            subject: AssertionSubject::Output { block: "charge".into(), path: "charged".into() },
+            subject: AssertionSubject::Output {
+                block: "charge".into(),
+                path: "charged".into(),
+            },
             op: AssertionOp::Equals { value: json!(true) },
         };
         evaluate_assertion(&a, &outputs, &json!({})).unwrap();
@@ -884,7 +968,10 @@ mod tests {
     #[test]
     fn assertion_on_missing_block_fails_with_context() {
         let a = Assertion {
-            subject: AssertionSubject::Output { block: "nope".into(), path: String::new() },
+            subject: AssertionSubject::Output {
+                block: "nope".into(),
+                path: String::new(),
+            },
             op: AssertionOp::Exists,
         };
         let err = evaluate_assertion(&a, &BTreeMap::new(), &json!({})).unwrap_err();
@@ -895,7 +982,10 @@ mod tests {
     #[test]
     fn not_exists_on_missing_block_passes() {
         let a = Assertion {
-            subject: AssertionSubject::Output { block: "refund".into(), path: "any".into() },
+            subject: AssertionSubject::Output {
+                block: "refund".into(),
+                path: "any".into(),
+            },
             op: AssertionOp::NotExists,
         };
         evaluate_assertion(&a, &BTreeMap::new(), &json!({})).unwrap();
@@ -904,8 +994,12 @@ mod tests {
     #[test]
     fn assertion_reads_context_data() {
         let a = Assertion {
-            subject: AssertionSubject::Context { path: "order.status".into() },
-            op: AssertionOp::Equals { value: json!("paid") },
+            subject: AssertionSubject::Context {
+                path: "order.status".into(),
+            },
+            op: AssertionOp::Equals {
+                value: json!("paid"),
+            },
         };
         evaluate_assertion(&a, &BTreeMap::new(), &json!({"order": {"status": "paid"}})).unwrap();
         let err = evaluate_assertion(&a, &BTreeMap::new(), &json!({})).unwrap_err();
@@ -920,14 +1014,24 @@ mod tests {
 
     #[test]
     fn unordered_path_only_requires_membership() {
-        let e = PathExpectation { traversed: vec!["b".into(), "a".into()], ordered: false };
+        let e = PathExpectation {
+            traversed: vec!["b".into(), "a".into()],
+            ordered: false,
+        };
         check_path(&e, &history(&["a", "x", "b"])).unwrap();
-        assert!(check_path(&e, &history(&["a"])).unwrap_err().contains("'b'"));
+        assert!(
+            check_path(&e, &history(&["a"]))
+                .unwrap_err()
+                .contains("'b'")
+        );
     }
 
     #[test]
     fn ordered_path_requires_relative_order() {
-        let e = PathExpectation { traversed: vec!["a".into(), "c".into()], ordered: true };
+        let e = PathExpectation {
+            traversed: vec!["a".into(), "c".into()],
+            ordered: true,
+        };
         check_path(&e, &history(&["a", "b", "c"])).unwrap();
         let err = check_path(&e, &history(&["c", "b", "a"])).unwrap_err();
         assert!(err.contains("out of expected order"), "{err}");
@@ -935,7 +1039,10 @@ mod tests {
 
     #[test]
     fn ordered_path_reports_missing_block() {
-        let e = PathExpectation { traversed: vec!["a".into(), "z".into()], ordered: true };
+        let e = PathExpectation {
+            traversed: vec!["a".into(), "z".into()],
+            ordered: true,
+        };
         let err = check_path(&e, &history(&["a", "b"])).unwrap_err();
         assert!(err.contains("'z'"), "{err}");
         assert!(err.contains("did not"), "{err}");
@@ -945,7 +1052,10 @@ mod tests {
     fn ordered_path_allows_duplicate_visits() {
         // Loop bodies execute repeatedly; expecting [a, a] must match a
         // history where 'a' ran twice.
-        let e = PathExpectation { traversed: vec!["a".into(), "a".into()], ordered: true };
+        let e = PathExpectation {
+            traversed: vec!["a".into(), "a".into()],
+            ordered: true,
+        };
         check_path(&e, &history(&["a", "b", "a"])).unwrap();
         assert!(check_path(&e, &history(&["a", "b"])).is_err());
     }
@@ -957,13 +1067,21 @@ mod tests {
         let mut calls = BTreeMap::new();
         calls.insert("charge".to_string(), 1u32);
         check_call_counts(
-            &[CallCountExpectation { handler: "charge".into(), min: 1, max: Some(1) }],
+            &[CallCountExpectation {
+                handler: "charge".into(),
+                min: 1,
+                max: Some(1),
+            }],
             &calls,
         )
         .unwrap();
 
         let err = check_call_counts(
-            &[CallCountExpectation { handler: "charge".into(), min: 2, max: None }],
+            &[CallCountExpectation {
+                handler: "charge".into(),
+                min: 2,
+                max: None,
+            }],
             &calls,
         )
         .unwrap_err();
@@ -971,7 +1089,11 @@ mod tests {
 
         calls.insert("charge".to_string(), 5);
         let err = check_call_counts(
-            &[CallCountExpectation { handler: "charge".into(), min: 0, max: Some(1) }],
+            &[CallCountExpectation {
+                handler: "charge".into(),
+                min: 0,
+                max: Some(1),
+            }],
             &calls,
         )
         .unwrap_err();
@@ -983,15 +1105,25 @@ mod tests {
         // "at most once" on a handler that never ran passes; "at least
         // once" fails.
         check_call_counts(
-            &[CallCountExpectation { handler: "ghost".into(), min: 0, max: Some(1) }],
+            &[CallCountExpectation {
+                handler: "ghost".into(),
+                min: 0,
+                max: Some(1),
+            }],
             &BTreeMap::new(),
         )
         .unwrap();
-        assert!(check_call_counts(
-            &[CallCountExpectation { handler: "ghost".into(), min: 1, max: None }],
-            &BTreeMap::new(),
-        )
-        .is_err());
+        assert!(
+            check_call_counts(
+                &[CallCountExpectation {
+                    handler: "ghost".into(),
+                    min: 1,
+                    max: None
+                }],
+                &BTreeMap::new(),
+            )
+            .is_err()
+        );
     }
 
     // --- reports ---

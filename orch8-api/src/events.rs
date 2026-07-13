@@ -117,7 +117,7 @@ pub(crate) async fn list_events(
         None => None,
         Some(s) => Some(
             s.parse::<EventStatus>()
-                .map_err(|e| ApiError::InvalidArgument(e))?,
+                .map_err(ApiError::InvalidArgument)?,
         ),
     };
     let mut events = state

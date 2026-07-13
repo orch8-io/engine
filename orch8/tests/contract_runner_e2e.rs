@@ -3,7 +3,7 @@
 //! a `ContractSuite` against a sequence definition through the public API.
 //!
 //! Covered here, beyond the module's inline tests: all composite block
-//! types (parallel / router / try_catch / for_each / loop), retry scripting
+//! types (parallel / router / `try_catch` / `for_each` / loop), retry scripting
 //! via `attempts` mocks, recorded outputs, virtual-time budgets, path and
 //! call-count divergences, multi-case aggregation, and signal fixtures for
 //! `wait_for_input` gates.
@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 // Helpers
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::needless_pass_by_value)]
 fn seq(blocks: Value) -> SequenceDefinition {
     serde_json::from_value(json!({
         "id": uuid::Uuid::now_v7(),
@@ -34,6 +35,7 @@ fn seq(blocks: Value) -> SequenceDefinition {
     .expect("valid sequence definition")
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn suite(cases: Value) -> ContractSuite {
     serde_json::from_value(json!({"cases": cases})).expect("valid suite")
 }
@@ -96,6 +98,7 @@ fn step(id: &str, handler: &str) -> Value {
     json!({"type": "step", "id": id, "handler": handler, "params": {}})
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn success_mock(handler: &str, output: Value) -> Value {
     json!({"handler": handler, "type": "success", "output": output})
 }
@@ -172,7 +175,11 @@ async fn context_input_passes_through_to_final_context() {
 
 #[tokio::test]
 async fn handler_calls_are_recorded_per_handler() {
-    let seq_def = seq(json!([step("a", "alpha"), step("b", "beta"), step("c", "alpha")]));
+    let seq_def = seq(json!([
+        step("a", "alpha"),
+        step("b", "beta"),
+        step("c", "alpha")
+    ]));
     let report = run_one(
         &seq_def,
         json!({
@@ -1051,7 +1058,11 @@ async fn block_failure_mock_overrides_handler_success_mock() {
 
 #[tokio::test]
 async fn handler_mock_covers_every_block_using_it() {
-    let seq_def = seq(json!([step("x", "common"), step("y", "common"), step("z", "common")]));
+    let seq_def = seq(json!([
+        step("x", "common"),
+        step("y", "common"),
+        step("z", "common")
+    ]));
     let report = run_one(
         &seq_def,
         json!({
@@ -1073,7 +1084,10 @@ async fn handler_mock_covers_every_block_using_it() {
 
 #[tokio::test]
 async fn partial_mocks_fail_only_the_unmocked_handler() {
-    let seq_def = seq(json!([step("first", "mocked_h"), step("second", "forgotten_h")]));
+    let seq_def = seq(json!([
+        step("first", "mocked_h"),
+        step("second", "forgotten_h")
+    ]));
     let report = run_one(
         &seq_def,
         json!({
@@ -1135,7 +1149,10 @@ async fn empty_success_policy_still_honors_explicit_mocks() {
 async fn recorded_outputs_are_keyed_by_block_not_handler() {
     // Two blocks share one recorded handler; each block replays its own
     // recording.
-    let seq_def = seq(json!([step("fetch_users", "fetcher"), step("fetch_orders", "fetcher")]));
+    let seq_def = seq(json!([
+        step("fetch_users", "fetcher"),
+        step("fetch_orders", "fetcher")
+    ]));
     let s = suite(json!([{
         "name": "per block recordings",
         "mocks": [{"handler": "fetcher", "type": "recorded"}],
@@ -1176,7 +1193,10 @@ async fn recorded_mock_with_partial_recordings_fails_missing_block() {
 
 #[tokio::test]
 async fn recorded_and_success_mocks_mix_in_one_case() {
-    let seq_def = seq(json!([step("live", "live_h"), step("replayed", "replay_h")]));
+    let seq_def = seq(json!([
+        step("live", "live_h"),
+        step("replayed", "replay_h")
+    ]));
     let s = suite(json!([{
         "name": "mixed mock styles",
         "mocks": [
@@ -1588,7 +1608,11 @@ async fn multi_case_suite_aggregates_pass_and_fail() {
     assert!(!report.passed);
     assert_eq!(report.cases.len(), 3);
     assert_eq!(
-        report.cases.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        report
+            .cases
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
         vec!["passes", "diverges", "also passes"]
     );
     assert!(report.cases[0].passed);
@@ -1644,6 +1668,7 @@ async fn mock_without_target_is_rejected_before_running() {
 // Signal fixtures (wait_for_input gates)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::needless_pass_by_value)]
 fn gated_sequence(gate_extra: Value) -> SequenceDefinition {
     let mut gate = json!({
         "type": "step", "id": "gate", "handler": "gate_h", "params": {},
@@ -1853,4 +1878,3 @@ async fn both_signal_fixtures_resolve_sequential_gates() {
     .await;
     assert!(report.passed, "failures: {:?}", report.failures);
 }
-

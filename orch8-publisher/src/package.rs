@@ -112,8 +112,7 @@ pub enum PackageError {
 /// Describes the violation.
 pub fn validate_package_name(name: &str) -> Result<(), PackageError> {
     let mut parts = name.split('/');
-    let (Some(publisher), Some(package), None) = (parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(publisher), Some(package), None) = (parts.next(), parts.next(), parts.next()) else {
         return Err(PackageError::Invalid(format!(
             "package name '{name}' must be 'publisher/package'"
         )));
@@ -145,8 +144,7 @@ pub fn install_namespace(package_name: &str) -> String {
 /// # Errors
 /// Serialization failures only.
 pub fn content_hash(archive: &PackageArchive) -> Result<String, PackageError> {
-    let canonical =
-        canonical_json(archive).map_err(|e| PackageError::Invalid(e.to_string()))?;
+    let canonical = canonical_json(archive).map_err(|e| PackageError::Invalid(e.to_string()))?;
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     Ok(hex::encode(hasher.finalize()))
@@ -286,8 +284,11 @@ pub fn check_upgrade(installed: &str, incoming: &str) -> Result<(), PackageError
     }
 }
 
-/// Sequence files inside the archive (path, raw JSON).
+/// Sequence files inside the archive (path, raw JSON). Package paths
+/// are canonical lowercase (enforced by the deterministic build), so a
+/// case-sensitive suffix check is exact, not an oversight.
 #[must_use]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn sequence_files(archive: &PackageArchive) -> Vec<(&String, &String)> {
     archive
         .files
@@ -298,6 +299,7 @@ pub fn sequence_files(archive: &PackageArchive) -> Vec<(&String, &String)> {
 
 /// Contract files inside the archive (path, raw JSON).
 #[must_use]
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn contract_files(archive: &PackageArchive) -> Vec<(&String, &String)> {
     archive
         .files
@@ -377,9 +379,10 @@ mod tests {
     #[test]
     fn tampering_with_a_file_is_detected() {
         let mut pkg = build_package(manifest("acme/checkout", "1.0.0"), files(), &key()).unwrap();
-        pkg.archive
-            .files
-            .insert("sequences/checkout.json".into(), r#"{"name":"evil"}"#.into());
+        pkg.archive.files.insert(
+            "sequences/checkout.json".into(),
+            r#"{"name":"evil"}"#.into(),
+        );
         assert_eq!(verify_package(&pkg), Err(PackageError::Tampered));
     }
 
@@ -395,7 +398,9 @@ mod tests {
         let mut pkg = build_package(manifest("acme/checkout", "1.0.0"), files(), &key()).unwrap();
         // Recompute a "valid" hash for tampered content but keep the old
         // signature: the signature check must catch it.
-        pkg.archive.files.insert("README.md".into(), "# Evil".into());
+        pkg.archive
+            .files
+            .insert("README.md".into(), "# Evil".into());
         pkg.content_hash = content_hash(&pkg.archive).unwrap();
         assert_eq!(verify_package(&pkg), Err(PackageError::BadSignature));
     }
@@ -406,8 +411,7 @@ mod tests {
         let mut forged = pkg.clone();
         // Swap in another key's signature over the same hash.
         let other = key();
-        forged.signature =
-            BASE64.encode(other.sign(pkg.content_hash.as_bytes()).to_bytes());
+        forged.signature = BASE64.encode(other.sign(pkg.content_hash.as_bytes()).to_bytes());
         assert_eq!(verify_package(&forged), Err(PackageError::BadSignature));
     }
 
@@ -415,17 +419,26 @@ mod tests {
     fn unsupported_format_version_is_rejected() {
         let mut pkg = build_package(manifest("acme/checkout", "1.0.0"), files(), &key()).unwrap();
         pkg.archive.format_version = 99;
-        assert_eq!(verify_package(&pkg), Err(PackageError::UnsupportedFormat(99)));
+        assert_eq!(
+            verify_package(&pkg),
+            Err(PackageError::UnsupportedFormat(99))
+        );
     }
 
     #[test]
     fn corrupted_encoding_is_invalid_not_panic() {
         let mut pkg = build_package(manifest("acme/checkout", "1.0.0"), files(), &key()).unwrap();
         pkg.public_key = "not base64!!!".into();
-        assert!(matches!(verify_package(&pkg), Err(PackageError::Invalid(_))));
+        assert!(matches!(
+            verify_package(&pkg),
+            Err(PackageError::Invalid(_))
+        ));
         let mut pkg2 = build_package(manifest("acme/checkout", "1.0.0"), files(), &key()).unwrap();
         pkg2.signature = "AAAA".into(); // wrong length
-        assert!(matches!(verify_package(&pkg2), Err(PackageError::Invalid(_))));
+        assert!(matches!(
+            verify_package(&pkg2),
+            Err(PackageError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -435,7 +448,10 @@ mod tests {
             trusted_keys: vec![],
             allow_untrusted: false,
         };
-        assert_eq!(check_trust(&pkg, &strict), Err(PackageError::UntrustedPublisher));
+        assert_eq!(
+            check_trust(&pkg, &strict),
+            Err(PackageError::UntrustedPublisher)
+        );
 
         let trusting = TrustPolicy {
             trusted_keys: vec![pkg.public_key.clone()],
@@ -447,7 +463,10 @@ mod tests {
             trusted_keys: vec![],
             allow_untrusted: true,
         };
-        assert_eq!(check_trust(&pkg, &permissive), Ok(TrustLevel::UntrustedAllowed));
+        assert_eq!(
+            check_trust(&pkg, &permissive),
+            Ok(TrustLevel::UntrustedAllowed)
+        );
     }
 
     #[test]

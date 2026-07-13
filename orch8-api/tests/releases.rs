@@ -74,7 +74,12 @@ async fn create_release(base: &str, client: &reqwest::Client, fx: &Fixture, gate
     resp.json().await.unwrap()
 }
 
-async fn post(base: &str, client: &reqwest::Client, path: &str, body: Value) -> (StatusCode, Value) {
+async fn post(
+    base: &str,
+    client: &reqwest::Client,
+    path: &str,
+    body: Value,
+) -> (StatusCode, Value) {
     let resp = client
         .post(format!("{base}{path}"))
         .header("X-Tenant-Id", "t1")
@@ -88,6 +93,7 @@ async fn post(base: &str, client: &reqwest::Client, path: &str, body: Value) -> 
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // full lifecycle walkthrough reads better linear
 async fn release_lifecycle_validate_canary_promote() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -153,7 +159,13 @@ async fn release_lifecycle_validate_canary_promote() {
 
     // Validate: the candidate replays offline; the added 'extra' block is
     // a divergence (executed in replay, absent from the recording).
-    let (status, report) = post(&base, &client, &format!("/releases/{rid}/validate"), json!({})).await;
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{report}");
     assert_eq!(report["replayed"], 1);
     assert_eq!(report["release_state"], "ready");
@@ -191,9 +203,7 @@ async fn release_lifecycle_validate_canary_promote() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let routed_id = InstanceId::from_uuid(
-        Uuid::parse_str(routed["id"].as_str().unwrap()).unwrap(),
-    );
+    let routed_id = InstanceId::from_uuid(Uuid::parse_str(routed["id"].as_str().unwrap()).unwrap());
     let stored = srv.storage.get_instance(routed_id).await.unwrap().unwrap();
     assert_eq!(
         stored.sequence_id.as_uuid(),
@@ -205,7 +215,13 @@ async fn release_lifecycle_validate_canary_promote() {
 
     // Promote (no gates configured → allowed), then routing continues to
     // the candidate and the audit trail is complete.
-    let (status, promoted) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, promoted) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{promoted}");
     assert_eq!(promoted["state"], "promoted");
 
@@ -218,15 +234,34 @@ async fn release_lifecycle_validate_canary_promote() {
     let decisions: Vec<Value> = resp.json().await.unwrap();
     let transitions: Vec<String> = decisions
         .iter()
-        .map(|d| format!("{}→{}", d["from_state"].as_str().unwrap(), d["to_state"].as_str().unwrap()))
+        .map(|d| {
+            format!(
+                "{}→{}",
+                d["from_state"].as_str().unwrap(),
+                d["to_state"].as_str().unwrap()
+            )
+        })
         .collect();
-    assert!(transitions.contains(&"draft→validating".to_string()), "{transitions:?}");
-    assert!(transitions.contains(&"validating→ready".to_string()), "{transitions:?}");
-    assert!(transitions.contains(&"ready→canary".to_string()), "{transitions:?}");
-    assert!(transitions.contains(&"canary→promoted".to_string()), "{transitions:?}");
+    assert!(
+        transitions.contains(&"draft→validating".to_string()),
+        "{transitions:?}"
+    );
+    assert!(
+        transitions.contains(&"validating→ready".to_string()),
+        "{transitions:?}"
+    );
+    assert!(
+        transitions.contains(&"ready→canary".to_string()),
+        "{transitions:?}"
+    );
+    assert!(
+        transitions.contains(&"canary→promoted".to_string()),
+        "{transitions:?}"
+    );
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // full lifecycle walkthrough reads better linear
 async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -242,9 +277,21 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
     let rid = release["id"].as_str().unwrap().to_string();
 
     // Skip validation, canary at 100% so every new instance is candidate.
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 100})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 100}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Create 3 routed instances and force them terminal: all failed
@@ -264,13 +311,19 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
             }),
         )
         .await;
-        candidate_ids.push(
-            InstanceId::from_uuid(Uuid::parse_str(v["id"].as_str().unwrap()).unwrap()),
-        );
+        candidate_ids.push(InstanceId::from_uuid(
+            Uuid::parse_str(v["id"].as_str().unwrap()).unwrap(),
+        ));
     }
     for id in &candidate_ids {
-        srv.storage.update_instance_state(*id, InstanceState::Running, None).await.unwrap();
-        srv.storage.update_instance_state(*id, InstanceState::Failed, None).await.unwrap();
+        srv.storage
+            .update_instance_state(*id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        srv.storage
+            .update_instance_state(*id, InstanceState::Failed, None)
+            .await
+            .unwrap();
     }
     // Plant 3 healthy baseline-variant observations.
     for i in 0..3 {
@@ -298,20 +351,38 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
             .update_instance_sequence(id, orch8_types::ids::SequenceId::from_uuid(fx.baseline_id))
             .await
             .unwrap();
-        srv.storage.update_instance_state(id, InstanceState::Running, None).await.unwrap();
-        srv.storage.update_instance_state(id, InstanceState::Completed, None).await.unwrap();
+        srv.storage
+            .update_instance_state(id, InstanceState::Running, None)
+            .await
+            .unwrap();
+        srv.storage
+            .update_instance_state(id, InstanceState::Completed, None)
+            .await
+            .unwrap();
     }
 
     // Evaluate: candidate error rate 1.0 vs baseline 0.0 → gate fails →
     // automatic rollback.
-    let (status, eval) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (status, eval) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "fail", "{eval}");
     assert_eq!(eval["auto_rolled_back"], true, "{eval}");
     assert_eq!(eval["release_state"], "rolled_back");
 
     // Evaluate again: idempotent, no second rollback decision.
-    let (_, eval2) = post(&base, &client, &format!("/releases/{rid}/evaluate"), json!({})).await;
+    let (_, eval2) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/evaluate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(eval2["auto_rolled_back"], false);
 
     // New traffic returns to the baseline: no routing annotation at all.
@@ -328,7 +399,11 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
     let after_id = InstanceId::from_uuid(Uuid::parse_str(after["id"].as_str().unwrap()).unwrap());
     let stored = srv.storage.get_instance(after_id).await.unwrap().unwrap();
     assert_eq!(stored.sequence_id.as_uuid(), &fx.baseline_id);
-    assert!(stored.metadata.get("release").is_none(), "{:?}", stored.metadata);
+    assert!(
+        stored.metadata.get("release").is_none(),
+        "{:?}",
+        stored.metadata
+    );
 
     // Exactly one rollback decision in the audit trail.
     let resp = client
@@ -359,8 +434,20 @@ async fn cohort_routing_is_deterministic_at_partial_percent() {
     let fx = publish_versions(&base, &client).await;
     let release = create_release(&base, &client, &fx, json!([])).await;
     let rid = release["id"].as_str().unwrap().to_string();
-    post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
-    post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 40})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 40}),
+    )
+    .await;
 
     // Same cohort key always lands on the same variant. The cohort key
     // must be the ONLY stable key on the request: a non-empty
@@ -380,7 +467,12 @@ async fn cohort_routing_is_deterministic_at_partial_percent() {
         .await;
         let id = InstanceId::from_uuid(Uuid::parse_str(v["id"].as_str().unwrap()).unwrap());
         let stored = srv.storage.get_instance(id).await.unwrap().unwrap();
-        variants.push(stored.metadata["release"]["variant"].as_str().unwrap().to_string());
+        variants.push(
+            stored.metadata["release"]["variant"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
     }
     assert!(
         variants.windows(2).all(|w| w[0] == w[1]),
@@ -413,8 +505,20 @@ async fn create_rejects_mismatched_sequences_and_duplicate_routing() {
     // one is active.
     let release = create_release(&base, &client, &fx, json!([])).await;
     let rid = release["id"].as_str().unwrap().to_string();
-    post(&base, &client, &format!("/releases/{rid}/validate"), json!({"skip": true})).await;
-    post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 10})).await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
+    post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 10}),
+    )
+    .await;
     let (status, _) = post(
         &base,
         &client,
@@ -439,10 +543,22 @@ async fn illegal_transitions_are_conflicts_and_tenant_isolated() {
     let rid = release["id"].as_str().unwrap().to_string();
 
     // Canary from draft (must validate or skip first) → 409.
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/canary"), json!({"percent": 10})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/canary"),
+        json!({"percent": 10}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     // Promote from draft → 409.
-    let (status, _) = post(&base, &client, &format!("/releases/{rid}/promote"), json!({})).await;
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/promote"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     // Another tenant cannot see the release.

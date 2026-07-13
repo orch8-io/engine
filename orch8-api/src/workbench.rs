@@ -111,6 +111,7 @@ pub(crate) struct WorkbenchQuery {
         (status = 404, description = "Instance not found"),
     )
 )]
+#[allow(clippy::too_many_lines)] // joins five sources into one view; splitting obscures the ordering contract
 pub(crate) async fn get_workbench(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -124,7 +125,11 @@ pub(crate) async fn get_workbench(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
 
     let sequence = state
         .storage
@@ -223,7 +228,10 @@ pub(crate) async fn get_workbench(
     Ok(Json(ExecutionWorkbenchView {
         instance_id: id,
         sequence_id: *instance.sequence_id.as_uuid(),
-        sequence_name: sequence.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
+        sequence_name: sequence
+            .as_ref()
+            .map(|s| s.name.clone())
+            .unwrap_or_default(),
         sequence_version: sequence.as_ref().map_or(0, |s| s.version),
         state: instance.state.to_string(),
         context_data: redaction.redacted(&instance.context.data),
@@ -309,7 +317,7 @@ pub(crate) async fn compare_runs(
             .await
             .unwrap_or_default();
         let mut order: Vec<String> = Vec::new();
-        let mut last: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+        let mut last = std::collections::BTreeMap::<String, serde_json::Value>::default();
         for o in &outputs {
             let block = o.block_id.as_str();
             if block.starts_with('_') || o.output_ref.as_deref() == Some("__retry__") {
@@ -405,7 +413,11 @@ pub(crate) async fn fork_preview(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("instance {id}"),
+    )?;
     let sequence = state
         .storage
         .get_sequence(instance.sequence_id)
@@ -457,7 +469,10 @@ pub(crate) async fn fork_preview(
     }))
 }
 
-fn collect_blocks(seq: &orch8_types::sequence::SequenceDefinition, out: &mut Vec<(String, Option<String>)>) {
+fn collect_blocks(
+    seq: &orch8_types::sequence::SequenceDefinition,
+    out: &mut Vec<(String, Option<String>)>,
+) {
     fn walk(value: &serde_json::Value, out: &mut Vec<(String, Option<String>)>) {
         match value {
             serde_json::Value::Object(map) => {

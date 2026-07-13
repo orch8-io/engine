@@ -198,6 +198,7 @@ fn collect_json_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     client: &Client,
     base: &str,

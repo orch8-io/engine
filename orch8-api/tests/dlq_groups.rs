@@ -119,7 +119,10 @@ async fn same_cause_groups_into_one_incident() {
     assert_eq!(groups[0]["error_class"], "external_dependency");
     assert_eq!(groups[0]["blocks"], json!(["charge"]));
     assert_eq!(groups[0]["handlers"], json!(["charge_card"]));
-    assert_eq!(groups[0]["sample_instance_ids"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        groups[0]["sample_instance_ids"].as_array().unwrap().len(),
+        3
+    );
     // Components make the grouping explainable.
     assert!(
         groups[0]["components"]
@@ -189,10 +192,7 @@ async fn bulk_retry_requires_sample_or_force() {
         .unwrap()
         .unwrap();
     assert_eq!(inst.state, InstanceState::Scheduled);
-    assert_eq!(
-        inst.metadata["dlq_sample_retry"]["fingerprint"],
-        json!(fp)
-    );
+    assert_eq!(inst.metadata["dlq_sample_retry"]["fingerprint"], json!(fp));
 
     // Bulk citing the sample while it has NOT completed → still 409.
     let resp = client

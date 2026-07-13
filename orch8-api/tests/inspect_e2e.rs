@@ -22,10 +22,12 @@ use uuid::Uuid;
 
 // ---------------------------------------------------------------- helpers
 
+#[allow(clippy::needless_pass_by_value)]
 fn step(id: &str, params: Value) -> Value {
     json!({"type": "step", "id": id, "handler": "noop", "params": params})
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn seq_with_blocks(id: Uuid, tenant: &str, blocks: Vec<Value>) -> Value {
     json!({
         "id": id,
@@ -158,7 +160,8 @@ async fn get_resolved_input(
 ) -> reqwest::Response {
     let mut url = format!("{v1}/instances/{inst}/blocks/{block}/resolved-input");
     if let Some(at) = at_block {
-        url.push_str(&format!("?at_block={at}"));
+        use std::fmt::Write as _;
+        let _ = write!(url, "?at_block={at}");
     }
     client
         .get(url)
@@ -201,7 +204,10 @@ async fn draft_trace_cfg(
 #[tokio::test]
 async fn draft_resolves_context_data_ok_status() {
     let trace = draft_trace(
-        vec![step("s1", json!({"email": "{{ context.data.customer.email }}"}))],
+        vec![step(
+            "s1",
+            json!({"email": "{{ context.data.customer.email }}"}),
+        )],
         "s1",
         json!({"customer": {"email": "a@b.c"}}),
         json!({}),
@@ -283,7 +289,10 @@ async fn draft_reports_error_status_with_message_and_no_value() {
 #[tokio::test]
 async fn draft_filter_error_surfaces_over_http() {
     let trace = draft_trace(
-        vec![step("s1", json!({"v": "{{ context.data.x | round(nope) }}"}))],
+        vec![step(
+            "s1",
+            json!({"v": "{{ context.data.x | round(nope) }}"}),
+        )],
         "s1",
         json!({"x": 1.5}),
         json!({}),
@@ -430,7 +439,10 @@ async fn draft_fallback_provenance_visible_over_http() {
 #[tokio::test]
 async fn draft_literal_fallback_source_is_literal() {
     let trace = draft_trace(
-        vec![step("s1", json!({"v": "{{ context.data.absent | default-val }}"}))],
+        vec![step(
+            "s1",
+            json!({"v": "{{ context.data.absent | default-val }}"}),
+        )],
         "s1",
         json!({}),
         json!({}),
@@ -506,7 +518,10 @@ async fn draft_nested_param_paths_in_response() {
 #[tokio::test]
 async fn draft_coerced_to_string_flag_for_inline_number() {
     let trace = draft_trace(
-        vec![step("s1", json!({"msg": "total: {{ context.data.n }} cents"}))],
+        vec![step(
+            "s1",
+            json!({"msg": "total: {{ context.data.n }} cents"}),
+        )],
         "s1",
         json!({"n": 42}),
         json!({}),
@@ -850,11 +865,7 @@ async fn draft_without_tenant_header_succeeds() {
 /// Spin up a server with the standard pipeline sequence and one instance.
 async fn pipeline_instance(
     context: Value,
-) -> (
-    orch8_api::test_harness::TestServer,
-    reqwest::Client,
-    Uuid,
-) {
+) -> (orch8_api::test_harness::TestServer, reqwest::Client, Uuid) {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
     let v1 = srv.v1_url();
@@ -896,20 +907,32 @@ async fn instance_reports_missing_when_no_outputs_recorded() {
 #[tokio::test]
 async fn instance_outputs_before_inspected_block_are_visible() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
-    srv.storage.save_block_output(&transform_row(inst, 1)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
+    srv.storage
+        .save_block_output(&transform_row(inst, 1))
+        .await
+        .unwrap();
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();
     assert_eq!(entry(&trace, "from_fetch")["value"], "fetched");
-    assert_eq!(entry(&trace, "from_fetch")["source"], "outputs.fetch.result");
+    assert_eq!(
+        entry(&trace, "from_fetch")["source"],
+        "outputs.fetch.result"
+    );
     assert_eq!(entry(&trace, "from_transform")["value"], "transformed");
 }
 
 #[tokio::test]
 async fn instance_outputs_at_and_after_boundary_are_invisible() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
     srv.storage
         .save_block_output(&out_at(inst, "notify", 1, json!({"result": "self"})))
         .await
@@ -944,12 +967,25 @@ async fn instance_own_output_excluded_by_default_boundary() {
 #[tokio::test]
 async fn instance_at_block_earlier_narrows_visibility() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
-    srv.storage.save_block_output(&transform_row(inst, 1)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
+    srv.storage
+        .save_block_output(&transform_row(inst, 1))
+        .await
+        .unwrap();
 
     // Boundary moved back to `transform`: only fetch remains visible.
-    let resp =
-        get_resolved_input(&client, &srv.v1_url(), inst, "notify", Some("transform"), "t1").await;
+    let resp = get_resolved_input(
+        &client,
+        &srv.v1_url(),
+        inst,
+        "notify",
+        Some("transform"),
+        "t1",
+    )
+    .await;
     let trace: Value = resp.json().await.unwrap();
     assert_eq!(entry(&trace, "from_fetch")["status"], "ok");
     assert_eq!(entry(&trace, "from_transform")["status"], "missing");
@@ -958,8 +994,14 @@ async fn instance_at_block_earlier_narrows_visibility() {
 #[tokio::test]
 async fn instance_at_block_later_reveals_own_output() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
-    srv.storage.save_block_output(&transform_row(inst, 1)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
+    srv.storage
+        .save_block_output(&transform_row(inst, 1))
+        .await
+        .unwrap();
     srv.storage
         .save_block_output(&out_at(inst, "notify", 2, json!({"result": "self-out"})))
         .await
@@ -971,7 +1013,8 @@ async fn instance_at_block_later_reveals_own_output() {
 
     // Boundary moved forward to `audit`: notify's own output becomes
     // visible, audit's does not.
-    let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", Some("audit"), "t1").await;
+    let resp =
+        get_resolved_input(&client, &srv.v1_url(), inst, "notify", Some("audit"), "t1").await;
     let trace: Value = resp.json().await.unwrap();
     assert_eq!(entry(&trace, "self_ref")["value"], "self-out");
     assert_eq!(entry(&trace, "from_transform")["value"], "transformed");
@@ -981,7 +1024,10 @@ async fn instance_at_block_later_reveals_own_output() {
 #[tokio::test]
 async fn instance_at_block_unknown_boundary_shows_everything() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
     srv.storage
         .save_block_output(&out_at(inst, "notify", 1, json!({"result": "self-out"})))
         .await
@@ -993,8 +1039,15 @@ async fn instance_at_block_unknown_boundary_shows_everything() {
 
     // A boundary block that never produced output never breaks the scan,
     // so every recorded output is visible.
-    let resp =
-        get_resolved_input(&client, &srv.v1_url(), inst, "notify", Some("zzz-never"), "t1").await;
+    let resp = get_resolved_input(
+        &client,
+        &srv.v1_url(),
+        inst,
+        "notify",
+        Some("zzz-never"),
+        "t1",
+    )
+    .await;
     let trace: Value = resp.json().await.unwrap();
     assert_eq!(entry(&trace, "from_fetch")["status"], "ok");
     assert_eq!(entry(&trace, "self_ref")["value"], "self-out");
@@ -1007,12 +1060,18 @@ async fn instance_boundary_breaks_at_first_occurrence_of_boundary_block() {
     // Storage order: fetch, notify, transform — the scan stops at the FIRST
     // notify row, so the later transform output is invisible even though it
     // exists.
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
     srv.storage
         .save_block_output(&out_at(inst, "notify", 1, json!({"result": "early"})))
         .await
         .unwrap();
-    srv.storage.save_block_output(&transform_row(inst, 2)).await.unwrap();
+    srv.storage
+        .save_block_output(&transform_row(inst, 2))
+        .await
+        .unwrap();
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();
@@ -1102,7 +1161,10 @@ async fn instance_underscore_sentinel_never_acts_as_boundary() {
         .save_block_output(&out_at(inst, "_sla:runtime", 0, json!({"breach": true})))
         .await
         .unwrap();
-    srv.storage.save_block_output(&fetch_row(inst, 1)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 1))
+        .await
+        .unwrap();
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();
@@ -1159,7 +1221,10 @@ async fn instance_retry_marker_after_real_output_wins_last_attempt() {
     // Last-attempt-wins applies to marker rows too: a `__retry__` row
     // written after the real output shadows it.
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
     srv.storage
         .save_block_output(&marker_at(
             inst,
@@ -1190,7 +1255,10 @@ async fn instance_real_output_after_retry_marker_wins() {
         ))
         .await
         .unwrap();
-    srv.storage.save_block_output(&fetch_row(inst, 1)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 1))
+        .await
+        .unwrap();
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();
@@ -1227,8 +1295,15 @@ async fn instance_unknown_block_is_404() {
 #[tokio::test]
 async fn instance_cross_tenant_hides_even_with_at_block() {
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
-    let resp =
-        get_resolved_input(&client, &srv.v1_url(), inst, "notify", Some("audit"), "intruder").await;
+    let resp = get_resolved_input(
+        &client,
+        &srv.v1_url(),
+        inst,
+        "notify",
+        Some("audit"),
+        "intruder",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -1290,7 +1365,12 @@ async fn instance_secret_in_stored_output_is_redacted_over_http() {
     create_sequence(&client, &v1, "t1", &seq).await;
     let inst = create_instance(&client, &v1, seq_id, "t1", json!({"data": {}})).await;
     srv.storage
-        .save_block_output(&out_at(inst, "login", 0, json!({"token": "ghp_storedsecret"})))
+        .save_block_output(&out_at(
+            inst,
+            "login",
+            0,
+            json!({"token": "ghp_storedsecret"}),
+        ))
         .await
         .unwrap();
 
@@ -1552,7 +1632,10 @@ async fn instance_five_block_pipeline_middle_inspection() {
 async fn instance_block_id_echoed_and_statuses_serialized_snake_case() {
     let (srv, client, inst) =
         pipeline_instance(json!({"data": {"customer": {"email": "e@x.io"}}})).await;
-    srv.storage.save_block_output(&fetch_row(inst, 0)).await.unwrap();
+    srv.storage
+        .save_block_output(&fetch_row(inst, 0))
+        .await
+        .unwrap();
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();

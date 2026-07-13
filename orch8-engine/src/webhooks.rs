@@ -228,15 +228,31 @@ async fn try_send(
         let started = std::time::Instant::now();
         match send_request(url, &body, timeout, secret).await {
             Ok(status) if status < 400 => {
-                record_attempt(delivery_id, url, event, attempt_number, started, Ok(status), signed)
-                    .await;
+                record_attempt(
+                    delivery_id,
+                    url,
+                    event,
+                    attempt_number,
+                    started,
+                    Ok(status),
+                    signed,
+                )
+                .await;
                 metrics::inc(metrics::WEBHOOKS_SENT);
                 debug!(url = %url, event_type = %event.event_type, "webhook delivered");
                 return Ok(());
             }
             Ok(status) => {
-                record_attempt(delivery_id, url, event, attempt_number, started, Ok(status), signed)
-                    .await;
+                record_attempt(
+                    delivery_id,
+                    url,
+                    event,
+                    attempt_number,
+                    started,
+                    Ok(status),
+                    signed,
+                )
+                .await;
                 last_error = format!("http {status}");
                 warn!(url = %url, status, attempt, "webhook returned error status");
             }
@@ -278,11 +294,20 @@ async fn send_with_retry(
     cancel: &CancellationToken,
 ) {
     let delivery_id = uuid::Uuid::now_v7();
-    let last_error =
-        match try_send(delivery_id, url, event, timeout, max_retries, secret, cancel).await {
-            Ok(()) => return,
-            Err(reason) => reason,
-        };
+    let last_error = match try_send(
+        delivery_id,
+        url,
+        event,
+        timeout,
+        max_retries,
+        secret,
+        cancel,
+    )
+    .await
+    {
+        Ok(()) => return,
+        Err(reason) => reason,
+    };
 
     metrics::inc(metrics::WEBHOOKS_FAILED);
     error!(

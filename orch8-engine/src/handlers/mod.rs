@@ -23,9 +23,9 @@ pub mod step;
 pub mod step_block;
 pub mod step_dispatch;
 pub mod tool_call;
-pub mod wait_for_event;
 pub mod try_catch;
 pub mod util;
+pub mod wait_for_event;
 pub mod wasm_plugin;
 
 use std::collections::HashMap;

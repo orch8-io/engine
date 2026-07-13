@@ -20,9 +20,7 @@ use crate::finding::ResourceRef;
 /// Broad, stable classification of where a failure originates. Used to
 /// separate "fix your workflow" from "fix your infrastructure" without
 /// reading messages.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
     /// The handler itself failed on valid infrastructure (business logic,
@@ -73,7 +71,7 @@ impl ErrorClass {
 /// human-readable message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FailureEnvelope {
-    /// Stable machine code, SCREAMING_SNAKE_CASE, e.g. `HANDLER_TIMEOUT`,
+    /// Stable machine code, `SCREAMING_SNAKE_CASE`, e.g. `HANDLER_TIMEOUT`,
     /// `HTTP_STATUS`, `NO_COMPATIBLE_WORKER`. Codes are producer-defined
     /// but must be stable across releases.
     pub error_code: String,
@@ -207,9 +205,7 @@ pub fn fingerprint(scope: &FingerprintScope, envelope: &FailureEnvelope) -> Fail
     // Fallback: when the code carries no more information than the class,
     // add a normalized-message hash so distinct generic failures don't all
     // collapse into one group.
-    if envelope.error_code.eq_ignore_ascii_case("unknown")
-        || envelope.error_code.is_empty()
-    {
+    if envelope.error_code.eq_ignore_ascii_case("unknown") || envelope.error_code.is_empty() {
         components.push(format!(
             "msg:{:016x}",
             fnv1a(normalize_message(&envelope.message).as_bytes())
@@ -300,9 +296,7 @@ fn is_volatile_token(token: &str) -> bool {
         return true;
     }
     // UUID with dashes (8-4-4-4-12) or any dash-separated all-hex token.
-    let hexish = token
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() || c == '-');
+    let hexish = token.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     if hexish && token.len() >= 8 {
         return true;
     }
@@ -341,37 +335,35 @@ pub fn envelope_from_message(
             .with_external_status(status.to_string());
     }
 
-    let (code, class) = if lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("deadline")
-    {
-        ("TIMEOUT", ErrorClass::Timeout)
-    } else if lower.contains("credential") || lower.contains("unauthorized") {
-        ("CREDENTIAL", ErrorClass::Credential)
-    } else if lower.contains("no compatible worker") || lower.contains("no worker") {
-        ("NO_WORKER", ErrorClass::Worker)
-    } else if lower.contains("circuit breaker") || lower.contains("breaker open") {
-        ("CIRCUIT_OPEN", ErrorClass::Policy)
-    } else if lower.contains("budget") {
-        ("BUDGET_EXCEEDED", ErrorClass::Policy)
-    } else if lower.contains("rate limit") || lower.contains("rate-limit") {
-        ("RATE_LIMITED", ErrorClass::Policy)
-    } else if lower.contains("blocked:") || lower.contains("url policy") {
-        ("URL_POLICY", ErrorClass::Policy)
-    } else if lower.contains("unknown handler")
-        || lower.contains("unknown template root")
-        || lower.contains("template")
-        || lower.contains("invalid params")
-        || lower.contains("schema")
-    {
-        ("CONFIGURATION", ErrorClass::Configuration)
-    } else if lower.contains("cancel") {
-        ("CANCELLED", ErrorClass::Cancelled)
-    } else if lower.contains("dns") || lower.contains("connect") || lower.contains("tls") {
-        ("TRANSPORT", ErrorClass::ExternalDependency)
-    } else {
-        ("unknown", ErrorClass::Application)
-    };
+    let (code, class) =
+        if lower.contains("timed out") || lower.contains("timeout") || lower.contains("deadline") {
+            ("TIMEOUT", ErrorClass::Timeout)
+        } else if lower.contains("credential") || lower.contains("unauthorized") {
+            ("CREDENTIAL", ErrorClass::Credential)
+        } else if lower.contains("no compatible worker") || lower.contains("no worker") {
+            ("NO_WORKER", ErrorClass::Worker)
+        } else if lower.contains("circuit breaker") || lower.contains("breaker open") {
+            ("CIRCUIT_OPEN", ErrorClass::Policy)
+        } else if lower.contains("budget") {
+            ("BUDGET_EXCEEDED", ErrorClass::Policy)
+        } else if lower.contains("rate limit") || lower.contains("rate-limit") {
+            ("RATE_LIMITED", ErrorClass::Policy)
+        } else if lower.contains("blocked:") || lower.contains("url policy") {
+            ("URL_POLICY", ErrorClass::Policy)
+        } else if lower.contains("unknown handler")
+            || lower.contains("unknown template root")
+            || lower.contains("template")
+            || lower.contains("invalid params")
+            || lower.contains("schema")
+        {
+            ("CONFIGURATION", ErrorClass::Configuration)
+        } else if lower.contains("cancel") {
+            ("CANCELLED", ErrorClass::Cancelled)
+        } else if lower.contains("dns") || lower.contains("connect") || lower.contains("tls") {
+            ("TRANSPORT", ErrorClass::ExternalDependency)
+        } else {
+            ("unknown", ErrorClass::Application)
+        };
     FailureEnvelope::new(code, class, message, retryable, occurred_at)
 }
 
@@ -437,7 +429,10 @@ mod tests {
             serde_json::to_string(&ErrorClass::ExternalDependency).unwrap(),
             "\"external_dependency\""
         );
-        assert_eq!(serde_json::to_string(&ErrorClass::Worker).unwrap(), "\"worker\"");
+        assert_eq!(
+            serde_json::to_string(&ErrorClass::Worker).unwrap(),
+            "\"worker\""
+        );
     }
 
     #[test]
@@ -476,7 +471,13 @@ mod tests {
         let e = FailureEnvelope::new("X", ErrorClass::Internal, "m", true, t0());
         let v = serde_json::to_value(&e).unwrap();
         let obj = v.as_object().unwrap();
-        for key in ["block_id", "handler", "external_status", "resource", "details"] {
+        for key in [
+            "block_id",
+            "handler",
+            "external_status",
+            "resource",
+            "details",
+        ] {
             assert!(!obj.contains_key(key), "{key} should be omitted");
         }
     }
@@ -485,8 +486,14 @@ mod tests {
 
     #[test]
     fn identical_failures_share_a_fingerprint() {
-        let a = fingerprint(&scope(), &envelope("HTTP_STATUS").with_external_status("503"));
-        let b = fingerprint(&scope(), &envelope("HTTP_STATUS").with_external_status("503"));
+        let a = fingerprint(
+            &scope(),
+            &envelope("HTTP_STATUS").with_external_status("503"),
+        );
+        let b = fingerprint(
+            &scope(),
+            &envelope("HTTP_STATUS").with_external_status("503"),
+        );
         assert_eq!(a.hash, b.hash);
         assert_eq!(a.components, b.components);
     }
@@ -497,7 +504,10 @@ mod tests {
         e1.message = "request req-8f2a9b17 to https://x failed".into();
         let mut e2 = envelope("HTTP_STATUS");
         e2.message = "request req-99999999 to https://x failed".into();
-        assert_eq!(fingerprint(&scope(), &e1).hash, fingerprint(&scope(), &e2).hash);
+        assert_eq!(
+            fingerprint(&scope(), &e1).hash,
+            fingerprint(&scope(), &e2).hash
+        );
     }
 
     #[test]
@@ -525,7 +535,10 @@ mod tests {
         e1.error_class = ErrorClass::Timeout;
         let mut e2 = envelope("TIMEOUT");
         e2.error_class = ErrorClass::ExternalDependency;
-        assert_ne!(fingerprint(&scope(), &e1).hash, fingerprint(&scope(), &e2).hash);
+        assert_ne!(
+            fingerprint(&scope(), &e1).hash,
+            fingerprint(&scope(), &e2).hash
+        );
     }
 
     #[test]
@@ -549,12 +562,18 @@ mod tests {
         e1.message = "widget frobnication failed".into();
         let mut e2 = envelope("unknown");
         e2.message = "database exploded".into();
-        assert_ne!(fingerprint(&scope(), &e1).hash, fingerprint(&scope(), &e2).hash);
+        assert_ne!(
+            fingerprint(&scope(), &e1).hash,
+            fingerprint(&scope(), &e2).hash
+        );
 
         // But volatile parts of the message do not split groups.
         let mut e3 = envelope("unknown");
         e3.message = "widget frobnication failed".into();
-        assert_eq!(fingerprint(&scope(), &e1).hash, fingerprint(&scope(), &e3).hash);
+        assert_eq!(
+            fingerprint(&scope(), &e1).hash,
+            fingerprint(&scope(), &e3).hash
+        );
     }
 
     #[test]
@@ -565,7 +584,11 @@ mod tests {
         );
         assert!(fp.components.iter().any(|c| c == "block:charge"));
         assert!(fp.components.iter().any(|c| c == "handler:http_request"));
-        assert!(fp.components.iter().any(|c| c == "class:external_dependency"));
+        assert!(
+            fp.components
+                .iter()
+                .any(|c| c == "class:external_dependency")
+        );
         assert!(fp.components.iter().any(|c| c == "code:HTTP_STATUS"));
         assert!(fp.components.iter().any(|c| c == "status:503"));
     }
@@ -579,7 +602,10 @@ mod tests {
         let mut e2 = envelope("X");
         e2.block_id = Some("a".into());
         e2.handler = Some("bc".into());
-        assert_ne!(fingerprint(&scope(), &e1).hash, fingerprint(&scope(), &e2).hash);
+        assert_ne!(
+            fingerprint(&scope(), &e1).hash,
+            fingerprint(&scope(), &e2).hash
+        );
     }
 
     // --- normalize_message ---
@@ -622,7 +648,10 @@ mod tests {
     #[test]
     fn normalize_keeps_short_words_with_digits() {
         // "s3" and "utf8" style tokens must survive.
-        assert_eq!(normalize_message("s3 upload failed utf8 decode"), "s3 upload failed utf8 decode");
+        assert_eq!(
+            normalize_message("s3 upload failed utf8 decode"),
+            "s3 upload failed utf8 decode"
+        );
     }
 
     #[test]
@@ -660,14 +689,42 @@ mod tests {
     #[test]
     fn message_derivation_classifies_common_failures() {
         let cases = [
-            ("request timed out after 30s", "TIMEOUT", ErrorClass::Timeout),
-            ("credential 'billing' is disabled", "CREDENTIAL", ErrorClass::Credential),
-            ("circuit breaker open for charge_card", "CIRCUIT_OPEN", ErrorClass::Policy),
-            ("budget exceeded: max_steps", "BUDGET_EXCEEDED", ErrorClass::Policy),
-            ("rate limit exhausted for mailbox:x", "RATE_LIMITED", ErrorClass::Policy),
-            ("unknown template root: bogus", "CONFIGURATION", ErrorClass::Configuration),
+            (
+                "request timed out after 30s",
+                "TIMEOUT",
+                ErrorClass::Timeout,
+            ),
+            (
+                "credential 'billing' is disabled",
+                "CREDENTIAL",
+                ErrorClass::Credential,
+            ),
+            (
+                "circuit breaker open for charge_card",
+                "CIRCUIT_OPEN",
+                ErrorClass::Policy,
+            ),
+            (
+                "budget exceeded: max_steps",
+                "BUDGET_EXCEEDED",
+                ErrorClass::Policy,
+            ),
+            (
+                "rate limit exhausted for mailbox:x",
+                "RATE_LIMITED",
+                ErrorClass::Policy,
+            ),
+            (
+                "unknown template root: bogus",
+                "CONFIGURATION",
+                ErrorClass::Configuration,
+            ),
             ("cancelled by operator", "CANCELLED", ErrorClass::Cancelled),
-            ("dns error: failed to resolve", "TRANSPORT", ErrorClass::ExternalDependency),
+            (
+                "dns error: failed to resolve",
+                "TRANSPORT",
+                ErrorClass::ExternalDependency,
+            ),
         ];
         for (msg, code, class) in cases {
             let e = envelope_from_message(msg, false, t0());

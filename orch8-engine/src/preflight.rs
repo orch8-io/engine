@@ -16,7 +16,9 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-use orch8_types::finding::{Confidence, Evidence, Finding, FindingSeverity, Remediation, ResourceRef};
+use orch8_types::finding::{
+    Confidence, Evidence, Finding, FindingSeverity, Remediation, ResourceRef,
+};
 use orch8_types::preflight::{PreflightCheck, PreflightReport, PreflightStatus};
 use orch8_types::queue_dispatch::{DispatchMode, QueueDispatchConfig};
 use orch8_types::queue_routing::QueueRoutingRule;
@@ -81,7 +83,7 @@ struct SequenceRefs {
     explicit_queues: BTreeSet<String>,
     /// `credentials://ID` references (bare id, field suffix stripped).
     credential_ids: BTreeSet<String>,
-    /// (block id, sequence_name, version) for sub-sequence blocks.
+    /// (block id, `sequence_name`, version) for sub-sequence blocks.
     sub_sequences: Vec<(String, String, Option<i32>)>,
     /// Rate-limit keys referenced by steps.
     rate_limit_keys: BTreeSet<String>,
@@ -256,6 +258,7 @@ const fn json_type_name(v: &Value) -> &'static str {
 
 /// Handlers not covered by built-ins or enabled plugins need a live,
 /// version-compatible worker.
+#[allow(clippy::too_many_lines)] // one coverage rule per handler source, kept together
 fn check_handlers(
     seq: &SequenceDefinition,
     refs: &SequenceRefs,
@@ -622,9 +625,12 @@ fn check_sub_sequences(
         }
         // A resolvable candidate must be usable: unpublished-only is fatal,
         // draft-only is a warning.
-        let usable = candidates
-            .iter()
-            .any(|s| matches!(s.status, SequenceStatus::Staging | SequenceStatus::Production));
+        let usable = candidates.iter().any(|s| {
+            matches!(
+                s.status,
+                SequenceStatus::Staging | SequenceStatus::Production
+            )
+        });
         let all_unpublished = candidates
             .iter()
             .all(|s| matches!(s.status, SequenceStatus::Unpublished));
@@ -633,8 +639,10 @@ fn check_sub_sequences(
                 Finding::new(
                     "SUB_SEQUENCE_UNPUBLISHED",
                     FindingSeverity::Error,
-                    format!("block '{block}' references sub-sequence '{name}', but every \
-                             matching version is unpublished"),
+                    format!(
+                        "block '{block}' references sub-sequence '{name}', but every \
+                             matching version is unpublished"
+                    ),
                     Confidence::Certain,
                     now,
                 )
@@ -645,8 +653,10 @@ fn check_sub_sequences(
                 Finding::new(
                     "SUB_SEQUENCE_DRAFT_ONLY",
                     FindingSeverity::Warning,
-                    format!("block '{block}' references sub-sequence '{name}', which only \
-                             exists as a draft"),
+                    format!(
+                        "block '{block}' references sub-sequence '{name}', which only \
+                             exists as a draft"
+                    ),
                     Confidence::Certain,
                     now,
                 )
@@ -688,6 +698,7 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 7, 11, 0, 0, 0).unwrap()
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn seq(blocks: Value) -> SequenceDefinition {
         serde_json::from_value(json!({
             "id": uuid::Uuid::now_v7(),
@@ -713,7 +724,11 @@ mod tests {
         }
     }
 
-    fn registration(handler: &str, queue: Option<&str>, version: Option<&str>) -> WorkerRegistration {
+    fn registration(
+        handler: &str,
+        queue: Option<&str>,
+        version: Option<&str>,
+    ) -> WorkerRegistration {
         WorkerRegistration {
             worker_id: format!("w-{handler}"),
             handler_name: handler.to_string(),
@@ -748,9 +763,15 @@ mod tests {
         assert!(refs.explicit_queues.contains("billing"));
         assert_eq!(
             refs.credential_ids,
-            ["slack", "stripe"].iter().map(ToString::to_string).collect()
+            ["slack", "stripe"]
+                .iter()
+                .map(ToString::to_string)
+                .collect()
         );
-        assert_eq!(refs.sub_sequences, vec![("child".into(), "refund-flow".into(), Some(3))]);
+        assert_eq!(
+            refs.sub_sequences,
+            vec![("child".into(), "refund-flow".into(), Some(3))]
+        );
         assert!(refs.rate_limit_keys.contains("mailbox:x"));
     }
 
@@ -772,10 +793,22 @@ mod tests {
             {"type": "step", "id": "a", "handler": "external_x", "params": {"k": "credentials://c1"}, "queue_name": "q"}
         ]));
         let report = run_preflight(&s, &RuntimeInventory::default(), t0());
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Unknown);
-        assert_eq!(check(&report, "credentials_present").status, PreflightStatus::Unknown);
-        assert_eq!(check(&report, "queues_consumable").status, PreflightStatus::Unknown);
-        assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Unknown);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Unknown
+        );
+        assert_eq!(
+            check(&report, "credentials_present").status,
+            PreflightStatus::Unknown
+        );
+        assert_eq!(
+            check(&report, "queues_consumable").status,
+            PreflightStatus::Unknown
+        );
+        assert_eq!(
+            check(&report, "plugins_enabled").status,
+            PreflightStatus::Unknown
+        );
         assert_eq!(report.overall, PreflightStatus::Unknown);
         assert!(!report.is_ready());
     }
@@ -814,7 +847,10 @@ mod tests {
         let mut inv = full_inventory();
         inv.worker_registrations = Some(vec![registration("charge_card", None, Some("1.0.0"))]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
     }
 
     #[test]
@@ -853,7 +889,10 @@ mod tests {
             updated_at: t0(),
         }]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
     }
 
     #[test]
@@ -866,7 +905,10 @@ mod tests {
         let mut inv = full_inventory();
         inv.worker_registrations = Some(vec![reg]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Fail);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Fail
+        );
     }
 
     #[test]
@@ -875,10 +917,19 @@ mod tests {
             {"type": "step", "id": "x", "handler": "sentiment", "params": {}}
         ]));
         let mut inv = full_inventory();
-        inv.plugins = Some(vec![PluginInfo { name: "sentiment".into(), enabled: true }]);
+        inv.plugins = Some(vec![PluginInfo {
+            name: "sentiment".into(),
+            enabled: true,
+        }]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Pass);
-        assert_eq!(check(&report, "plugins_enabled").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
+        assert_eq!(
+            check(&report, "plugins_enabled").status,
+            PreflightStatus::Pass
+        );
     }
 
     #[test]
@@ -887,10 +938,16 @@ mod tests {
             {"type": "step", "id": "x", "handler": "sentiment", "params": {}}
         ]));
         let mut inv = full_inventory();
-        inv.plugins = Some(vec![PluginInfo { name: "sentiment".into(), enabled: false }]);
+        inv.plugins = Some(vec![PluginInfo {
+            name: "sentiment".into(),
+            enabled: false,
+        }]);
         let report = run_preflight(&s, &inv, t0());
         // Disabled plugin doesn't serve the handler...
-        assert_eq!(check(&report, "handlers_have_workers").status, PreflightStatus::Fail);
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Fail
+        );
         // ...and is explicitly reported as disabled.
         let c = check(&report, "plugins_enabled");
         assert_eq!(c.status, PreflightStatus::Fail);
@@ -910,7 +967,11 @@ mod tests {
         ]));
         let mut inv = full_inventory();
         inv.credentials = Some(vec![
-            CredentialInfo { id: "disabled".into(), enabled: false, expires_at: None },
+            CredentialInfo {
+                id: "disabled".into(),
+                enabled: false,
+                expires_at: None,
+            },
             CredentialInfo {
                 id: "expired".into(),
                 enabled: true,
@@ -938,7 +999,10 @@ mod tests {
             expires_at: Some(t0() + chrono::Duration::days(30)),
         }]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "credentials_present").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "credentials_present").status,
+            PreflightStatus::Pass
+        );
     }
 
     // --- queues ---
@@ -964,7 +1028,10 @@ mod tests {
         let mut inv = full_inventory();
         inv.worker_registrations = Some(vec![registration("whatever", Some("billing"), None)]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "queues_consumable").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "queues_consumable").status,
+            PreflightStatus::Pass
+        );
     }
 
     #[test]
@@ -973,17 +1040,22 @@ mod tests {
             {"type": "step", "id": "a", "handler": "noop", "params": {}, "queue_name": "push-q"}
         ]));
         let mut inv = full_inventory();
-        inv.queue_dispatch = Some(vec![serde_json::from_value(json!({
-            "tenant_id": "t1",
-            "queue_name": "push-q",
-            "mode": "push",
-            "push_url": "https://worker.example.com/tasks",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z"
-        }))
-        .unwrap()]);
+        inv.queue_dispatch = Some(vec![
+            serde_json::from_value(json!({
+                "tenant_id": "t1",
+                "queue_name": "push-q",
+                "mode": "push",
+                "push_url": "https://worker.example.com/tasks",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }))
+            .unwrap(),
+        ]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "queues_consumable").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "queues_consumable").status,
+            PreflightStatus::Pass
+        );
     }
 
     // --- sub-sequences ---
@@ -1041,14 +1113,20 @@ mod tests {
             status: SequenceStatus::Production,
         }]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "sub_sequences_available").status, PreflightStatus::Pass);
+        assert_eq!(
+            check(&report, "sub_sequences_available").status,
+            PreflightStatus::Pass
+        );
 
         // Asking for a version that doesn't exist fails.
         let s3 = seq(json!([
             {"type": "sub_sequence", "id": "c", "sequence_name": "refund", "version": 3, "input": {}}
         ]));
         let report3 = run_preflight(&s3, &inv, t0());
-        assert_eq!(check(&report3, "sub_sequences_available").status, PreflightStatus::Fail);
+        assert_eq!(
+            check(&report3, "sub_sequences_available").status,
+            PreflightStatus::Fail
+        );
     }
 
     #[test]
@@ -1064,7 +1142,10 @@ mod tests {
             status: SequenceStatus::Production,
         }]);
         let report = run_preflight(&s, &inv, t0());
-        assert_eq!(check(&report, "sub_sequences_available").status, PreflightStatus::Fail);
+        assert_eq!(
+            check(&report, "sub_sequences_available").status,
+            PreflightStatus::Fail
+        );
     }
 
     // --- schema / definition ---

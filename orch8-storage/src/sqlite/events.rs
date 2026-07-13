@@ -89,10 +89,12 @@ pub(super) async fn get(
     storage: &SqliteStorage,
     id: Uuid,
 ) -> Result<Option<EventEnvelope>, StorageError> {
-    let row = sqlx::query(&format!("SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = ?1"))
-        .bind(id.to_string())
-        .fetch_optional(&storage.pool)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = ?1"
+    ))
+    .bind(id.to_string())
+    .fetch_optional(&storage.pool)
+    .await?;
     row.as_ref().map(row_to_event).transpose()
 }
 

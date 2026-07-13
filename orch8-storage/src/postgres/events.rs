@@ -1,4 +1,4 @@
-//! Durable event correlation storage — PostgreSQL.
+//! Durable event correlation storage — `PostgreSQL`.
 
 use std::str::FromStr;
 
@@ -78,10 +78,12 @@ pub(super) async fn get(
     store: &PostgresStorage,
     id: Uuid,
 ) -> Result<Option<EventEnvelope>, StorageError> {
-    let row = sqlx::query(&format!("SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(&store.pool)
-        .await?;
+    let row = sqlx::query(&format!(
+        "SELECT {EVENT_COLUMNS} FROM event_inbox WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(&store.pool)
+    .await?;
     row.as_ref().map(row_to_event).transpose()
 }
 
@@ -140,7 +142,10 @@ pub(super) async fn consume(
     Ok(result.rows_affected())
 }
 
-pub(super) async fn upsert_wait(store: &PostgresStorage, w: &EventWait) -> Result<(), StorageError> {
+pub(super) async fn upsert_wait(
+    store: &PostgresStorage,
+    w: &EventWait,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO event_waits
             (id, tenant_id, instance_id, block_id, event_names, correlation_key, join_mode,

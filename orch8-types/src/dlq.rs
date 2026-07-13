@@ -85,8 +85,14 @@ mod tests {
 
     #[test]
     fn retry_mode_serializes_snake_case() {
-        assert_eq!(serde_json::to_string(&DlqRetryMode::Sample).unwrap(), "\"sample\"");
-        assert_eq!(serde_json::to_string(&DlqRetryMode::Bulk).unwrap(), "\"bulk\"");
+        assert_eq!(
+            serde_json::to_string(&DlqRetryMode::Sample).unwrap(),
+            "\"sample\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DlqRetryMode::Bulk).unwrap(),
+            "\"bulk\""
+        );
     }
 
     #[test]

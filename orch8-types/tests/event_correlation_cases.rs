@@ -734,8 +734,7 @@ fn join_mode_round_trips_all_variants() {
         JoinMode::Count { count: 1 },
         JoinMode::Count { count: u32::MAX },
     ] {
-        let back: JoinMode =
-            serde_json::from_str(&serde_json::to_string(&mode).unwrap()).unwrap();
+        let back: JoinMode = serde_json::from_str(&serde_json::to_string(&mode).unwrap()).unwrap();
         assert_eq!(back, mode);
     }
 }
@@ -766,17 +765,26 @@ fn event_status_as_str_values() {
 
 #[test]
 fn event_status_from_str_pending() {
-    assert_eq!("pending".parse::<EventStatus>().unwrap(), EventStatus::Pending);
+    assert_eq!(
+        "pending".parse::<EventStatus>().unwrap(),
+        EventStatus::Pending
+    );
 }
 
 #[test]
 fn event_status_from_str_consumed() {
-    assert_eq!("consumed".parse::<EventStatus>().unwrap(), EventStatus::Consumed);
+    assert_eq!(
+        "consumed".parse::<EventStatus>().unwrap(),
+        EventStatus::Consumed
+    );
 }
 
 #[test]
 fn event_status_from_str_expired() {
-    assert_eq!("expired".parse::<EventStatus>().unwrap(), EventStatus::Expired);
+    assert_eq!(
+        "expired".parse::<EventStatus>().unwrap(),
+        EventStatus::Expired
+    );
 }
 
 #[test]
@@ -805,9 +813,18 @@ fn event_status_from_str_rejects_whitespace() {
 
 #[test]
 fn event_status_serde_serializes_snake_case() {
-    assert_eq!(serde_json::to_string(&EventStatus::Pending).unwrap(), "\"pending\"");
-    assert_eq!(serde_json::to_string(&EventStatus::Consumed).unwrap(), "\"consumed\"");
-    assert_eq!(serde_json::to_string(&EventStatus::Expired).unwrap(), "\"expired\"");
+    assert_eq!(
+        serde_json::to_string(&EventStatus::Pending).unwrap(),
+        "\"pending\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EventStatus::Consumed).unwrap(),
+        "\"consumed\""
+    );
+    assert_eq!(
+        serde_json::to_string(&EventStatus::Expired).unwrap(),
+        "\"expired\""
+    );
 }
 
 #[test]
@@ -829,7 +846,11 @@ fn event_status_serde_rejects_unknown() {
 
 #[test]
 fn event_status_serde_and_fromstr_agree() {
-    for status in [EventStatus::Pending, EventStatus::Consumed, EventStatus::Expired] {
+    for status in [
+        EventStatus::Pending,
+        EventStatus::Consumed,
+        EventStatus::Expired,
+    ] {
         let via_serde = serde_json::to_string(&status).unwrap();
         // Strip the JSON quotes: the inner token must round-trip FromStr.
         let token = via_serde.trim_matches('"');
@@ -853,17 +874,26 @@ fn wait_status_as_str_values() {
 
 #[test]
 fn wait_status_from_str_waiting() {
-    assert_eq!("waiting".parse::<WaitStatus>().unwrap(), WaitStatus::Waiting);
+    assert_eq!(
+        "waiting".parse::<WaitStatus>().unwrap(),
+        WaitStatus::Waiting
+    );
 }
 
 #[test]
 fn wait_status_from_str_satisfied() {
-    assert_eq!("satisfied".parse::<WaitStatus>().unwrap(), WaitStatus::Satisfied);
+    assert_eq!(
+        "satisfied".parse::<WaitStatus>().unwrap(),
+        WaitStatus::Satisfied
+    );
 }
 
 #[test]
 fn wait_status_from_str_cancelled() {
-    assert_eq!("cancelled".parse::<WaitStatus>().unwrap(), WaitStatus::Cancelled);
+    assert_eq!(
+        "cancelled".parse::<WaitStatus>().unwrap(),
+        WaitStatus::Cancelled
+    );
 }
 
 #[test]
@@ -886,9 +916,18 @@ fn wait_status_from_str_rejects_american_spelling() {
 
 #[test]
 fn wait_status_serde_serializes_snake_case() {
-    assert_eq!(serde_json::to_string(&WaitStatus::Waiting).unwrap(), "\"waiting\"");
-    assert_eq!(serde_json::to_string(&WaitStatus::Satisfied).unwrap(), "\"satisfied\"");
-    assert_eq!(serde_json::to_string(&WaitStatus::Cancelled).unwrap(), "\"cancelled\"");
+    assert_eq!(
+        serde_json::to_string(&WaitStatus::Waiting).unwrap(),
+        "\"waiting\""
+    );
+    assert_eq!(
+        serde_json::to_string(&WaitStatus::Satisfied).unwrap(),
+        "\"satisfied\""
+    );
+    assert_eq!(
+        serde_json::to_string(&WaitStatus::Cancelled).unwrap(),
+        "\"cancelled\""
+    );
 }
 
 #[test]
@@ -910,10 +949,17 @@ fn wait_status_serde_rejects_unknown() {
 
 #[test]
 fn wait_status_serde_and_fromstr_agree() {
-    for status in [WaitStatus::Waiting, WaitStatus::Satisfied, WaitStatus::Cancelled] {
+    for status in [
+        WaitStatus::Waiting,
+        WaitStatus::Satisfied,
+        WaitStatus::Cancelled,
+    ] {
         let token = status.as_str();
         assert_eq!(token.parse::<WaitStatus>().unwrap(), status);
-        assert_eq!(serde_json::to_string(&status).unwrap(), format!("\"{token}\""));
+        assert_eq!(
+            serde_json::to_string(&status).unwrap(),
+            format!("\"{token}\"")
+        );
         let back: WaitStatus = serde_json::from_str(&format!("\"{token}\"")).unwrap();
         assert_eq!(back, status);
     }
@@ -957,7 +1003,10 @@ fn envelope_round_trips_with_consumer() {
 fn envelope_consumed_by_none_is_omitted_from_json() {
     let e = full_envelope();
     let v: serde_json::Value = serde_json::to_value(&e).unwrap();
-    assert!(v.get("consumed_by").is_none(), "consumed_by must be omitted when None");
+    assert!(
+        v.get("consumed_by").is_none(),
+        "consumed_by must be omitted when None"
+    );
 }
 
 #[test]
@@ -1267,8 +1316,7 @@ fn satisfied_wait_state_survives_serde_round_trip() {
 fn partially_matched_wait_resumes_after_round_trip() {
     let mut w = wait(&["a", "b"], JoinMode::All);
     w.record_match(&event("a"));
-    let mut back: EventWait =
-        serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+    let mut back: EventWait = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
     assert!(!back.is_satisfied());
     assert!(back.record_match(&event("b")));
     assert!(back.is_satisfied());
@@ -1279,8 +1327,7 @@ fn count_progress_survives_round_trip() {
     let mut w = wait(&["r"], JoinMode::Count { count: 3 });
     w.record_match(&event("r"));
     w.record_match(&event("r"));
-    let mut back: EventWait =
-        serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+    let mut back: EventWait = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
     assert!(!back.is_satisfied());
     assert!(back.record_match(&event("r")));
     assert!(back.is_satisfied());
@@ -1291,8 +1338,7 @@ fn duplicate_id_still_rejected_after_round_trip() {
     let mut w = wait(&["r"], JoinMode::Count { count: 5 });
     let e = event("r");
     w.record_match(&e);
-    let mut back: EventWait =
-        serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
+    let mut back: EventWait = serde_json::from_str(&serde_json::to_string(&w).unwrap()).unwrap();
     assert!(!back.record_match(&e));
 }
 

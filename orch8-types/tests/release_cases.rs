@@ -236,8 +236,7 @@ fn serde_repr_matches_as_str_for_every_state() {
 #[test]
 fn serde_deserializes_every_snake_case_state() {
     for s in ALL_STATES {
-        let back: ReleaseState =
-            serde_json::from_str(&format!("\"{}\"", s.as_str())).unwrap();
+        let back: ReleaseState = serde_json::from_str(&format!("\"{}\"", s.as_str())).unwrap();
         assert_eq!(back, s);
     }
 }
@@ -272,7 +271,8 @@ fn assignment_is_deterministic_across_repeat_calls() {
 #[test]
 fn assignment_is_deterministic_for_unicode_keys() {
     let release = fixed_release();
-    for key in ["клієнт-42", "顧客-7", "🚀-cohort", "ünïcode-ß", "मुवक्किल"] {
+    for key in ["клієнт-42", "顧客-7", "🚀-cohort", "ünïcode-ß", "मुवक्किल"]
+    {
         let first = assign_variant(release, key, 37);
         for _ in 0..20 {
             assert_eq!(assign_variant(release, key, 37), first, "{key}");
@@ -394,7 +394,9 @@ fn candidate_share(release: Uuid, percent: u8, n: u32) -> f64 {
             assign_variant(release, &format!("cohort-{i}"), percent) == ReleaseVariant::Candidate
         })
         .count();
-    candidates as f64 / f64::from(n)
+    #[allow(clippy::cast_precision_loss)]
+    let share = candidates as f64 / f64::from(n);
+    share
 }
 
 #[test]
@@ -464,7 +466,10 @@ fn assignment_works_with_nil_uuid() {
         assert_eq!(assign_variant(nil, "cohort", 50), first);
     }
     assert_eq!(assign_variant(nil, "cohort", 0), ReleaseVariant::Baseline);
-    assert_eq!(assign_variant(nil, "cohort", 100), ReleaseVariant::Candidate);
+    assert_eq!(
+        assign_variant(nil, "cohort", 100),
+        ReleaseVariant::Candidate
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -820,8 +825,7 @@ fn sample_release() -> WorkflowRelease {
 #[test]
 fn workflow_release_full_round_trip() {
     let r = sample_release();
-    let back: WorkflowRelease =
-        serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+    let back: WorkflowRelease = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
     assert_eq!(back, r);
 }
 
@@ -1001,8 +1005,7 @@ fn semantic_diff_round_trip_and_empty_omission() {
         max_severity: Some(DiffSeverity::Behavioral),
         candidate_lint: vec!["[extra] something looks off".into()],
     };
-    let back: SemanticDiff =
-        serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+    let back: SemanticDiff = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
     assert_eq!(back, full);
 
     let empty = SemanticDiff {

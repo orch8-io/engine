@@ -20,8 +20,7 @@ use serde_json::{Value, json};
 
 use orch8_publisher::package::{
     PackageManifest, PackageRequirements, SignedPackage, TrustLevel, TrustPolicy, build_package,
-    check_trust, check_upgrade, contract_files, install_namespace, sequence_files,
-    verify_package,
+    check_trust, check_upgrade, contract_files, install_namespace, sequence_files, verify_package,
 };
 
 use crate::OutputFormat;
@@ -73,7 +72,10 @@ pub enum PackageCmd {
 
 pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFormat) -> Result<()> {
     match cmd {
-        PackageCmd::Keygen => keygen(),
+        PackageCmd::Keygen => {
+            keygen();
+            Ok(())
+        }
         PackageCmd::Build { dir, key, out } => build(&dir, &key, out.as_deref()),
         PackageCmd::Verify { file, trusted_keys } => verify(&file, &trusted_keys),
         PackageCmd::Inspect { file } => inspect(&file, format),
@@ -98,11 +100,16 @@ pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFor
     }
 }
 
-fn keygen() -> Result<()> {
+fn keygen() {
     let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
-    println!("seed (SECRET — store safely): {}", BASE64.encode(key.to_bytes()));
-    println!("public key (share/trust this): {}", BASE64.encode(key.verifying_key().to_bytes()));
-    Ok(())
+    println!(
+        "seed (SECRET — store safely): {}",
+        BASE64.encode(key.to_bytes())
+    );
+    println!(
+        "public key (share/trust this): {}",
+        BASE64.encode(key.verifying_key().to_bytes())
+    );
 }
 
 fn load_signing_key(key_arg: &str) -> Result<ed25519_dalek::SigningKey> {
@@ -123,8 +130,8 @@ fn load_signing_key(key_arg: &str) -> Result<ed25519_dalek::SigningKey> {
 }
 
 fn read_package(path: &Path) -> Result<SignedPackage> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).context("file is not a signed orch8 package")
 }
 
@@ -144,8 +151,14 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
             .as_str()
             .context("package.json: 'version' is required")?
             .to_string(),
-        description: manifest_json["description"].as_str().unwrap_or("").to_string(),
-        publisher: manifest_json["publisher"].as_str().unwrap_or("").to_string(),
+        description: manifest_json["description"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        publisher: manifest_json["publisher"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         requirements: manifest_json
             .get("requirements")
             .map(|r| serde_json::from_value::<PackageRequirements>(r.clone()))
@@ -245,7 +258,7 @@ fn verify(path: &Path, trusted_keys: &[String]) -> Result<()> {
 
 fn inspect(path: &Path, format: OutputFormat) -> Result<()> {
     let pkg = read_package(path)?;
-    let integrity = verify_package(&pkg).map(|()| "verified").unwrap_or("FAILED");
+    let integrity = verify_package(&pkg).map_or("FAILED", |()| "verified");
     match format {
         OutputFormat::Json => {
             println!(
@@ -336,7 +349,11 @@ async fn install(
                 orch8::contract::run_suite(&seq, &suite, &orch8::contract::RunOptions::default())
                     .await?;
             if report.passed {
-                println!("contracts: {} — {} case(s) passed", stem, report.cases.len());
+                println!(
+                    "contracts: {} — {} case(s) passed",
+                    stem,
+                    report.cases.len()
+                );
             } else {
                 for case in report.failed_cases() {
                     eprintln!("contract FAILED [{stem} / {}]:", case.name);
@@ -354,7 +371,10 @@ async fn install(
     let mut installed = Vec::new();
     for (seq_path, seq_raw) in sequence_files(&pkg.archive) {
         let mut seq: Value = serde_json::from_str(seq_raw)?;
-        let name = seq["name"].as_str().context("sequence missing name")?.to_string();
+        let name = seq["name"]
+            .as_str()
+            .context("sequence missing name")?
+            .to_string();
         let version = seq["version"].as_i64().unwrap_or(1);
 
         // Never overwrite: abort when this (name, version) already exists.
@@ -379,7 +399,11 @@ async fn install(
         seq["tenant_id"] = json!(tenant_id);
         seq["namespace"] = json!(namespace);
         seq["created_at"] = json!(chrono::Utc::now().to_rfc3339());
-        let resp = client.post(format!("{base}/sequences")).json(&seq).send().await?;
+        let resp = client
+            .post(format!("{base}/sequences"))
+            .json(&seq)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             bail!(
                 "failed to install {seq_path}: {} {}",
@@ -388,7 +412,11 @@ async fn install(
             );
         }
         let created: Value = resp.json().await?;
-        installed.push((name, version, created["id"].as_str().unwrap_or("").to_string()));
+        installed.push((
+            name,
+            version,
+            created["id"].as_str().unwrap_or("").to_string(),
+        ));
     }
 
     // 6. Preflight every installed sequence and show what still needs

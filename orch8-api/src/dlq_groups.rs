@@ -20,9 +20,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use orch8_types::dlq::{DlqGroup, DlqGroupRetryRequest, DlqGroupRetryResponse, DlqRetryMode};
-use orch8_types::failure::{
-    FailureEnvelope, FingerprintScope, envelope_from_message, fingerprint,
-};
+use orch8_types::failure::{FailureEnvelope, FingerprintScope, envelope_from_message, fingerprint};
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
@@ -190,7 +188,10 @@ async fn derive_envelope(
 
     let (block_id, message) = match best {
         Some((_, block, message)) => (Some(block), message),
-        None => (None, "instance failed with no recorded step error".to_string()),
+        None => (
+            None,
+            "instance failed with no recorded step error".to_string(),
+        ),
     };
 
     let mut envelope = envelope_from_message(&message, false, instance.updated_at);
@@ -236,10 +237,7 @@ fn build_groups(failures: Vec<InstanceFailure>) -> Vec<DlqGroup> {
         }
         push_bounded(&mut entry.blocks, f.envelope.block_id.clone());
         push_bounded(&mut entry.handlers, f.envelope.handler.clone());
-        push_bounded(
-            &mut entry.sequences,
-            Some(f.scope.sequence_id.clone()),
-        );
+        push_bounded(&mut entry.sequences, Some(f.scope.sequence_id.clone()));
     }
 
     let mut out: Vec<DlqGroup> = groups.into_values().collect();
@@ -328,10 +326,7 @@ pub(crate) async fn retry_group(
             if !req.force {
                 verify_sample(&state, &fingerprint_hash, req.sample_verified_instance_id).await?;
             }
-            let limit = req
-                .limit
-                .unwrap_or(BULK_DEFAULT_LIMIT)
-                .min(BULK_MAX_LIMIT) as usize;
+            let limit = req.limit.unwrap_or(BULK_DEFAULT_LIMIT).min(BULK_MAX_LIMIT) as usize;
             let mut retried = Vec::new();
             let mut skipped = 0u64;
             for member in members.iter().take(limit) {

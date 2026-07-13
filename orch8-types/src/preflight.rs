@@ -36,7 +36,7 @@ pub enum PreflightStatus {
 /// One named readiness check with its findings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PreflightCheck {
-    /// Stable check identifier, snake_case: `definition_valid`,
+    /// Stable check identifier, `snake_case`: `definition_valid`,
     /// `handlers_have_workers`, `credentials_present`, ...
     pub id: String,
     pub status: PreflightStatus,
@@ -112,7 +112,10 @@ impl PreflightReport {
     /// True when nothing blocks execution (warnings allowed).
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        matches!(self.overall, PreflightStatus::Pass | PreflightStatus::Warning)
+        matches!(
+            self.overall,
+            PreflightStatus::Pass | PreflightStatus::Warning
+        )
     }
 }
 

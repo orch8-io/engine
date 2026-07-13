@@ -13,9 +13,9 @@ use commands::config::ConfigCmd;
 use commands::cron::CronCmd;
 use commands::dev::DevCmd;
 use commands::inspect_cmd::InspectCmd;
+use commands::instance::InstanceCmd;
 use commands::package_cmd::PackageCmd;
 use commands::release::ReleaseCmd;
-use commands::instance::InstanceCmd;
 use commands::sequence::SequenceCmd;
 use commands::templates::TemplatesCmd;
 

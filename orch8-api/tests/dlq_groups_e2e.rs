@@ -375,7 +375,10 @@ async fn mixed_causes_produce_expected_counts() {
     plant_default(&c, seq, "budget exhausted").await;
     let groups = groups_t1(&c).await;
     assert_eq!(groups.len(), 3, "{groups:#?}");
-    let counts: Vec<u64> = groups.iter().map(|g| g["count"].as_u64().unwrap()).collect();
+    let counts: Vec<u64> = groups
+        .iter()
+        .map(|g| g["count"].as_u64().unwrap())
+        .collect();
     assert_eq!(counts, vec![3, 2, 1]);
 }
 
@@ -456,11 +459,20 @@ async fn components_explain_the_grouping() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert!(components.contains(&format!("seq:{seq}").as_str()), "{components:?}");
+    assert!(
+        components.contains(&format!("seq:{seq}").as_str()),
+        "{components:?}"
+    );
     assert!(components.contains(&"v:1"), "{components:?}");
     assert!(components.contains(&"block:charge"), "{components:?}");
-    assert!(components.contains(&"handler:charge_card"), "{components:?}");
-    assert!(components.contains(&"class:external_dependency"), "{components:?}");
+    assert!(
+        components.contains(&"handler:charge_card"),
+        "{components:?}"
+    );
+    assert!(
+        components.contains(&"class:external_dependency"),
+        "{components:?}"
+    );
     assert!(components.contains(&"code:HTTP_STATUS"), "{components:?}");
     assert!(components.contains(&"status:503"), "{components:?}");
 }
@@ -496,7 +508,12 @@ async fn sample_message_redacts_stripe_secret() {
 async fn sample_message_redacts_github_token() {
     let c = ctx().await;
     let seq = seq_one_block(&c).await;
-    plant_default(&c, seq, "push rejected for ghp_16C7e42F292c6912E7710c8383 upstream").await;
+    plant_default(
+        &c,
+        seq,
+        "push rejected for ghp_16C7e42F292c6912E7710c8383 upstream",
+    )
+    .await;
     let groups = groups_t1(&c).await;
     let msg = groups[0]["sample_message"].as_str().unwrap();
     assert!(!msg.contains("ghp_"), "{msg}");
@@ -670,7 +687,15 @@ async fn error_output_without_message_field_uses_unknown_error() {
     let c = ctx().await;
     let seq = seq_one_block(&c).await;
     let id = create_instance(&c, "t1", seq).await;
-    save_output(&c, id, "charge", "__error__", json!({"__error__": true}), Utc::now()).await;
+    save_output(
+        &c,
+        id,
+        "charge",
+        "__error__",
+        json!({"__error__": true}),
+        Utc::now(),
+    )
+    .await;
     fail_instance(&c, id).await;
     let groups = groups_t1(&c).await;
     assert_eq!(groups.len(), 1, "{groups:#?}");
@@ -683,7 +708,15 @@ async fn retry_marker_without_error_field_uses_unknown_error() {
     let c = ctx().await;
     let seq = seq_one_block(&c).await;
     let id = create_instance(&c, "t1", seq).await;
-    save_output(&c, id, "charge", "__retry__", json!({"attempt": 3}), Utc::now()).await;
+    save_output(
+        &c,
+        id,
+        "charge",
+        "__retry__",
+        json!({"attempt": 3}),
+        Utc::now(),
+    )
+    .await;
     fail_instance(&c, id).await;
     let groups = groups_t1(&c).await;
     assert_eq!(groups.len(), 1, "{groups:#?}");
@@ -944,7 +977,15 @@ async fn sample_retry_wipes_in_progress_sentinels() {
     let c = ctx().await;
     let seq = seq_one_block(&c).await;
     let id = plant_default(&c, seq, "http 503").await;
-    save_output(&c, id, "charge", "__in_progress__", json!({"tick": 1}), Utc::now()).await;
+    save_output(
+        &c,
+        id,
+        "charge",
+        "__in_progress__",
+        json!({"tick": 1}),
+        Utc::now(),
+    )
+    .await;
     let fp = fingerprint_of_only_group(&c).await;
 
     retry(&c, "t1", &fp, &json!({"mode": "sample"})).await;
@@ -1235,11 +1276,16 @@ async fn bulk_limit_bounds_the_retry() {
         plant_default(&c, seq, "http 503").await;
     }
     let fp = fingerprint_of_only_group(&c).await;
-    let body: Value = retry(&c, "t1", &fp, &json!({"mode": "bulk", "force": true, "limit": 1}))
-        .await
-        .json()
-        .await
-        .unwrap();
+    let body: Value = retry(
+        &c,
+        "t1",
+        &fp,
+        &json!({"mode": "bulk", "force": true, "limit": 1}),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
     assert_eq!(body["retried"].as_array().unwrap().len(), 1);
     // The other two stay failed and grouped.
     let groups = groups_t1(&c).await;
@@ -1254,11 +1300,16 @@ async fn bulk_limit_two_of_three() {
         plant_default(&c, seq, "http 503").await;
     }
     let fp = fingerprint_of_only_group(&c).await;
-    let body: Value = retry(&c, "t1", &fp, &json!({"mode": "bulk", "force": true, "limit": 2}))
-        .await
-        .json()
-        .await
-        .unwrap();
+    let body: Value = retry(
+        &c,
+        "t1",
+        &fp,
+        &json!({"mode": "bulk", "force": true, "limit": 2}),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
     assert_eq!(body["retried"].as_array().unwrap().len(), 2);
     let groups = groups_t1(&c).await;
     assert_eq!(groups[0]["count"], 1);
@@ -1272,7 +1323,13 @@ async fn bulk_limit_zero_retries_nothing() {
         plant_default(&c, seq, "http 503").await;
     }
     let fp = fingerprint_of_only_group(&c).await;
-    let resp = retry(&c, "t1", &fp, &json!({"mode": "bulk", "force": true, "limit": 0})).await;
+    let resp = retry(
+        &c,
+        "t1",
+        &fp,
+        &json!({"mode": "bulk", "force": true, "limit": 0}),
+    )
+    .await;
     // limit=0 is honored literally: a successful call that touches nothing.
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = resp.json().await.unwrap();
@@ -1411,7 +1468,15 @@ async fn bulk_retried_instances_are_scheduled_with_wiped_sentinels() {
     let mut members = Vec::new();
     for _ in 0..3 {
         let id = plant_default(&c, seq, "http 503").await;
-        save_output(&c, id, "charge", "__in_progress__", json!({"t": 0}), Utc::now()).await;
+        save_output(
+            &c,
+            id,
+            "charge",
+            "__in_progress__",
+            json!({"t": 0}),
+            Utc::now(),
+        )
+        .await;
         members.push(id);
     }
     let fp = fingerprint_of_only_group(&c).await;
