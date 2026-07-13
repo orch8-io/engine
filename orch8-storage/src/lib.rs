@@ -1669,6 +1669,17 @@ pub trait AdminStore: Send + Sync + 'static {
     /// Delete a trigger and its associated poll state (if any).
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
 
+    /// Atomically claim a webhook nonce until `expires_at`.
+    ///
+    /// Returns `true` only for the first caller across all processes using
+    /// this backend. Expired claims are removed opportunistically.
+    async fn claim_webhook_nonce(
+        &self,
+        slug: &str,
+        nonce: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     // === Trigger poll state (activepieces_poll) ===
 
     /// Fetch the persisted poll cursor/state for a polling trigger.
@@ -1785,33 +1796,24 @@ pub trait AdminStore: Send + Sync + 'static {
     // === Circuit Breakers ===
     //
     // Only `Open` rows are persisted -- this is a correctness backstop so that
-    // a crash mid-cooldown does not reset every tripped breaker. Default
-    // impls are no-ops so decorator backends (encrypting, externalizing) and
-    // future backends can opt in without forcing every crate to edit.
+    // a crash mid-cooldown does not reset every tripped breaker. Implementors
+    // must provide this capability; silently dropping state is not safe.
 
     /// Upsert an `Open` circuit breaker row. Keyed by `(tenant_id, handler)`.
-    async fn upsert_circuit_breaker(
-        &self,
-        _state: &CircuitBreakerState,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+    async fn upsert_circuit_breaker(&self, state: &CircuitBreakerState)
+    -> Result<(), StorageError>;
 
     /// Return every persisted `Open` row across all tenants. Used at boot to
     /// rehydrate the in-memory registry.
-    async fn list_open_circuit_breakers(&self) -> Result<Vec<CircuitBreakerState>, StorageError> {
-        Ok(Vec::new())
-    }
+    async fn list_open_circuit_breakers(&self) -> Result<Vec<CircuitBreakerState>, StorageError>;
 
     /// Delete any persisted circuit breaker row for `(tenant_id, handler)`.
     /// No-op if no row exists.
     async fn delete_circuit_breaker(
         &self,
-        _tenant_id: &TenantId,
-        _handler: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        tenant_id: &TenantId,
+        handler: &str,
+    ) -> Result<(), StorageError>;
 
     // === Audit Log ===
 
@@ -1836,69 +1838,55 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn create_rollback_policy(
         &self,
-        _tenant_id: &str,
-        _sequence_name: &str,
-        _error_rate_threshold: f64,
-        _time_window_secs: i32,
-        _cooldown_secs: Option<i32>,
-        _confirmation_window_secs: Option<i32>,
-        _webhook_url: Option<&str>,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate_threshold: f64,
+        time_window_secs: i32,
+        cooldown_secs: Option<i32>,
+        confirmation_window_secs: Option<i32>,
+        webhook_url: Option<&str>,
+    ) -> Result<(), StorageError>;
 
     async fn get_rollback_policy(
         &self,
-        _tenant_id: &str,
-        _sequence_name: &str,
-    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        Ok(None)
-    }
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError>;
 
     async fn list_rollback_policies(
         &self,
-        _tenant_id: Option<&str>,
-        _limit: u32,
-    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError> {
-        Ok(Vec::new())
-    }
+        tenant_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError>;
 
     async fn delete_rollback_policy(
         &self,
-        _tenant_id: &str,
-        _sequence_name: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        tenant_id: &str,
+        sequence_name: &str,
+    ) -> Result<(), StorageError>;
 
     async fn record_rollback(
         &self,
-        _tenant_id: &str,
-        _sequence_name: &str,
-        _error_rate: f64,
-        _threshold: f64,
-        _reason: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        tenant_id: &str,
+        sequence_name: &str,
+        error_rate: f64,
+        threshold: f64,
+        reason: &str,
+    ) -> Result<(), StorageError>;
 
     async fn query_error_rate(
         &self,
-        _tenant_id: &str,
-        _sequence_name: &str,
-        _window_secs: i64,
-    ) -> Result<Option<f64>, StorageError> {
-        Ok(None)
-    }
+        tenant_id: &str,
+        sequence_name: &str,
+        window_secs: i64,
+    ) -> Result<Option<f64>, StorageError>;
 
     async fn list_rollback_history(
         &self,
-        _tenant_id: Option<&str>,
-        _sequence_name: Option<&str>,
-        _limit: u32,
-    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError> {
-        Ok(Vec::new())
-    }
+        tenant_id: Option<&str>,
+        sequence_name: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::rollback::RollbackHistory>, StorageError>;
 
     // === Health ===
 
@@ -1912,22 +1900,18 @@ pub trait AdminStore: Send + Sync + 'static {
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait TelemetryStore: Send + Sync + 'static {
-    // Default no-ops so decorator backends don't break.
-
     async fn ingest_telemetry_event(
         &self,
-        _event_type: &str,
-        _payload: &str,
-        _device_id: &str,
-        _os_name: &str,
-        _os_version: &str,
-        _app_version: &str,
-        _sdk_version: &str,
-        _tenant_id: &str,
-        _created_at: DateTime<Utc>,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        event_type: &str,
+        payload: &str,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
+        tenant_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
 
     /// Batch-insert telemetry events in a single round-trip.
     ///
@@ -1957,68 +1941,55 @@ pub trait TelemetryStore: Send + Sync + 'static {
 
     async fn ingest_telemetry_error(
         &self,
-        _error_type: &str,
-        _message: &str,
-        _stack_trace: Option<&str>,
-        _device_id: &str,
-        _os_name: &str,
-        _os_version: &str,
-        _app_version: &str,
-        _sdk_version: &str,
-        _tenant_id: &str,
-        _instance_id: Option<&str>,
-        _sequence_name: Option<&str>,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        error_type: &str,
+        message: &str,
+        stack_trace: Option<&str>,
+        device_id: &str,
+        os_name: &str,
+        os_version: &str,
+        app_version: &str,
+        sdk_version: &str,
+        tenant_id: &str,
+        instance_id: Option<&str>,
+        sequence_name: Option<&str>,
+    ) -> Result<(), StorageError>;
 
     async fn query_telemetry_dashboard(
         &self,
-        _query_type: &str,
-        _tenant_id: &str,
-        _start: DateTime<Utc>,
-        _end: DateTime<Utc>,
-    ) -> Result<Vec<(String, i64)>, StorageError> {
-        Ok(Vec::new())
-    }
+        query_type: &str,
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<(String, i64)>, StorageError>;
 
     async fn delete_old_telemetry_events(
         &self,
-        _older_than: DateTime<Utc>,
-        _limit: u32,
-    ) -> Result<u64, StorageError> {
-        Ok(0)
-    }
+        older_than: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError>;
 
     /// Record a usage event (e.g. LLM token consumption). Best-effort, called
-    /// from the hot path — callers log and continue on error. Default no-op.
-    async fn record_usage_event(&self, _event: &UsageEvent) -> Result<(), StorageError> {
-        Ok(())
-    }
+    /// from the hot path — callers log and continue on error.
+    async fn record_usage_event(&self, event: &UsageEvent) -> Result<(), StorageError>;
 
     /// Aggregate a tenant's usage over `[start, end)`, grouped by `(kind, model)`.
     /// Default: empty.
     async fn query_usage(
         &self,
-        _tenant_id: &str,
-        _start: DateTime<Utc>,
-        _end: DateTime<Utc>,
-    ) -> Result<Vec<UsageAggregate>, StorageError> {
-        Ok(Vec::new())
-    }
+        tenant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<UsageAggregate>, StorageError>;
 
     /// Sum recorded usage for a single instance across all `usage_events`
     /// rows. Returns `(input_tokens, output_tokens)`.
     ///
     /// Used by the scheduler's budget enforcement — only called for instances
-    /// that actually carry a token budget, so backends without usage tracking
-    /// can keep the default `(0, 0)` (a budgetless deployment never breaches).
+    /// that actually carry a token budget.
     async fn query_instance_usage_totals(
         &self,
-        _instance_id: InstanceId,
-    ) -> Result<(i64, i64), StorageError> {
-        Ok((0, 0))
-    }
+        instance_id: InstanceId,
+    ) -> Result<(i64, i64), StorageError>;
 }
 
 // ============================================================================
@@ -2035,35 +2006,27 @@ pub trait ResourceStore: Send + Sync + 'static {
 
     async fn set_instance_kv(
         &self,
-        _instance_id: InstanceId,
-        _key: &str,
-        _value: &serde_json::Value,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        instance_id: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError>;
 
     async fn get_instance_kv(
         &self,
-        _instance_id: InstanceId,
-        _key: &str,
-    ) -> Result<Option<serde_json::Value>, StorageError> {
-        Ok(None)
-    }
+        instance_id: InstanceId,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError>;
 
     async fn get_all_instance_kv(
         &self,
-        _instance_id: InstanceId,
-    ) -> Result<HashMap<String, serde_json::Value>, StorageError> {
-        Ok(HashMap::new())
-    }
+        instance_id: InstanceId,
+    ) -> Result<HashMap<String, serde_json::Value>, StorageError>;
 
     async fn delete_instance_kv(
         &self,
-        _instance_id: InstanceId,
-        _key: &str,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
+        instance_id: InstanceId,
+        key: &str,
+    ) -> Result<(), StorageError>;
 
     // === Artifacts (durable binary blobs) ===
     //
@@ -2141,20 +2104,16 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Return up to `limit` instances in a **terminal** state whose `updated_at`
     /// is older than `cutoff` and that have not yet had their artifacts swept
     /// (no `_artifacts_gced` marker). Drives the background artifact-retention
-    /// sweeper. Default: `Ok(vec![])` (backends without instance storage opt out).
+    /// sweeper.
     async fn list_artifact_gc_candidates(
         &self,
-        _cutoff: DateTime<Utc>,
-        _limit: u32,
-    ) -> Result<Vec<InstanceId>, StorageError> {
-        Ok(Vec::new())
-    }
+        cutoff: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError>;
 
     /// Mark an instance's artifacts as swept (idempotent) so the retention
-    /// sweeper does not re-scan it. Default: `Ok(())`.
-    async fn mark_artifacts_gced(&self, _instance_id: InstanceId) -> Result<(), StorageError> {
-        Ok(())
-    }
+    /// sweeper does not re-scan it.
+    async fn mark_artifacts_gced(&self, instance_id: InstanceId) -> Result<(), StorageError>;
 
     /// Delete up to `limit` **terminal** instances (state Completed / Failed /
     /// Cancelled -- same set as [`Self::list_artifact_gc_candidates`]) whose
@@ -2168,15 +2127,12 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Drives the opt-in instance-retention GC sweeper
     /// (`instance_retention_secs` in `SchedulerConfig`) -- unlike artifact
     /// retention this removes queryable instance history, so it is off by
-    /// default. Returns the number of instances deleted. Default: `Ok(0)`
-    /// (backends without instance storage opt out).
+    /// default. Returns the number of instances deleted.
     async fn delete_terminal_instances(
         &self,
-        _cutoff: DateTime<Utc>,
-        _limit: u32,
-    ) -> Result<u64, StorageError> {
-        Ok(0)
-    }
+        cutoff: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<u64, StorageError>;
 
     // === Externalized State ===
 
@@ -2253,9 +2209,7 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Rows with `expires_at IS NULL` never expire and are never touched.
     /// The default impl returns `Ok(0)` so test/memory backends remain
     /// compilable without an implementation.
-    async fn delete_expired_externalized_state(&self, _limit: u32) -> Result<u64, StorageError> {
-        Ok(0)
-    }
+    async fn delete_expired_externalized_state(&self, limit: u32) -> Result<u64, StorageError>;
 
     // === Resource Pools ===
 
@@ -2404,50 +2358,32 @@ pub struct MobileCommand {
 pub trait MobileSyncStore: Send + Sync + 'static {
     // --- Devices ---
 
-    async fn register_mobile_device(&self, device: &MobileDevice) -> Result<(), StorageError> {
-        let _ = device;
-        Ok(())
-    }
+    async fn register_mobile_device(&self, device: &MobileDevice) -> Result<(), StorageError>;
 
     async fn get_mobile_device(
         &self,
         device_id: &str,
-    ) -> Result<Option<MobileDevice>, StorageError> {
-        let _ = device_id;
-        Ok(None)
-    }
+    ) -> Result<Option<MobileDevice>, StorageError>;
 
-    async fn update_device_last_sync(&self, device_id: &str) -> Result<(), StorageError> {
-        let _ = device_id;
-        Ok(())
-    }
+    async fn update_device_last_sync(&self, device_id: &str) -> Result<(), StorageError>;
 
     async fn list_mobile_devices(
         &self,
         tenant_id: Option<&str>,
         limit: u32,
-    ) -> Result<Vec<MobileDevice>, StorageError> {
-        let _ = (tenant_id, limit);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<MobileDevice>, StorageError>;
 
     async fn mark_stale_devices_inactive(
         &self,
         stale_threshold_secs: i64,
-    ) -> Result<u64, StorageError> {
-        let _ = stale_threshold_secs;
-        Ok(0)
-    }
+    ) -> Result<u64, StorageError>;
 
     // --- Instance Status ---
 
     async fn upsert_mobile_instance_status(
         &self,
         status: &MobileInstanceStatus,
-    ) -> Result<(), StorageError> {
-        let _ = status;
-        Ok(())
-    }
+    ) -> Result<(), StorageError>;
 
     async fn upsert_mobile_instance_status_batch(
         &self,
@@ -2464,86 +2400,54 @@ pub trait MobileSyncStore: Send + Sync + 'static {
         tenant_id: Option<&str>,
         device_id: Option<&str>,
         limit: u32,
-    ) -> Result<Vec<MobileInstanceStatus>, StorageError> {
-        let _ = (tenant_id, device_id, limit);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<MobileInstanceStatus>, StorageError>;
 
     // --- Approval Requests ---
 
     async fn insert_mobile_approval(
         &self,
         approval: &MobileApprovalRequest,
-    ) -> Result<bool, StorageError> {
-        let _ = approval;
-        Ok(false)
-    }
+    ) -> Result<bool, StorageError>;
 
     async fn get_mobile_approval(
         &self,
         id: &str,
-    ) -> Result<Option<MobileApprovalRequest>, StorageError> {
-        let _ = id;
-        Ok(None)
-    }
+    ) -> Result<Option<MobileApprovalRequest>, StorageError>;
 
     async fn resolve_mobile_approval(
         &self,
         id: &str,
         resolution: &str,
-    ) -> Result<Option<MobileApprovalRequest>, StorageError> {
-        let _ = (id, resolution);
-        Ok(None)
-    }
+    ) -> Result<Option<MobileApprovalRequest>, StorageError>;
 
     async fn list_mobile_approvals(
         &self,
         tenant_id: Option<&str>,
         state: Option<&str>,
         limit: u32,
-    ) -> Result<Vec<MobileApprovalRequest>, StorageError> {
-        let _ = (tenant_id, state, limit);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<MobileApprovalRequest>, StorageError>;
 
-    async fn expire_mobile_approvals(&self) -> Result<u64, StorageError> {
-        Ok(0)
-    }
+    async fn expire_mobile_approvals(&self) -> Result<u64, StorageError>;
 
     // --- Commands ---
 
-    async fn create_mobile_command(&self, command: &MobileCommand) -> Result<(), StorageError> {
-        let _ = command;
-        Ok(())
-    }
+    async fn create_mobile_command(&self, command: &MobileCommand) -> Result<(), StorageError>;
 
     async fn fetch_pending_commands(
         &self,
         device_id: &str,
         limit: u32,
-    ) -> Result<Vec<MobileCommand>, StorageError> {
-        let _ = (device_id, limit);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<MobileCommand>, StorageError>;
 
     async fn ack_mobile_commands(
         &self,
         device_id: &str,
         command_ids: &[String],
-    ) -> Result<u64, StorageError> {
-        let _ = (device_id, command_ids);
-        Ok(0)
-    }
+    ) -> Result<u64, StorageError>;
 
-    async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError> {
-        let _ = older_than_secs;
-        Ok(0)
-    }
+    async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError>;
 
-    async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
-        let _ = ttl_secs;
-        Ok(0)
-    }
+    async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError>;
 }
 
 // ============================================================================

@@ -74,6 +74,13 @@ struct ServiceAccount {
     token_uri: String,
 }
 
+impl Drop for ServiceAccount {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.private_key.zeroize();
+    }
+}
+
 #[derive(serde::Serialize)]
 struct JwtClaims {
     iss: String,
@@ -93,6 +100,13 @@ struct CachedToken {
     created_at: Instant,
 }
 
+impl Drop for CachedToken {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.token.zeroize();
+    }
+}
+
 pub struct FcmProvider {
     client: reqwest::Client,
     project_id: String,
@@ -102,8 +116,9 @@ pub struct FcmProvider {
 
 impl FcmProvider {
     pub fn new(config: FcmConfig) -> Result<Self, PushError> {
-        let service_account: ServiceAccount = serde_json::from_str(&config.service_account_json)
-            .map_err(|e| PushError::Config(format!("invalid FCM service account JSON: {e}")))?;
+        let service_account: ServiceAccount =
+            serde_json::from_str(config.service_account_json.expose())
+                .map_err(|e| PushError::Config(format!("invalid FCM service account JSON: {e}")))?;
         if service_account.token_uri != FCM_TOKEN_URI {
             return Err(PushError::Config(format!(
                 "FCM token_uri must be {FCM_TOKEN_URI}, got {}",
@@ -125,13 +140,13 @@ impl FcmProvider {
     }
 
     async fn get_or_refresh_token(&self) -> Result<String, PushError> {
+        // Keep the refresh mutex through the exchange. Token refresh is rare,
+        // and this coalesces a burst of cache misses into one OAuth request.
+        let mut cached = self.cached_token.lock().await;
+        if let Some(ref ct) = *cached
+            && ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL
         {
-            let cached = self.cached_token.lock().await;
-            if let Some(ref ct) = *cached
-                && ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL
-            {
-                return Ok(ct.token.clone());
-            }
+            return Ok(ct.token.clone());
         }
 
         let now = chrono::Utc::now().timestamp();
@@ -174,7 +189,6 @@ impl FcmProvider {
             .map_err(|e| PushError::Delivery(format!("FCM token parse failed: {e}")))?;
 
         let access_token = token_resp.access_token.clone();
-        let mut cached = self.cached_token.lock().await;
         *cached = Some(CachedToken {
             token: access_token.clone(),
             created_at: Instant::now(),
@@ -234,11 +248,11 @@ impl PushProvider for FcmProvider {
 
             match classify_fcm_response(status, &body) {
                 FcmOutcome::Success => {
-                    debug!(token = &token[..8.min(token.len())], "FCM silent push sent");
+                    debug!(token = crate::safe_prefix(token, 8), "FCM silent push sent");
                     return Ok(());
                 }
                 FcmOutcome::InvalidToken => {
-                    warn!(token = &token[..8.min(token.len())], "FCM token invalid");
+                    warn!(token = crate::safe_prefix(token, 8), "FCM token invalid");
                     return Err(PushError::InvalidToken);
                 }
                 FcmOutcome::AuthRejected => {
@@ -266,7 +280,10 @@ impl PushProvider for FcmProvider {
                 }
                 FcmOutcome::Retryable | FcmOutcome::Permanent => {
                     let preview = if body.len() > MAX_ERROR_BODY_LEN {
-                        format!("{}… (truncated)", &body[..MAX_ERROR_BODY_LEN])
+                        format!(
+                            "{}… (truncated)",
+                            crate::safe_prefix(&body, MAX_ERROR_BODY_LEN)
+                        )
                     } else {
                         body
                     };

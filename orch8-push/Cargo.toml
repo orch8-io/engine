@@ -3,6 +3,7 @@ name = "orch8-push"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
@@ -15,6 +16,7 @@ jsonwebtoken = "10"
 chrono.workspace = true
 tokio.workspace = true
 urlencoding = "2"
+zeroize.workspace = true
 
 [lints]
 workspace = true

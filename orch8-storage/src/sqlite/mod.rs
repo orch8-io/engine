@@ -1808,6 +1808,15 @@ impl crate::AdminStore for SqliteStorage {
         triggers::delete(self, slug).await
     }
 
+    async fn claim_webhook_nonce(
+        &self,
+        slug: &str,
+        nonce: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        triggers::claim_nonce(self, slug, nonce, expires_at).await
+    }
+
     async fn get_trigger_poll_state(
         &self,
         slug: &str,

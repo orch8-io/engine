@@ -27,6 +27,23 @@ use crate::OutputFormat;
 
 const LOCKFILE: &str = "orch8-packages.lock";
 
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file beside {}", path.display()))?;
+    file.write_all(contents)?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replace {}", path.display()))?;
+    Ok(())
+}
+
 #[derive(Subcommand)]
 pub enum PackageCmd {
     /// Generate a publisher signing keypair (prints base64 seed + public key).
@@ -221,7 +238,7 @@ fn build(dir: &Path, key_arg: &str, out: Option<&Path>) -> Result<()> {
         pkg.archive.manifest.version
     );
     let out_path = out.map_or_else(|| PathBuf::from(default_name), Path::to_path_buf);
-    std::fs::write(&out_path, serde_json::to_string_pretty(&pkg)?)?;
+    atomic_write(&out_path, serde_json::to_string_pretty(&pkg)?.as_bytes())?;
     println!(
         "built {} v{} → {} (hash {})",
         pkg.archive.manifest.name,
@@ -462,7 +479,10 @@ async fn install(
             "installed_at": chrono::Utc::now().to_rfc3339(),
         }),
     );
-    std::fs::write(LOCKFILE, serde_json::to_string_pretty(&lock)?)?;
+    atomic_write(
+        Path::new(LOCKFILE),
+        serde_json::to_string_pretty(&lock)?.as_bytes(),
+    )?;
     println!("provenance recorded in {LOCKFILE}");
     Ok(())
 }

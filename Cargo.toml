@@ -55,9 +55,11 @@ tracing-opentelemetry = "0.33"
 
 # API
 axum = "0.8"
-tonic = "0.13"
-tonic-build = "0.13"
-prost = "0.13"
+tonic = "0.14"
+tonic-build = "0.14"
+tonic-prost-build = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 
@@ -81,7 +83,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "multipart"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "multipart", "form", "query"] }
 url = "2"
 
 # JSON Schema validation (llm_call `response_schema`). default-features off:
@@ -90,7 +92,9 @@ url = "2"
 jsonschema = { version = "0.46", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
-object_store = { version = "0.14", features = ["aws"] }
+# 0.14.0 pins quick-xml 0.40.x, which is affected by RUSTSEC-2026-0194
+# and RUSTSEC-2026-0195. Pin the upstream 0.14.1 fix until it is released.
+object_store = { git = "https://github.com/apache/arrow-rs-object-store.git", rev = "c7316d29face118e7409eead0cda098f38589428", features = ["aws"] }
 futures = "0.3"
 bytes = "1"
 

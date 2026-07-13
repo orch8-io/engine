@@ -98,4 +98,6 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Temporary pinned upstream security fix for object_store 0.14.0's vulnerable
+# quick-xml dependency. Remove when object_store 0.14.1 is on crates.io.
+allow-git = ["https://github.com/apache/arrow-rs-object-store.git"]

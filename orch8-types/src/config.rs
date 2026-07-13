@@ -522,13 +522,13 @@ pub struct ApiConfig {
     /// `false` (an informed opt-out, surfaced loudly at startup).
     #[serde(default = "default_require_tenant_header")]
     pub require_tenant_header: bool,
-    /// Maximum in-flight HTTP requests (global concurrency cap). 0 disables the cap.
+    /// Maximum in-flight HTTP requests (global concurrency cap). 0 explicitly disables the cap.
     ///
     /// Perf#10: this is a concurrency limit (tower `ConcurrencyLimitLayer`),
     /// not an RPS rate limiter. The `rate_limit_rps` alias is accepted for
     /// backward compatibility with older configs and the
     /// `ORCH8_RATE_LIMIT_RPS` env var.
-    #[serde(default, alias = "rate_limit_rps")]
+    #[serde(default = "default_max_concurrent_requests", alias = "rate_limit_rps")]
     pub max_concurrent_requests: u64,
 }
 
@@ -540,13 +540,17 @@ impl Default for ApiConfig {
             cors_origins: default_cors_origins(),
             api_key: SecretString::default(),
             require_tenant_header: default_require_tenant_header(),
-            max_concurrent_requests: 0,
+            max_concurrent_requests: default_max_concurrent_requests(),
         }
     }
 }
 
 const fn default_cors_origins() -> String {
     String::new()
+}
+
+const fn default_max_concurrent_requests() -> u64 {
+    1024
 }
 
 /// Secure by default: tenant isolation is enforced unless explicitly disabled.
@@ -1056,7 +1060,7 @@ mod tests {
         assert_eq!(cfg.cors_origins, "");
         assert!(cfg.api_key.is_empty());
         assert!(cfg.require_tenant_header);
-        assert_eq!(cfg.max_concurrent_requests, 0);
+        assert_eq!(cfg.max_concurrent_requests, 1024);
     }
 
     #[test]

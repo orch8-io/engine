@@ -2,7 +2,8 @@
 .env.*
 !.env.example
 
-/target
+# Rust/Cargo build output, including nested workspaces such as fuzz/target.
+target/
 *.db
 *.db-shm
 *.db-wal

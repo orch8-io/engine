@@ -3,6 +3,7 @@ name = "orch8-storage"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 orch8-types = { path = "../orch8-types" }

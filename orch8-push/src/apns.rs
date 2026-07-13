@@ -64,6 +64,13 @@ struct CachedToken {
     created_at: Instant,
 }
 
+impl Drop for CachedToken {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.token.zeroize();
+    }
+}
+
 pub struct ApnsProvider {
     client: reqwest::Client,
     encoding_key: EncodingKey,
@@ -76,7 +83,7 @@ pub struct ApnsProvider {
 
 impl ApnsProvider {
     pub fn new(config: ApnsConfig) -> Result<Self, PushError> {
-        let encoding_key = EncodingKey::from_ec_pem(config.key_pem.as_bytes())
+        let encoding_key = EncodingKey::from_ec_pem(config.key_pem.expose().as_bytes())
             .map_err(|e| PushError::Config(format!("invalid APNs key: {e}")))?;
 
         let base_url = if config.sandbox {
@@ -174,14 +181,14 @@ impl PushProvider for ApnsProvider {
             match classify_apns_status(status) {
                 ApnsOutcome::Success => {
                     debug!(
-                        token = &token[..8.min(token.len())],
+                        token = crate::safe_prefix(token, 8),
                         "APNs silent push sent"
                     );
                     return Ok(());
                 }
                 ApnsOutcome::InvalidToken => {
                     warn!(
-                        token = &token[..8.min(token.len())],
+                        token = crate::safe_prefix(token, 8),
                         "APNs token invalid (410)"
                     );
                     return Err(PushError::InvalidToken);
@@ -211,7 +218,10 @@ impl PushProvider for ApnsProvider {
                 ApnsOutcome::Retryable | ApnsOutcome::Permanent => {
                     let body = resp.text().await.unwrap_or_default();
                     let preview = if body.len() > MAX_ERROR_BODY_LEN {
-                        format!("{}… (truncated)", &body[..MAX_ERROR_BODY_LEN])
+                        format!(
+                            "{}… (truncated)",
+                            crate::safe_prefix(&body, MAX_ERROR_BODY_LEN)
+                        )
                     } else {
                         body
                     };

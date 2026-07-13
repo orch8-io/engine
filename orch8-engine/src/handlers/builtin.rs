@@ -126,18 +126,18 @@ fn socket_addr_is_blocked(sa: &std::net::SocketAddr) -> bool {
 ///
 /// Resolves hostnames via the system resolver but drops any address in a
 /// private/internal/metadata range **before the connection is made**. This
-/// closes the DNS-rebinding TOCTOU that the pre-flight [`is_url_safe`] check
+/// closes the DNS-rebinding TOCTOU that the pre-flight `is_url_safe` check
 /// cannot: `is_url_safe` resolves at *check* time, but reqwest re-resolves at
 /// *connect* time, so an attacker-controlled resolver that returns a public IP
 /// for the check and a private IP for the connect would otherwise reach an
 /// internal target. reqwest routes redirect connections through the same
 /// resolver, so this also closes hostname-redirect-to-private-IP vectors that
-/// the literal-only [`redirect_target_allowed`] guard misses.
+/// the literal-only `redirect_target_allowed` guard misses.
 ///
 /// When all resolved addresses are filtered out, reqwest receives an empty
 /// address set and the connection fails — the intended block.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct SsrfGuardResolver;
+pub struct SsrfGuardResolver;
 
 impl reqwest::dns::Resolve for SsrfGuardResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
@@ -203,7 +203,7 @@ pub(crate) fn outbound_header_name_allowed(name: &str) -> bool {
 
 /// Failure modes for [`read_body_capped`].
 #[derive(Debug)]
-pub(crate) enum BodyReadError {
+pub enum BodyReadError {
     /// Body exceeded the cap (carries the cap, in bytes).
     TooLarge(usize),
     /// Transport error while streaming the body.
@@ -217,7 +217,7 @@ pub(crate) enum BodyReadError {
 /// worker before any post-read size check fires. This streams chunk-by-chunk
 /// and bails the moment the running total would exceed the cap, bounding peak
 /// memory to `max_bytes + one chunk`.
-pub(crate) async fn read_body_capped(
+pub async fn read_body_capped(
     mut resp: reqwest::Response,
     max_bytes: usize,
 ) -> Result<Vec<u8>, BodyReadError> {

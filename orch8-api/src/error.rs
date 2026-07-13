@@ -40,6 +40,9 @@ pub enum ApiError {
 
     #[error("bad gateway: {0}")]
     BadGateway(String),
+
+    #[error("rate limit exceeded: {0}")]
+    RateLimited(String),
 }
 
 impl ApiError {
@@ -80,6 +83,7 @@ impl IntoResponse for ApiError {
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            Self::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         };
         let body = match &self {
             Self::Internal(msg) => {

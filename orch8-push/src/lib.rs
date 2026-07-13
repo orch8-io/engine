@@ -31,9 +31,44 @@ impl PushProvider for NoopPushProvider {
 pub use apns::ApnsProvider;
 pub use fcm::FcmProvider;
 
+/// Secret material that is redacted from debug output and wiped on drop.
+#[derive(Clone)]
+pub struct PushSecret(String);
+
+impl PushSecret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for PushSecret {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for PushSecret {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl std::fmt::Debug for PushSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Drop for PushSecret {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ApnsConfig {
-    pub key_pem: String,
+    pub key_pem: PushSecret,
     pub key_id: String,
     pub team_id: String,
     pub topic: String,
@@ -43,7 +78,15 @@ pub struct ApnsConfig {
 #[derive(Debug, Clone)]
 pub struct FcmConfig {
     pub project_id: String,
-    pub service_account_json: String,
+    pub service_account_json: PushSecret,
+}
+
+pub(crate) fn safe_prefix(value: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 pub fn create_provider(

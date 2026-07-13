@@ -9,7 +9,7 @@ description = "Durable workflow execution as an embeddable Rust library"
 publish = false
 
 [dependencies]
-orch8-engine = { path = "../orch8-engine" }
+orch8-engine = { path = "../orch8-engine", default-features = false }
 orch8-storage = { path = "../orch8-storage" }
 orch8-types = { path = "../orch8-types" }
 tokio = { workspace = true }
@@ -21,10 +21,15 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
+[features]
+default = ["compression"]
+compression = ["orch8-engine/compression"]
+nats = ["orch8-engine/nats"]
+file-watch = ["orch8-engine/file-watch"]
+wasm = ["orch8-engine/wasm"]
+
 [dev-dependencies]
 axum = { workspace = true }
-serde = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true

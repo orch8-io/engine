@@ -127,6 +127,39 @@ pub(super) async fn delete(store: &PostgresStorage, slug: &str) -> Result<(), St
     Ok(())
 }
 
+pub(super) async fn claim_nonce(
+    store: &PostgresStorage,
+    slug: &str,
+    nonce: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    // Keep cleanup work bounded on the request path. The conflict clause
+    // below can reclaim the current nonce even if more expired rows remain.
+    sqlx::query(
+        r"DELETE FROM webhook_replay_nonces WHERE ctid IN (
+              SELECT ctid FROM webhook_replay_nonces
+              WHERE expires_at <= NOW() LIMIT 100
+          )",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let result = sqlx::query(
+        r"INSERT INTO webhook_replay_nonces (trigger_slug, nonce, expires_at)
+          VALUES ($1, $2, $3)
+          ON CONFLICT (trigger_slug, nonce) DO UPDATE
+          SET expires_at = EXCLUDED.expires_at
+          WHERE webhook_replay_nonces.expires_at <= NOW()",
+    )
+    .bind(slug)
+    .bind(nonce)
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn get_poll_state(
     store: &PostgresStorage,
     slug: &str,

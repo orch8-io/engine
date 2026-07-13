@@ -3,6 +3,7 @@ name = "orch8-publisher"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 orch8-types = { path = "../orch8-types" }
@@ -19,9 +20,9 @@ chrono = { workspace = true }
 hex = "0.4"
 hmac.workspace = true
 async-trait = { workspace = true }
+zeroize.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true }
 rand_core = "0.6"
 

@@ -1417,6 +1417,7 @@ passthrough_impl! {
             .await
     }
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
+    async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
     async fn get_trigger_poll_state(&self, slug: &str) -> Result<Option<orch8_types::trigger::TriggerPollState>, StorageError>;
     async fn upsert_trigger_poll_state(&self, state: &orch8_types::trigger::TriggerPollState) -> Result<(), StorageError>;
 

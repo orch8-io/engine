@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Durable webhook replay protection and fuzzing**: public webhook nonces are now claimed atomically in PostgreSQL and SQLite so replay protection works across processes and restarts (Postgres migration `056_webhook_replay_nonces.sql`). New `cargo-fuzz` targets exercise expression evaluation and template resolution, and nested Cargo `target/` directories are ignored consistently.
+
 - **Safe Workflow Release Control Plane**: promote a new sequence version with evidence instead of hope. `POST /releases` pins an exact baseline/candidate version pair and moves it through a conditional, fully audited state machine (`draft → validating → ready → canary → promoted | paused | rolled_back`), where every transition is a compare-and-swap plus an immutable decision record — concurrent promote/rollback can never both win. **Semantic diff** (`GET /releases/{id}/diff`, `POST /sequences/releases/diff`) reports what changes *operationally*: added/removed/reordered blocks, handler/queue/retry/timeout/deadline changes, router and A/B weight changes, dangling `outputs.*` references and input-schema narrowing (flagged **incompatible**), and side-effect risk. **Historical validation** (`POST /releases/{id}/validate`) replays the candidate offline against real recorded runs — no side effects, virtual time — and reports path/state divergences. **Canary routing** assigns a deterministic, monotone cohort of new instances to the candidate (same cohort key → same variant; raising the percentage never reshuffles); explicit version selection stays authoritative. **Gates** (error-rate/cancel-rate regression vs. baseline with minimum sample sizes) treat insufficient data as *inconclusive, never pass*; a failing gate during canary triggers an idempotent automatic rollback that instantly returns all new traffic to the baseline. `orch8 release create/diff/validate/canary/evaluate/promote/pause/rollback/decisions`. (Postgres migration `054_workflow_releases.sql`; SQLite schema v21.)
 
 - **Workflow Contracts & Scenario Testing**: sequences get a first-class, version-controlled test artifact (`checkout.contracts.json` beside `checkout.json`). A contract declares input fixtures, per-handler/per-block mock policies (fixed success, fixed failure, recorded outputs, scripted attempt sequences for retry tests), signal fixtures, and expectations: terminal state, traversed/skipped blocks (ordered or not), JSON assertions over outputs and context, and call-count invariants ("charge is called at most once"). The runner executes cases on an ephemeral embedded engine where **real handlers are never invoked** and **time is virtual** — a workflow with a three-day delay tests in milliseconds. `orch8 test run` emits human, JSON, or JUnit output with CI exit codes; `orch8 test record <instance>` drafts a fixture from a real run with secrets redacted. Release validation reuses the same runner.
@@ -33,7 +35,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Storage capabilities fail closed**: required circuit-breaker, rollback, telemetry, key-value, garbage-collection, and mobile-sync operations no longer inherit silent no-op defaults. Every backend and decorator must implement or delegate them explicitly, preventing successful-looking data loss when a new storage wrapper is introduced.
+- **Atomic package metadata writes**: CLI package and lock files are now written through temporary files and atomically renamed, preventing truncated metadata after interruption or disk-write failure.
 - **Pool resource delete: cross-pool isolation restored**: making `DELETE /pools/{pool}/resources/{id}` idempotent had dropped the pool-membership check, allowing a resource to be deleted through another pool's URL. Deletion is now both idempotent (re-deleting a genuinely gone id returns 204) and pool-scoped (an id owned by a different pool returns 404 and is left untouched).
+
+### Changed
+
+- **Contemporary Rust dependency and crate hygiene**: upgraded to Reqwest 0.13 and Tonic/Prost 0.14, centralized the supported Rust version across all crates, removed unused dependencies, narrowed the `orch8` facade's default feature surface, and pinned the audited upstream `object_store` fix for the affected `quick-xml` versions until its next release.
+- **Async gRPC authentication**: replaced blocking authentication inside the async request path with a Tower layer that resolves root and tenant API keys asynchronously.
+
+### Performance
+
+- **Bounded, deduplicated hot paths**: public webhooks now enforce a bounded per-peer/slug request rate; FCM access-token refreshes use single-flight caching; and mobile HTTP clients stream responses through hard size limits instead of buffering unbounded bodies.
+
+### Security
+
+- **BREAKING — signed public webhooks**: `POST /webhooks/{slug}` now requires `x-orch8-signature: v1=<base64url HMAC-SHA256>` over the exact `timestamp.nonce.body` bytes. The former plaintext `x-trigger-secret` header is no longer accepted. Signatures bind the timestamp, nonce, and payload; timestamps have a bounded skew, nonces have strict syntax and durable single-use enforcement, and request bodies remain capped at 1 MiB.
+- **Connect-time SSRF enforcement for mobile clients**: DNS answers are validated when establishing connections, redirects are disabled, and response bodies are streamed with strict caps to close DNS-rebinding and memory-exhaustion gaps.
+- **Secret handling hardening**: push and publisher credentials use redacted secret wrappers, zeroize sensitive cached material where supported, and avoid leaking secrets through debug formatting. Push payload truncation is also UTF-8 safe.
 
 
 ## [0.6.0] — 2026-06-21

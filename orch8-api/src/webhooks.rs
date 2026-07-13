@@ -4,8 +4,7 @@
 //! Stripe, Shopify, ...) POST events to. It deliberately bypasses the tenant
 //! header + API key middlewares because the caller is external and won't
 //! have credentials — authentication is enforced instead by the trigger's own
-//! HMAC secret (`x-trigger-secret` header), validated with constant-time
-//! comparison.
+//! an HMAC-SHA256 signature over the timestamp, nonce, and exact request body.
 //!
 //! The server wires this router in *after* the auth middleware layers so its
 //! routes are not subject to them. Do not merge this module through
@@ -14,15 +13,22 @@
 //! Only triggers with `trigger_type = "webhook"` are accepted. `event` and
 //! `nats` types are rejected with 404 (they're never meant for public entry).
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{DefaultBodyLimit, Json, Path, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Json, Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use moka::future::Cache;
+use base64::Engine as _;
+use bytes::Bytes;
+use hmac::{Hmac, KeyInit, Mac};
+use moka::sync::Cache;
+use sha2::Sha256;
 
 use orch8_types::trigger::TriggerType;
 
@@ -51,20 +57,62 @@ fn timestamp_within_window(now: i64, ts: i64) -> bool {
     (-MAX_FUTURE_SKEW_SECS..=REPLAY_WINDOW_SECS).contains(&age)
 }
 
-/// Global nonce cache with composite key `slug:nonce`. Using a single cache
-/// instead of a per-slug `DashMap` prevents unbounded growth when many unique
-/// slugs are encountered (e.g., scanning probes or UUID-based slugs).
-static SEEN_NONCES: LazyLock<Cache<String, ()>> = LazyLock::new(|| {
-    Cache::builder()
-        .time_to_live(Duration::from_secs((REPLAY_WINDOW_SECS as u64) + 60))
-        .max_capacity(100_000)
-        .build()
-});
-
 /// Maximum body size for public webhooks. Webhook payloads are small event
 /// notifications (GitHub, Stripe, etc.) — anything larger is suspicious and
 /// should be rejected to prevent memory exhaustion / JSON parse `DoS`.
 const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024; // 1 MB
+
+const SIGNATURE_PREFIX: &str = "v1=";
+const MIN_NONCE_LEN: usize = 16;
+const MAX_NONCE_LEN: usize = 128;
+const MAX_WEBHOOKS_PER_SECOND: u64 = 300;
+
+static WEBHOOK_RATE_COUNTERS: LazyLock<Cache<String, Arc<AtomicU64>>> = LazyLock::new(|| {
+    Cache::builder()
+        .max_capacity(100_000)
+        .time_to_live(Duration::from_secs(1))
+        .build()
+});
+
+fn check_rate_limit(peer: Option<SocketAddr>, slug: &str) -> Result<(), ApiError> {
+    let peer = peer.map_or_else(|| "unknown".to_owned(), |address| address.ip().to_string());
+    let key = format!("{peer}:{slug}");
+    let counter = WEBHOOK_RATE_COUNTERS
+        .entry(key)
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .into_value();
+    if counter.fetch_add(1, Ordering::Relaxed) >= MAX_WEBHOOKS_PER_SECOND {
+        return Err(ApiError::RateLimited(
+            "public webhook request rate exceeded".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Verify `v1=base64url(HMAC-SHA256(secret, timestamp.nonce.body))`.
+fn verify_signature(
+    signature: &str,
+    secret: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    body: &[u8],
+) -> bool {
+    let Some(encoded) = signature.strip_prefix(SIGNATURE_PREFIX) else {
+        return false;
+    };
+    let Ok(provided) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret) else {
+        return false;
+    };
+    mac.update(timestamp.as_bytes());
+    mac.update(b".");
+    mac.update(nonce.as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    mac.verify_slice(&provided).is_ok()
+}
 
 /// Public router — merged into the server *after* auth middleware so these
 /// routes are reachable without a tenant header or API key.
@@ -82,26 +130,28 @@ pub fn public_routes() -> Router<AppState> {
 /// - The trigger is not of type `webhook` (events and nats are internal only).
 ///
 /// Rejects with 401 if:
-/// - The trigger has a `secret` configured but no `x-trigger-secret` header
-///   was provided, or the provided secret doesn't match.
+/// - The trigger has no secret, or the request signature is missing/invalid.
 #[utoipa::path(post, path = "/webhooks/{slug}", tag = "webhooks",
     params(("slug" = String, Path, description = "Webhook slug (the trigger slug)")),
     request_body = serde_json::Value,
     responses(
         (status = 202, description = "Webhook accepted; instance created and queued for execution"),
-        (status = 401, description = "Missing or invalid `x-trigger-secret`"),
+        (status = 401, description = "Missing or invalid webhook signature"),
         (status = 404, description = "Unknown slug, disabled trigger, or non-webhook trigger type"),
     )
 )]
 pub(crate) async fn public_webhook(
     State(state): State<AppState>,
     Path(slug): Path<String>,
+    peer: Result<ConnectInfo<SocketAddr>, axum::extract::rejection::ExtensionRejection>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
+    check_rate_limit(peer.ok().map(|ConnectInfo(address)| address), &slug)?;
+
     // Unscoped: this is the public, unauthenticated webhook endpoint --
     // resolving *which* tenant owns `slug` is this lookup's job, since the
-    // caller has no tenant context to scope by. The `x-trigger-secret` /
+    // caller has no tenant context to scope by. The request signature and
     // trigger-type checks below are the real authorization boundary here.
     let trigger = state
         .storage
@@ -136,14 +186,6 @@ pub(crate) async fn public_webhook(
         return Err(ApiError::Unauthorized);
     }
 
-    let provided = headers
-        .get("x-trigger-secret")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !orch8_types::auth::verify_secret_constant_time(provided, secret.expose()) {
-        return Err(ApiError::Unauthorized);
-    }
-
     // Replay protection: require `x-trigger-timestamp` within the window
     // AND a unique `x-trigger-nonce` that we haven't seen recently. The
     // timestamp bounds the replay window; the nonce prevents repeated
@@ -156,11 +198,11 @@ pub(crate) async fn public_webhook(
     // adopted orch8 webhooks before this change will need to send these
     // headers; we surface a clear 401 so the failure mode is obvious rather
     // than silent success.
-    let ts_hdr = headers
+    let timestamp = headers
         .get("x-trigger-timestamp")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i64>().ok());
-    let Some(ts) = ts_hdr else {
+        .unwrap_or("");
+    let Ok(ts) = timestamp.parse::<i64>() else {
         tracing::warn!(slug = %slug, "webhook rejected: missing/invalid x-trigger-timestamp");
         return Err(ApiError::Unauthorized);
     };
@@ -178,18 +220,41 @@ pub(crate) async fn public_webhook(
         .get("x-trigger-nonce")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if nonce.is_empty() {
+    if !(MIN_NONCE_LEN..=MAX_NONCE_LEN).contains(&nonce.len())
+        || !nonce.bytes().all(|byte| byte.is_ascii_graphic())
+    {
         tracing::warn!(slug = %slug, "webhook rejected: missing x-trigger-nonce");
         return Err(ApiError::Unauthorized);
     }
-    // Length-prefixed composite key prevents collisions when a slug contains
-    // the separator character: "a:b" + "c" and "a" + "b:c" cannot collide.
-    let composite_key = format!("{}:{}:{}", slug.len(), slug, nonce);
-    if SEEN_NONCES.get(&composite_key).await.is_some() {
+
+    let signature = headers
+        .get("x-orch8-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !verify_signature(
+        signature,
+        secret.expose().as_bytes(),
+        timestamp,
+        nonce,
+        &body,
+    ) {
+        return Err(ApiError::Unauthorized);
+    }
+
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::seconds(REPLAY_WINDOW_SECS + MAX_FUTURE_SKEW_SECS);
+    let claimed = state
+        .storage
+        .claim_webhook_nonce(&slug, nonce, expires_at)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "webhook nonce"))?;
+    if !claimed {
         tracing::warn!(slug = %slug, "webhook rejected: nonce reuse detected");
         return Err(ApiError::Unauthorized);
     }
-    SEEN_NONCES.insert(composite_key, ()).await;
+
+    let body: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::InvalidArgument(format!("invalid webhook JSON: {error}")))?;
 
     let meta = serde_json::json!({
         "source": "public_webhook",
@@ -215,8 +280,14 @@ pub(crate) async fn public_webhook(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FUTURE_SKEW_SECS, REPLAY_WINDOW_SECS, timestamp_within_window};
+    use super::{
+        MAX_FUTURE_SKEW_SECS, MAX_WEBHOOKS_PER_SECOND, REPLAY_WINDOW_SECS, check_rate_limit,
+        timestamp_within_window, verify_signature,
+    };
+    use base64::Engine as _;
+    use hmac::{Hmac, KeyInit, Mac};
     use orch8_types::config::SecretString;
+    use sha2::Sha256;
 
     #[test]
     fn empty_configured_secret_is_treated_as_unconfigured() {
@@ -245,5 +316,46 @@ mod tests {
             now + MAX_FUTURE_SKEW_SECS + 1
         ));
         assert!(!timestamp_within_window(now, now + REPLAY_WINDOW_SECS));
+    }
+
+    #[test]
+    fn signature_binds_timestamp_nonce_and_body() {
+        let secret = b"a sufficiently long webhook secret";
+        let timestamp = "1000000";
+        let nonce = "unique-request-nonce";
+        let body = br#"{"event":"created"}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(b".");
+        mac.update(nonce.as_bytes());
+        mac.update(b".");
+        mac.update(body);
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let signature = format!("v1={encoded}");
+
+        assert!(verify_signature(&signature, secret, timestamp, nonce, body));
+        assert!(!verify_signature(
+            &signature, secret, timestamp, nonce, b"{}"
+        ));
+        assert!(!verify_signature(
+            &signature,
+            secret,
+            timestamp,
+            "another-nonce",
+            body
+        ));
+    }
+
+    #[test]
+    fn webhook_rate_limit_is_bounded_per_peer_and_slug() {
+        let slug = "rate-limit-unit-test";
+        for _ in 0..MAX_WEBHOOKS_PER_SECOND {
+            assert!(check_rate_limit(None, slug).is_ok());
+        }
+        assert!(matches!(
+            check_rate_limit(None, slug),
+            Err(crate::error::ApiError::RateLimited(_))
+        ));
     }
 }

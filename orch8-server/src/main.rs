@@ -62,10 +62,6 @@ struct Cli {
     insecure_storage: bool,
 }
 
-// INVARIANT: bare `#[tokio::main]` = multi-thread runtime. The gRPC auth
-// interceptor (`orch8_grpc::auth`) relies on this: it uses `block_in_place`,
-// which panics on a current-thread runtime. Do not switch to
-// `flavor = "current_thread"` without removing that dependency.
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
@@ -233,13 +229,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Engine ready");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_token.cancelled().await;
-            tracing::info!("Shutting down gracefully...");
-        })
-        .await
-        .context("HTTP server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_token.cancelled().await;
+        tracing::info!("Shutting down gracefully...");
+    })
+    .await
+    .context("HTTP server error")?;
 
     drain_shutdown(engine_handle, grpc_handle, cb_registry).await;
 
@@ -556,15 +555,12 @@ fn spawn_grpc_server(
 
     let grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
-    let grpc_interceptor =
-        orch8_grpc::auth::auth_interceptor(Some(storage), root_key_digest, require_tenant);
+    let auth_layer = orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant);
     let handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
         if let Err(e) = tonic::transport::Server::builder()
-            .add_service(Orch8ServiceServer::with_interceptor(
-                grpc_service,
-                grpc_interceptor,
-            ))
+            .layer(auth_layer)
+            .add_service(Orch8ServiceServer::new(grpc_service))
             .serve_with_shutdown(grpc_addr, async move {
                 shutdown.cancelled().await;
             })
@@ -941,6 +937,7 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
             HeaderName::from_static("x-trigger-secret"),
             HeaderName::from_static("x-trigger-timestamp"),
             HeaderName::from_static("x-trigger-nonce"),
+            HeaderName::from_static("x-orch8-signature"),
         ]);
 
     if origins.trim() == "*" {

@@ -139,6 +139,41 @@ pub(super) async fn delete(store: &SqliteStorage, slug: &str) -> Result<(), Stor
     Ok(())
 }
 
+pub(super) async fn claim_nonce(
+    store: &SqliteStorage,
+    slug: &str,
+    nonce: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    // Bound cleanup work on the request path. The upsert below still reclaims
+    // the current nonce when its previous claim has expired.
+    sqlx::query(
+        r"DELETE FROM webhook_replay_nonces WHERE rowid IN (
+              SELECT rowid FROM webhook_replay_nonces
+              WHERE expires_at <= ?1 LIMIT 100
+          )",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    let result = sqlx::query(
+        r"INSERT INTO webhook_replay_nonces (trigger_slug, nonce, expires_at)
+          VALUES (?1, ?2, ?3)
+          ON CONFLICT (trigger_slug, nonce) DO UPDATE
+          SET expires_at = excluded.expires_at
+          WHERE webhook_replay_nonces.expires_at <= ?4",
+    )
+    .bind(slug)
+    .bind(nonce)
+    .bind(expires_at.to_rfc3339())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn get_poll_state(
     store: &SqliteStorage,
     slug: &str,

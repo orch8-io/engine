@@ -81,6 +81,7 @@ impl TelemetryManager {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
             .build()
             .expect("reqwest client builds");
         Self {

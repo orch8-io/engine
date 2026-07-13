@@ -253,6 +253,17 @@ CREATE TABLE IF NOT EXISTS triggers (
     updated_at TEXT NOT NULL
 );
 
+-- Cluster/restart-safe replay claims for signed inbound webhooks.
+CREATE TABLE IF NOT EXISTS webhook_replay_nonces (
+    trigger_slug TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (trigger_slug, nonce),
+    FOREIGN KEY (trigger_slug) REFERENCES triggers(slug) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_replay_nonces_expiry
+    ON webhook_replay_nonces(expires_at);
+
 -- Runtime state for polling triggers (trigger_type = 'activepieces_poll'):
 -- opaque dedupe cursor returned by the sidecar plus failure bookkeeping.
 -- Rows are deleted explicitly alongside their trigger (see triggers::delete).

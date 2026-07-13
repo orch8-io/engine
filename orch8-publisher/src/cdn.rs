@@ -105,6 +105,13 @@ pub struct S3CdnBackend {
     http: reqwest::Client,
 }
 
+impl Drop for S3CdnBackend {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.secret_key.zeroize();
+    }
+}
+
 impl S3CdnBackend {
     pub fn new(
         endpoint: String,

@@ -1,0 +1,30 @@
+[package]
+name = "orch8-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["embedded"] }
+orch8-types = { path = "../orch8-types" }
+
+[[bin]]
+name = "expression"
+path = "fuzz_targets/expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template"
+path = "fuzz_targets/template.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

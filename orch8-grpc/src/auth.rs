@@ -14,7 +14,7 @@
 //! contract diverged on the same storage. This module gives the gRPC path
 //! parity with the HTTP path via:
 //!
-//!   1. A [`auth_interceptor`] that runs before every RPC, rejecting
+//!   1. A [`GrpcAuthLayer`] that runs asynchronously before every RPC, rejecting
 //!      requests without a valid API key and stamping the caller's
 //!      `x-tenant-id` into request extensions as a [`CallerTenant`].
 //!   2. A [`caller_tenant`] helper that handlers can call to pull the
@@ -22,13 +22,14 @@
 //!      mirrors the HTTP-side `enforce_tenant_access` (returns `NotFound`
 //!      on cross-tenant reads so existence doesn't leak).
 //!
-//! The interceptor is typed on `Request<()>` because tonic's interceptor
-//! contract only gives it access to metadata + extensions — the typed body
-//! is threaded through untouched.
-
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use tonic::codegen::http;
 use tonic::{Request, Status};
+use tower::{Layer, Service};
 
 use orch8_storage::StorageBackend;
 use orch8_types::ids::TenantId;
@@ -41,6 +42,160 @@ use orch8_types::ids::TenantId;
 /// cannot accidentally masquerade as caller identity.
 #[derive(Clone, Debug)]
 pub struct CallerTenant(pub TenantId);
+
+type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// Async authentication middleware for tonic services.
+#[derive(Clone)]
+pub struct GrpcAuthLayer {
+    storage: Arc<dyn StorageBackend>,
+    expected_digest: Option<[u8; 32]>,
+    require_tenant: bool,
+}
+
+impl GrpcAuthLayer {
+    pub fn new(
+        storage: Arc<dyn StorageBackend>,
+        expected_digest: Option<[u8; 32]>,
+        require_tenant: bool,
+    ) -> Self {
+        Self {
+            storage,
+            expected_digest,
+            require_tenant,
+        }
+    }
+}
+
+impl<S> Layer<S> for GrpcAuthLayer {
+    type Service = GrpcAuthService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        GrpcAuthService {
+            inner,
+            storage: Arc::clone(&self.storage),
+            expected_digest: self.expected_digest,
+            require_tenant: self.require_tenant,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GrpcAuthService<S> {
+    inner: S,
+    storage: Arc<dyn StorageBackend>,
+    expected_digest: Option<[u8; 32]>,
+    require_tenant: bool,
+}
+
+impl<S> Service<http::Request<tonic::body::Body>> for GrpcAuthService<S>
+where
+    S: Service<http::Request<tonic::body::Body>, Response = http::Response<tonic::body::Body>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(context)
+    }
+
+    fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+        let replacement = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
+        let storage = Arc::clone(&self.storage);
+        let expected_digest = self.expected_digest;
+        let require_tenant = self.require_tenant;
+
+        Box::pin(async move {
+            let (mut parts, body) = request.into_parts();
+            if let Err(status) = authenticate_request(
+                &parts.headers,
+                &mut parts.extensions,
+                &storage,
+                expected_digest,
+                require_tenant,
+            )
+            .await
+            {
+                return Ok(status.into_http());
+            }
+            inner.call(http::Request::from_parts(parts, body)).await
+        })
+    }
+}
+
+async fn authenticate_request(
+    headers: &http::HeaderMap,
+    extensions: &mut http::Extensions,
+    storage: &Arc<dyn StorageBackend>,
+    expected_digest: Option<[u8; 32]>,
+    require_tenant: bool,
+) -> Result<(), Status> {
+    let tenant = headers
+        .get("x-tenant-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if expected_digest.is_none() {
+        if let Some(tenant) = tenant {
+            extensions.insert(CallerTenant(TenantId::unchecked(tenant.to_owned())));
+            return Ok(());
+        }
+        return if require_tenant {
+            Err(Status::invalid_argument("missing x-tenant-id metadata"))
+        } else {
+            Ok(())
+        };
+    }
+
+    let provided = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if expected_digest
+        .as_ref()
+        .is_some_and(|digest| orch8_types::auth::verify_secret_against_digest(provided, digest))
+    {
+        if let Some(tenant) = tenant {
+            extensions.insert(CallerTenant(TenantId::unchecked(tenant.to_owned())));
+            return Ok(());
+        }
+        return if require_tenant {
+            Err(Status::invalid_argument("missing x-tenant-id metadata"))
+        } else {
+            Ok(())
+        };
+    }
+
+    if provided.is_empty() {
+        return Err(Status::unauthenticated("invalid or missing x-api-key"));
+    }
+
+    let hash = orch8_types::api_key::hash_api_key(provided);
+    match orch8_storage::api_key_cache::authenticate(storage, &hash).await {
+        Ok(Some(record)) if record.is_active(chrono::Utc::now()) => {
+            if tenant.is_some_and(|tenant| tenant != record.tenant_id) {
+                return Err(Status::permission_denied(
+                    "x-tenant-id does not match key tenant",
+                ));
+            }
+            extensions.insert(CallerTenant(TenantId::unchecked(record.tenant_id)));
+            Ok(())
+        }
+        Ok(_) => Err(Status::unauthenticated("invalid or missing x-api-key")),
+        Err(error) => {
+            tracing::error!(%error, "grpc api key lookup failed");
+            Err(Status::internal("authentication failed"))
+        }
+    }
+}
 
 /// Extract tenant from metadata and stamp it into request extensions.
 fn stamp_tenant(req: &mut Request<()>, require_tenant: bool) -> Result<(), Status> {
@@ -75,7 +230,7 @@ fn stamp_tenant(req: &mut Request<()>, require_tenant: bool) -> Result<(), Statu
 ///   metadata results in `InvalidArgument` for root-key callers. Per-tenant
 ///   key callers are exempt because their tenant is bound to the key.
 pub fn auth_interceptor(
-    storage: Option<Arc<dyn StorageBackend>>,
+    _storage: Option<Arc<dyn StorageBackend>>,
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
 ) -> impl Fn(Request<()>) -> Result<Request<()>, Status> + Clone + Send + Sync + 'static {
@@ -101,56 +256,6 @@ pub fn auth_interceptor(
         if root_ok {
             stamp_tenant(&mut req, require_tenant)?;
             return Ok(req);
-        }
-
-        // 2. Per-tenant key lookup. Tonic interceptors are sync, so we
-        //    block_in_place to await the async (cached) storage call. This is
-        //    only sound on a multi-threaded runtime — `block_in_place` panics
-        //    on a current-thread runtime — which the server guarantees via a
-        //    bare `#[tokio::main]`. Check it at runtime so a future runtime
-        //    change (or a single-threaded test harness) returns a clear error
-        //    rather than letting `block_in_place` panic at an arbitrary request.
-        if let (Some(storage), Some(provided)) = (storage.as_ref(), provided) {
-            if tokio::runtime::Handle::current().runtime_flavor()
-                != tokio::runtime::RuntimeFlavor::MultiThread
-            {
-                return Err(Status::internal(
-                    "gRPC auth interceptor requires a multi-thread tokio runtime",
-                ));
-            }
-            let hash = orch8_types::api_key::hash_api_key(provided);
-            let lookup = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(orch8_storage::api_key_cache::authenticate(storage, &hash))
-            });
-
-            match lookup {
-                Ok(Some(record)) if record.is_active(chrono::Utc::now()) => {
-                    let tenant_raw: Option<String> = req
-                        .metadata()
-                        .get("x-tenant-id")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-
-                    if let Some(ref tid) = tenant_raw
-                        && tid != &record.tenant_id
-                    {
-                        return Err(Status::permission_denied(
-                            "x-tenant-id does not match key tenant",
-                        ));
-                    }
-
-                    req.extensions_mut()
-                        .insert(CallerTenant(TenantId::unchecked(record.tenant_id)));
-                    return Ok(req);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!(error = %e, "grpc api key lookup failed");
-                    return Err(Status::internal("authentication failed"));
-                }
-            }
         }
 
         Err(Status::unauthenticated("invalid or missing x-api-key"))
@@ -369,12 +474,10 @@ mod tests {
         );
     }
 
-    // --- per-tenant API key parity tests ---
-    // These need a multi-threaded runtime because the interceptor uses
-    // `tokio::task::block_in_place` to perform async storage lookups.
+    // --- asynchronous per-tenant API key parity tests ---
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn interceptor_accepts_per_tenant_key_and_stamps_tenant() {
+    #[tokio::test]
+    async fn middleware_accepts_per_tenant_key_and_stamps_tenant() {
         let storage: Arc<dyn StorageBackend> = Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await
@@ -383,18 +486,28 @@ mod tests {
         let minted = orch8_types::api_key::mint("acme", "ci", None);
         storage.create_api_key(&minted.record).await.unwrap();
 
-        let ic = auth_interceptor(Some(storage.clone()), Some(digest_of("root-key")), true);
-        let req = make_req(&[("x-api-key", &minted.secret)]);
-        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
-        let req = result.expect("per-tenant key must authenticate");
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", minted.secret.parse().unwrap());
+        let mut extensions = http::Extensions::new();
+        authenticate_request(
+            &headers,
+            &mut extensions,
+            &storage,
+            Some(digest_of("root-key")),
+            true,
+        )
+        .await
+        .expect("per-tenant key must authenticate");
         assert_eq!(
-            caller_tenant(&req).map(orch8_types::TenantId::as_str),
+            extensions
+                .get::<CallerTenant>()
+                .map(|caller| caller.0.as_str()),
             Some("acme")
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn interceptor_rejects_per_tenant_key_with_wrong_tenant_header() {
+    #[tokio::test]
+    async fn middleware_rejects_per_tenant_key_with_wrong_tenant_header() {
         let storage: Arc<dyn StorageBackend> = Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await
@@ -403,15 +516,23 @@ mod tests {
         let minted = orch8_types::api_key::mint("acme", "ci", None);
         storage.create_api_key(&minted.record).await.unwrap();
 
-        let ic = auth_interceptor(Some(storage.clone()), Some(digest_of("root-key")), true);
-        let req = make_req(&[("x-api-key", &minted.secret), ("x-tenant-id", "evil")]);
-        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
-        let err = result.expect_err("mismatched tenant header must fail");
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", minted.secret.parse().unwrap());
+        headers.insert("x-tenant-id", "evil".parse().unwrap());
+        let err = authenticate_request(
+            &headers,
+            &mut http::Extensions::new(),
+            &storage,
+            Some(digest_of("root-key")),
+            true,
+        )
+        .await
+        .expect_err("mismatched tenant header must fail");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn interceptor_rejects_revoked_per_tenant_key() {
+    #[tokio::test]
+    async fn middleware_rejects_revoked_per_tenant_key() {
         let storage: Arc<dyn StorageBackend> = Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await
@@ -421,10 +542,17 @@ mod tests {
         storage.create_api_key(&minted.record).await.unwrap();
         storage.revoke_api_key(&minted.record.id).await.unwrap();
 
-        let ic = auth_interceptor(Some(storage.clone()), Some(digest_of("root-key")), true);
-        let req = make_req(&[("x-api-key", &minted.secret)]);
-        let result = tokio::spawn(async move { ic(req) }).await.unwrap();
-        let err = result.expect_err("revoked key must fail");
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-api-key", minted.secret.parse().unwrap());
+        let err = authenticate_request(
+            &headers,
+            &mut http::Extensions::new(),
+            &storage,
+            Some(digest_of("root-key")),
+            true,
+        )
+        .await
+        .expect_err("revoked key must fail");
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

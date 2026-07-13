@@ -207,6 +207,8 @@ impl SyncOrchestrator {
         #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
             .build()
             .expect("reqwest client builds");
         Self {

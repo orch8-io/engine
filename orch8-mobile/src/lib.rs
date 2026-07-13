@@ -586,6 +586,7 @@ impl MobileEngine {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
                 .build()
                 .map_err(|e| MobileError::Engine {
                     message: format!("http client: {e}"),
@@ -614,17 +615,25 @@ impl MobileEngine {
                     ),
                 });
             }
-            let body_bytes = resp.bytes().await.map_err(|e| MobileError::Engine {
-                message: format!("read response body: {e}"),
+            let body_bytes = orch8_engine::handlers::builtin::read_body_capped(
+                resp,
+                MAX_SEQUENCES_RESPONSE_BYTES,
+            )
+            .await
+            .map_err(|error| match error {
+                orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => {
+                    MobileError::InvalidInput {
+                        message: format!(
+                            "sequences response exceeds {MAX_SEQUENCES_RESPONSE_BYTES} byte limit"
+                        ),
+                    }
+                }
+                orch8_engine::handlers::builtin::BodyReadError::Io(message) => {
+                    MobileError::Engine {
+                        message: format!("read response body: {message}"),
+                    }
+                }
             })?;
-            if body_bytes.len() > MAX_SEQUENCES_RESPONSE_BYTES {
-                return Err(MobileError::InvalidInput {
-                    message: format!(
-                        "sequences response too large: {} bytes exceeds limit",
-                        body_bytes.len()
-                    ),
-                });
-            }
 
             let sequences: Vec<SequenceDefinition> =
                 serde_json::from_slice(&body_bytes).map_err(|e| MobileError::InvalidInput {

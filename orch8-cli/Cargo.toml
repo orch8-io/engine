@@ -3,6 +3,7 @@ name = "orch8-cli"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "orch8"
@@ -36,8 +37,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio-rustls", "postgres", "migrate"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
-
-[dev-dependencies]
 tempfile = { workspace = true }
 
 [lints]

@@ -3,6 +3,7 @@ name = "orch8-api"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 orch8-types = { path = "../orch8-types" }
@@ -27,6 +28,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 reqwest.workspace = true
 url.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+bytes.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }
