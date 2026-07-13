@@ -1073,8 +1073,8 @@ async fn run_cleanup_hooks(
         let result = if let Some(handler) = handlers.get(&step.handler) {
             dispatch_hook_bounded(handler(ctx)).await
         } else if crate::handlers::activepieces::is_ap_handler(&step.handler) {
-            let handler_name = step.handler.clone();
-            dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &handler_name))
+            // ⚡ Bolt: Avoid cloning `step.handler` String just to pass a reference.
+            dispatch_hook_bounded(crate::handlers::activepieces::handle_ap(ctx, &step.handler))
                 .await
         } else if crate::handlers::grpc_plugin::is_grpc_handler(&step.handler) {
             let Some(endpoint) = crate::handlers::step_dispatch::resolve_plugin_source(
