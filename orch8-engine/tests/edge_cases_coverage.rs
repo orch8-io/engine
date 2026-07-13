@@ -817,6 +817,7 @@ async fn retry_with_timeout_per_step() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }));
     let (storage, seq, inst) = setup(vec![block]).await;
     let reg = registry();

@@ -1445,6 +1445,7 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     })))
     .unwrap();
 

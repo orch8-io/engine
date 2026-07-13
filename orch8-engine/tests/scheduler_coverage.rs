@@ -834,6 +834,7 @@ async fn tick_unregistered_handler_dispatches_external() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     };
     let seq = mk_sequence(vec![BlockDefinition::Step(Box::new(step_def))]);
     s.create_sequence(&seq).await.unwrap();
@@ -1260,6 +1261,7 @@ async fn tick_delay_checked_before_send_window() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     };
     let seq = mk_sequence(vec![BlockDefinition::Step(Box::new(step_def))]);
     s.create_sequence(&seq).await.unwrap();

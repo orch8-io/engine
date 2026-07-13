@@ -1738,7 +1738,7 @@ fn two_sub_sequences_resolve_independently() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn report_contains_all_eight_checks_in_stable_order() {
+fn report_contains_all_checks_in_stable_order() {
     let report = run_preflight(&seq(json!([noop_step("a")])), &full_inventory(), t0());
     let ids: Vec<&str> = report.checks.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(
@@ -1747,6 +1747,8 @@ fn report_contains_all_eight_checks_in_stable_order() {
             "definition_valid",
             "lint_clean",
             "input_schema_valid",
+            "output_schemas_valid",
+            "when_guards_valid",
             "handlers_have_workers",
             "plugins_enabled",
             "credentials_present",

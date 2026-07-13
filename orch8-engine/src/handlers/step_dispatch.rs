@@ -639,6 +639,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         };
 
         let result = dispatch_step_to_external_worker(

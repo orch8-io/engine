@@ -935,6 +935,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }))
     }
 
@@ -1319,6 +1320,7 @@ mod tests {
             fallback_handler: Some("http_request".into()),
             cache_key: None,
             output_schema: None,
+            when: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1359,6 +1361,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1389,6 +1392,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);

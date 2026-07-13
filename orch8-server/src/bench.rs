@@ -52,6 +52,7 @@ fn make_sequence(tenant: &str, num_steps: usize) -> SequenceDefinition {
                 fallback_handler: None,
                 cache_key: None,
                 output_schema: None,
+                when: None,
             }))
         })
         .collect();

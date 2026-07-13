@@ -47,6 +47,7 @@ fn make_sequence() -> SequenceDefinition {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -423,6 +424,7 @@ fn make_nested_blocks(depth: usize, breadth: usize) -> Vec<orch8_types::sequence
                         fallback_handler: None,
                         cache_key: None,
                         output_schema: None,
+                        when: None,
                     }))
                 })
                 .collect();
@@ -535,6 +537,7 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                                         fallback_handler: None,
                                         cache_key: None,
                                         output_schema: None,
+                                        when: None,
                                     }))]
                                 })
                                 .collect(),

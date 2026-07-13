@@ -55,6 +55,7 @@ struct StepFacts {
     wait_for_input: bool,
     fallback_handler: Option<String>,
     output_schema: Option<serde_json::Value>,
+    when: Option<String>,
     /// DFS position for reorder detection.
     position: usize,
 }
@@ -112,6 +113,7 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                                     .get("output_schema")
                                     .cloned()
                                     .filter(|v| !v.is_null()),
+                                when: str_field(map, "when"),
                                 position,
                             },
                         );
@@ -394,6 +396,14 @@ pub fn semantic_diff(
                 DiffSeverity::Behavioral,
                 Some(id),
                 format!("step '{id}' output schema changed"),
+            );
+        }
+        if old_step.when != new_step.when {
+            push(
+                "when_guard_changed",
+                DiffSeverity::Behavioral,
+                Some(id),
+                format!("step '{id}' conditional guard changed"),
             );
         }
     }

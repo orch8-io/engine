@@ -502,6 +502,21 @@ pub(super) async fn execute_step_block(
         return Ok(StepOutcome::Deferred);
     }
 
+    // Conditional guard: evaluate `when` expression before any work.
+    if let Some(ref when_expr) = step_def.when {
+        let outputs_snap = crate::handlers::param_resolve::OutputsSnapshot::new();
+        let outputs_val = outputs_snap.get(storage.as_ref(), instance_id).await?;
+        if !crate::expression::evaluate_condition(when_expr, &instance.context, outputs_val) {
+            debug!(
+                instance_id = %instance_id,
+                block_id = %step_def.id,
+                when = %when_expr,
+                "when guard is false, skipping step"
+            );
+            return Ok(StepOutcome::Skipped);
+        }
+    }
+
     if check_step_delay(storage.as_ref(), instance, step_def, clock).await? {
         return Ok(StepOutcome::Deferred);
     }

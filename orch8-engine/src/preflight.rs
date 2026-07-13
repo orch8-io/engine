@@ -160,6 +160,7 @@ pub fn run_preflight(
         check_lint(seq, now),
         check_input_schema(seq, now),
         check_output_schemas(seq, now),
+        check_when_guards(seq, now),
         check_handlers(seq, &refs, inventory, now),
         check_plugins(&refs, inventory, now),
         check_credentials(&refs, inventory, now),
@@ -309,6 +310,58 @@ fn check_output_schemas(seq: &SequenceDefinition, now: DateTime<Utc>) -> Preflig
             "output_schemas_valid",
             PreflightStatus::Fail,
             format!("{} invalid output schema(s)", findings.len()),
+            findings,
+        )
+    }
+}
+
+fn check_when_guards(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
+    fn walk(value: &Value, findings: &mut Vec<Finding>, now: DateTime<Utc>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(id)) = map.get("id")
+                    && let Some(Value::String(when_expr)) = map.get("when")
+                    && when_expr.trim().is_empty()
+                {
+                    findings.push(
+                        Finding::new(
+                            "EMPTY_WHEN_GUARD",
+                            FindingSeverity::Warning,
+                            format!("step '{id}' has an empty `when` guard expression"),
+                            Confidence::Certain,
+                            now,
+                        )
+                        .with_resource(ResourceRef::new("block", id.clone())),
+                    );
+                }
+                for child in map.values() {
+                    walk(child, findings, now);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, findings, now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Ok(val) = serde_json::to_value(seq) else {
+        return PreflightCheck::pass("when_guards_valid", "no when guards (serialization failed)");
+    };
+    let mut findings = Vec::new();
+    walk(&val, &mut findings, now);
+    if findings.is_empty() {
+        PreflightCheck::pass(
+            "when_guards_valid",
+            "all `when` guard expressions are well-formed",
+        )
+    } else {
+        PreflightCheck::with_status(
+            "when_guards_valid",
+            PreflightStatus::Fail,
+            format!("{} invalid `when` guard(s)", findings.len()),
             findings,
         )
     }

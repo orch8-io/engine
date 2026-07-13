@@ -181,6 +181,7 @@ mod tests {
                 fallback_handler: None,
                 cache_key: None,
                 output_schema: None,
+                when: None,
             }))],
             interceptors: None,
             input_schema: None,

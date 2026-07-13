@@ -140,6 +140,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }));
         assert_eq!(block_def_id(&def), "step_1");
     }

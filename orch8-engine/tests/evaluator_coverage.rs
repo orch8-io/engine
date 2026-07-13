@@ -900,6 +900,7 @@ async fn ensure_tree_handles_injected_blocks() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .unwrap();
     storage.inject_blocks(inst.id, &injected).await.unwrap();
@@ -1098,6 +1099,7 @@ async fn sla_deadline_breached_fails_node() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1147,6 +1149,7 @@ async fn sla_deadline_with_escalation_handler_called() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
 
@@ -1183,6 +1186,7 @@ async fn sla_deadline_escalation_handler_not_found_still_fails() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1230,6 +1234,7 @@ async fn sla_deadline_escalation_handler_fails_still_fails_node() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
 
@@ -1351,6 +1356,7 @@ async fn sla_deadline_multiple_nodes_some_breached() {
                 fallback_handler: None,
                 cache_key: None,
                 output_schema: None,
+                when: None,
             }))],
         ],
     }));
@@ -1388,6 +1394,7 @@ async fn sla_deadline_zero_duration_immediately_breaches() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1437,6 +1444,7 @@ async fn sla_deadline_records_block_output_on_breach() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1477,6 +1485,7 @@ async fn sla_deadline_breach_metadata_in_output() {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();

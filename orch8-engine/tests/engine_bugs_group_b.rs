@@ -74,6 +74,7 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }
 }
 

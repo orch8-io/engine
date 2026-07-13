@@ -1510,6 +1510,9 @@ enum StepOutcome {
     Deferred,
     /// Step failed permanently or after retries. Instance transitioned to Failed.
     Failed,
+    /// Step `when` guard evaluated to false — advance to next block without
+    /// incrementing the step counter.
+    Skipped,
 }
 
 /// Process a single claimed instance: execute ALL pending steps in one go.
@@ -1782,6 +1785,11 @@ async fn process_instance(
             }
             StepOutcome::Deferred => {
                 return Ok(());
+            }
+            StepOutcome::Skipped => {
+                if let Err(pos) = completed_blocks.binary_search(&step_def.id) {
+                    completed_blocks.insert(pos, step_def.id.clone());
+                }
             }
         }
     }

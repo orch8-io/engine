@@ -40,6 +40,7 @@ fn make_step(id: &str) -> BlockDefinition {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))
 }
 

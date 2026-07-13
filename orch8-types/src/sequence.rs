@@ -219,6 +219,12 @@ pub struct StepDef {
     /// Validated after handler returns; schema violation is a permanent failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<serde_json::Value>,
+    /// Conditional guard expression. When set, the step is only executed if the
+    /// expression evaluates to a truthy value; otherwise the step is skipped
+    /// (marked `NodeState::Skipped`). Uses the same expression syntax as router
+    /// conditions — `data.*`, `outputs.*`, comparisons, boolean ops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1165,6 +1171,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }));
         for i in 0..depth {
             inner = BlockDefinition::Loop(Box::new(LoopDef {
@@ -1247,6 +1254,7 @@ mod tests {
                 fallback_handler: None,
                 cache_key: None,
                 output_schema: None,
+                when: None,
             }))],
             max_iterations: u32::MAX,
             break_on: None,
@@ -1285,6 +1293,7 @@ mod tests {
                 fallback_handler: None,
                 cache_key: None,
                 output_schema: None,
+                when: None,
             }))]
         };
         let branches: Vec<Vec<BlockDefinition>> = (0..=MAX_BRANCHES).map(|_| leaf()).collect();
@@ -1327,6 +1336,7 @@ mod tests {
                     fallback_handler: None,
                     cache_key: None,
                     output_schema: None,
+                    when: None,
                 }))
             })
             .collect();
@@ -1568,6 +1578,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }))
     }
 
@@ -1718,6 +1729,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }));
         let seq = sample_seq(vec![step_with_bad]);
         let err = seq.validate().unwrap_err();

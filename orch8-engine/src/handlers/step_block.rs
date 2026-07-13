@@ -263,6 +263,18 @@ pub async fn execute_step_node(
     step_def: &StepDef,
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
+    // Conditional guard: if `when` is set, evaluate the expression against
+    // the current context + outputs. Skip the step entirely if falsy.
+    if let Some(ref when_expr) = step_def.when {
+        let outputs_val = outputs.get(storage.as_ref(), instance.id).await?;
+        if !crate::expression::evaluate_condition(when_expr, &instance.context, outputs_val) {
+            storage
+                .update_node_state(node.id, orch8_types::execution::NodeState::Skipped)
+                .await?;
+            return Ok(true);
+        }
+    }
+
     // Human-in-the-loop: if this step has `wait_for_input`, check for a
     // matching signal before running the handler. If no signal exists yet,
     // set the node to Waiting so the tree evaluator transitions the instance
@@ -805,6 +817,7 @@ mod tests {
             fallback_handler: None,
             cache_key: None,
             output_schema: None,
+            when: None,
         }
     }
 

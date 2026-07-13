@@ -53,6 +53,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         fallback_handler: None,
         cache_key: None,
         output_schema: None,
+        when: None,
     }))
 }
 
