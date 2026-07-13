@@ -42,6 +42,7 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -129,6 +130,13 @@ fn full_step(id: &str) -> StepDef {
         }),
         fallback_handler: Some("http_request_fallback".into()),
         cache_key: Some("rate_{{ data.currency }}".into()),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "status": { "type": "string" }
+            },
+            "required": ["status"]
+        })),
     }
 }
 

@@ -73,6 +73,7 @@ fn mk_step_with_retry(id: &str, handler: &str, retry: Option<RetryPolicy>) -> St
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }
 }
 

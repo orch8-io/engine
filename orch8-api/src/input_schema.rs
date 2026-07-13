@@ -1,10 +1,14 @@
-//! Sequence `input_schema` validation.
+//! Sequence `input_schema` and step `output_schema` validation.
 //!
 //! A sequence may declare an optional JSON Schema (`input_schema`). When
 //! present, `context.data` of every new instance is validated against it at
 //! create time — a failing create is rejected with 422 before the instance is
 //! persisted, so a malformed payload never reaches the engine. The schema also
 //! doubles as the contract the dashboard renders an input form from.
+//!
+//! Steps may declare an optional `output_schema`. Well-formedness is checked
+//! at sequence-create time; actual output validation happens in the engine
+//! after the handler returns.
 
 use crate::error::ApiError;
 
@@ -59,6 +63,21 @@ pub fn validate_input(
             errors.join("; ")
         )))
     }
+}
+
+/// Validate that a step-level `output_schema` is a well-formed JSON Schema.
+/// Called at sequence-create time so a broken schema is caught when the
+/// sequence is authored.
+pub fn validate_output_schema_is_well_formed(schema: &serde_json::Value) -> Result<(), ApiError> {
+    if !schema.is_object() {
+        return Err(ApiError::InvalidArgument(
+            "output_schema must be a JSON object".into(),
+        ));
+    }
+    jsonschema::validator_for(schema).map_err(|e| {
+        ApiError::InvalidArgument(format!("output_schema is not a valid JSON Schema: {e}"))
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

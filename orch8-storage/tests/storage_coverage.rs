@@ -64,6 +64,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -870,6 +871,7 @@ async fn t33_sequence_blocks_json_roundtrip() {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         })),
         BlockDefinition::Step(Box::new(StepDef {
             id: BlockId::new("step_b"),
@@ -888,6 +890,7 @@ async fn t33_sequence_blocks_json_roundtrip() {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         })),
     ];
     s.create_sequence(&seq).await.unwrap();
@@ -942,6 +945,7 @@ async fn t35_sequence_with_complex_nested_blocks() {
                     on_deadline_breach: None,
                     fallback_handler: None,
                     cache_key: None,
+                    output_schema: None,
                 }))],
                 vec![BlockDefinition::Step(Box::new(StepDef {
                     id: BlockId::new("branch_b_step"),
@@ -960,6 +964,7 @@ async fn t35_sequence_with_complex_nested_blocks() {
                     on_deadline_breach: None,
                     fallback_handler: None,
                     cache_key: None,
+                    output_schema: None,
                 }))],
             ],
         },

@@ -159,6 +159,7 @@ pub fn run_preflight(
         check_definition(seq, now),
         check_lint(seq, now),
         check_input_schema(seq, now),
+        check_output_schemas(seq, now),
         check_handlers(seq, &refs, inventory, now),
         check_plugins(&refs, inventory, now),
         check_credentials(&refs, inventory, now),
@@ -242,6 +243,74 @@ fn check_input_schema(seq: &SequenceDefinition, now: DateTime<Utc>) -> Preflight
                 now,
             )],
         ),
+    }
+}
+
+fn check_output_schemas(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
+    fn walk(value: &Value, findings: &mut Vec<Finding>, now: DateTime<Utc>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(id)) = map.get("id")
+                    && let Some(schema) = map.get("output_schema")
+                    && !schema.is_null()
+                {
+                    if !schema.is_object() {
+                        findings.push(
+                            Finding::new(
+                                "INVALID_OUTPUT_SCHEMA",
+                                FindingSeverity::Error,
+                                format!(
+                                    "step '{id}' output_schema must be a JSON Schema object, found {}",
+                                    json_type_name(schema)
+                                ),
+                                Confidence::Certain,
+                                now,
+                            )
+                            .with_resource(ResourceRef::new("block", id.clone())),
+                        );
+                    } else if jsonschema::validator_for(schema).is_err() {
+                        findings.push(
+                            Finding::new(
+                                "INVALID_OUTPUT_SCHEMA",
+                                FindingSeverity::Error,
+                                format!("step '{id}' output_schema is not a valid JSON Schema"),
+                                Confidence::Certain,
+                                now,
+                            )
+                            .with_resource(ResourceRef::new("block", id.clone())),
+                        );
+                    }
+                }
+                for child in map.values() {
+                    walk(child, findings, now);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, findings, now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Ok(val) = serde_json::to_value(seq) else {
+        return PreflightCheck::pass(
+            "output_schemas_valid",
+            "no output schemas (serialization failed)",
+        );
+    };
+    let mut findings = Vec::new();
+    walk(&val, &mut findings, now);
+    if findings.is_empty() {
+        PreflightCheck::pass("output_schemas_valid", "all output schemas are well-formed")
+    } else {
+        PreflightCheck::with_status(
+            "output_schemas_valid",
+            PreflightStatus::Fail,
+            format!("{} invalid output schema(s)", findings.len()),
+            findings,
+        )
     }
 }
 

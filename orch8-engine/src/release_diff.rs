@@ -54,6 +54,7 @@ struct StepFacts {
     rate_limit_key: Option<String>,
     wait_for_input: bool,
     fallback_handler: Option<String>,
+    output_schema: Option<serde_json::Value>,
     /// DFS position for reorder detection.
     position: usize,
 }
@@ -75,6 +76,7 @@ struct SequenceFacts {
     output_refs: Vec<(String, String)>, // (referencing block, referenced block)
 }
 
+#[allow(clippy::too_many_lines)]
 fn collect(seq: &SequenceDefinition) -> SequenceFacts {
     fn walk(value: &Value, facts: &mut SequenceFacts) {
         match value {
@@ -106,6 +108,10 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                                     .get("wait_for_input")
                                     .is_some_and(|v| !v.is_null()),
                                 fallback_handler: str_field(map, "fallback_handler"),
+                                output_schema: map
+                                    .get("output_schema")
+                                    .cloned()
+                                    .filter(|v| !v.is_null()),
                                 position,
                             },
                         );
@@ -380,6 +386,14 @@ pub fn semantic_diff(
                 DiffSeverity::Behavioral,
                 Some(id),
                 format!("step '{id}' fallback handler changed"),
+            );
+        }
+        if old_step.output_schema != new_step.output_schema {
+            push(
+                "output_schema_changed",
+                DiffSeverity::Behavioral,
+                Some(id),
+                format!("step '{id}' output schema changed"),
             );
         }
     }

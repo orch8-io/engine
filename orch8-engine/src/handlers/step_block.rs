@@ -384,9 +384,13 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(storage.as_ref(), node, attempt, move || async move {
-            super::activepieces::handle_ap(ctx, &handler_name).await
-        })
+        return dispatch_plugin(
+            storage.as_ref(),
+            node,
+            attempt,
+            move || async move { super::activepieces::handle_ap(ctx, &handler_name).await },
+            step_def.output_schema.as_ref(),
+        )
         .await;
     }
 
@@ -415,9 +419,13 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(storage.as_ref(), node, attempt, || {
-            super::grpc_plugin::handle_grpc_plugin(ctx)
-        })
+        return dispatch_plugin(
+            storage.as_ref(),
+            node,
+            attempt,
+            || super::grpc_plugin::handle_grpc_plugin(ctx),
+            step_def.output_schema.as_ref(),
+        )
         .await;
     }
 
@@ -455,9 +463,13 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(storage.as_ref(), node, attempt, || {
-            super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path)
-        })
+        return dispatch_plugin(
+            storage.as_ref(),
+            node,
+            attempt,
+            || super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path),
+            step_def.output_schema.as_ref(),
+        )
         .await;
     }
 
@@ -488,6 +500,7 @@ pub async fn execute_step_node(
         externalize_threshold: 0, // Tree evaluator does not externalize (no config available)
         wait_for_input: step_def.wait_for_input.clone(),
         cache_key: resolved_cache_key,
+        output_schema: step_def.output_schema.clone(),
     };
 
     let result = crate::handlers::step::execute_step(storage, handlers, exec_params)
@@ -791,6 +804,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }
     }
 

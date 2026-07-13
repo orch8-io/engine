@@ -22,6 +22,7 @@ fn find_block_in_flat_list() {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))];
 
     let found = find_block(&blocks, &BlockId::new("step_1"));
@@ -53,6 +54,7 @@ fn find_block_nested_in_parallel() {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             }))]],
         },
     ))];
@@ -80,6 +82,7 @@ fn block_meta_returns_correct_types() {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }));
     let (id, bt) = block_meta(&step);
     assert_eq!(id.as_str(), "s");
@@ -104,6 +107,7 @@ fn mk_step(id: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 

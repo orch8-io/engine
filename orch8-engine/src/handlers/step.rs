@@ -32,6 +32,8 @@ pub struct StepExecParams {
     /// cached in instance KV state under this key. On subsequent executions,
     /// the cached value is returned without running the handler.
     pub cache_key: Option<String>,
+    /// Optional JSON Schema to validate handler output against.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Execute a step without persisting the output — returns the `BlockOutput` for
@@ -52,6 +54,52 @@ fn json_byte_size(value: &serde_json::Value) -> Result<usize, serde_json::Error>
     let mut counter = Counter(0);
     serde_json::to_writer(&mut counter, value)?;
     Ok(counter.0)
+}
+
+fn validate_output_schema(
+    output_schema: Option<&serde_json::Value>,
+    output: &serde_json::Value,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+) -> Result<(), EngineError> {
+    let Some(schema) = output_schema else {
+        return Ok(());
+    };
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(EngineError::StepFailed {
+                instance_id,
+                block_id: block_id.clone(),
+                message: format!("output_schema is not a valid JSON Schema: {e}"),
+                retryable: false,
+            });
+        }
+    };
+    let errors: Vec<String> = validator
+        .iter_errors(output)
+        .map(|e| {
+            let path = e.instance_path().to_string();
+            if path.is_empty() {
+                e.to_string()
+            } else {
+                format!("at {path}: {e}")
+            }
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(EngineError::StepFailed {
+            instance_id,
+            block_id: block_id.clone(),
+            message: format!(
+                "output failed output_schema validation: {}",
+                errors.join("; ")
+            ),
+            retryable: false,
+        })
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -134,6 +182,7 @@ pub async fn execute_step_dry(
     let attempt = exec.attempt;
     let timeout = exec.timeout;
     let cache_key = exec.cache_key;
+    let output_schema = exec.output_schema;
 
     // Span around the handler invocation, exported via OTLP when the server
     // is configured with an endpoint. Structured handler events (e.g. the
@@ -176,6 +225,8 @@ pub async fn execute_step_dry(
 
     match result {
         Ok(output) => {
+            validate_output_schema(output_schema.as_ref(), &output, instance_id, &block_id)?;
+
             // Save to cache if cache_key is set.
             if let Some(ref ck) = cache_key {
                 let prefixed_key = format!("_cache:{ck}");
@@ -312,6 +363,7 @@ pub async fn execute_step(
     let attempt = exec.attempt;
     let timeout = exec.timeout;
     let cache_key = exec.cache_key;
+    let output_schema = exec.output_schema;
 
     // Same `orch8.step` span as `execute_step_dry` — the tree-evaluator path
     // must export identically-shaped spans as the flat scheduler path.
@@ -353,6 +405,8 @@ pub async fn execute_step(
 
     match result {
         Ok(output) => {
+            validate_output_schema(output_schema.as_ref(), &output, instance_id, &block_id)?;
+
             if let Some(ref ck) = cache_key {
                 let prefixed_key = format!("_cache:{ck}");
                 if let Err(e) = storage
@@ -516,6 +570,139 @@ mod tests {
     }
 
     #[test]
+    fn validate_output_schema_none_always_passes() {
+        let output = serde_json::json!({"any": "thing"});
+        let result = validate_output_schema(None, &output, InstanceId::new(), &BlockId::new("s1"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_output_schema_conforming_output_passes() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"score": {"type": "number"}},
+            "required": ["score"]
+        });
+        let output = serde_json::json!({"score": 42});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_output_schema_non_conforming_output_returns_permanent_error() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"score": {"type": "number"}},
+            "required": ["score"]
+        });
+        let output = serde_json::json!({"score": "not a number"});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        let err = result.unwrap_err();
+        match err {
+            EngineError::StepFailed {
+                retryable, message, ..
+            } => {
+                assert!(!retryable, "schema violation must be permanent");
+                assert!(message.contains("output_schema validation"), "{message}");
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_schema_missing_required_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["name", "age"]
+        });
+        let output = serde_json::json!({"name": "Alice"});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        let err = result.unwrap_err();
+        match err {
+            EngineError::StepFailed { message, .. } => {
+                assert!(
+                    message.contains("age") || message.contains("required"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_schema_malformed_schema_returns_error() {
+        let schema = serde_json::json!({"type": "not_a_real_type"});
+        let output = serde_json::json!({"x": 1});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        // jsonschema may either reject the schema at compile time (StepFailed with "not a valid JSON Schema")
+        // or validate successfully depending on the implementation. Either way should not panic.
+        // With "not_a_real_type", jsonschema::validator_for will fail.
+        let err = result.unwrap_err();
+        match err {
+            EngineError::StepFailed {
+                retryable, message, ..
+            } => {
+                assert!(!retryable);
+                assert!(message.contains("not a valid JSON Schema"), "{message}");
+            }
+            other => panic!("expected StepFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_schema_additional_properties_allowed_by_default() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}}
+        });
+        let output = serde_json::json!({"a": 1, "b": "extra"});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_output_schema_strict_additional_properties_rejects_extras() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"a": {"type": "number"}},
+            "additionalProperties": false
+        });
+        let output = serde_json::json!({"a": 1, "b": "extra"});
+        let result = validate_output_schema(
+            Some(&schema),
+            &output,
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn backoff_caps_at_max() {
         let initial = Duration::from_secs(1);
         let max = Duration::from_secs(10);
@@ -599,6 +786,7 @@ mod tests {
             externalize_threshold: 0,
             wait_for_input: None,
             cache_key: None,
+            output_schema: None,
         };
 
         let output = execute_step_dry(&storage, &handlers, exec)

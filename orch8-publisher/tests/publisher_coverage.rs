@@ -137,6 +137,7 @@ fn make_sequence_definition_with_tenant(
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -1198,6 +1199,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             })),
             BlockDefinition::Step(Box::new(StepDef {
                 id: BlockId::new("s2"),
@@ -1216,6 +1218,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             })),
             BlockDefinition::Step(Box::new(StepDef {
                 id: BlockId::new("s3"),
@@ -1234,6 +1237,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             })),
         ],
         interceptors: None,

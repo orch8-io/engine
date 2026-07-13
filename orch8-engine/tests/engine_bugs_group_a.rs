@@ -64,6 +64,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -1892,6 +1893,7 @@ async fn a11_sla_breach_records_block_output() {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }));
 
     let (storage, instance, tree) = setup_tree(vec![step.clone()], json!({})).await;

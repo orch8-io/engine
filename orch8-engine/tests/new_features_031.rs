@@ -48,6 +48,7 @@ fn mk_step_cached(
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: Some(cache_key.into()),
+        output_schema: None,
     }))
 }
 

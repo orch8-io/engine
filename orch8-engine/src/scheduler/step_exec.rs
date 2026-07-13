@@ -707,6 +707,7 @@ pub(super) async fn execute_step_block(
         externalize_threshold,
         wait_for_input: step_def.wait_for_input.clone(),
         cache_key: resolved_cache_key,
+        output_schema: step_def.output_schema.clone(),
     };
 
     let result = crate::handlers::step::execute_step_dry(storage, handlers, exec_params)

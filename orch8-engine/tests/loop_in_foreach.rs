@@ -51,6 +51,7 @@ fn build_sequence() -> SequenceDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }));
     let inner_loop = BlockDefinition::Loop(Box::new(LoopDef {
         id: BlockId::new("l1"),

@@ -51,6 +51,7 @@ fn step(id: &str, handler: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 

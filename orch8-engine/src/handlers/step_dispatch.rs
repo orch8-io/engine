@@ -18,11 +18,13 @@ use crate::evaluator;
 /// `{{outputs.<block_id>.*}}` — matching how the in-process registry path
 /// saves step outputs. Previously the output was discarded, leaving plugin
 /// steps invisible to templating and causing `getOutputs` to miss them.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch_plugin<F, Fut>(
     storage: &dyn StorageBackend,
     node: &ExecutionNode,
     attempt: u32,
     handler_fn: F,
+    output_schema: Option<&serde_json::Value>,
 ) -> Result<bool, EngineError>
 where
     F: FnOnce() -> Fut,
@@ -31,6 +33,32 @@ where
     #[allow(clippy::single_match_else)]
     match handler_fn().await {
         Ok(output) => {
+            if let Some(schema) = output_schema
+                && let Ok(validator) = jsonschema::validator_for(schema)
+            {
+                let errors: Vec<String> = validator
+                    .iter_errors(&output)
+                    .map(|e| {
+                        let path = e.instance_path().to_string();
+                        if path.is_empty() {
+                            e.to_string()
+                        } else {
+                            format!("at {path}: {e}")
+                        }
+                    })
+                    .collect();
+                if !errors.is_empty() {
+                    tracing::error!(
+                        instance_id = %node.instance_id,
+                        block_id = %node.block_id,
+                        errors = %errors.join("; "),
+                        "plugin output failed output_schema validation — failing node"
+                    );
+                    evaluator::fail_node(storage, node.id).await?;
+                    return Ok(false);
+                }
+            }
+
             let output_size = serde_json::to_vec(&output)
                 .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
             let bo = orch8_types::output::BlockOutput {
@@ -340,9 +368,15 @@ mod tests {
         let node = mk_node(inst.id, "step1", NodeState::Running);
         s.create_execution_node(&node).await.unwrap();
 
-        let result = dispatch_plugin(&s, &node, 0, || async { Ok(json!({"result": "success"})) })
-            .await
-            .unwrap();
+        let result = dispatch_plugin(
+            &s,
+            &node,
+            0,
+            || async { Ok(json!({"result": "success"})) },
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(result, "dispatch_plugin should return true on success");
 
@@ -366,12 +400,18 @@ mod tests {
         let node = mk_node(inst.id, "step_fail", NodeState::Running);
         s.create_execution_node(&node).await.unwrap();
 
-        let result = dispatch_plugin(&s, &node, 0, || async {
-            Err(orch8_types::error::StepError::Permanent {
-                message: "boom".into(),
-                details: None,
-            })
-        })
+        let result = dispatch_plugin(
+            &s,
+            &node,
+            0,
+            || async {
+                Err(orch8_types::error::StepError::Permanent {
+                    message: "boom".into(),
+                    details: None,
+                })
+            },
+            None,
+        )
         .await
         .unwrap();
 
@@ -400,12 +440,18 @@ mod tests {
         let node = mk_node(inst.id, "step_retry", NodeState::Running);
         s.create_execution_node(&node).await.unwrap();
 
-        let result = dispatch_plugin(&s, &node, 1, || async {
-            Err(orch8_types::error::StepError::Retryable {
-                message: "timeout".into(),
-                details: Some(json!({"code": 504})),
-            })
-        })
+        let result = dispatch_plugin(
+            &s,
+            &node,
+            1,
+            || async {
+                Err(orch8_types::error::StepError::Retryable {
+                    message: "timeout".into(),
+                    details: Some(json!({"code": 504})),
+                })
+            },
+            None,
+        )
         .await
         .unwrap();
 
@@ -592,6 +638,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         };
 
         let result = dispatch_step_to_external_worker(

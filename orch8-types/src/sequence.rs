@@ -215,6 +215,10 @@ pub struct StepDef {
     /// The key is template-resolved before lookup (e.g. `"rate_{{ data.currency }}"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// Optional JSON Schema that the handler output must conform to.
+    /// Validated after handler returns; schema violation is a permanent failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1160,6 +1164,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }));
         for i in 0..depth {
             inner = BlockDefinition::Loop(Box::new(LoopDef {
@@ -1241,6 +1246,7 @@ mod tests {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             }))],
             max_iterations: u32::MAX,
             break_on: None,
@@ -1278,6 +1284,7 @@ mod tests {
                 on_deadline_breach: None,
                 fallback_handler: None,
                 cache_key: None,
+                output_schema: None,
             }))]
         };
         let branches: Vec<Vec<BlockDefinition>> = (0..=MAX_BRANCHES).map(|_| leaf()).collect();
@@ -1319,6 +1326,7 @@ mod tests {
                     on_deadline_breach: None,
                     fallback_handler: None,
                     cache_key: None,
+                    output_schema: None,
                 }))
             })
             .collect();
@@ -1559,6 +1567,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }))
     }
 
@@ -1708,6 +1717,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }));
         let seq = sample_seq(vec![step_with_bad]);
         let err = seq.validate().unwrap_err();

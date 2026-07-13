@@ -56,6 +56,15 @@ pub(crate) async fn create_sequence(
         crate::input_schema::validate_schema_is_well_formed(schema)?;
     }
 
+    // Reject malformed `output_schema` on any step at authoring time.
+    validate_output_schemas_in_blocks(&seq.blocks)?;
+    if let Some(on_failure) = &seq.on_failure {
+        validate_output_schemas_in_blocks(on_failure)?;
+    }
+    if let Some(on_cancel) = &seq.on_cancel {
+        validate_output_schemas_in_blocks(on_cancel)?;
+    }
+
     let mut warnings = seq.unknown_handler_warnings();
 
     let template_warnings = orch8_engine::template::validate_sequence_templates(&seq);
@@ -567,6 +576,59 @@ pub(crate) async fn set_sequence_status(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+use orch8_types::sequence::BlockDefinition;
+
+fn validate_output_schemas_in_blocks(blocks: &[BlockDefinition]) -> Result<(), ApiError> {
+    for block in blocks {
+        match block {
+            BlockDefinition::Step(step) => {
+                if let Some(schema) = &step.output_schema {
+                    crate::input_schema::validate_output_schema_is_well_formed(schema).map_err(
+                        |e| ApiError::InvalidArgument(format!("step '{}': {e}", step.id)),
+                    )?;
+                }
+            }
+            BlockDefinition::Parallel(p) => {
+                for branch in &p.branches {
+                    validate_output_schemas_in_blocks(branch)?;
+                }
+            }
+            BlockDefinition::Race(r) => {
+                for branch in &r.branches {
+                    validate_output_schemas_in_blocks(branch)?;
+                }
+            }
+            BlockDefinition::Loop(l) => validate_output_schemas_in_blocks(&l.body)?,
+            BlockDefinition::ForEach(f) => validate_output_schemas_in_blocks(&f.body)?,
+            BlockDefinition::Router(r) => {
+                for route in &r.routes {
+                    validate_output_schemas_in_blocks(&route.blocks)?;
+                }
+                if let Some(default) = &r.default {
+                    validate_output_schemas_in_blocks(default)?;
+                }
+            }
+            BlockDefinition::TryCatch(tc) => {
+                validate_output_schemas_in_blocks(&tc.try_block)?;
+                validate_output_schemas_in_blocks(&tc.catch_block)?;
+                if let Some(finally) = &tc.finally_block {
+                    validate_output_schemas_in_blocks(finally)?;
+                }
+            }
+            BlockDefinition::SubSequence(_) => {}
+            BlockDefinition::ABSplit(ab) => {
+                for variant in &ab.variants {
+                    validate_output_schemas_in_blocks(&variant.blocks)?;
+                }
+            }
+            BlockDefinition::CancellationScope(cs) => {
+                validate_output_schemas_in_blocks(&cs.blocks)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

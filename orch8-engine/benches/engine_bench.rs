@@ -46,6 +46,7 @@ fn make_sequence() -> SequenceDefinition {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -421,6 +422,7 @@ fn make_nested_blocks(depth: usize, breadth: usize) -> Vec<orch8_types::sequence
                         on_deadline_breach: None,
                         fallback_handler: None,
                         cache_key: None,
+                        output_schema: None,
                     }))
                 })
                 .collect();
@@ -532,6 +534,7 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
                                         on_deadline_breach: None,
                                         fallback_handler: None,
                                         cache_key: None,
+                                        output_schema: None,
                                     }))]
                                 })
                                 .collect(),

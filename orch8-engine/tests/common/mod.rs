@@ -45,6 +45,7 @@ pub fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -66,6 +67,7 @@ pub fn mk_step_with_params(id: &str, handler: &str, params: Value) -> BlockDefin
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -92,6 +94,7 @@ pub fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDe
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -123,6 +126,7 @@ pub fn mk_step_with_retry_backoff(
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -144,6 +148,7 @@ pub fn mk_step_with_timeout(id: &str, handler: &str, timeout_ms: u64) -> BlockDe
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -172,6 +177,7 @@ pub fn mk_step_with_delay(id: &str, handler: &str, duration: Duration) -> BlockD
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -193,6 +199,7 @@ pub fn mk_step_with_deadline(id: &str, handler: &str, deadline: Duration) -> Blo
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -222,6 +229,7 @@ pub fn mk_step_with_deadline_and_escalation(
         }),
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -243,6 +251,7 @@ pub fn mk_step_with_fallback(id: &str, handler: &str, fallback: &str) -> BlockDe
         on_deadline_breach: None,
         fallback_handler: Some(fallback.into()),
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -264,6 +273,7 @@ pub fn mk_step_with_rate_limit(id: &str, handler: &str, key: &str) -> BlockDefin
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -285,6 +295,7 @@ pub fn mk_step_with_queue(id: &str, handler: &str, queue: &str) -> BlockDefiniti
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -306,6 +317,7 @@ pub fn mk_step_with_cache_key(id: &str, handler: &str, cache_key: &str) -> Block
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: Some(cache_key.into()),
+        output_schema: None,
     }))
 }
 
@@ -327,6 +339,7 @@ pub fn mk_step_with_delay_spec(id: &str, handler: &str, delay: DelaySpec) -> Blo
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 
@@ -348,6 +361,34 @@ pub fn mk_step_with_send_window(id: &str, handler: &str, window: SendWindow) -> 
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
+    }))
+}
+
+pub fn mk_step_with_output_schema(
+    id: &str,
+    handler: &str,
+    params: Value,
+    schema: Value,
+) -> BlockDefinition {
+    BlockDefinition::Step(Box::new(StepDef {
+        id: BlockId::new(id),
+        handler: handler.into(),
+        params,
+        delay: None,
+        retry: None,
+        timeout: None,
+        rate_limit_key: None,
+        send_window: None,
+        context_access: None,
+        cancellable: true,
+        wait_for_input: None,
+        queue_name: None,
+        deadline: None,
+        on_deadline_breach: None,
+        fallback_handler: None,
+        cache_key: None,
+        output_schema: Some(schema),
     }))
 }
 
@@ -369,6 +410,7 @@ pub fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
         on_deadline_breach: None,
         fallback_handler: None,
         cache_key: None,
+        output_schema: None,
     }))
 }
 

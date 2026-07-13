@@ -934,6 +934,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }))
     }
 
@@ -1317,6 +1318,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: Some("http_request".into()),
             cache_key: None,
+            output_schema: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1356,6 +1358,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1385,6 +1388,7 @@ mod tests {
             }),
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);

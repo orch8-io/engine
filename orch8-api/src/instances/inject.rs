@@ -139,6 +139,7 @@ mod tests {
             on_deadline_breach: None,
             fallback_handler: None,
             cache_key: None,
+            output_schema: None,
         }));
         assert_eq!(block_def_id(&def), "step_1");
     }
