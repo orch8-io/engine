@@ -26,7 +26,7 @@
 //!
 //! | Field | Type | Default | Description |
 //! |-------|------|---------|-------------|
-//! | `events` | string or [string] | — | Event name(s) to wait for (required) |
+//! | `events` | string or `[string]` | — | Event name(s) to wait for (required) |
 //! | `correlation_key` | string | — | Tenant-scoped correlation key (required) |
 //! | `join` | `any` \| `all` \| `count` | `all` | Join policy |
 //! | `count` | integer | — | Required with `join: "count"` |
