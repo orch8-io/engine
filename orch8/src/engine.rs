@@ -152,8 +152,10 @@ impl Engine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(task) = task {
-            let _ = task.await;
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            tracing::error!(%error, "orch8 tick task failed during shutdown");
         }
     }
 

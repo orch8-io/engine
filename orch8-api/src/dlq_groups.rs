@@ -124,7 +124,7 @@ async fn collect_failures(
     let mut failures = Vec::with_capacity(instances.len());
     for instance in instances {
         let seq = sequences.get(instance.sequence_id.as_uuid());
-        let envelope = derive_envelope(state, &instance, seq).await;
+        let envelope = derive_envelope(state, &instance, seq).await?;
         let scope = FingerprintScope {
             sequence_id: instance.sequence_id.as_uuid().to_string(),
             sequence_version: seq.map_or(0, |s| i64::from(s.version)),
@@ -147,12 +147,12 @@ async fn derive_envelope(
     state: &AppState,
     instance: &TaskInstance,
     seq: Option<&SequenceDefinition>,
-) -> FailureEnvelope {
+) -> Result<FailureEnvelope, ApiError> {
     let outputs = state
         .storage
         .get_all_outputs(instance.id)
         .await
-        .unwrap_or_default();
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
 
     let mut best: Option<(bool, String, String)> = None; // (is_error_row, block, message)
     for o in &outputs {
@@ -204,7 +204,7 @@ async fn derive_envelope(
             envelope = envelope.with_handler(step.handler.clone());
         }
     }
-    envelope
+    Ok(envelope)
 }
 
 /// Group derived failures by fingerprint, ordered by count then recency.

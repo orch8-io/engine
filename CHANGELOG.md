@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cross-crate failure propagation**: historical release validation, DLQ grouping, and `{{ state.* }}` template resolution now surface backend failures instead of treating missing evidence/state as an empty successful result. Mobile dedup lookup failures no longer fall through to creating a duplicate workflow, and mobile sync aborts a cycle when its local outbox cannot be read rather than sending a partial request.
+- **Shutdown and cleanup observability**: server, facade-engine, and mobile lifecycle shutdown/cleanup paths now report failed background tasks and persisted dedup cleanup errors instead of silently discarding them.
+- **Workbench evidence fails closed**: execution views, run comparisons, and fork previews now propagate storage failures instead of silently converting them into empty trees, outputs, logs, or audit trails that could produce false operator conclusions.
 - **Storage capabilities fail closed**: required circuit-breaker, rollback, telemetry, key-value, garbage-collection, and mobile-sync operations no longer inherit silent no-op defaults. Every backend and decorator must implement or delegate them explicitly, preventing successful-looking data loss when a new storage wrapper is introduced.
 - **Atomic package metadata writes**: CLI package and lock files are now written through temporary files and atomically renamed, preventing truncated metadata after interruption or disk-write failure.
 - **Pool resource delete: cross-pool isolation restored**: making `DELETE /pools/{pool}/resources/{id}` idempotent had dropped the pool-membership check, allowing a resource to be deleted through another pool's URL. Deletion is now both idempotent (re-deleting a genuinely gone id returns 204) and pool-scoped (an id owned by a different pool returns 404 and is left untouched).
@@ -46,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- **Concurrent mobile outbox reads**: independent status, approval, delegation, and acknowledgement batches are loaded together for each sync cycle.
+- **Concurrent workbench reads**: independent execution-tree, output, log, audit, and sequence reads now run concurrently; run comparisons load both sides concurrently and use set membership instead of quadratic path scans.
 - **Bounded, deduplicated hot paths**: public webhooks now enforce a bounded per-peer/slug request rate; FCM access-token refreshes use single-flight caching; and mobile HTTP clients stream responses through hard size limits instead of buffering unbounded bodies.
 
 ### Security

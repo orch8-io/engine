@@ -433,11 +433,11 @@ pub(crate) async fn validate_release(
             .storage
             .get_all_outputs(instance.id)
             .await
-            .unwrap_or_default();
+            .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
         let mut recorded: std::collections::HashMap<String, serde_json::Value> =
             std::collections::HashMap::new();
         let mut recorded_blocks: Vec<String> = Vec::new();
-        for o in &outputs {
+        for o in outputs {
             let bid = o.block_id.as_str();
             if bid.starts_with('_')
                 || o.output_ref.as_deref() == Some("__error__")
@@ -445,10 +445,15 @@ pub(crate) async fn validate_release(
             {
                 continue;
             }
-            if !recorded_blocks.iter().any(|b| b == bid) {
-                recorded_blocks.push(bid.to_string());
+            match recorded.entry(bid.to_string()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    recorded_blocks.push(entry.key().clone());
+                    entry.insert(o.output);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.insert(o.output);
+                }
             }
-            recorded.insert(bid.to_string(), o.output.clone());
         }
 
         match replay_one(&candidate, &instance.context.data, recorded).await {

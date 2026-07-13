@@ -614,8 +614,13 @@ async fn drain_shutdown(
     // rehydrated against at boot.
     let drain_timeout = tokio::time::Duration::from_secs(30);
     if tokio::time::timeout(drain_timeout, async {
-        let _ = engine_handle.await;
-        let _ = grpc_handle.await;
+        let (engine_result, grpc_result) = tokio::join!(engine_handle, grpc_handle);
+        if let Err(error) = engine_result {
+            tracing::error!(%error, "engine task failed while draining shutdown");
+        }
+        if let Err(error) = grpc_result {
+            tracing::error!(%error, "gRPC task failed while draining shutdown");
+        }
         cb_registry.flush().await;
     })
     .await

@@ -350,33 +350,32 @@ impl SyncReporter {
         storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
     ) {
-        let status_rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, payload FROM sync_outbox WHERE entry_type = 'status' ORDER BY id LIMIT 100",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-
-        let approval_rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, payload FROM sync_outbox WHERE entry_type = 'approval' ORDER BY id LIMIT 50",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-
-        let delegation_rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, payload FROM sync_outbox WHERE entry_type = 'delegation' ORDER BY id LIMIT 20",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
-
-        let ack_rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT command_id FROM sync_command_acks ORDER BY created_at LIMIT 100",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .unwrap_or_default();
+        let pending = tokio::try_join!(
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'status' ORDER BY id LIMIT 100",
+            )
+            .fetch_all(&self.pool),
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'approval' ORDER BY id LIMIT 50",
+            )
+            .fetch_all(&self.pool),
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'delegation' ORDER BY id LIMIT 20",
+            )
+            .fetch_all(&self.pool),
+            sqlx::query_as::<_, (String,)>(
+                "SELECT command_id FROM sync_command_acks ORDER BY created_at LIMIT 100",
+            )
+            .fetch_all(&self.pool),
+        );
+        let (status_rows, approval_rows, delegation_rows, ack_rows) = match pending {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "failed to read pending mobile sync data");
+                self.reset_counter();
+                return;
+            }
+        };
 
         let status_updates: Vec<serde_json::Value> = status_rows
             .iter()
@@ -535,9 +534,6 @@ impl SyncReporter {
                 let output = cmd.payload.get("output");
 
                 if let (Some(iid), Some(step)) = (instance_id, step_name) {
-                    let output_str =
-                        output.map_or_else(|| "{}".to_string(), std::string::ToString::to_string);
-
                     debug!(
                         instance_id = %iid,
                         step_name = %step,
@@ -557,7 +553,7 @@ impl SyncReporter {
                         signal_type: orch8_types::signal::SignalType::Custom(format!(
                             "human_input:{step}"
                         )),
-                        payload: serde_json::from_str(&output_str).unwrap_or_default(),
+                        payload: output.cloned().unwrap_or_else(|| serde_json::json!({})),
                         delivered: false,
                         created_at: chrono::Utc::now(),
                         delivered_at: None,
@@ -1005,6 +1001,17 @@ mod tests {
         reporter.init_tables().await;
 
         (reporter, storage, lifecycle)
+    }
+
+    #[tokio::test]
+    async fn sync_read_failure_resets_counter_without_sending_partial_data() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        reporter.tick_counter.store(42, Ordering::Relaxed);
+        reporter.pool.close().await;
+
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        assert_eq!(reporter.tick_counter.load(Ordering::Relaxed), 0);
     }
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {

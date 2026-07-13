@@ -18,7 +18,6 @@ use uuid::Uuid;
 use orch8_types::execution::ExecutionNode;
 use orch8_types::ids::InstanceId;
 use orch8_types::redaction::RedactionPolicy;
-use orch8_types::step_log::StepLog;
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -131,33 +130,46 @@ pub(crate) async fn get_workbench(
         &format!("instance {id}"),
     )?;
 
-    let sequence = state
-        .storage
-        .get_sequence(instance.sequence_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
-
-    let nodes = state
-        .storage
-        .get_execution_tree(instance_id)
-        .await
-        .unwrap_or_default();
-    let outputs_raw = state
-        .storage
-        .get_all_outputs(instance_id)
-        .await
-        .unwrap_or_default();
-    let logs: Vec<StepLog> = state
-        .storage
-        .list_step_logs(instance_id)
-        .await
-        .unwrap_or_default();
-    let audit = state
-        .storage
-        .list_audit_log(instance_id, 500)
-        .await
-        .unwrap_or_default();
-
+    // These sources are independent. Fetch them concurrently and fail the
+    // joined view closed if any source is unavailable: an empty timeline or
+    // output list is valid evidence, while a storage failure is not.
+    let (sequence, nodes, outputs_raw, logs, audit) = tokio::try_join!(
+        async {
+            state
+                .storage
+                .get_sequence(instance.sequence_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "sequence"))
+        },
+        async {
+            state
+                .storage
+                .get_execution_tree(instance_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "execution_tree"))
+        },
+        async {
+            state
+                .storage
+                .get_all_outputs(instance_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "block_outputs"))
+        },
+        async {
+            state
+                .storage
+                .list_step_logs(instance_id)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "step_logs"))
+        },
+        async {
+            state
+                .storage
+                .list_audit_log(instance_id, 500)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "audit_log"))
+        },
+    )?;
     // --- unified timeline with a stable ordering contract ---
     let mut events: Vec<WorkbenchEvent> = Vec::new();
     for a in &audit {
@@ -283,6 +295,51 @@ pub struct RunComparison {
     pub matching_blocks: u32,
 }
 
+type ComparisonSide = (
+    String,
+    Vec<String>,
+    std::collections::BTreeMap<String, serde_json::Value>,
+);
+
+async fn load_comparison_side(
+    state: &AppState,
+    tenant_ctx: &crate::auth::OptionalTenant,
+    id: Uuid,
+) -> Result<ComparisonSide, ApiError> {
+    let instance = state
+        .storage
+        .get_instance(InstanceId::from_uuid(id))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    let outputs = state
+        .storage
+        .get_all_outputs(instance.id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
+    let mut order = Vec::new();
+    let mut last = std::collections::BTreeMap::new();
+    for output in outputs {
+        let block = output.block_id.as_str();
+        if block.starts_with('_') || output.output_ref.as_deref() == Some("__retry__") {
+            continue;
+        }
+        match last.entry(block.to_string()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                order.push(entry.key().clone());
+                entry.insert(output.output);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                entry.insert(output.output);
+            }
+        }
+    }
+
+    Ok((instance.state.to_string(), order, last))
+}
+
 #[utoipa::path(get, path = "/instances/{id}/compare/{other}", tag = "instances",
     params(
         ("id" = Uuid, Path, description = "Left instance"),
@@ -298,54 +355,36 @@ pub(crate) async fn compare_runs(
     tenant_ctx: crate::auth::OptionalTenant,
     Path((id, other)): Path<(Uuid, Uuid)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut sides = Vec::new();
-    for iid in [id, other] {
-        let instance = state
-            .storage
-            .get_instance(InstanceId::from_uuid(iid))
-            .await
-            .map_err(|e| ApiError::from_storage(e, "instance"))?
-            .ok_or_else(|| ApiError::NotFound(format!("instance {iid}")))?;
-        crate::auth::enforce_tenant_access(
-            &tenant_ctx,
-            &instance.tenant_id,
-            &format!("instance {iid}"),
-        )?;
-        let outputs = state
-            .storage
-            .get_all_outputs(instance.id)
-            .await
-            .unwrap_or_default();
-        let mut order: Vec<String> = Vec::new();
-        let mut last = std::collections::BTreeMap::<String, serde_json::Value>::default();
-        for o in &outputs {
-            let block = o.block_id.as_str();
-            if block.starts_with('_') || o.output_ref.as_deref() == Some("__retry__") {
-                continue;
-            }
-            if !order.iter().any(|b| b == block) {
-                order.push(block.to_string());
-            }
-            last.insert(block.to_string(), o.output.clone());
-        }
-        sides.push((instance, order, last));
-    }
-    let (right_inst, right_order, right_outputs) = sides.pop().expect("two sides");
-    let (left_inst, left_order, left_outputs) = sides.pop().expect("two sides");
+    // The two runs are independent; load them concurrently and avoid the
+    // temporary Vec/`expect` pair that encoded a runtime-only length invariant.
+    let (left, right) = tokio::try_join!(
+        load_comparison_side(&state, &tenant_ctx, id),
+        load_comparison_side(&state, &tenant_ctx, other),
+    )?;
+    let (left_state, left_order, left_outputs) = left;
+    let (right_state, right_order, right_outputs) = right;
+
+    let left_blocks: std::collections::HashSet<&str> =
+        left_order.iter().map(String::as_str).collect();
+    let right_blocks: std::collections::HashSet<&str> =
+        right_order.iter().map(String::as_str).collect();
 
     let only_left: Vec<String> = left_order
         .iter()
-        .filter(|b| !right_order.contains(b))
+        .filter(|b| !right_blocks.contains(b.as_str()))
         .cloned()
         .collect();
     let only_right: Vec<String> = right_order
         .iter()
-        .filter(|b| !left_order.contains(b))
+        .filter(|b| !left_blocks.contains(b.as_str()))
         .cloned()
         .collect();
     let mut differing = Vec::new();
     let mut matching = 0u32;
-    for block in left_order.iter().filter(|b| right_order.contains(b)) {
+    for block in left_order
+        .iter()
+        .filter(|b| right_blocks.contains(b.as_str()))
+    {
         if left_outputs.get(block) == right_outputs.get(block) {
             matching += 1;
         } else {
@@ -356,8 +395,8 @@ pub(crate) async fn compare_runs(
     Ok(Json(RunComparison {
         left: id,
         right: other,
-        left_state: left_inst.state.to_string(),
-        right_state: right_inst.state.to_string(),
+        left_state,
+        right_state,
         only_left,
         only_right,
         differing_outputs: differing,
@@ -436,7 +475,7 @@ pub(crate) async fn fork_preview(
         .storage
         .get_all_outputs(instance_id)
         .await
-        .unwrap_or_default()
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?
         .iter()
         .filter(|o| !o.block_id.as_str().starts_with('_'))
         .map(|o| o.block_id.as_str().to_string())

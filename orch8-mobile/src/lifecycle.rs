@@ -76,7 +76,7 @@ impl InstanceLifecycleManager {
                 return Ok(existing_id.clone());
             }
             drop(dedup);
-            if let Ok(Some(persisted_id)) = self.mobile_storage.get_dedup_instance(key).await {
+            if let Some(persisted_id) = self.mobile_storage.get_dedup_instance(key).await? {
                 self.dedup_keys
                     .lock()
                     .await
@@ -194,7 +194,9 @@ impl InstanceLifecycleManager {
         let mut dedup = self.dedup_keys.lock().await;
         dedup.retain(|_, v| v != instance_id);
         drop(dedup);
-        let _ = self.mobile_storage.remove_dedup(instance_id).await;
+        if let Err(error) = self.mobile_storage.remove_dedup(instance_id).await {
+            warn!(instance_id, %error, "failed to remove persisted mobile dedup entry");
+        }
 
         info!(instance_id = %instance_id, "cancelled mobile instance");
         Ok(())
@@ -367,7 +369,10 @@ impl InstanceLifecycleManager {
     pub async fn cleanup_dedup(&self, instance_id: &str) {
         let mut dedup = self.dedup_keys.lock().await;
         dedup.retain(|_, v| v != instance_id);
-        let _ = self.mobile_storage.remove_dedup(instance_id).await;
+        drop(dedup);
+        if let Err(error) = self.mobile_storage.remove_dedup(instance_id).await {
+            warn!(instance_id, %error, "failed to remove persisted mobile dedup entry");
+        }
     }
 
     async fn count_active_instances(&self) -> Result<u64, MobileError> {

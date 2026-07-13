@@ -109,7 +109,7 @@ pub(crate) async fn resolve_templates_in_params(
         let state_map = storage
             .get_all_instance_kv(instance.id)
             .await
-            .unwrap_or_default();
+            .map_err(EngineError::Storage)?;
         Some(serde_json::to_value(&state_map).unwrap_or(serde_json::Value::Null))
     } else {
         None
@@ -376,6 +376,29 @@ mod tests {
         let result =
             resolve_templates_in_params(&s, &inst, &ctx, &params, &OutputsSnapshot::new()).await;
         assert!(result.is_err(), "unknown root should error, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn resolve_state_template_propagates_storage_failure() {
+        let storage = mk_storage().await;
+        let instance = mk_instance(InstanceId::new());
+        storage.create_instance(&instance).await.unwrap();
+        let outputs = OutputsSnapshot::new();
+        // Prime the independent output snapshot so the closed pool below is
+        // observed specifically by the state-KV lookup.
+        outputs.get(&storage, instance.id).await.unwrap();
+        storage.pool().close().await;
+
+        let result = resolve_templates_in_params(
+            &storage,
+            &instance,
+            &ExecutionContext::default(),
+            &json!({"value": "{{ state.key }}"}),
+            &outputs,
+        )
+        .await;
+
+        assert!(matches!(result, Err(EngineError::Storage(_))));
     }
 
     // PR8: nested objects/arrays are recursively resolved.
