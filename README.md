@@ -243,12 +243,12 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**~7,700 tests** across two layers:
+**~8,900 tests** across two layers:
 
 | Layer | Tests | Scope |
 |-------|-------|-------|
 | **Rust unit + integration** | 6,840 | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
-| **TypeScript E2E** | 861 | 217 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if), typed dataflow |
+| **TypeScript E2E** | 2,082 | 228 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if/invariants/compensation runs/attention leases/residency/disclosure/federation/delegation), typed dataflow |
 
 **Coverage by feature area:**
 
@@ -266,7 +266,7 @@ cargo test --test '*' --workspace
 | Security | API key auth, CORS, encryption at rest, tenant isolation, webhook HMAC + replay protection |
 | Templating | Context expressions, dynamic params, conditional logic, dataflow type-checking |
 | Observability | Prometheus metrics, audit log, health endpoints, SSE streaming, workbench |
-| Portable Continuity | Ownership handoff/CAS races, capsule encryption + signing, provenance chain tamper detection, effect-receipt at-most-once, live migration + rollback, what-if simulation, fault-lab scenario shrinking, federation/residency, human attention leases |
+| Portable Continuity | Ownership handoff/CAS races, capsule encryption + signing, provenance chain tamper detection, effect-receipt at-most-once, compensation-run saga rollback, invariant evaluation, live migration + rollback, what-if simulation, fault-lab scenario shrinking + incident reproduction, federation/residency/disclosure minimization, human attention leases, device delegation, full-lifecycle integration scenarios, systematic tenant-isolation sweep |
 
 ## Project Structure
 
@@ -284,7 +284,7 @@ engine/
   orch8-types/        Shared domain types and config
   proto/              Protobuf service definitions
   migrations/         68 SQL migrations (Postgres schema; SQLite bundled schema v34)
-  tests/e2e/          217 TypeScript E2E test files (861 test cases)
+  tests/e2e/          228 TypeScript E2E test files (2,082 test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
@@ -340,7 +340,7 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 
 ## Status & Limitations
 
-Pre-1.0. This is the public release of an engine that has been running my own production for several months, with ~7,700 tests covering core paths. Honest about what it isn't yet:
+Pre-1.0. This is the public release of an engine that has been running my own production for several months, with ~8,900 tests covering core paths. Honest about what it isn't yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
 - **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
