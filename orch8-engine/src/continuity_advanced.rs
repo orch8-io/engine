@@ -8,11 +8,12 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orch8_types::continuity::{EffectReceipt, EffectState, RuntimeTrustLevel};
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, BudgetReservation, DeviceDelegation, DisclosureResult,
-    EvidenceStatus, FaultInjection, FederationEnvelope, FederationPeer, GeneratedScenario,
-    IncidentCaseId, IncidentReproduction, InvariantResult, InvariantResultId, InvariantRule,
-    LiveMigrationPlan, MigrationDisposition, MigrationPlanId, OptimizationRecommendation,
-    ProviderCandidate, ProviderDecision, ProviderDecisionId, RecommendationId, ReservationState,
-    ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfScenario,
+    DurableWritePhase, EvidenceStatus, FaultInjection, FaultLabRun, FaultProfile,
+    FederationEnvelope, FederationPeer, GeneratedScenario, IncidentCaseId, IncidentReproduction,
+    InvariantResult, InvariantResultId, InvariantRule, LiveMigrationPlan, MigrationDisposition,
+    MigrationPlanId, OptimizationRecommendation, OwnershipTransition, ProviderCandidate,
+    ProviderDecision, ProviderDecisionId, RecommendationId, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfScenario,
     WorkflowInvariant,
 };
 use orch8_types::instance::{Budget, BudgetUsage};
@@ -20,6 +21,9 @@ use sha2::{Digest, Sha256};
 
 const MAX_SCENARIO_EVENTS: usize = 64;
 const MAX_SCENARIO_FAULTS: usize = 32;
+const MAX_SCENARIO_DIMENSION: usize = 64;
+const MAX_SCENARIO_STEPS: u32 = 10_000;
+const MAX_SCENARIO_VIRTUAL_TIME_MS: u64 = 86_400_000;
 const MAX_MIGRATION_TRANSFORMS: usize = 128;
 
 pub struct InvariantEvidence<'a> {
@@ -402,15 +406,63 @@ pub fn generate_scenarios(
     max_scenarios: usize,
     seed: u64,
 ) -> Result<Vec<GeneratedScenario>, AdvancedContinuityError> {
-    if events.len() > MAX_SCENARIO_EVENTS || faults.len() > MAX_SCENARIO_FAULTS {
+    generate_scenarios_from_spec(&ScenarioGenerationSpec {
+        events: events.to_vec(),
+        faults: faults.to_vec(),
+        input_schema_cases: Vec::new(),
+        router_branches: Vec::new(),
+        event_joins: Vec::new(),
+        policy_facts: Vec::new(),
+        invariant_codes: Vec::new(),
+        retry_attempts: vec![0],
+        handoff_delays_ms: vec![0],
+        max_scenarios,
+        max_steps: MAX_SCENARIO_STEPS,
+        max_virtual_time_ms: MAX_SCENARIO_VIRTUAL_TIME_MS,
+        seed,
+    })
+}
+
+/// Generate a bounded deterministic cross-product from workflow-derived
+/// dimensions. Dimension values are deliberately strings: schema/router/event
+/// compilers retain ownership of their rich ASTs and pass only stable case IDs
+/// into the laboratory.
+pub fn generate_scenarios_from_spec(
+    spec: &ScenarioGenerationSpec,
+) -> Result<Vec<GeneratedScenario>, AdvancedContinuityError> {
+    let dimensions = [
+        spec.input_schema_cases.len(),
+        spec.router_branches.len(),
+        spec.event_joins.len(),
+        spec.policy_facts.len(),
+        spec.invariant_codes.len(),
+        spec.retry_attempts.len(),
+        spec.handoff_delays_ms.len(),
+    ];
+    if spec.events.len() > MAX_SCENARIO_EVENTS
+        || spec.faults.len() > MAX_SCENARIO_FAULTS
+        || dimensions
+            .into_iter()
+            .any(|size| size > MAX_SCENARIO_DIMENSION)
+        || spec.max_steps == 0
+        || spec.max_steps > MAX_SCENARIO_STEPS
+        || spec.max_virtual_time_ms > MAX_SCENARIO_VIRTUAL_TIME_MS
+        || spec
+            .handoff_delays_ms
+            .iter()
+            .any(|delay| *delay > spec.max_virtual_time_ms)
+    {
         return Err(AdvancedContinuityError::ScenarioTooLarge);
     }
-    let limit = max_scenarios.min(256);
+    let limit = spec.max_scenarios.min(256);
     let mut scenarios = Vec::with_capacity(limit);
     for index in 0..limit {
-        let mut event_order = events.to_vec();
+        let scenario_seed = spec
+            .seed
+            .wrapping_add(u64::try_from(index).unwrap_or(u64::MAX));
+        let mut event_order = spec.events.clone();
         if !event_order.is_empty() {
-            let rotation = usize::try_from(seed)
+            let rotation = usize::try_from(spec.seed)
                 .unwrap_or(usize::MAX)
                 .wrapping_add(index)
                 % event_order.len();
@@ -419,20 +471,126 @@ pub fn generate_scenarios(
                 event_order.reverse();
             }
         }
-        let selected_faults = if faults.is_empty() {
+        let selected_faults = if spec.faults.is_empty() {
             Vec::new()
         } else {
-            vec![faults[index % faults.len()].clone()]
+            vec![spec.faults[index % spec.faults.len()].clone()]
         };
+        let mut policy_facts = Vec::new();
+        select_case(&mut policy_facts, "input", &spec.input_schema_cases, index);
+        select_case(
+            &mut policy_facts,
+            "router",
+            &spec.router_branches,
+            index / 2,
+        );
+        select_case(&mut policy_facts, "join", &spec.event_joins, index / 3);
+        select_case(&mut policy_facts, "policy", &spec.policy_facts, index / 5);
+        select_case(
+            &mut policy_facts,
+            "invariant",
+            &spec.invariant_codes,
+            index / 7,
+        );
+        let retry_attempt = select_number(&spec.retry_attempts, index).unwrap_or_default();
+        let handoff_delay_ms =
+            select_number(&spec.handoff_delays_ms, index / 2).unwrap_or_default();
         scenarios.push(GeneratedScenario {
-            id: ScenarioId::new(),
+            id: deterministic_scenario_id(scenario_seed, index),
             event_order,
             faults: selected_faults,
-            max_steps: 10_000,
-            seed: seed.wrapping_add(u64::try_from(index).unwrap_or(u64::MAX)),
+            max_steps: spec.max_steps,
+            seed: scenario_seed,
+            retry_attempt,
+            policy_facts,
+            handoff_delay_ms,
         });
     }
     Ok(scenarios)
+}
+
+fn select_case(target: &mut Vec<String>, name: &str, values: &[String], index: usize) {
+    if let Some(value) = values.get(index % values.len().max(1)) {
+        target.push(format!("{name}:{value}"));
+    }
+}
+
+fn select_number<T: Copy>(values: &[T], index: usize) -> Option<T> {
+    values.get(index % values.len().max(1)).copied()
+}
+
+fn deterministic_scenario_id(seed: u64, index: usize) -> ScenarioId {
+    let mut digest = Sha256::new();
+    digest.update(b"orch8-scenario-v1\0");
+    digest.update(seed.to_be_bytes());
+    digest.update(u64::try_from(index).unwrap_or(u64::MAX).to_be_bytes());
+    let bytes: [u8; 16] = digest.finalize()[..16].try_into().expect("fixed digest");
+    ScenarioId::from_uuid(uuid::Uuid::from_bytes(bytes))
+}
+
+/// Execute one ownership transition against an isolated protocol model. This
+/// capability performs no production I/O and is only exposed by the API when
+/// the continuity laboratory capability is explicitly enabled.
+#[must_use]
+pub fn run_ownership_fault_lab(
+    profile: FaultProfile,
+    transition: OwnershipTransition,
+    phase: DurableWritePhase,
+    initial_epoch: u64,
+) -> FaultLabRun {
+    let boundary = match transition {
+        OwnershipTransition::RequestToQuiescing => "ownership.request",
+        OwnershipTransition::QuiescingToExported => "storage.capsule",
+        OwnershipTransition::ExportedToAccepted => "ownership.claim",
+        OwnershipTransition::AcceptedToResumed => "dispatch.resume",
+        OwnershipTransition::ResumedToCompleted => "receipt.terminal",
+    };
+    let mut trace = vec![format!("t=0 contract:{boundary}:validated")];
+    let committed = phase == DurableWritePhase::After;
+    if committed {
+        trace.push(format!("t=1 durable_write:{boundary}:committed"));
+        trace.push(format!(
+            "t=2 fault:{}:raised_after_commit",
+            fault_name(profile)
+        ));
+        trace.push("t=3 retry:cas_rejected_as_already_committed".into());
+    } else {
+        trace.push(format!(
+            "t=1 fault:{}:raised_before_commit",
+            fault_name(profile)
+        ));
+        trace.push("t=2 retry:durable_write_committed_once".into());
+    }
+    let advances_epoch = matches!(transition, OwnershipTransition::ExportedToAccepted);
+    FaultLabRun {
+        profile,
+        transition,
+        phase,
+        initial_epoch,
+        final_epoch: initial_epoch + u64::from(committed && advances_epoch),
+        committed,
+        retry_safe: true,
+        virtual_time_ms: if profile == FaultProfile::DelayedApproval {
+            30_000
+        } else {
+            3
+        },
+        trace,
+    }
+}
+
+const fn fault_name(profile: FaultProfile) -> &'static str {
+    match profile {
+        FaultProfile::WorkerDeath => "worker_death",
+        FaultProfile::DatabaseTimeout => "database_timeout",
+        FaultProfile::DuplicateDelivery => "duplicate_delivery",
+        FaultProfile::StaleOwner => "stale_owner",
+        FaultProfile::OfflineDevice => "offline_device",
+        FaultProfile::CorruptCapsule => "corrupt_capsule",
+        FaultProfile::ExpiredGrant => "expired_grant",
+        FaultProfile::ProviderOutage => "provider_outage",
+        FaultProfile::DelayedApproval => "delayed_approval",
+    }
 }
 
 pub fn minimize_reproducing_scenario(
@@ -455,6 +613,42 @@ pub fn minimize_reproducing_scenario(
         index -= 1;
         let mut candidate = scenario.clone();
         candidate.faults.remove(index);
+        attempts += 1;
+        if reproduces(&candidate) {
+            scenario = candidate;
+        }
+    }
+    index = scenario.event_order.len();
+    while index > 0 && attempts < 128 {
+        index -= 1;
+        let mut candidate = scenario.clone();
+        candidate.event_order.remove(index);
+        attempts += 1;
+        if reproduces(&candidate) {
+            scenario = candidate;
+        }
+    }
+    index = scenario.policy_facts.len();
+    while index > 0 && attempts < 128 {
+        index -= 1;
+        let mut candidate = scenario.clone();
+        candidate.policy_facts.remove(index);
+        attempts += 1;
+        if reproduces(&candidate) {
+            scenario = candidate;
+        }
+    }
+    if scenario.retry_attempt > 0 && attempts < 128 {
+        let mut candidate = scenario.clone();
+        candidate.retry_attempt = 0;
+        attempts += 1;
+        if reproduces(&candidate) {
+            scenario = candidate;
+        }
+    }
+    if scenario.handoff_delay_ms > 0 && attempts < 128 {
+        let mut candidate = scenario.clone();
+        candidate.handoff_delay_ms = 0;
         attempts += 1;
         if reproduces(&candidate) {
             scenario = candidate;
@@ -935,7 +1129,8 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use orch8_types::continuity::{ContinuityId, ExecutionEpoch};
     use orch8_types::continuity_advanced::{
-        BudgetReservationId, FaultKind, FaultPoint, ReservationState,
+        BudgetReservationId, DurableWritePhase, FaultKind, FaultPoint, FaultProfile,
+        OwnershipTransition, ReservationState, ScenarioGenerationSpec,
     };
     use orch8_types::ids::TenantId;
 
@@ -1074,6 +1269,92 @@ mod tests {
         });
         assert_eq!(result.status, EvidenceStatus::Pass);
         assert_eq!(result.scenario.unwrap().faults.len(), 1);
+    }
+
+    #[test]
+    fn state_space_generation_crosses_dimensions_and_shrinks_race_fixture() {
+        let spec = ScenarioGenerationSpec {
+            events: vec!["payment".into(), "inventory".into()],
+            faults: vec![FaultInjection {
+                point: FaultPoint::OwnershipClaim,
+                kind: FaultKind::StaleOwner,
+                occurrence: 1,
+            }],
+            input_schema_cases: vec!["valid".into(), "boundary".into()],
+            router_branches: vec!["cloud".into(), "device".into()],
+            event_joins: vec!["all".into()],
+            policy_facts: vec!["trusted".into(), "untrusted".into()],
+            invariant_codes: vec!["single_owner".into()],
+            retry_attempts: vec![0, 1, 2],
+            handoff_delays_ms: vec![0, 50],
+            max_scenarios: 12,
+            max_steps: 100,
+            max_virtual_time_ms: 1_000,
+            seed: 42,
+        };
+        let first = generate_scenarios_from_spec(&spec).unwrap();
+        let second = generate_scenarios_from_spec(&spec).unwrap();
+        assert_eq!(first, second);
+        assert!(first.iter().any(|scenario| scenario.retry_attempt == 2));
+        assert!(first.iter().any(|scenario| scenario.handoff_delay_ms == 50));
+
+        let mut race = first[5].clone();
+        race.policy_facts.push("race:stale_epoch".into());
+        let minimized = minimize_reproducing_scenario(race, |candidate| {
+            candidate
+                .policy_facts
+                .iter()
+                .any(|fact| fact == "race:stale_epoch")
+        });
+        let fixture = minimized.scenario.unwrap();
+        assert!(fixture.event_order.is_empty());
+        assert_eq!(fixture.policy_facts, ["race:stale_epoch"]);
+        assert!(fixture.faults.is_empty());
+        assert_eq!(fixture.retry_attempt, 0);
+        assert_eq!(fixture.handoff_delay_ms, 0);
+    }
+
+    #[test]
+    fn every_ownership_transition_is_retry_safe_around_its_durable_write() {
+        let transitions = [
+            OwnershipTransition::RequestToQuiescing,
+            OwnershipTransition::QuiescingToExported,
+            OwnershipTransition::ExportedToAccepted,
+            OwnershipTransition::AcceptedToResumed,
+            OwnershipTransition::ResumedToCompleted,
+        ];
+        let profiles = [
+            FaultProfile::WorkerDeath,
+            FaultProfile::DatabaseTimeout,
+            FaultProfile::DuplicateDelivery,
+            FaultProfile::StaleOwner,
+            FaultProfile::OfflineDevice,
+            FaultProfile::CorruptCapsule,
+            FaultProfile::ExpiredGrant,
+            FaultProfile::ProviderOutage,
+            FaultProfile::DelayedApproval,
+        ];
+        for (index, transition) in transitions.into_iter().enumerate() {
+            for phase in [DurableWritePhase::Before, DurableWritePhase::After] {
+                let run = run_ownership_fault_lab(profiles[index], transition, phase, 7);
+                assert!(run.retry_safe);
+                assert_eq!(run.committed, phase == DurableWritePhase::After);
+                assert_eq!(
+                    run.final_epoch,
+                    if transition == OwnershipTransition::ExportedToAccepted
+                        && phase == DurableWritePhase::After
+                    {
+                        8
+                    } else {
+                        7
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            FaultProfile::CorruptCapsule.kind(),
+            FaultKind::CorruptCapsule
+        );
     }
 
     #[test]

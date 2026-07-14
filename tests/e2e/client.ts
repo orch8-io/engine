@@ -394,6 +394,22 @@ export class Orch8Client {
     return this.#post(`/continuity/executions/${continuityId}/compensations`, req);
   }
 
+  async generateContinuityScenarios(
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse[]> {
+    return this.#post("/continuity/scenarios/generate", req);
+  }
+
+  async reproduceContinuityIncident(
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post("/continuity/scenarios/reproduce", req);
+  }
+
+  async runContinuityFaultLab(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/fault-lab/run", req);
+  }
+
   async getContinuityCompensation(id: string, tenantId: string): Promise<ApiResponse> {
     return this.#get(
       `/continuity/compensations/${id}${toQuery({ tenant_id: tenantId })}`,

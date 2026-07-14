@@ -139,6 +139,7 @@ describe("Portable Continuity", () => {
         ORCH8_ARTIFACT_BACKEND: "local",
         ORCH8_ARTIFACT_PATH: artifactDir,
         ORCH8_LOG_LEVEL: "error",
+        ORCH8_CONTINUITY_LAB_ENABLED: "true",
       },
     });
   });
@@ -1486,6 +1487,69 @@ describe("Portable Continuity", () => {
       String(failures[0]!.summary),
       /duplicate effect dispatch or commit evidence/,
     );
+  });
+
+  it("fault-injects every ownership write and minimizes deterministic scenarios", async () => {
+    const transitions = [
+      "request_to_quiescing",
+      "quiescing_to_exported",
+      "exported_to_accepted",
+      "accepted_to_resumed",
+      "resumed_to_completed",
+    ];
+    for (const transition of transitions) {
+      for (const phase of ["before", "after"]) {
+        const run = await client.runContinuityFaultLab({
+          profile: transition === "exported_to_accepted" ? "stale_owner" : "worker_death",
+          transition,
+          phase,
+          initial_epoch: 4,
+        });
+        assert.equal(run.retry_safe, true);
+        assert.equal(run.committed, phase === "after");
+        assert.equal(
+          run.final_epoch,
+          transition === "exported_to_accepted" && phase === "after" ? 5 : 4,
+        );
+        assert.ok(Array.isArray(run.trace));
+      }
+    }
+
+    const request = {
+      events: ["payment", "inventory"],
+      faults: [{ point: "ownership_claim", kind: "stale_owner", occurrence: 1 }],
+      input_schema_cases: ["valid", "boundary"],
+      router_branches: ["cloud", "device"],
+      event_joins: ["all"],
+      policy_facts: ["trusted", "untrusted"],
+      invariant_codes: ["single_owner"],
+      retry_attempts: [0, 1, 2],
+      handoff_delays_ms: [0, 50],
+      max_scenarios: 12,
+      max_steps: 100,
+      max_virtual_time_ms: 1_000,
+      seed: 42,
+    };
+    const first = await client.generateContinuityScenarios(request);
+    const second = await client.generateContinuityScenarios(request);
+    assert.deepEqual(first, second, "same seed must produce byte-stable fixtures");
+    assert.equal(first.length, 12);
+    assert.ok(first.some((scenario) => scenario.retry_attempt === 2));
+    assert.ok(first.some((scenario) => scenario.handoff_delay_ms === 50));
+
+    const candidate = structuredClone(first[5]!);
+    candidate.faults = [
+      ...(candidate.faults as unknown[]),
+      { point: "ownership_claim", kind: "database_timeout", occurrence: 1 },
+    ];
+    const minimized = await client.reproduceContinuityIncident({
+      scenario: candidate,
+      required_fault_kind: "database_timeout",
+    });
+    assert.equal(minimized.status, "pass");
+    assert.equal((minimized.scenario as any).faults.length, 1);
+    assert.deepEqual((minimized.scenario as any).event_order, []);
+    assert.deepEqual((minimized.scenario as any).policy_facts, []);
   });
 
   it("rejects self-asserted elevated runtime trust", async () => {

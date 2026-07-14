@@ -356,6 +356,71 @@ pub enum FaultKind {
     DelayedApproval,
 }
 
+/// Named, reviewable laboratory profiles. Each profile maps to one stable
+/// fault kind; callers do not need to construct low-level schedules by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultProfile {
+    WorkerDeath,
+    DatabaseTimeout,
+    DuplicateDelivery,
+    StaleOwner,
+    OfflineDevice,
+    CorruptCapsule,
+    ExpiredGrant,
+    ProviderOutage,
+    DelayedApproval,
+}
+
+impl FaultProfile {
+    #[must_use]
+    pub const fn kind(self) -> FaultKind {
+        match self {
+            Self::WorkerDeath => FaultKind::WorkerDeath,
+            Self::DatabaseTimeout => FaultKind::DatabaseTimeout,
+            Self::DuplicateDelivery => FaultKind::DuplicateDelivery,
+            Self::StaleOwner => FaultKind::StaleOwner,
+            Self::OfflineDevice => FaultKind::OfflineDevice,
+            Self::CorruptCapsule => FaultKind::CorruptCapsule,
+            Self::ExpiredGrant => FaultKind::ExpiredGrant,
+            Self::ProviderOutage => FaultKind::ProviderOutage,
+            Self::DelayedApproval => FaultKind::DelayedApproval,
+        }
+    }
+}
+
+/// The ownership protocol transition exercised by the isolated fault lab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipTransition {
+    RequestToQuiescing,
+    QuiescingToExported,
+    ExportedToAccepted,
+    AcceptedToResumed,
+    ResumedToCompleted,
+}
+
+/// Whether a fault is raised before or after the simulated durable commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableWritePhase {
+    Before,
+    After,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FaultLabRun {
+    pub profile: FaultProfile,
+    pub transition: OwnershipTransition,
+    pub phase: DurableWritePhase,
+    pub initial_epoch: u64,
+    pub final_epoch: u64,
+    pub committed: bool,
+    pub retry_safe: bool,
+    pub virtual_time_ms: u64,
+    pub trace: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct FaultInjection {
     pub point: FaultPoint,
@@ -369,6 +434,41 @@ pub struct GeneratedScenario {
     pub event_order: Vec<String>,
     pub faults: Vec<FaultInjection>,
     pub max_steps: u32,
+    pub seed: u64,
+    /// Retry attempt selected from the declared retry-policy state space.
+    #[serde(default)]
+    pub retry_attempt: u32,
+    /// Deterministically selected policy facts (for example locality or trust).
+    #[serde(default)]
+    pub policy_facts: Vec<String>,
+    /// Virtual handoff delay selected from the bounded timing state space.
+    #[serde(default)]
+    pub handoff_delay_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScenarioGenerationSpec {
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub faults: Vec<FaultInjection>,
+    #[serde(default)]
+    pub input_schema_cases: Vec<String>,
+    #[serde(default)]
+    pub router_branches: Vec<String>,
+    #[serde(default)]
+    pub event_joins: Vec<String>,
+    #[serde(default)]
+    pub policy_facts: Vec<String>,
+    #[serde(default)]
+    pub invariant_codes: Vec<String>,
+    #[serde(default)]
+    pub retry_attempts: Vec<u32>,
+    #[serde(default)]
+    pub handoff_delays_ms: Vec<u64>,
+    pub max_scenarios: usize,
+    pub max_steps: u32,
+    pub max_virtual_time_ms: u64,
     pub seed: u64,
 }
 

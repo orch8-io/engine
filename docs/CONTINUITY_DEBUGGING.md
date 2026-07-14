@@ -4,6 +4,26 @@ Use continuity checkpoints to inspect one execution across runtime handoffs,
 run an effect-free continuation from a durable boundary, and turn the same
 evidence into a reviewable offline regression fixture.
 
+## Fault laboratory and scenario exploration
+
+The fault laboratory is isolated from production provider I/O and is disabled by
+default. Enable it only in a non-production process with
+`ORCH8_CONTINUITY_LAB_ENABLED=true`. `POST /continuity/fault-lab/run` (or
+`orch8 execution run-fault-lab --request <file>`) accepts a named profile, an
+ownership transition, a `before` or `after` durable-write phase, and an initial
+epoch. Its virtual-time trace states whether the write committed and whether a
+retry is safe; an `exported_to_accepted` write advances the epoch only after the
+commit.
+
+`POST /continuity/scenarios/generate` derives a bounded schedule from stable case
+IDs supplied by schema, router, event-join, retry, policy, invariant, and handoff
+timing analysis. Always set `max_scenarios`, `max_steps`, and
+`max_virtual_time_ms`; the server rejects dimensions above its hard limits.
+Identical inputs and seeds return identical scenario IDs and schedules.
+`POST /continuity/scenarios/reproduce` then removes irrelevant faults, events,
+policy facts, retries, and delays while preserving the requested stable failure,
+yielding a small fixture suitable for source control.
+
 ## Inspect a boundary
 
 List the bounded checkpoint index:

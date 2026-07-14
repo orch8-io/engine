@@ -199,6 +199,8 @@ pub enum ExecutionCmd {
     },
     /// Generate bounded fault/state-space scenarios from a JSON request.
     GenerateScenarios { request: PathBuf },
+    /// Run one explicitly enabled, isolated ownership fault-lab transition.
+    RunFaultLab { request: PathBuf },
     /// Minimize an incident reproduction from a JSON request.
     ReproduceIncident { request: PathBuf },
     /// Select a provider under quality, locality, latency, and cost policy.
@@ -714,6 +716,15 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/scenarios/generate"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::RunFaultLab { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/fault-lab/run"),
                 &request,
                 format,
             )

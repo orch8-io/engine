@@ -31,12 +31,13 @@ use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
     CheckpointBoundary, CompensationExecutionStep, CompensationPlan, CompensationRunId,
     CompensationRunRecord, CompensationRunState, CompensationStepState, DeviceDelegation,
-    EvaluationId, EvaluationScore, ExtractedEffectMock, ExtractedTestFixture, FaultInjection,
-    FaultKind, FederationEnvelope, FederationPeer, ForkEffectMode, GeneratedScenario, InvariantId,
-    InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
-    MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule, ProviderCandidate,
-    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform,
-    WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
+    DurableWritePhase, EvaluationId, EvaluationScore, ExtractedEffectMock, ExtractedTestFixture,
+    FaultInjection, FaultKind, FaultLabRun, FaultProfile, FederationEnvelope, FederationPeer,
+    ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
+    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
+    MigrationPlanId, MigrationRollbackCapsule, OwnershipTransition, ProviderCandidate,
+    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
+    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
@@ -173,6 +174,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/continuity/scenarios/generate", post(generate_scenarios))
         .route("/continuity/scenarios/reproduce", post(reproduce_incident))
+        .route("/continuity/fault-lab/run", post(run_fault_lab))
         .route("/continuity/providers/choose", post(choose_provider))
         .route(
             "/continuity/optimizations/recommend",
@@ -4738,8 +4740,34 @@ struct GenerateScenariosRequest {
     events: Vec<String>,
     #[serde(default)]
     faults: Vec<FaultInjection>,
+    #[serde(default)]
+    input_schema_cases: Vec<String>,
+    #[serde(default)]
+    router_branches: Vec<String>,
+    #[serde(default)]
+    event_joins: Vec<String>,
+    #[serde(default)]
+    policy_facts: Vec<String>,
+    #[serde(default)]
+    invariant_codes: Vec<String>,
+    #[serde(default)]
+    retry_attempts: Vec<u32>,
+    #[serde(default)]
+    handoff_delays_ms: Vec<u64>,
     max_scenarios: usize,
+    #[serde(default = "default_scenario_steps")]
+    max_steps: u32,
+    #[serde(default = "default_scenario_time")]
+    max_virtual_time_ms: u64,
     seed: u64,
+}
+
+const fn default_scenario_steps() -> u32 {
+    10_000
+}
+
+const fn default_scenario_time() -> u64 {
+    86_400_000
 }
 
 async fn generate_scenarios(
@@ -4751,14 +4779,51 @@ async fn generate_scenarios(
             "continuity fault laboratory is disabled".into(),
         ));
     }
-    orch8_engine::continuity_advanced::generate_scenarios(
-        &body.events,
-        &body.faults,
-        body.max_scenarios,
-        body.seed,
-    )
+    orch8_engine::continuity_advanced::generate_scenarios_from_spec(&ScenarioGenerationSpec {
+        events: body.events,
+        faults: body.faults,
+        input_schema_cases: body.input_schema_cases,
+        router_branches: body.router_branches,
+        event_joins: body.event_joins,
+        policy_facts: body.policy_facts,
+        invariant_codes: body.invariant_codes,
+        retry_attempts: body.retry_attempts,
+        handoff_delays_ms: body.handoff_delays_ms,
+        max_scenarios: body.max_scenarios,
+        max_steps: body.max_steps,
+        max_virtual_time_ms: body.max_virtual_time_ms,
+        seed: body.seed,
+    })
     .map(Json)
     .map_err(|error| ApiError::InvalidArgument(error.to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+struct RunFaultLabRequest {
+    profile: FaultProfile,
+    transition: OwnershipTransition,
+    phase: DurableWritePhase,
+    #[serde(default)]
+    initial_epoch: u64,
+}
+
+async fn run_fault_lab(
+    State(state): State<AppState>,
+    Json(body): Json<RunFaultLabRequest>,
+) -> Result<Json<FaultLabRun>, ApiError> {
+    if !state.continuity_lab_enabled {
+        return Err(ApiError::Unavailable(
+            "continuity fault laboratory is disabled".into(),
+        ));
+    }
+    Ok(Json(
+        orch8_engine::continuity_advanced::run_ownership_fault_lab(
+            body.profile,
+            body.transition,
+            body.phase,
+            body.initial_epoch,
+        ),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
