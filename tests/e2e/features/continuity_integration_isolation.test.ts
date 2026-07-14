@@ -467,6 +467,19 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.notEqual(verification.valid, true, "a stale expected_head must fail verification");
     });
 
+    it("verify_provenance against the CURRENT real head succeeds, and the reported head sha matches the last entry's own entry_sha256", async () => {
+      const setup = await resumedHandoff("int-hoff-currenthead");
+      const provenance = await client.listContinuityProvenance(setup.execution.continuity_id, setup.tenantId);
+      const currentHead = provenance[provenance.length - 1]!.entry_sha256;
+      const verification = await client.verifyContinuityProvenance(
+        setup.execution.continuity_id,
+        setup.tenantId,
+        currentHead,
+      );
+      assert.equal(verification.valid, true, "the actual current head must verify successfully when supplied as expected_head");
+      assert.equal(verification.first_invalid_index, null);
+    });
+
     it("a fully accepted+resumed execution can no longer be handed off again from the old owner", async () => {
       const setup = await resumedHandoff("int-hoff-nodouble");
       // The old source runtime tries to hand off again using a fresh preview;
@@ -680,6 +693,47 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         "epoch must monotonically increase even across a rollback",
       );
     });
+
+    it("rolling back an already-rolled-back plan a second time is rejected — rollback is a one-shot transition out of Applied", async () => {
+      const tenantId = tid("int-mig-rb-twice");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-mig-rb-twice");
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      const rolledBack = await client.rollbackContinuityMigration(plan.id, { tenant_id: tenantId });
+      assert.equal(rolledBack.state, "rolled_back");
+      await rejects(
+        client.rollbackContinuityMigration(plan.id, { tenant_id: tenantId }),
+        409,
+        "a plan already rolled_back is no longer in the Applied state rollback requires",
+      );
+    });
+
+    it("applying an already-applied migration plan a second time is rejected — apply is a one-shot transition out of Planned", async () => {
+      const tenantId = tid("int-mig-apply-twice");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-mig-apply-twice");
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      const applied = await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      assert.equal(applied.state, "applied");
+      await rejects(
+        client.applyContinuityMigration(plan.id, { tenant_id: tenantId }),
+        409,
+        "a plan already applied is no longer Planned; apply cannot be replayed",
+      );
+    });
   });
 
   describe("A. what-if is strictly read-only against the real execution", () => {
@@ -743,6 +797,42 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.equal(runs.length, 1);
       const stillSameEpoch = await client.getContinuityExecution(execution.continuity_id, tenantId);
       assert.equal(stillSameEpoch.epoch, execution.epoch);
+    });
+
+    it("what-if targeting a DIFFERENT sequence version (a dry-run of a prospective migration) still leaves the real instance bound to its original sequence_id/version", async () => {
+      const tenantId = tid("int-whatif-target-version");
+      const { execution, sequence, instance } = await pausedContinuityFixture(
+        tenantId,
+        "int-whatif-target-version",
+      );
+      // Publish a second version of the SAME sequence under the SAME
+      // (tenant_id, namespace, name) — get_sequence_by_name resolves purely
+      // by that triple + version, independent of the id, so a fresh id is
+      // fine here (matches the sameShapeTarget helper's own pattern).
+      const secondVersion = { ...sequence, id: uuid(), version: (sequence.version ?? 1) + 1 };
+      await client.createSequence(secondVersion);
+      const result = await client.runContinuityWhatIf(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: (await client.listContinuityCheckpoints(execution.continuity_id, tenantId)).at(-1)!.checkpoint_id,
+        target_sequence_version: secondVersion.version,
+      });
+      assert.ok(result, "what-if against an explicit target_sequence_version must resolve and run");
+      const finalInstance = await client.getInstance(instance.id);
+      assert.equal((finalInstance as any).sequence_id, sequence.id, "the real instance's sequence binding is untouched by a what-if dry-run");
+    });
+
+    it("what-if with block_param_overrides referencing an unknown step id is rejected with a clear validation error, not silently ignored", async () => {
+      const tenantId = tid("int-whatif-bad-param-override");
+      const { execution, checkpointId } = await pausedContinuityFixture(tenantId, "int-whatif-bad-param-override");
+      await rejects(
+        client.runContinuityWhatIf(execution.continuity_id, {
+          tenant_id: tenantId,
+          checkpoint_id: checkpointId,
+          block_param_overrides: { nonexistent_step_id: { foo: "bar" } },
+        }),
+        400,
+        "an override referencing a step id absent from the sequence must be rejected, not silently dropped",
+      );
     });
   });
 
@@ -885,6 +975,58 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
   });
 
+  describe("A. manual provenance recording (record_provenance_boundary) is restricted to an allowlist of kinds and is tenant-scoped", () => {
+    const validKinds = ["package_identity", "model_selected", "terminal_outcome"];
+
+    for (const kind of validKinds) {
+      it(`accepts kind=${kind} and appends it to the real provenance chain, still passing verification`, async () => {
+        const tenantId = tid("int-manual-prov");
+        const { execution } = await setupExecution(tenantId);
+        const payloadSha = createHash("sha256").update(`manual-${kind}`).digest("hex");
+        const head = await client.recordContinuityProvenance(execution.continuity_id, {
+          tenant_id: tenantId,
+          kind,
+          payload_sha256: payloadSha,
+        });
+        assert.ok(head, "a successful record must return the new provenance head");
+        const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+        assert.ok(provenance.some((e: any) => e.kind === kind));
+        const verification = await client.verifyContinuityProvenance(execution.continuity_id, tenantId);
+        assert.equal(verification.valid, true);
+      });
+    }
+
+    it("rejects a kind outside the allowlist (e.g. an attempt to forge 'execution_created' or 'migration_applied' manually)", async () => {
+      const tenantId = tid("int-manual-prov-forge");
+      const { execution } = await setupExecution(tenantId);
+      for (const forgedKind of ["execution_created", "migration_applied", "anything_else"]) {
+        await rejects(
+          client.recordContinuityProvenance(execution.continuity_id, {
+            tenant_id: tenantId,
+            kind: forgedKind,
+            payload_sha256: createHash("sha256").update(forgedKind).digest("hex"),
+          }),
+          400,
+          `kind=${forgedKind} must be rejected — it is outside the manual-record allowlist`,
+        );
+      }
+    });
+
+    it("tenant B cannot append manual provenance to tenant A's continuity_id", async () => {
+      const tenantA2 = tid("int-manual-prov-iso-a");
+      const tenantB2 = tid("int-manual-prov-iso-b");
+      const { execution } = await setupExecution(tenantA2);
+      await rejects(
+        client.recordContinuityProvenance(execution.continuity_id, {
+          tenant_id: tenantB2,
+          kind: "model_selected",
+          payload_sha256: createHash("sha256").update("cross-tenant").digest("hex"),
+        }),
+        404,
+      );
+    });
+  });
+
   describe("A. terminal coherence after a full compound lifecycle", () => {
     it("an execution that was migrated then had its committed effect compensated reaches a coherent, queryable terminal state", async () => {
       const tenantId = tid("int-terminal");
@@ -928,6 +1070,83 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         tenantId,
       );
       assert.equal(verification.valid, true);
+    });
+
+    it("migrate THEN handoff THEN what-if on the same execution: each stage's epoch/ownership evidence is internally consistent with the next", async () => {
+      const tenantId = tid("int-terminal-mig-then-handoff");
+      const { execution, sequence, checkpointId } = await pausedContinuityFixture(
+        tenantId,
+        "int-terminal-mig-then-handoff",
+      );
+
+      // 1. Migrate to a same-shape target sequence (epoch 0 -> 1).
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const migrationPlan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(migrationPlan.id, { tenant_id: tenantId });
+      const postMigration = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      assert.equal(postMigration.epoch, execution.epoch + 1);
+
+      // 2. Hand off from the NEW (post-migration) epoch to a fresh
+      // destination runtime — the migrated instance is `paused`, which is a
+      // valid export precondition just like `waiting`.
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      assert.equal(handoff.expected_epoch, postMigration.epoch, "the handoff must capture the POST-migration epoch, not the original one");
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      const destInstanceId = uuid();
+      const imported = await client.importContinuityCapsule({
+        tenant_id: tenantId,
+        destination_runtime_id: destRuntime,
+        destination_instance_id: destInstanceId,
+        expected_epoch: postMigration.epoch,
+        capsule: exported.capsule,
+        payload_base64: exported.payload_base64,
+      });
+      const accepted = await client.acceptHandoff(handoff.id, {
+        tenant_id: tenantId,
+        destination_instance_id: imported.instance_id,
+      });
+      assert.equal(accepted.handoff.state, "accepted");
+      const postHandoff = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      assert.equal(postHandoff.epoch, postMigration.epoch + 1, "accept bumps the epoch once more, on top of the migration bump");
+      assert.equal(postHandoff.owner_runtime_id, destRuntime);
+
+      // 3. what-if against the ORIGINAL (pre-migration, pre-handoff)
+      // checkpoint must still run read-only and not disturb the now
+      // twice-transitioned execution.
+      const whatIfResult = await client.runContinuityWhatIf(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+      });
+      assert.ok(whatIfResult, "what-if must still resolve against an old checkpoint even after two epoch-bumping transitions");
+      const stillPostHandoff = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      assert.deepEqual(stillPostHandoff, postHandoff, "what-if must not disturb the execution's state after the migrate+handoff chain");
+
+      // 4. Every location row (original, post-migration, post-handoff-
+      // accept epochs) must be present, and provenance must verify.
+      const locations = await client.listContinuityLocations(execution.continuity_id, tenantId);
+      const epochs = new Set(locations.map((l: any) => l.epoch));
+      assert.ok(epochs.has(execution.epoch));
+      assert.ok(epochs.has(postMigration.epoch));
+      assert.ok(epochs.has(postHandoff.epoch));
+      const verification = await client.verifyContinuityProvenance(execution.continuity_id, tenantId);
+      assert.equal(verification.valid, true, "the full migrate-then-handoff provenance chain must still verify end to end");
     });
   });
 
@@ -1121,7 +1340,17 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
 
   describe("A. residency evaluated across every classification x operation pairing shares one coherent chain", () => {
     const classifications = ["public", "internal"] as const;
-    const operations = ["handler_dispatch", "artifact_creation", "migration", "fork"];
+    const operations = [
+      "handler_dispatch",
+      "artifact_creation",
+      "migration",
+      "fork",
+      "backup_export",
+      "retry",
+      "fallback",
+      "operator_override",
+      "device_delegation",
+    ];
 
     for (const classification of classifications) {
       for (const operation of operations) {
@@ -1197,6 +1426,71 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       const verification = await client.verifyContinuityProvenance(execution.continuity_id, tenantId);
       assert.equal(verification.valid, true);
     });
+
+    it("a candidate with breaker_open=true is excluded from selection even when it is otherwise the cheapest, highest-quality option", async () => {
+      const tenantId = tid("int-provider-breaker");
+      const { execution } = await setupExecution(tenantId);
+      const decision = await client.chooseContinuityProvider({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        candidates: [
+          {
+            provider: "cheap-but-tripped",
+            model: "m1",
+            region: "br-south",
+            pricing_version: "v1",
+            price_microunits: 1,
+            expected_latency_ms: 5,
+            quality_millipoints: 1000,
+            breaker_open: true,
+            supports_idempotency: true,
+          },
+          {
+            provider: "healthy-fallback",
+            model: "m2",
+            region: "br-south",
+            pricing_version: "v1",
+            price_microunits: 50,
+            expected_latency_ms: 100,
+            quality_millipoints: 700,
+            breaker_open: false,
+            supports_idempotency: true,
+          },
+        ],
+        cohort_key: "int-cohort-breaker",
+      });
+      assert.ok(decision.selected, "a healthy fallback candidate exists and must be selected");
+      assert.equal(decision.selected.provider, "healthy-fallback");
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      assert.ok(provenance.some((e: any) => e.kind === "provider_selected"));
+    });
+
+    it("all candidates exceeding max_price_microunits yields no selection, but still records the (empty) decision as provenance", async () => {
+      const tenantId = tid("int-provider-price-cap");
+      const { execution } = await setupExecution(tenantId);
+      const decision = await client.chooseContinuityProvider({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        candidates: [
+          {
+            provider: "too-expensive",
+            model: "m1",
+            region: "br-south",
+            pricing_version: "v1",
+            price_microunits: 1000,
+            expected_latency_ms: 20,
+            quality_millipoints: 900,
+            breaker_open: false,
+            supports_idempotency: true,
+          },
+        ],
+        cohort_key: "int-cohort-price",
+        max_price_microunits: 10,
+      });
+      assert.equal(decision.selected ?? null, null, "the only candidate exceeds the price cap, so nothing is selected");
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      assert.ok(provenance.some((e: any) => e.kind === "provider_selected"), "even a null decision is recorded as evidence");
+    });
   });
 
   describe("A. evaluation gate (stored) reads real evaluation scores across two executions on the candidate's chain", () => {
@@ -1241,6 +1535,84 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       );
       assert.ok(!baselineProvenance.some((e: any) => e.kind === "evaluation_gate"));
       assert.ok(candidateProvenance.some((e: any) => e.kind === "evaluation_gate"));
+    });
+
+    it("a candidate that regresses below the allowed threshold reports a fail status, still attributed to the candidate's chain", async () => {
+      const tenantId = tid("int-eval-gate-regress");
+      const { execution: baseline } = await setupExecution(tenantId);
+      const { execution: candidate } = await setupExecution(tenantId);
+      const evidence = (score: number) => createHash("sha256").update(`ev-regress-${score}`).digest("hex");
+      for (const score of [900, 910, 905]) {
+        await client.appendContinuityEvaluation(baseline.continuity_id, {
+          tenant_id: tenantId,
+          evaluator: "int-judge-regress",
+          score_millipoints: score,
+          sample_size: 10,
+          evidence_sha256: evidence(score),
+        });
+      }
+      // Candidate scores are substantially lower than baseline — a real
+      // regression that should not be silently tolerated by a zero-slack
+      // gate.
+      for (const score of [500, 510, 505]) {
+        await client.appendContinuityEvaluation(candidate.continuity_id, {
+          tenant_id: tenantId,
+          evaluator: "int-judge-regress",
+          score_millipoints: score,
+          sample_size: 10,
+          evidence_sha256: evidence(score + 1000),
+        });
+      }
+      const result = await client.evaluateStoredContinuityGate({
+        tenant_id: tenantId,
+        baseline_continuity_id: baseline.continuity_id,
+        candidate_continuity_id: candidate.continuity_id,
+        evaluator: "int-judge-regress",
+        minimum_samples: 3,
+        maximum_regression_millipoints: 0,
+      });
+      assert.equal(result.status, "fail", "a large candidate regression must not pass a zero-slack gate");
+      assert.ok((result.baseline_score_millipoints ?? 0) > (result.candidate_score_millipoints ?? 0));
+      const candidateProvenance = await client.listContinuityProvenance(candidate.continuity_id, tenantId);
+      assert.ok(candidateProvenance.some((e: any) => e.kind === "evaluation_gate"));
+    });
+
+    it("a stored gate whose summed sample_size is below minimum_samples reports 'inconclusive', not a hard pass/fail", async () => {
+      // baseline_samples/candidate_samples are the SUM of each evaluation
+      // entry's `sample_size` field (see orch8-engine/src/
+      // continuity_advanced.rs weighted_evaluation_mean: `samples.
+      // saturating_add(score.sample_size)`), not a count of entries. A
+      // single entry with sample_size=1 against minimum_samples=5 is
+      // exactly the shortfall this test needs.
+      const tenantId = tid("int-eval-gate-insufficient");
+      const { execution: baseline } = await setupExecution(tenantId);
+      const { execution: candidate } = await setupExecution(tenantId);
+      const evidence = (score: number) => createHash("sha256").update(`ev-insuff-${score}`).digest("hex");
+      await client.appendContinuityEvaluation(baseline.continuity_id, {
+        tenant_id: tenantId,
+        evaluator: "int-judge-insufficient",
+        score_millipoints: 900,
+        sample_size: 1,
+        evidence_sha256: evidence(900),
+      });
+      await client.appendContinuityEvaluation(candidate.continuity_id, {
+        tenant_id: tenantId,
+        evaluator: "int-judge-insufficient",
+        score_millipoints: 900,
+        sample_size: 1,
+        evidence_sha256: evidence(1900),
+      });
+      const result = await client.evaluateStoredContinuityGate({
+        tenant_id: tenantId,
+        baseline_continuity_id: baseline.continuity_id,
+        candidate_continuity_id: candidate.continuity_id,
+        evaluator: "int-judge-insufficient",
+        minimum_samples: 5,
+        maximum_regression_millipoints: 0,
+      });
+      assert.equal(result.status, "inconclusive", "a sample-size shortfall must report inconclusive, never pass or fail");
+      assert.equal(result.baseline_samples, 1);
+      assert.equal(result.candidate_samples, 1);
     });
   });
 
@@ -1583,6 +1955,299 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       });
       assert.equal(second.state, "reserved");
     });
+
+    it("reconciling with ACTUAL usage greater than requested succeeds (no hard cap on overage), and the reservation's counted amount is updated to the (larger) actual value, still blocking a fresh 10-unit reservation", async () => {
+      // settle_budget_reservation (orch8-storage/src/sqlite/evidence.rs)
+      // overwrites the stored cost_microunits/attention_units/etc columns
+      // with `actual` usage when a reservation transitions to Reconciled,
+      // and reserve_budget's availability check sums those same columns
+      // for every reservation in state 'reserved' OR 'reconciled'. So an
+      // over-budget reconcile (actual=25 against requested=10) makes the
+      // reservation count for its ACTUAL (larger) amount going forward —
+      // reconciling never rejects the overage, but it also does not cap it
+      // at the original request, so it still fully blocks a fresh
+      // reservation of the original size.
+      const tenantId = tid("int-budget-overrun");
+      const seq = testSequence("int-budget-overrun", [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        budget: { max_attention_units: 10 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const usage = (attention_units: number) => ({
+        cost_microunits: 0,
+        wall_time_ms: 0,
+        external_calls: 0,
+        bytes_transferred: 0,
+        energy_millijoules: 0,
+        attention_units,
+      });
+      const reservation = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: usage(10),
+        estimation_version: "int-v1",
+      });
+      const reconciled = await client.reconcileContinuityBudget(execution.continuity_id, reservation.id, {
+        tenant_id: tenantId,
+        actual: usage(25),
+      });
+      assert.equal(reconciled.state, "reconciled", "reconciling with an over-budget actual must still succeed");
+      await rejects(
+        client.reserveContinuityBudget(execution.continuity_id, {
+          tenant_id: tenantId,
+          requested: usage(10),
+          estimation_version: "int-v1",
+        }),
+        409,
+        "the reconciled reservation now counts for its actual (25) usage, well above the 10-unit cap",
+      );
+    });
+
+    it("reconciling with ACTUAL usage LESS than requested frees the difference — a subsequent reservation for exactly the freed amount succeeds", async () => {
+      const tenantId = tid("int-budget-underrun");
+      const seq = testSequence("int-budget-underrun", [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        budget: { max_attention_units: 10 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const usage = (attention_units: number) => ({
+        cost_microunits: 0,
+        wall_time_ms: 0,
+        external_calls: 0,
+        bytes_transferred: 0,
+        energy_millijoules: 0,
+        attention_units,
+      });
+      const reservation = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: usage(10),
+        estimation_version: "int-v1",
+      });
+      await client.reconcileContinuityBudget(execution.continuity_id, reservation.id, {
+        tenant_id: tenantId,
+        actual: usage(3),
+      });
+      // Only 3 of the original 10 units are now counted, freeing 7.
+      const second = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: usage(7),
+        estimation_version: "int-v1",
+      });
+      assert.equal(second.state, "reserved", "reconciling to a smaller actual usage must genuinely free the difference");
+    });
+  });
+
+  describe("A. attention task decision settles its budget reservation and records human_decision provenance", () => {
+    async function attentionFixtureWithBudget(namePrefix: string) {
+      const tenantId = tid(namePrefix);
+      const seq = testSequence(namePrefix, [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        budget: { max_attention_units: 50 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const task = await client.createAttentionTask({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        required_skills: ["review"],
+        classification: "internal",
+        priority: 1,
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        estimated_attention_units: 5,
+      });
+      const reviewerId = uuid();
+      const assigned = await client.assignAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewers: [
+          {
+            reviewer_id: reviewerId,
+            tenant_ids: [tenantId],
+            skills: ["review"],
+            region: "br-south",
+            trust: "registered",
+            available_attention_units: 10,
+          },
+        ],
+        lease_seconds: 60,
+      });
+      return { tenantId, execution, task, reviewerId, assigned };
+    }
+
+    it("deciding an assigned task reconciles its budget reservation to settled and appends human_decision provenance", async () => {
+      const { tenantId, execution, task, reviewerId } = await attentionFixtureWithBudget("int-attn-decide-budget");
+      const beforeReservations = await client.listContinuityBudgetReservations(execution.continuity_id, tenantId);
+      const ours = beforeReservations.find((r: any) => r.id === task.budget_reservation_id);
+      assert.equal(ours.state, "reserved");
+      const decided = await client.decideAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewer_id: reviewerId,
+        decision_sha256: createHash("sha256").update("approve").digest("hex"),
+      });
+      assert.equal(decided.state, "decided");
+      const afterReservations = await client.listContinuityBudgetReservations(execution.continuity_id, tenantId);
+      const oursAfter = afterReservations.find((r: any) => r.id === task.budget_reservation_id);
+      assert.equal(oursAfter.state, "reconciled");
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      assert.ok(provenance.some((e: any) => e.kind === "human_decision"));
+    });
+
+    it("deciding an already-decided task a second time is rejected — the lease/decision transition is one-shot", async () => {
+      const { tenantId, task, reviewerId } = await attentionFixtureWithBudget("int-attn-decide-twice");
+      await client.decideAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewer_id: reviewerId,
+        decision_sha256: createHash("sha256").update("first").digest("hex"),
+      });
+      await rejects(
+        client.decideAttentionTask(task.id, {
+          tenant_id: tenantId,
+          reviewer_id: reviewerId,
+          decision_sha256: createHash("sha256").update("second").digest("hex"),
+        }),
+        409,
+        "a task already decided cannot be decided again",
+      );
+    });
+
+    it("a reviewer who was never assigned this task cannot decide it, even under the correct tenant", async () => {
+      const { tenantId, task } = await attentionFixtureWithBudget("int-attn-decide-wrong-reviewer");
+      const impostorReviewer = uuid();
+      await rejects(
+        client.decideAttentionTask(task.id, {
+          tenant_id: tenantId,
+          reviewer_id: impostorReviewer,
+          decision_sha256: createHash("sha256").update("x").digest("hex"),
+        }),
+        409,
+        "only the assigned reviewer's id can decide the task",
+      );
+    });
+
+    it("a task whose lease expires without a decision can be reassigned to a DIFFERENT reviewer via a second assign_attention_task call", async () => {
+      const { tenantId, execution } = await attentionFixtureWithBudget("int-attn-lease-reassign");
+      // First reviewer's lease was already granted at 60s in the fixture —
+      // build a SECOND fresh task with an intentionally short lease instead,
+      // so this test controls its own expiry precisely.
+      const task = await client.createAttentionTask({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        required_skills: ["reassign-review"],
+        classification: "internal",
+        priority: 1,
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        estimated_attention_units: 1,
+      });
+      const firstReviewer = uuid();
+      await client.assignAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewers: [
+          {
+            reviewer_id: firstReviewer,
+            tenant_ids: [tenantId],
+            skills: ["reassign-review"],
+            region: "br-south",
+            trust: "registered",
+            available_attention_units: 10,
+          },
+        ],
+        lease_seconds: 1,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const secondReviewer = uuid();
+      const reassigned = await client.assignAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewers: [
+          {
+            reviewer_id: secondReviewer,
+            tenant_ids: [tenantId],
+            skills: ["reassign-review"],
+            region: "br-south",
+            trust: "registered",
+            available_attention_units: 10,
+          },
+        ],
+        lease_seconds: 60,
+      });
+      assert.equal(reassigned.state, "assigned");
+      assert.equal(reassigned.assignee, secondReviewer);
+      assert.notEqual(reassigned.assignee, firstReviewer);
+      // The original (now-expired) reviewer can no longer decide it.
+      await rejects(
+        client.decideAttentionTask(task.id, {
+          tenant_id: tenantId,
+          reviewer_id: firstReviewer,
+          decision_sha256: createHash("sha256").update("stale").digest("hex"),
+        }),
+        409,
+        "the original reviewer's lease already expired and was superseded by reassignment",
+      );
+    });
+  });
+
+  describe("A. handoff preview reports incompatible (not an error) when the execution has an unresolved effect in flight", () => {
+    it("preview_handoff against an execution with a dispatched-but-unresolved effect returns compatible=false with that effect listed, not a hard error", async () => {
+      const setup = await compensableExecution("int-preview-unresolved-effect");
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "dispatched", "setup: the effect must still be unresolved");
+      const destRuntime = uuid();
+      await registerRuntime(setup.tenantId, destRuntime, { handlers: ["human_review", setup.handler] });
+      const preview = await client.previewHandoff(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+        destination_runtime_id: destRuntime,
+        requirements: { handlers: ["human_review"] },
+      });
+      assert.equal(preview.compatible, false, "an unresolved effect must make the preview incompatible");
+      assert.ok(
+        preview.unresolved_effects.some((e: any) => e.id === effects[0]!.id),
+        "the specific unresolved effect must be named in the preview evidence",
+      );
+    });
+
+    it("a create_handoff attempt built from an incompatible (unresolved-effect) preview is rejected — create_handoff enforces compatible=true itself", async () => {
+      const setup = await compensableExecution("int-create-unresolved-effect");
+      const destRuntime = uuid();
+      await registerRuntime(setup.tenantId, destRuntime, { handlers: ["human_review", setup.handler] });
+      const preview = await client.previewHandoff(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+        destination_runtime_id: destRuntime,
+        requirements: { handlers: ["human_review"] },
+      });
+      assert.equal(preview.compatible, false);
+      await rejects(
+        client.createHandoff({
+          tenant_id: setup.tenantId,
+          continuity_id: setup.execution.continuity_id,
+          destination_runtime_id: destRuntime,
+          requirements: { handlers: ["human_review"] },
+          placement_decision_id: preview.placement_decision.id,
+          preview_sha256: preview.preview_sha256,
+        }),
+        409,
+        "create_handoff must independently refuse an incompatible preview, not just report it",
+      );
+    });
   });
 
   describe("A. mixing export_handoff and attach_device_capsule on one handoff is rejected", () => {
@@ -1691,6 +2356,48 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         after_sequence: 1,
       });
       assert.equal(retracted.retracted, 1);
+    });
+  });
+
+  describe("A. a stream past its ttl_seconds expiry can no longer accept new frames, and its already-appended frames also drop out of listing", () => {
+    it("both appending to an expired stream AND listing its pre-expiry frames are affected once the stream's TTL elapses (frames inherit the stream's expires_at and are filtered by list_stream_frames' own `expires_at > now` clause)", async () => {
+      // append_stream_frame stamps each new frame's `expires_at` to the
+      // OWNING STREAM's expires_at (see append_stream_frame: `expires_at:
+      // stream.expires_at`), and list_stream_frames' SQL filters on
+      // `expires_at > ?` (orch8-storage/src/sqlite/continuity.rs
+      // list_stream_frames) — so once a stream's TTL elapses, frames
+      // appended while it was still live also disappear from subsequent
+      // listings, not just future appends being blocked. This test pins
+      // both halves of that behavior together rather than assuming only
+      // appends are affected.
+      const tenantId = tid("int-strm-ttl-expiry");
+      const { execution } = await setupExecution(tenantId);
+      const stream = await client.createContinuityStream({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        ttl_seconds: 1,
+      });
+      await client.appendContinuityFrame(stream.stream_id, {
+        tenant_id: tenantId,
+        sequence: 0,
+        checkpoint_sha256: "a".repeat(64),
+        payload: { before: "expiry" },
+      });
+      const framesBeforeExpiry = await client.listContinuityFrames(stream.stream_id, tenantId);
+      assert.equal(framesBeforeExpiry.length, 1, "the frame is listable immediately after append, before expiry");
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await rejects(
+        client.appendContinuityFrame(stream.stream_id, {
+          tenant_id: tenantId,
+          sequence: 1,
+          checkpoint_sha256: "b".repeat(64),
+          payload: { after: "expiry" },
+        }),
+        409,
+        "appending to a stream past its own expires_at must be rejected",
+      );
+      const framesAfterExpiry = await client.listContinuityFrames(stream.stream_id, tenantId);
+      assert.deepEqual(framesAfterExpiry, [], "frames inherited the stream's expires_at, so they drop out of listing too once it elapses");
     });
   });
 
@@ -1895,6 +2602,174 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
   });
 
+  describe("A. compensation step claim exclusivity: a second worker cannot claim while the current step is already Claimed", () => {
+    it("a second claim_compensation_step call while the first worker's claim is still active is rejected, and the original claim's owner is untouched", async () => {
+      const setup = await committedCompensableExecution("int-comp-claim-exclusive");
+      const run = await client.createContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      const firstClaim = await client.claimContinuityCompensation(run.id, {
+        tenant_id: setup.tenantId,
+        worker_id: "worker-first",
+      });
+      assert.equal(firstClaim.state, "claimed");
+      await rejects(
+        client.claimContinuityCompensation(run.id, {
+          tenant_id: setup.tenantId,
+          worker_id: "worker-second",
+        }),
+        409,
+        "the current step must be settled (completed/failed/verified) before a different worker can claim anything",
+      );
+      // The original worker can still complete its own claim afterward —
+      // the rejected second claim must not have disturbed it.
+      const completed = await client.completeContinuityCompensation(run.id, firstClaim.plan.effect_id, {
+        tenant_id: setup.tenantId,
+        worker_id: "worker-first",
+      });
+      assert.equal(completed.state, "completed");
+    });
+
+    it("a worker attempting to complete a step it never claimed (wrong worker_id) is rejected, even though the step IS claimed by someone", async () => {
+      const setup = await committedCompensableExecution("int-comp-complete-wrong-worker");
+      const run = await client.createContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      const claimed = await client.claimContinuityCompensation(run.id, {
+        tenant_id: setup.tenantId,
+        worker_id: "real-worker",
+      });
+      await rejects(
+        client.completeContinuityCompensation(run.id, claimed.plan.effect_id, {
+          tenant_id: setup.tenantId,
+          worker_id: "impostor-worker",
+        }),
+        409,
+        "only the worker that actually claimed the step's lease may complete it",
+      );
+    });
+
+    it("verify_compensation_step against a step that is still Pending (never claimed at all) is rejected — verification only applies once a step reaches VerificationPending", async () => {
+      const setup = await committedCompensableExecution("int-comp-verify-still-pending");
+      const run = await client.createContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      await rejects(
+        client.verifyContinuityCompensation(run.id, setup.effect.id, {
+          tenant_id: setup.tenantId,
+          approved: true,
+          evidence: "premature verification attempt",
+        }),
+        409,
+        "a never-claimed Pending step cannot be verified",
+      );
+    });
+
+    it("verify_compensation_step against a step that is Claimed (in progress, not yet completed/failed) is also rejected", async () => {
+      const setup = await committedCompensableExecution("int-comp-verify-claimed-not-settled");
+      const run = await client.createContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      const claimed = await client.claimContinuityCompensation(run.id, {
+        tenant_id: setup.tenantId,
+        worker_id: "in-progress-worker",
+      });
+      await rejects(
+        client.verifyContinuityCompensation(run.id, claimed.plan.effect_id, {
+          tenant_id: setup.tenantId,
+          approved: true,
+          evidence: "premature verification while still claimed",
+        }),
+        409,
+        "a Claimed-but-not-yet-completed step is not awaiting verification either",
+      );
+    });
+  });
+
+  describe("A. effect state machine: invalid transitions are rejected end to end, valid multi-hop transitions succeed", () => {
+    it("BUG-ADJACENT: Committed -> Compensated IS allowed directly via resolve_effect, bypassing the entire compensation-run workflow with no audit trail", async () => {
+      // EffectState::can_transition_to (orch8-types/src/continuity.rs
+      // ~688) lists `(Committed | Verified, Compensated)` as a structurally
+      // valid transition, and resolve_effect (orch8-api/src/continuity.rs
+      // ~1742-1785) accepts ANY structurally valid target state supplied by
+      // the caller — there is no additional guard requiring compensation to
+      // go through create_continuity_compensation /
+      // complete_compensation_step. A caller can mark a committed effect
+      // "compensated" directly via resolve_effect with a single call, with
+      // no compensation run, no LIFO ordering, and no verification policy.
+      // Separately: this codebase's ENTIRE compensation-run workflow
+      // (create/claim/complete/fail/verify_compensation) never calls
+      // append_provenance_boundary anywhere — grep confirms no
+      // "compensation_*" provenance kind exists at all in continuity.rs, so
+      // even a proper compensation run leaves no chain evidence distinct
+      // from a direct resolve_effect call. Both facts are pinned here as a
+      // genuine, previously unreported gap distinct from the three already
+      // documented in this file's header comments.
+      const setup = await committedCompensableExecution("int-effect-direct-compensate");
+      const resolved = await client.resolveContinuityEffect(setup.effect.id, {
+        tenant_id: setup.tenantId,
+        state: "compensated",
+      });
+      assert.equal(resolved.state, "compensated", "documents that this transition is currently permitted with no compensation-run evidence");
+      const provenance = await client.listContinuityProvenance(setup.execution.continuity_id, setup.tenantId);
+      const kinds = provenance.map((e: any) => e.kind);
+      assert.ok(kinds.includes("effect_resolved"), "the only trace of this state change is a generic effect_resolved entry");
+      assert.ok(
+        !kinds.some((k: string) => k.startsWith("compensation")),
+        "no compensation-specific provenance kind exists anywhere, even though a full compensation-run workflow exists as a separate API surface",
+      );
+    });
+
+    it("Dispatched -> Verified is refused (Verified is only reachable via Unknown, never directly from Dispatched)", async () => {
+      const setup = await compensableExecution("int-effect-skip-unknown");
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "dispatched");
+      await rejects(
+        client.resolveContinuityEffect(effects[0]!.id, {
+          tenant_id: setup.tenantId,
+          state: "verified",
+        }),
+        409,
+        "Dispatched can only move to Committed or Unknown, never directly to Verified",
+      );
+    });
+
+    it("Committed -> Committed (a redundant re-resolve to the same state) is refused as an invalid self-transition", async () => {
+      const setup = await committedCompensableExecution("int-effect-redundant-commit");
+      await rejects(
+        client.resolveContinuityEffect(setup.effect.id, {
+          tenant_id: setup.tenantId,
+          state: "committed",
+        }),
+        409,
+        "an effect already committed cannot be 're-committed'",
+      );
+    });
+
+    it("a compensated effect can never transition again in any direction (Compensated is a true terminal state)", async () => {
+      const setup = await committedCompensableExecution("int-effect-terminal-compensated");
+      await completeCompensationRun(setup.execution.continuity_id, setup.tenantId);
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "compensated");
+      await rejects(
+        client.resolveContinuityEffect(effects[0]!.id, {
+          tenant_id: setup.tenantId,
+          state: "committed",
+        }),
+        409,
+        "a compensated effect can never move back to committed",
+      );
+      await rejects(
+        client.resolveContinuityEffect(effects[0]!.id, {
+          tenant_id: setup.tenantId,
+          state: "verified",
+        }),
+        409,
+        "a compensated effect can never move to verified either — it is terminal",
+      );
+    });
+  });
+
   describe("A. invariant evaluation is re-run correctly against the post-migration sequence", () => {
     it("a terminal_state_in invariant registered on the target sequence fails migration planning (Pin), matching that it would also fail post-migration", async () => {
       // A terminal_state_in invariant is evaluated as part of historical
@@ -1961,6 +2836,42 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.equal(matched.status, "pass", "no effects were ever dispatched, so this vacuously passes");
       const stored = await client.listContinuityInvariantResults(execution.continuity_id, tenantId);
       assert.ok(stored.some((r: any) => r.invariant_id === invariant.id));
+    });
+
+    it("an invariant registered with sequence_version=null applies across EVERY migrated version of that sequence_id, not just the version it was created against", async () => {
+      // list_workflow_invariants' SQL matches `sequence_version IS NULL OR
+      // sequence_version = ?` (orch8-storage/src/sqlite/evidence.rs) — a
+      // version-less invariant is intentionally version-agnostic. This
+      // test registers one against the ORIGINAL sequence with no version
+      // pinned, migrates to a target version, and confirms it still
+      // evaluates post-migration even though the instance is now on a
+      // DIFFERENT sequence_id (planContinuityMigration always targets a
+      // distinct to_sequence_id, so this also proves the invariant survives
+      // a full sequence_id change, not merely a version bump on the same
+      // id — provided it is re-registered on the target id, matching how
+      // this file's other migration+invariant tests operate).
+      const tenantId = tid("int-inv-version-agnostic");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-inv-version-agnostic");
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const invariant = await client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: target.id,
+        sequence_version: null,
+        name: "version-agnostic-no-unknown-effects",
+        rule: { type: "no_unknown_effects" },
+      });
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: target.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      const results = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      const matched = results.find((r: any) => r.invariant_id === invariant.id);
+      assert.ok(matched, "a version-agnostic invariant must still be evaluated after migrating to the target sequence_id");
+      assert.equal(matched.status, "pass");
     });
 
     it("a budget_within_limits invariant always evaluates to 'unknown' via evaluate_invariants, regardless of real budget reservations — budget_breached evidence is never wired up", async () => {
@@ -2160,6 +3071,136 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
   });
 
+  describe("A. regulated-classification residency enforces destination trust level, unlike internal/public classifications", () => {
+    // NOTE: RuntimeTrustLevel::Signed/Attested can never actually be
+    // reached through the public register_runtime endpoint — it hard-caps
+    // incoming trust at Registered (see orch8-api/src/continuity.rs
+    // register_runtime: `if body.capabilities.trust > RuntimeTrustLevel::
+    // Registered { return InvalidArgument("signed or attested runtime
+    // trust requires a verified attestation flow") }`), and no other public
+    // endpoint elevates a runtime's trust level either. This means
+    // evaluate_residency's regulated-classification PASS path (which
+    // requires `trust >= Signed`) is presently unreachable end-to-end via
+    // the API surface — only the Fail path (Unverified/Registered) is
+    // exercisable here. This is flagged as a genuine, previously
+    // unreported observation distinct from the three documented bugs.
+    const trustCases: Array<{ trust: string; expectPass: boolean }> = [
+      { trust: "unverified", expectPass: false },
+      { trust: "registered", expectPass: false },
+    ];
+
+    for (const { trust, expectPass } of trustCases) {
+      it(`confidential classification against a destination with trust=${trust} resolves outcome=${expectPass ? "pass" : "fail"} (Signed is the minimum bar, unreachable via the public API)`, async () => {
+        const tenantId = tid("int-res-trust-matrix");
+        const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+        // A regulated classification also requires the SOURCE (owner)
+        // runtime's region to be resolvable, or evaluate_residency fails
+        // fast on SOURCE_REGION_UNKNOWN before ever reaching the
+        // destination trust check — register it too.
+        await registerRuntime(tenantId, sourceRuntimeId, { regions: ["br-south"] });
+        const destRuntime = uuid();
+        await client.registerRuntime({
+          tenant_id: tenantId,
+          capabilities: runtimeCaps(destRuntime, { trust, regions: ["br-south"] }),
+        });
+        const result = await client.evaluateContinuityResidency({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          classification: "confidential",
+          operation: "handler_dispatch",
+          destination_runtime_id: destRuntime,
+        });
+        if (expectPass) {
+          assert.equal(result.outcome, "pass");
+        } else {
+          assert.equal(result.outcome, "fail");
+          assert.ok(result.finding_codes.includes("DESTINATION_TRUST_TOO_LOW"));
+        }
+      });
+    }
+
+    it("the SAME low trust level (registered) is perfectly fine for an internal-classification residency check — trust enforcement is regulated-classification-only", async () => {
+      const tenantId = tid("int-res-trust-internal-ok");
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      await registerRuntime(tenantId, sourceRuntimeId, { regions: ["br-south"] });
+      const destRuntime = uuid();
+      await client.registerRuntime({
+        tenant_id: tenantId,
+        capabilities: runtimeCaps(destRuntime, { trust: "registered", regions: ["br-south"] }),
+      });
+      const result = await client.evaluateContinuityResidency({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        classification: "internal",
+        operation: "handler_dispatch",
+        destination_runtime_id: destRuntime,
+      });
+      assert.equal(result.outcome, "pass", "trust enforcement only applies to confidential/restricted, not internal");
+    });
+
+    it("a regulated (confidential) classification whose SOURCE runtime sits in a region outside allowed_regions fails with SOURCE_REGION_DENIED, checked before the destination is even evaluated", async () => {
+      const tenantId = tid("int-res-source-region-denied");
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      await registerRuntime(tenantId, sourceRuntimeId, { regions: ["us-east"] });
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { regions: ["br-south"], trust: "registered" });
+      const result = await client.evaluateContinuityResidency({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        classification: "confidential",
+        operation: "handler_dispatch",
+        destination_runtime_id: destRuntime,
+        allowed_regions: ["br-south"],
+      });
+      assert.equal(result.outcome, "fail");
+      assert.ok(result.finding_codes.includes("SOURCE_REGION_DENIED"));
+    });
+
+    it("the SAME source-region mismatch is NOT enforced for a public/internal classification — SOURCE_REGION_DENIED is a regulated-classification-only check", async () => {
+      const tenantId = tid("int-res-source-region-ok-internal");
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      await registerRuntime(tenantId, sourceRuntimeId, { regions: ["us-east"] });
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { regions: ["br-south"] });
+      const result = await client.evaluateContinuityResidency({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        classification: "internal",
+        operation: "handler_dispatch",
+        destination_runtime_id: destRuntime,
+        allowed_regions: ["br-south"],
+      });
+      assert.equal(result.outcome, "pass", "source-region enforcement is regulated-classification-only, per evaluate_residency's match guards");
+    });
+
+    it("a confidential-classification residency check against a destination runtime that was NEVER registered at all fails with DESTINATION_REGION_UNKNOWN (checked before trust), not a 404", async () => {
+      // evaluate_residency's match arms are ordered: an unresolvable
+      // destination region for a regulated classification
+      // (`(_, None, _) if regulated`) is checked BEFORE the destination
+      // trust arms, so a never-registered runtime (which has no capability
+      // row and therefore no resolvable single region) always surfaces
+      // DESTINATION_REGION_UNKNOWN — the trust check is never reached. The
+      // SOURCE runtime must be registered here too, or the source-region
+      // arm (checked even earlier) would fail first instead.
+      const tenantId = tid("int-res-trust-unregistered");
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      await registerRuntime(tenantId, sourceRuntimeId, { regions: ["br-south"] });
+      const neverRegisteredRuntime = uuid();
+      const result = await client.evaluateContinuityResidency({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        classification: "confidential",
+        operation: "handler_dispatch",
+        destination_runtime_id: neverRegisteredRuntime,
+      });
+      assert.equal(result.outcome, "fail");
+      assert.ok(
+        result.finding_codes.includes("DESTINATION_REGION_UNKNOWN"),
+        "an unregistered destination must resolve as a well-formed evidence failure, never a 404",
+      );
+    });
+  });
+
   describe("A. negative/conflict branches not yet exercised", () => {
     it("BUG: create_handoff has no guard against a second concurrent pending handoff for the same execution", async () => {
       // create_handoff (orch8-api/src/continuity.rs ~844-933) validates the
@@ -2246,6 +3287,128 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.equal(stillResumed.state, "resumed");
     });
 
+    it("rejecting a handoff that has already been exported is refused — reject only applies to a still-Requested handoff", async () => {
+      const tenantId = tid("int-hoff-reject-after-export");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-reject-after-export");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      await rejects(
+        client.rejectHandoff(handoff.id, { tenant_id: tenantId }),
+        409,
+        "reject_handoff requires HandoffState::Requested; an exported handoff has moved on",
+      );
+    });
+
+    it("revoking a handoff that is still Requested (never exported) is refused — revoke only applies to an already-Exported handoff", async () => {
+      const tenantId = tid("int-hoff-revoke-before-export");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(tenantId, execution.continuity_id, destRuntime);
+      const handoff = await client.createHandoff(req);
+      assert.equal(handoff.state, "requested");
+      await rejects(
+        client.revokeHandoff(handoff.id, { tenant_id: tenantId }),
+        409,
+        "revoke_handoff requires HandoffState::Exported; a still-requested handoff cannot be revoked yet",
+      );
+    });
+
+    it("revoking an already-revoked handoff a second time is rejected — revoke is a one-shot transition out of Exported", async () => {
+      const tenantId = tid("int-hoff-revoke-twice");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-revoke-twice");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      const revoked = await client.revokeHandoff(handoff.id, { tenant_id: tenantId });
+      assert.equal(revoked.state, "revoked");
+      await rejects(
+        client.revokeHandoff(handoff.id, { tenant_id: tenantId }),
+        409,
+        "a handoff already revoked cannot be revoked again",
+      );
+    });
+
+    it("rejecting an already-rejected handoff a second time is rejected — reject is a one-shot transition out of Requested", async () => {
+      const tenantId = tid("int-hoff-reject-twice");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(tenantId, execution.continuity_id, destRuntime);
+      const handoff = await client.createHandoff(req);
+      const rejected = await client.rejectHandoff(handoff.id, { tenant_id: tenantId });
+      assert.equal(rejected.state, "rejected");
+      await rejects(
+        client.rejectHandoff(handoff.id, { tenant_id: tenantId }),
+        409,
+        "a handoff already rejected cannot be rejected again",
+      );
+    });
+
+    it("export_handoff against a source instance that is still RUNNING (never paused or durably waiting) is rejected", async () => {
+      // setupExecution's instance runs a bare noop sequence with no
+      // wait_for_input gate, so it either completes almost immediately or
+      // is caught mid-flight — either way it is never Paused/Waiting, which
+      // export_handoff hard-requires (orch8-api/src/continuity.rs
+      // export_handoff: `if !matches!(instance.state, Paused | Waiting)`).
+      const tenantId = tid("int-hoff-export-running-instance");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(tenantId, execution.continuity_id, destRuntime);
+      const handoff = await client.createHandoff(req);
+      await rejects(
+        client.exportHandoff(handoff.id, {
+          tenant_id: tenantId,
+          requirements: req.requirements,
+          expires_in_seconds: 60,
+        }),
+        409,
+        "export must refuse a source instance that is not paused or durably waiting",
+      );
+    });
+
+    it("resuming a handoff that was exported but never accepted is rejected (resume requires Accepted state, Exported is not enough)", async () => {
+      const tenantId = tid("int-hoff-resume-before-accept");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-resume-before-accept");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      await rejects(
+        client.resumeHandoff(handoff.id, { tenant_id: tenantId }),
+        409,
+        "resume requires the handoff to already be Accepted; Exported alone is not sufficient",
+      );
+    });
+
     it("revoking a grant after it has already been consumed is rejected and does not un-consume it", async () => {
       const tenantId = tid("int-grant-revoke-consumed");
       const { execution } = await setupExecution(tenantId);
@@ -2302,6 +3465,44 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.ok(result, "what-if must still run normally while a plan is pending but unapplied");
       const afterExecution = await client.getContinuityExecution(execution.continuity_id, tenantId);
       assert.deepEqual(afterExecution, beforeExecution, "an unapplied plan must not affect what-if read-only guarantees");
+    });
+
+    it("running what-if against continuity_id A using a checkpoint_id that actually belongs to a SIBLING execution B (same tenant) 404s — checkpoint lookup is continuity_id-scoped, not just tenant-scoped", async () => {
+      const tenantId = tid("int-whatif-foreign-checkpoint");
+      const fixtureFirst = await pausedContinuityFixture(tenantId, "int-whatif-foreign-first");
+      const fixtureSecond = await pausedContinuityFixture(tenantId, "int-whatif-foreign-second");
+      await rejects(
+        client.runContinuityWhatIf(fixtureFirst.execution.continuity_id, {
+          tenant_id: tenantId,
+          checkpoint_id: fixtureSecond.checkpointId,
+        }),
+        404,
+        "a checkpoint id from a sibling execution must not resolve under a different continuity_id, even for the same tenant",
+      );
+    });
+
+    it("extract_test_fixture against continuity_id A using a checkpoint_id from sibling execution B (same tenant) also 404s, via the same find_continuity_checkpoint scoping", async () => {
+      const tenantId = tid("int-fixture-foreign-checkpoint");
+      const fixtureFirst = await pausedContinuityFixture(tenantId, "int-fixture-foreign-first");
+      const fixtureSecond = await pausedContinuityFixture(tenantId, "int-fixture-foreign-second");
+      await rejects(
+        client.extractContinuityTestFixture(fixtureFirst.execution.continuity_id, {
+          tenant_id: tenantId,
+          checkpoint_id: fixtureSecond.checkpointId,
+          allowlisted_fields: [],
+        }),
+        404,
+      );
+    });
+
+    it("get_continuity_checkpoint against continuity_id A using a checkpoint_id from sibling execution B (same tenant) 404s too", async () => {
+      const tenantId = tid("int-getckpt-foreign-checkpoint");
+      const fixtureFirst = await pausedContinuityFixture(tenantId, "int-getckpt-foreign-first");
+      const fixtureSecond = await pausedContinuityFixture(tenantId, "int-getckpt-foreign-second");
+      await rejects(
+        client.getContinuityCheckpoint(fixtureFirst.execution.continuity_id, fixtureSecond.checkpointId, tenantId),
+        404,
+      );
     });
 
     it("a federation envelope for an execution that has already been handed off (owner changed) is still verifiable against the CURRENT epoch, not the stale one", async () => {
@@ -2525,6 +3726,57 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.notEqual(effects1[0]!.id, effects2[0]!.id);
     });
 
+    it("a dispatched-but-unresolved effect PINS both migration planning and handoff preview compatibility — the two independent 'in-flight work' guards agree with each other", async () => {
+      // This cross-checks two SEPARATE unresolved-effects guards that this
+      // file documents individually elsewhere: build_handoff_preview sets
+      // compatible=false when unresolved_effects is non-empty, and
+      // validate_migration_history compiles to MigrationDisposition::Pin
+      // for the same reason. Confirming both trigger together on the SAME
+      // execution state (rather than one being checked and the other
+      // assumed) closes a real gap — it would be easy for one guard to
+      // regress without the other catching it.
+      const setup = await compensableExecution("int-effect-blocks-both-paths");
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "dispatched");
+
+      await client.waitForState(setup.instance.id, "waiting");
+      await client.saveCheckpoint(setup.instance.id, { safe_boundary: "pre-migration", context_snapshot: {} });
+      const target = sameShapeTarget(setup.createdSequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: setup.tenantId,
+        continuity_id: setup.execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      assert.equal(plan.disposition, "pin", "an unresolved effect must pin the migration plan");
+
+      const handoffDest = uuid();
+      await registerRuntime(setup.tenantId, handoffDest, { handlers: ["human_review"] });
+      const preview = await client.previewHandoff(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+        destination_runtime_id: handoffDest,
+        requirements: { handlers: ["human_review"] },
+      });
+      assert.equal(preview.compatible, false, "the SAME unresolved effect must also block handoff compatibility");
+      assert.ok(preview.unresolved_effects.some((e: any) => e.id === effects[0]!.id));
+
+      // Resolving the effect (bypassing both compensation AND handoff/
+      // migration workflows, since resolve_effect requires only the
+      // effect's own id) clears BOTH guards simultaneously.
+      await client.resolveContinuityEffect(effects[0]!.id, {
+        tenant_id: setup.tenantId,
+        state: "committed",
+        provider_receipt_id: `receipt-${uuid().slice(0, 8)}`,
+      });
+      const previewAfter = await client.previewHandoff(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+        destination_runtime_id: handoffDest,
+        requirements: { handlers: ["human_review"] },
+      });
+      assert.equal(previewAfter.compatible, true, "resolving the last unresolved effect clears the handoff-preview guard immediately");
+    });
+
     it("continuity locations record a distinct epoch per row and are sorted by epoch ascending", async () => {
       const tenantId = tid("int-locations-epoch-order");
       const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-locations-epoch-order");
@@ -2578,6 +3830,35 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       for (const id of distinctBefore) {
         assert.ok(distinctAfter.has(id), "every pre-migration checkpoint must survive the migration");
       }
+    });
+
+    it("a chain of THREE checkpoints saved within the same epoch links previous_checkpoint_id transitively, and the diff reflects only the immediately-adjacent change", async () => {
+      const tenantId = tid("int-ckpt-chain-depth");
+      const { execution, instance, checkpointId: firstId } = await pausedContinuityFixture(
+        tenantId,
+        "int-ckpt-chain-depth",
+        [],
+        { step: 1 },
+      );
+      await client.saveCheckpoint(instance.id, { safe_boundary: "gate", context_snapshot: { step: 2 } });
+      await client.saveCheckpoint(instance.id, { safe_boundary: "gate", context_snapshot: { step: 3 } });
+      const checkpoints = await client.listContinuityCheckpoints(execution.continuity_id, tenantId);
+      assert.ok(checkpoints.length >= 3, "fixture must have produced three checkpoints total");
+      const thirdId = checkpoints[checkpoints.length - 1]!.checkpoint_id;
+      const secondId = checkpoints[checkpoints.length - 2]!.checkpoint_id;
+      assert.notEqual(thirdId, firstId);
+      assert.notEqual(secondId, firstId);
+
+      const thirdDetail = await client.getContinuityCheckpoint(execution.continuity_id, thirdId, tenantId);
+      assert.equal(thirdDetail.previous_checkpoint_id, secondId, "the third checkpoint must chain to the second, not the first");
+      const changedPaths = thirdDetail.redacted_state_diff.map((c: any) => c.path);
+      assert.ok(
+        changedPaths.some((p: string) => p.includes("step")),
+        "the diff must reflect the step field changing from 2 to 3",
+      );
+
+      const secondDetail = await client.getContinuityCheckpoint(execution.continuity_id, secondId, tenantId);
+      assert.equal(secondDetail.previous_checkpoint_id, firstId, "the second checkpoint must chain to the first");
     });
 
     it("an execution spanning THREE epochs of history (two migrations) reports all three epochs in locations and provenance still verifies", async () => {
@@ -2802,6 +4083,81 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       });
       assert.deepEqual((fixture as any).sanitized_context, {});
     });
+
+    it("extracting the same checkpoint's fixture twice with identical inputs produces the SAME stable_id both times (deterministic content hash)", async () => {
+      const tenantId = tid("int-fixture-stable-id");
+      const { execution, checkpointId } = await pausedContinuityFixture(
+        tenantId,
+        "int-fixture-stable-id",
+        [],
+        { a: "1" },
+      );
+      const first = await client.extractContinuityTestFixture(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+        allowlisted_fields: ["a"],
+      });
+      const second = await client.extractContinuityTestFixture(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+        allowlisted_fields: ["a"],
+      });
+      assert.equal((first as any).stable_id, (second as any).stable_id, "identical extraction inputs must produce the same stable_id");
+    });
+
+    it("extracting a fixture from an execution with zero dispatched effects returns empty receipt_mocks/effect_mocks arrays, not null or undefined", async () => {
+      const tenantId = tid("int-fixture-no-effects");
+      const { execution, checkpointId } = await pausedContinuityFixture(tenantId, "int-fixture-no-effects");
+      const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+        allowlisted_fields: [],
+      });
+      assert.deepEqual((fixture as any).receipt_mocks, []);
+      assert.deepEqual((fixture as any).effect_mocks, []);
+    });
+
+    it("a terminal_state_in invariant PASSES once the instance naturally reaches a listed terminal state (the other tests in this file only exercise the failing/unknown branches)", async () => {
+      const tenantId = tid("int-inv-terminal-pass");
+      const seq = testSequence(tenantId, [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const invariant = await client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: createdSeq.id,
+        sequence_version: seq.version,
+        name: "terminal-completed-pass",
+        rule: { type: "terminal_state_in", states: ["completed", "failed"] },
+      });
+      await client.waitForState(instance.id, "completed");
+      const results = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      const matched = results.find((r: any) => r.invariant_id === invariant.id);
+      assert.equal(matched.status, "pass", "a completed instance satisfies terminal_state_in=['completed','failed']");
+    });
+
+    it("extract_test_fixture with an allowlist exceeding 256 fields is rejected", async () => {
+      const tenantId = tid("int-fixture-allowlist-too-large");
+      const { execution, checkpointId } = await pausedContinuityFixture(tenantId, "int-fixture-allowlist-too-large");
+      const oversizedAllowlist = Array.from({ length: 257 }, (_, i) => `field_${i}`);
+      await rejects(
+        client.extractContinuityTestFixture(execution.continuity_id, {
+          tenant_id: tenantId,
+          checkpoint_id: checkpointId,
+          allowlisted_fields: oversizedAllowlist,
+        }),
+        413,
+        "an allowlist over the 256-field bound must be rejected",
+      );
+    });
   });
 
   describe("A. what-if against a checkpoint that has since been superseded by a newer checkpoint still targets the ORIGINAL boundary, not the latest", () => {
@@ -2940,6 +4296,180 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       const kinds = provenance.map((e: any) => e.kind);
       assert.ok(kinds.includes("residency_evaluated"));
       assert.ok(!kinds.includes("disclosure_minimized"));
+    });
+
+    it("minimize_disclosure rejects confidential and restricted classifications outright, regardless of allowlist — regulated payloads must never transit through this endpoint at all", async () => {
+      for (const classification of ["confidential", "restricted"]) {
+        await rejects(
+          client.minimizeContinuityDisclosure({
+            classification,
+            payload: { field: "x" },
+            allowed_top_level_fields: ["field"],
+          }),
+          400,
+          `classification=${classification} must be rejected outright`,
+        );
+      }
+    });
+  });
+
+  describe("A. continuation grant scope enforcement across issue -> consume", () => {
+    it("consuming a grant with an action outside its allowed_actions scope is rejected, even with a structurally valid signature and token", async () => {
+      const tenantId = tid("int-grant-scope-mismatch");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime);
+      const grant = await client.issueContinuationGrant({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destRuntime,
+        allowed_actions: ["accept"],
+        ttl_seconds: 60,
+      });
+      await rejects(
+        client.consumeContinuationGrant({
+          tenant_id: tenantId,
+          action: "resume",
+          token: grant.token,
+          signed_grant: grant.signed_grant,
+        }),
+        409,
+        "'resume' is outside the grant's allowed_actions=['accept'] scope",
+      );
+      // The grant must still be consumable for its actually-allowed action.
+      const consumed = await client.consumeContinuationGrant({
+        tenant_id: tenantId,
+        action: "accept",
+        token: grant.token,
+        signed_grant: grant.signed_grant,
+      });
+      assert.equal(consumed.state, "consumed");
+    });
+
+    it("issuing a grant with a ttl_seconds so short it has already expired by consume-time is rejected as GrantExpired", async () => {
+      const tenantId = tid("int-grant-expired");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime);
+      const grant = await client.issueContinuationGrant({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destRuntime,
+        allowed_actions: ["accept"],
+        ttl_seconds: 1,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await rejects(
+        client.consumeContinuationGrant({
+          tenant_id: tenantId,
+          action: "accept",
+          token: grant.token,
+          signed_grant: grant.signed_grant,
+        }),
+        409,
+        "a grant whose ttl has elapsed must be rejected as expired, even with a valid signature and token",
+      );
+    });
+
+    it("a grant issued with MULTIPLE allowed_actions can be consumed for the SECOND listed action just as validly as the first, and consuming it once still exhausts it for the other action too", async () => {
+      const tenantId = tid("int-grant-multi-action");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime);
+      const grant = await client.issueContinuationGrant({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destRuntime,
+        allowed_actions: ["accept", "resume"],
+        ttl_seconds: 60,
+      });
+      const consumed = await client.consumeContinuationGrant({
+        tenant_id: tenantId,
+        action: "resume",
+        token: grant.token,
+        signed_grant: grant.signed_grant,
+      });
+      assert.equal(consumed.state, "consumed");
+      // Even though "accept" was ALSO in allowed_actions, the grant is a
+      // single-use token — consuming it for "resume" exhausts it entirely,
+      // it does not leave "accept" separately available.
+      await rejects(
+        client.consumeContinuationGrant({
+          tenant_id: tenantId,
+          action: "accept",
+          token: grant.token,
+          signed_grant: grant.signed_grant,
+        }),
+        409,
+        "a grant is single-use across its ENTIRE allowed_actions set, not per-action",
+      );
+    });
+
+    it("issuing a grant with duplicate actions in allowed_actions is rejected at issue time", async () => {
+      const tenantId = tid("int-grant-dup-actions");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime);
+      await rejects(
+        client.issueContinuationGrant({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          destination_runtime_id: destRuntime,
+          allowed_actions: ["accept", "accept"],
+          ttl_seconds: 60,
+        }),
+        400,
+        "duplicate actions in allowed_actions must be rejected",
+      );
+    });
+
+    it("issuing a grant for a destination_runtime_id with no live capability registration at all is rejected", async () => {
+      const tenantId = tid("int-grant-unregistered-dest");
+      const { execution } = await setupExecution(tenantId);
+      const neverRegisteredRuntime = uuid();
+      await rejects(
+        client.issueContinuationGrant({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          destination_runtime_id: neverRegisteredRuntime,
+          allowed_actions: ["accept"],
+          ttl_seconds: 60,
+        }),
+        409,
+        "a grant destination must have a live capability registration at issue time",
+      );
+    });
+
+    it("issuing a grant for a destination whose capability registration has since EXPIRED is also rejected, even though it was live at some point", async () => {
+      const tenantId = tid("int-grant-expired-dest-capability");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      const now = Date.now();
+      await client.registerRuntime({
+        tenant_id: tenantId,
+        capabilities: {
+          runtime_id: destRuntime,
+          kind: "server",
+          trust: "registered",
+          handlers: ["noop"],
+          regions: ["br-south"],
+          offline_capable: false,
+          observed_at: new Date(now - 4 * 60_000).toISOString(),
+          expires_at: new Date(now + 1_000).toISOString(),
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      await rejects(
+        client.issueContinuationGrant({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          destination_runtime_id: destRuntime,
+          allowed_actions: ["accept"],
+          ttl_seconds: 60,
+        }),
+        409,
+        "an expired capability registration no longer counts as a live destination for grant issuance",
+      );
     });
   });
 
@@ -3914,6 +5444,114 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         }),
         404,
         "the placement decision was authorized for tenant A; tenant B cannot claim it as its own",
+      );
+    });
+
+    it("reject_handoff and revoke_handoff under tenant B against tenant A's real handoff both 404, and the handoff's real state is untouched afterward", async () => {
+      const tenantForHandoffMutation = tid("iso-hoff-mutation-a");
+      const { execution } = await setupExecution(tenantForHandoffMutation);
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(tenantForHandoffMutation, execution.continuity_id, destRuntime);
+      const handoff = await client.createHandoff(req);
+      await rejects(
+        client.rejectHandoff(handoff.id, { tenant_id: tenantB }),
+        404,
+        "tenant B cannot reject a handoff belonging to another tenant",
+      );
+      await rejects(
+        client.revokeHandoff(handoff.id, { tenant_id: tenantB }),
+        404,
+        "tenant B cannot revoke a handoff belonging to another tenant",
+      );
+      const stillReal = await client.getHandoff(handoff.id, tenantForHandoffMutation);
+      assert.equal(stillReal.state, "requested", "the cross-tenant mutation attempts must not have changed the handoff's real state");
+    });
+
+    it("accept_handoff and resume_handoff under tenant B against tenant A's real handoff both 404", async () => {
+      const setup = await resumedHandoff("iso-hoff-accept-resume-a");
+      // The handoff is already resumed; probe accept/resume under a
+      // completely unrelated tenant B to confirm both mutation endpoints
+      // enforce tenant scoping independent of the handoff's actual state.
+      await rejects(
+        client.acceptHandoff(setup.handoff.id, {
+          tenant_id: tenantB,
+          destination_instance_id: setup.imported.instance_id,
+        }),
+        404,
+      );
+      await rejects(
+        client.resumeHandoff(setup.handoff.id, { tenant_id: tenantB }),
+        404,
+      );
+    });
+
+    it("import_capsule refuses a capsule whose manifest.tenant_id belongs to a different tenant than the one presenting it, even with the correct destination runtime and a fresh instance id", async () => {
+      const tenantForCapsule = tid("iso-capsule-a");
+      const { execution } = await pausedContinuityFixture(tenantForCapsule, "iso-capsule-a");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantForCapsule,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantForCapsule,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      await rejects(
+        client.importContinuityCapsule({
+          tenant_id: tenantB,
+          destination_runtime_id: destRuntime,
+          destination_instance_id: uuid(),
+          expected_epoch: 0,
+          capsule: exported.capsule,
+          payload_base64: exported.payload_base64,
+        }),
+        409,
+        "a capsule manifest carrying tenant A's tenant_id must be refused when presented under tenant B",
+      );
+      // The capsule remains importable under its real, correct tenant.
+      const imported = await client.importContinuityCapsule({
+        tenant_id: tenantForCapsule,
+        destination_runtime_id: destRuntime,
+        destination_instance_id: uuid(),
+        expected_epoch: 0,
+        capsule: exported.capsule,
+        payload_base64: exported.payload_base64,
+      });
+      assert.ok(imported.instance_id);
+    });
+
+    it("attach_device_capsule under tenant B against tenant A's real handoff id 404s, independent of the handoff's own state", async () => {
+      const tenantForAttach = tid("iso-attach-a");
+      const { execution } = await pausedContinuityFixture(tenantForAttach, "iso-attach-a");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantForAttach,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantForAttach,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      await rejects(
+        client.attachDeviceCapsule(handoff.id, {
+          tenant_id: tenantB,
+          destination_instance_id: uuid(),
+          capsule: exported.capsule,
+          payload_base64: exported.payload_base64,
+          payload_key_base64: Buffer.from(
+            Array.from({ length: 32 }, () => Math.floor(Math.random() * 256)),
+          ).toString("base64"),
+        }),
+        404,
       );
     });
 

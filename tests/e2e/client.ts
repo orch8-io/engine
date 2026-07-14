@@ -482,6 +482,17 @@ export class Orch8Client {
     return this.#post(`/continuity/executions/${continuityId}/evaluations`, req);
   }
 
+  async listContinuityEvaluations(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/evaluations${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
   async evaluateStoredContinuityGate(
     req: Record<string, unknown>,
   ): Promise<ApiResponse> {
