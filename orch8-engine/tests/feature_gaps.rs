@@ -47,6 +47,7 @@ fn mk_step(id: &str, handler: &str) -> StepDef {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }
 }
 

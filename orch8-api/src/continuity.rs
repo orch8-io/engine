@@ -21,21 +21,22 @@ use zeroize::{Zeroize, Zeroizing};
 use orch8_engine::continuity::{CompatibilityFinding, assess_compatibility};
 use orch8_types::continuity::{
     CapsuleRequirements, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
-    ContinuityExecution, ContinuityId, ContinuityStream, DataClassification, EffectReceipt,
-    EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
-    LocalityPolicy, OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence,
-    PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel, StreamFrame,
-    StreamFrameState, StreamId,
+    ContinuityExecution, ContinuityId, ContinuityStream, DataClassification, EffectId,
+    EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId,
+    HandoffState, LocalityPolicy, OwnershipState, PlacementDecision, PlacementDecisionId,
+    PlacementEvidence, PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
+    StreamFrame, StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
-    CheckpointBoundary, DeviceDelegation, EvaluationId, EvaluationScore, ExtractedEffectMock,
-    ExtractedTestFixture, FaultInjection, FaultKind, FederationEnvelope, FederationPeer,
-    ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
-    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
-    MigrationPlanId, MigrationRollbackCapsule, ProviderCandidate, ReservationState,
-    ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfRunRecord,
-    WhatIfScenario, WorkflowInvariant,
+    CheckpointBoundary, CompensationExecutionStep, CompensationPlan, CompensationRunId,
+    CompensationRunRecord, CompensationRunState, CompensationStepState, DeviceDelegation,
+    EvaluationId, EvaluationScore, ExtractedEffectMock, ExtractedTestFixture, FaultInjection,
+    FaultKind, FederationEnvelope, FederationPeer, ForkEffectMode, GeneratedScenario, InvariantId,
+    InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
+    MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule, ProviderCandidate,
+    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform,
+    WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
@@ -144,6 +145,31 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/continuity/migrations/{id}/rollback",
             post(rollback_live_migration),
+        )
+        .route(
+            "/continuity/executions/{id}/compensations/preview",
+            post(preview_compensation),
+        )
+        .route(
+            "/continuity/executions/{id}/compensations",
+            post(create_compensation_run),
+        )
+        .route("/continuity/compensations/{id}", get(get_compensation_run))
+        .route(
+            "/continuity/compensations/{id}/claim",
+            post(claim_compensation_step),
+        )
+        .route(
+            "/continuity/compensations/{id}/steps/{effect_id}/complete",
+            post(complete_compensation_step),
+        )
+        .route(
+            "/continuity/compensations/{id}/steps/{effect_id}/fail",
+            post(fail_compensation_step),
+        )
+        .route(
+            "/continuity/compensations/{id}/steps/{effect_id}/verify",
+            post(verify_compensation_step),
         )
         .route("/continuity/scenarios/generate", post(generate_scenarios))
         .route("/continuity/scenarios/reproduce", post(reproduce_incident))
@@ -4088,6 +4114,622 @@ async fn rollback_live_migration(
         ));
     }
     Ok(Json(next_record))
+}
+
+#[derive(Debug, Deserialize)]
+struct CompensationScopeRequest {
+    tenant_id: TenantId,
+}
+
+async fn compensation_plan(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+) -> Result<(InstanceId, CompensationPlan), ApiError> {
+    let (_, instance) = continuity_instance(state, tenant_id, continuity_id).await?;
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation sequence"))?
+        .ok_or_else(|| ApiError::NotFound("compensation sequence".into()))?;
+    let (receipts, outputs) = tokio::try_join!(
+        state
+            .storage
+            .list_effect_receipts(tenant_id, continuity_id, 10_000),
+        state.storage.get_all_outputs(instance.id),
+    )
+    .map_err(|error| ApiError::from_storage(error, "compensation evidence"))?;
+    let rules = orch8_engine::compensation::rules_from_sequence(&sequence);
+    let mut plan = orch8_engine::compensation::build_compensation_plan(&receipts, &rules)
+        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    let output_context = serde_json::Value::Object(
+        outputs
+            .into_iter()
+            .filter(|output| !output.block_id.as_str().starts_with('_'))
+            .map(|output| (output.block_id.as_str().to_owned(), output.output))
+            .collect(),
+    );
+    for step in &mut plan.steps {
+        step.params =
+            orch8_engine::template::resolve(&step.params, &instance.context, &output_context)
+                .map_err(|error| {
+                    ApiError::InvalidArgument(format!(
+                        "compensation parameters for '{}' cannot be resolved: {error}",
+                        step.effect_block_id
+                    ))
+                })?;
+    }
+    Ok((instance.id, plan))
+}
+
+async fn preview_compensation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<CompensationScopeRequest>,
+) -> Result<Json<CompensationPlan>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let (_, plan) = compensation_plan(&state, &tenant_id, id).await?;
+    Ok(Json(plan))
+}
+
+async fn create_compensation_run(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<CompensationScopeRequest>,
+) -> Result<(StatusCode, Json<CompensationRunRecord>), ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let (source_instance_id, plan) = compensation_plan(&state, &tenant_id, id).await?;
+    if plan.steps.is_empty() {
+        return Err(ApiError::Conflict(
+            "no committed effects have executable compensation rules".into(),
+        ));
+    }
+    let now = Utc::now();
+    let run = CompensationRunRecord {
+        id: CompensationRunId::new(),
+        tenant_id,
+        continuity_id: id,
+        source_instance_id,
+        state: CompensationRunState::Planned,
+        version: 0,
+        steps: plan
+            .steps
+            .into_iter()
+            .map(|plan| CompensationExecutionStep {
+                plan,
+                state: CompensationStepState::Pending,
+                attempt: 0,
+                lease_owner: None,
+                lease_expires_at: None,
+                provider_receipt_id: None,
+                error: None,
+                updated_at: now,
+            })
+            .collect(),
+        hazards: plan.hazards.clone(),
+        residual_effects: plan.hazards,
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    let created = state
+        .storage
+        .create_compensation_run(&run)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation run"))?;
+    if !created {
+        return Err(ApiError::Conflict(
+            "this continuity execution already has an active compensation run".into(),
+        ));
+    }
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
+async fn get_compensation_run(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<CompensationRunId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<CompensationRunRecord>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let run = state
+        .storage
+        .get_compensation_run(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation run"))?
+        .ok_or_else(|| ApiError::NotFound("compensation run".into()))?;
+    Ok(Json(run))
+}
+
+fn refresh_compensation_state(run: &mut CompensationRunRecord, now: chrono::DateTime<Utc>) {
+    let has_active = run.steps.iter().any(|step| {
+        matches!(
+            step.state,
+            CompensationStepState::Pending | CompensationStepState::Claimed
+        )
+    });
+    let has_verification = run.steps.iter().any(|step| {
+        matches!(
+            step.state,
+            CompensationStepState::VerificationPending | CompensationStepState::Unknown
+        )
+    });
+    if has_active {
+        run.state = CompensationRunState::Running;
+    } else if has_verification {
+        run.state = CompensationRunState::AwaitingVerification;
+    } else {
+        let has_residual = !run.residual_effects.is_empty()
+            || run.steps.iter().any(|step| {
+                matches!(
+                    step.state,
+                    CompensationStepState::Failed | CompensationStepState::Unknown
+                )
+            });
+        run.state = if has_residual {
+            CompensationRunState::CompletedWithResiduals
+        } else {
+            CompensationRunState::Completed
+        };
+        run.completed_at = Some(now);
+    }
+    run.updated_at = now;
+}
+
+fn advance_compensation_version(run: &mut CompensationRunRecord) -> Result<u64, ApiError> {
+    let expected = run.version;
+    run.version = run
+        .version
+        .checked_add(1)
+        .ok_or_else(|| ApiError::Conflict("compensation version exhausted".into()))?;
+    Ok(expected)
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimCompensationRequest {
+    tenant_id: TenantId,
+    worker_id: String,
+    #[serde(default = "default_compensation_lease_seconds")]
+    lease_seconds: u32,
+}
+
+const fn default_compensation_lease_seconds() -> u32 {
+    60
+}
+
+fn expire_compensation_claim(run: &mut CompensationRunRecord, now: chrono::DateTime<Utc>) -> bool {
+    let Some(expired) = run.steps.iter_mut().find(|step| {
+        step.state == CompensationStepState::Claimed
+            && step.lease_expires_at.is_some_and(|expiry| expiry <= now)
+    }) else {
+        return false;
+    };
+    expired.state = CompensationStepState::Unknown;
+    expired.error = Some("worker lease expired after dispatch eligibility".into());
+    expired.lease_owner = None;
+    expired.lease_expires_at = None;
+    expired.updated_at = now;
+    run.residual_effects.push(format!(
+        "COMPENSATION_OUTCOME_UNKNOWN:{}",
+        expired.plan.effect_id
+    ));
+    run.residual_effects.sort();
+    run.residual_effects.dedup();
+    refresh_compensation_state(run, now);
+    true
+}
+
+fn exhaust_compensation_retries(
+    run: &mut CompensationRunRecord,
+    index: usize,
+    now: chrono::DateTime<Utc>,
+) {
+    let exhausted = &mut run.steps[index];
+    exhausted.state = CompensationStepState::Failed;
+    exhausted.error = Some("compensation retry limit exhausted".into());
+    exhausted.updated_at = now;
+    run.residual_effects.push(format!(
+        "COMPENSATION_RETRIES_EXHAUSTED:{}",
+        exhausted.plan.effect_id
+    ));
+    run.residual_effects.sort();
+    run.residual_effects.dedup();
+    refresh_compensation_state(run, now);
+}
+
+async fn claim_compensation_step(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<CompensationRunId>,
+    Json(body): Json<ClaimCompensationRequest>,
+) -> Result<Json<CompensationExecutionStep>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.worker_id.trim().is_empty() || body.worker_id.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "worker_id must contain between 1 and 128 bytes".into(),
+        ));
+    }
+    if !(5..=3_600).contains(&body.lease_seconds) {
+        return Err(ApiError::InvalidArgument(
+            "lease_seconds must be between 5 and 3600".into(),
+        ));
+    }
+    for _ in 0..8 {
+        let mut run = state
+            .storage
+            .get_compensation_run(&tenant_id, id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "compensation run"))?
+            .ok_or_else(|| ApiError::NotFound("compensation run".into()))?;
+        let now = Utc::now();
+        if expire_compensation_claim(&mut run, now) {
+            let expected = advance_compensation_version(&mut run)?;
+            if state
+                .storage
+                .cas_compensation_run(&tenant_id, expected, &run)
+                .await
+                .map_err(|error| ApiError::from_storage(error, "compensation lease"))?
+            {
+                return Err(ApiError::Conflict(
+                    "an expired compensation claim has an unknown outcome and requires verification"
+                        .into(),
+                ));
+            }
+            continue;
+        }
+        if run.steps.iter().any(|step| {
+            matches!(
+                step.state,
+                CompensationStepState::Claimed
+                    | CompensationStepState::VerificationPending
+                    | CompensationStepState::Failed
+                    | CompensationStepState::Unknown
+            )
+        }) {
+            return Err(ApiError::Conflict(
+                "the current compensation step must be settled before another can be claimed"
+                    .into(),
+            ));
+        }
+        let Some(index) = run
+            .steps
+            .iter()
+            .position(|step| step.state == CompensationStepState::Pending)
+        else {
+            return Err(ApiError::Conflict(
+                "compensation run has no pending step".into(),
+            ));
+        };
+        if run.steps[index].attempt >= 10 {
+            exhaust_compensation_retries(&mut run, index, now);
+            let expected = advance_compensation_version(&mut run)?;
+            if state
+                .storage
+                .cas_compensation_run(&tenant_id, expected, &run)
+                .await
+                .map_err(|error| ApiError::from_storage(error, "compensation retries"))?
+            {
+                return Err(ApiError::Conflict(
+                    "compensation retry limit exhausted".into(),
+                ));
+            }
+            continue;
+        }
+        let claimed = &mut run.steps[index];
+        claimed.state = CompensationStepState::Claimed;
+        claimed.attempt = claimed.attempt.saturating_add(1);
+        claimed.lease_owner = Some(body.worker_id.clone());
+        claimed.lease_expires_at = Some(now + Duration::seconds(i64::from(body.lease_seconds)));
+        claimed.updated_at = now;
+        let response = claimed.clone();
+        refresh_compensation_state(&mut run, now);
+        let expected = advance_compensation_version(&mut run)?;
+        if state
+            .storage
+            .cas_compensation_run(&tenant_id, expected, &run)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "compensation claim"))?
+        {
+            return Ok(Json(response));
+        }
+    }
+    Err(ApiError::Conflict(
+        "compensation claim lost repeated concurrent updates".into(),
+    ))
+}
+
+async fn mark_effect_compensated(
+    state: &AppState,
+    tenant_id: &TenantId,
+    effect_id: EffectId,
+) -> Result<(), ApiError> {
+    let receipt = state
+        .storage
+        .get_effect_receipt(tenant_id, effect_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
+        .ok_or_else(|| ApiError::NotFound("effect receipt".into()))?;
+    if receipt.state == EffectState::Compensated {
+        return Ok(());
+    }
+    if !matches!(
+        receipt.state,
+        EffectState::Committed | EffectState::Verified
+    ) {
+        return Err(ApiError::Conflict(
+            "only committed or verified effects can be marked compensated".into(),
+        ));
+    }
+    let mut next = receipt.clone();
+    next.transition(EffectState::Compensated, Utc::now())
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    if !state
+        .storage
+        .cas_effect_receipt(tenant_id, effect_id, receipt.state, &next)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
+    {
+        let current = state
+            .storage
+            .get_effect_receipt(tenant_id, effect_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "effect receipt"))?;
+        if !current.is_some_and(|value| value.state == EffectState::Compensated) {
+            return Err(ApiError::Conflict(
+                "effect receipt changed concurrently".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteCompensationRequest {
+    tenant_id: TenantId,
+    worker_id: String,
+    #[serde(alias = "provider_receipt_id")]
+    provider_receipt: Option<String>,
+}
+
+async fn complete_compensation_step(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, effect_id)): Path<(CompensationRunId, EffectId)>,
+    Json(body): Json<CompleteCompensationRequest>,
+) -> Result<Json<CompensationRunRecord>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body
+        .provider_receipt
+        .as_ref()
+        .is_some_and(|value| value.len() > 512)
+    {
+        return Err(ApiError::PayloadTooLarge(
+            "provider_receipt_id exceeds 512 bytes".into(),
+        ));
+    }
+    let mut run = state
+        .storage
+        .get_compensation_run(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation run"))?
+        .ok_or_else(|| ApiError::NotFound("compensation run".into()))?;
+    let step = run
+        .steps
+        .iter_mut()
+        .find(|step| step.plan.effect_id == effect_id)
+        .ok_or_else(|| ApiError::NotFound("compensation step".into()))?;
+    if step.state != CompensationStepState::Claimed
+        || step.lease_owner.as_deref() != Some(body.worker_id.as_str())
+        || step
+            .lease_expires_at
+            .is_none_or(|expiry| expiry <= Utc::now())
+    {
+        return Err(ApiError::Conflict(
+            "compensation step is not actively claimed by this worker".into(),
+        ));
+    }
+    if step.plan.verification
+        == orch8_types::sequence::CompensationVerificationPolicy::ProviderReceipt
+        && body.provider_receipt.is_none()
+    {
+        return Err(ApiError::InvalidArgument(
+            "this compensation requires a provider receipt".into(),
+        ));
+    }
+    let manual =
+        step.plan.verification == orch8_types::sequence::CompensationVerificationPolicy::Manual;
+    if !manual {
+        mark_effect_compensated(&state, &tenant_id, effect_id).await?;
+    }
+    let now = Utc::now();
+    step.state = if manual {
+        CompensationStepState::VerificationPending
+    } else {
+        CompensationStepState::Succeeded
+    };
+    step.provider_receipt_id = body.provider_receipt;
+    step.lease_owner = None;
+    step.lease_expires_at = None;
+    step.error = None;
+    step.updated_at = now;
+    refresh_compensation_state(&mut run, now);
+    let expected = advance_compensation_version(&mut run)?;
+    if !state
+        .storage
+        .cas_compensation_run(&tenant_id, expected, &run)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation completion"))?
+    {
+        return Err(ApiError::Conflict(
+            "compensation completion changed concurrently".into(),
+        ));
+    }
+    Ok(Json(run))
+}
+
+#[derive(Debug, Deserialize)]
+struct FailCompensationRequest {
+    tenant_id: TenantId,
+    worker_id: String,
+    error: String,
+    #[serde(default)]
+    outcome_uncertain: bool,
+    #[serde(default)]
+    retryable: bool,
+}
+
+async fn fail_compensation_step(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, effect_id)): Path<(CompensationRunId, EffectId)>,
+    Json(body): Json<FailCompensationRequest>,
+) -> Result<Json<CompensationRunRecord>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.error.trim().is_empty() || body.error.len() > 2_048 {
+        return Err(ApiError::InvalidArgument(
+            "error must contain between 1 and 2048 bytes".into(),
+        ));
+    }
+    if body.outcome_uncertain && body.retryable {
+        return Err(ApiError::InvalidArgument(
+            "an outcome-uncertain compensation cannot be retried automatically".into(),
+        ));
+    }
+    let mut run = state
+        .storage
+        .get_compensation_run(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation run"))?
+        .ok_or_else(|| ApiError::NotFound("compensation run".into()))?;
+    let step = run
+        .steps
+        .iter_mut()
+        .find(|step| step.plan.effect_id == effect_id)
+        .ok_or_else(|| ApiError::NotFound("compensation step".into()))?;
+    if step.state != CompensationStepState::Claimed
+        || step.lease_owner.as_deref() != Some(body.worker_id.as_str())
+    {
+        return Err(ApiError::Conflict(
+            "compensation step is not claimed by this worker".into(),
+        ));
+    }
+    let now = Utc::now();
+    step.state = if body.outcome_uncertain {
+        CompensationStepState::Unknown
+    } else if body.retryable {
+        CompensationStepState::Pending
+    } else {
+        CompensationStepState::Failed
+    };
+    step.error = Some(body.error);
+    step.lease_owner = None;
+    step.lease_expires_at = None;
+    step.updated_at = now;
+    if !body.retryable {
+        run.residual_effects.push(format!(
+            "COMPENSATION_{}:{}",
+            if body.outcome_uncertain {
+                "UNKNOWN"
+            } else {
+                "FAILED"
+            },
+            effect_id
+        ));
+    }
+    run.residual_effects.sort();
+    run.residual_effects.dedup();
+    refresh_compensation_state(&mut run, now);
+    let expected = advance_compensation_version(&mut run)?;
+    if !state
+        .storage
+        .cas_compensation_run(&tenant_id, expected, &run)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation failure"))?
+    {
+        return Err(ApiError::Conflict(
+            "compensation failure changed concurrently".into(),
+        ));
+    }
+    Ok(Json(run))
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyCompensationRequest {
+    tenant_id: TenantId,
+    approved: bool,
+    evidence: String,
+}
+
+async fn verify_compensation_step(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, effect_id)): Path<(CompensationRunId, EffectId)>,
+    Json(body): Json<VerifyCompensationRequest>,
+) -> Result<Json<CompensationRunRecord>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.evidence.trim().is_empty() || body.evidence.len() > 2_048 {
+        return Err(ApiError::InvalidArgument(
+            "evidence must contain between 1 and 2048 bytes".into(),
+        ));
+    }
+    let mut run = state
+        .storage
+        .get_compensation_run(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation run"))?
+        .ok_or_else(|| ApiError::NotFound("compensation run".into()))?;
+    let step = run
+        .steps
+        .iter_mut()
+        .find(|step| step.plan.effect_id == effect_id)
+        .ok_or_else(|| ApiError::NotFound("compensation step".into()))?;
+    if !matches!(
+        step.state,
+        CompensationStepState::VerificationPending | CompensationStepState::Unknown
+    ) {
+        return Err(ApiError::Conflict(
+            "compensation step is not awaiting verification".into(),
+        ));
+    }
+    if body.approved {
+        mark_effect_compensated(&state, &tenant_id, effect_id).await?;
+    }
+    let now = Utc::now();
+    step.state = if body.approved {
+        CompensationStepState::Verified
+    } else {
+        CompensationStepState::Failed
+    };
+    step.error = if body.approved {
+        None
+    } else {
+        Some(body.evidence)
+    };
+    if body.approved {
+        run.residual_effects
+            .retain(|residual| !residual.ends_with(&format!(":{effect_id}")));
+    } else {
+        run.residual_effects
+            .push(format!("COMPENSATION_REJECTED:{effect_id}"));
+    }
+    run.residual_effects.sort();
+    run.residual_effects.dedup();
+    refresh_compensation_state(&mut run, now);
+    let expected = advance_compensation_version(&mut run)?;
+    if !state
+        .storage
+        .cas_compensation_run(&tenant_id, expected, &run)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation verification"))?
+    {
+        return Err(ApiError::Conflict(
+            "compensation verification changed concurrently".into(),
+        ));
+    }
+    Ok(Json(run))
 }
 
 #[derive(Debug, Deserialize)]

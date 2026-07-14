@@ -977,6 +977,149 @@ describe("Portable Continuity", () => {
     assert.deepEqual(locations.map((location) => location.epoch), [0, 1, 2]);
   });
 
+  it("durably compensates committed effects in reverse dependency order", async () => {
+    const tenantId = `continuity-compensation-${uuid().slice(0, 8)}`;
+    const reserveHandler = `reserve_${uuid().slice(0, 8)}`;
+    const chargeHandler = `charge_${uuid().slice(0, 8)}`;
+    const failHandler = `fail_${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      "portable-compensation",
+      [
+        step("review", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Start effects?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+        step("reserve", reserveHandler, { resource: "seat-7" }, {
+          compensation: {
+            handler: "release_reservation",
+            params: { resource: "{{ outputs.reserve.resource }}" },
+            verification: "handler_result",
+          },
+        }),
+        step("charge", chargeHandler, { amount: 4200 }, {
+          compensation: {
+            handler: "refund_payment",
+            params: { amount: "{{ outputs.charge.amount }}" },
+            depends_on: ["reserve"],
+            verification: "provider_receipt",
+          },
+        }),
+        step("notify", failHandler, { channel: "email" }),
+      ],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    await client.sendSignal(
+      instance.id,
+      { custom: "human_input:review" } as unknown as string,
+      { value: "continue" },
+    );
+    const reserveTask = await waitForWorkerTask(reserveHandler, "effects-worker");
+    await client.completeWorkerTask(reserveTask.id, "effects-worker", {
+      provider_receipt_id: "reservation-7",
+      resource: "seat-7",
+    });
+    const chargeTask = await waitForWorkerTask(chargeHandler, "effects-worker");
+    await client.completeWorkerTask(chargeTask.id, "effects-worker", {
+      provider_receipt_id: "charge-7",
+      amount: 4200,
+    });
+    const failingTask = await waitForWorkerTask(failHandler, "effects-worker");
+    await client.failWorkerTask(
+      failingTask.id,
+      "effects-worker",
+      "provider unavailable",
+      false,
+    );
+    await client.waitForState(instance.id, "failed");
+
+    const preview = await client.previewContinuityCompensation(
+      execution.continuity_id,
+      { tenant_id: tenantId },
+    );
+    assert.deepEqual(
+      preview.steps.map((candidate: Record<string, unknown>) => candidate.handler),
+      ["refund_payment", "release_reservation"],
+    );
+    assert.equal(preview.steps[0].params.amount, 4200);
+    assert.equal(preview.steps[1].params.resource, "seat-7");
+    assert.ok(preview.hazards.some((hazard: string) =>
+      hazard.startsWith("UNKNOWN_EFFECT_MUST_BE_RESOLVED:notify")
+    ));
+    const run = await client.createContinuityCompensation(
+      execution.continuity_id,
+      { tenant_id: tenantId },
+    );
+    assert.equal(run.state, "planned");
+
+    const refund = await client.claimContinuityCompensation(run.id, {
+      tenant_id: tenantId,
+      worker_id: "compensation-worker",
+      lease_seconds: 5,
+    });
+    assert.equal(refund.plan.handler, "refund_payment");
+    assert.ok(refund.plan.idempotency_key.startsWith("compensate:"));
+    await new Promise((resolve) => setTimeout(resolve, 5_100));
+    await assert.rejects(
+      () => client.claimContinuityCompensation(run.id, {
+        tenant_id: tenantId,
+        worker_id: "replacement-worker",
+        lease_seconds: 30,
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+    const crashed = await client.getContinuityCompensation(run.id, tenantId);
+    assert.equal(crashed.steps[0].state, "unknown");
+    await client.verifyContinuityCompensation(run.id, refund.plan.effect_id, {
+      tenant_id: tenantId,
+      approved: true,
+      evidence: "provider confirms refund under the supplied idempotency key",
+    });
+
+    const release = await client.claimContinuityCompensation(run.id, {
+      tenant_id: tenantId,
+      worker_id: "compensation-worker",
+      lease_seconds: 30,
+    });
+    assert.equal(release.plan.handler, "release_reservation");
+    const finished = await client.completeContinuityCompensation(
+      run.id,
+      release.plan.effect_id,
+      {
+        tenant_id: tenantId,
+        worker_id: "compensation-worker",
+        provider_receipt_id: "release-7",
+      },
+    );
+    assert.equal(finished.state, "completed_with_residuals");
+    assert.ok(finished.residual_effects.some((residual: string) =>
+      residual.startsWith("UNKNOWN_EFFECT_MUST_BE_RESOLVED:notify")
+    ));
+    const receipts = await client.listContinuityEffects(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(receipts.find((receipt) => receipt.block_id === "charge")?.state, "compensated");
+    assert.equal(receipts.find((receipt) => receipt.block_id === "reserve")?.state, "compensated");
+    assert.equal(receipts.find((receipt) => receipt.block_id === "notify")?.state, "unknown");
+  });
+
   it("fails preview when a required capability is missing", async () => {
     const tenantId = `continuity-gap-${uuid().slice(0, 8)}`;
     const sequence = testSequence("portable-gap", [step("work", "noop")], {

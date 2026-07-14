@@ -50,6 +50,7 @@ fn mk_step_cached(
         cache_key: Some(cache_key.into()),
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 

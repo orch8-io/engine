@@ -2742,6 +2742,24 @@ pub trait ContinuityStore: Send + Sync + 'static {
         &self,
         transition: LiveMigrationTransition<'_>,
     ) -> Result<bool, StorageError>;
+
+    async fn create_compensation_run(
+        &self,
+        run: &orch8_types::continuity_advanced::CompensationRunRecord,
+    ) -> Result<bool, StorageError>;
+
+    async fn get_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        id: orch8_types::continuity_advanced::CompensationRunId,
+    ) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError>;
+
+    async fn cas_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        expected_version: u64,
+        next: &orch8_types::continuity_advanced::CompensationRunRecord,
+    ) -> Result<bool, StorageError>;
 }
 
 /// Inputs to one atomic live-migration state transition. Grouping the fields

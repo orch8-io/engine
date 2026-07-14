@@ -12,14 +12,107 @@ use orch8_types::continuity::{
     StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::{
-    CheckpointBoundary, ForkEffectMode, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
-    MigrationDisposition, MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+    CheckpointBoundary, CompensationExecutionStep, CompensationPlanStep, CompensationRunId,
+    CompensationRunRecord, CompensationRunState, CompensationStepState, ForkEffectMode,
+    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
+    MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+use orch8_types::sequence::CompensationVerificationPolicy;
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
+}
+
+#[tokio::test]
+async fn compensation_runs_are_durable_and_version_cas_protected() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant_id = tenant("tenant-compensation");
+    let continuity_id = ContinuityId::new();
+    let instance_id = InstanceId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant_id.clone(),
+            current_instance_id: instance_id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let run = CompensationRunRecord {
+        id: CompensationRunId::new(),
+        tenant_id: tenant_id.clone(),
+        continuity_id,
+        source_instance_id: instance_id,
+        state: CompensationRunState::Planned,
+        version: 0,
+        steps: vec![CompensationExecutionStep {
+            plan: CompensationPlanStep {
+                effect_id: EffectId::new(),
+                effect_block_id: BlockId::new("charge"),
+                handler: "refund".into(),
+                params: serde_json::json!({"secret": "sensitive"}),
+                idempotency_key: "compensate:charge".into(),
+                verification: CompensationVerificationPolicy::ProviderReceipt,
+            },
+            state: CompensationStepState::Pending,
+            attempt: 0,
+            lease_owner: None,
+            lease_expires_at: None,
+            provider_receipt_id: None,
+            error: None,
+            updated_at: now,
+        }],
+        hazards: Vec::new(),
+        residual_effects: Vec::new(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    };
+    assert!(storage.create_compensation_run(&run).await.unwrap());
+    assert_eq!(
+        storage
+            .get_compensation_run(&tenant_id, run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .steps[0]
+            .plan
+            .params,
+        serde_json::json!({"secret": "sensitive"})
+    );
+    let mut duplicate_active = run.clone();
+    duplicate_active.id = CompensationRunId::new();
+    assert!(
+        !storage
+            .create_compensation_run(&duplicate_active)
+            .await
+            .unwrap(),
+        "only one active compensation executor may own an execution"
+    );
+    let mut claimed = run.clone();
+    claimed.version = 1;
+    claimed.state = CompensationRunState::Running;
+    claimed.steps[0].state = CompensationStepState::Claimed;
+    claimed.steps[0].lease_owner = Some("worker-a".into());
+    assert!(
+        storage
+            .cas_compensation_run(&tenant_id, 0, &claimed)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .cas_compensation_run(&tenant_id, 0, &claimed)
+            .await
+            .unwrap(),
+        "stale compensation executors must not overwrite a newer claim"
+    );
 }
 
 #[tokio::test]

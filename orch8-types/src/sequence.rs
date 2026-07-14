@@ -228,6 +228,35 @@ pub struct StepDef {
     /// conditions — `data.*`, `outputs.*`, comparisons, boolean ops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// Receipt-backed recovery action for this externally visible step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation: Option<StepCompensation>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationVerificationPolicy {
+    /// A successful handler response is evidence of the compensation attempt,
+    /// but does not claim the external world was fully restored.
+    #[default]
+    HandlerResult,
+    /// Require a provider receipt identifier before the step is accepted.
+    ProviderReceipt,
+    /// Hold completion for explicit operator verification.
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StepCompensation {
+    pub handler: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// Effect blocks that must be compensated after this block. The planner
+    /// reverses these forward dependencies deterministically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<BlockId>,
+    #[serde(default)]
+    pub verification: CompensationVerificationPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -783,6 +812,9 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
     match block {
         BlockDefinition::Step(s) => {
             names.push(s.handler.clone());
+            if let Some(compensation) = &s.compensation {
+                names.push(compensation.handler.clone());
+            }
         }
         BlockDefinition::Parallel(p) => {
             for branch in &p.branches {
@@ -888,6 +920,32 @@ fn validate_step(
 
     if s.handler.is_empty() {
         return Err(block_err(id, "handler name must not be empty"));
+    }
+    if let Some(compensation) = &s.compensation {
+        if compensation.handler.trim().is_empty() {
+            return Err(block_err(id, "compensation.handler must not be empty"));
+        }
+        if compensation.depends_on.len() > 256 {
+            return Err(block_err(
+                id,
+                "compensation.depends_on must not exceed 256 entries",
+            ));
+        }
+        let mut dependencies = std::collections::HashSet::new();
+        for dependency in &compensation.depends_on {
+            if dependency == &s.id {
+                return Err(block_err(
+                    id,
+                    "compensation cannot depend on its own effect",
+                ));
+            }
+            if !dependencies.insert(dependency) {
+                return Err(block_err(
+                    id,
+                    "compensation.depends_on must not contain duplicates",
+                ));
+            }
+        }
     }
 
     if let Some(retry) = &s.retry {
@@ -1247,6 +1305,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }));
         for i in 0..depth {
             inner = BlockDefinition::Loop(Box::new(LoopDef {
@@ -1330,6 +1389,7 @@ mod tests {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             }))],
             max_iterations: u32::MAX,
             break_on: None,
@@ -1369,6 +1429,7 @@ mod tests {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             }))]
         };
         let branches: Vec<Vec<BlockDefinition>> = (0..=MAX_BRANCHES).map(|_| leaf()).collect();
@@ -1412,6 +1473,7 @@ mod tests {
                     cache_key: None,
                     output_schema: None,
                     when: None,
+                    compensation: None,
                 }))
             })
             .collect();
@@ -1654,6 +1716,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))
     }
 
@@ -1805,6 +1868,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }));
         let seq = sample_seq(vec![step_with_bad]);
         let err = seq.validate().unwrap_err();
@@ -1938,6 +2002,38 @@ mod tests {
         let seq = sample_seq(vec![step("a"), step("b")]);
         let names = seq.handler_names();
         assert_eq!(names, vec!["noop"]); // step() helper uses "noop"
+    }
+
+    #[test]
+    fn handler_names_and_validation_include_compensations() {
+        let mut block = step("charge");
+        let BlockDefinition::Step(definition) = &mut block else {
+            unreachable!();
+        };
+        definition.compensation = Some(StepCompensation {
+            handler: "refund".into(),
+            params: serde_json::Value::Null,
+            depends_on: Vec::new(),
+            verification: CompensationVerificationPolicy::ProviderReceipt,
+        });
+        let sequence = sample_seq(vec![block]);
+        assert_eq!(sequence.handler_names(), vec!["noop", "refund"]);
+        assert!(sequence.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_self_dependent_compensation() {
+        let mut block = step("charge");
+        let BlockDefinition::Step(definition) = &mut block else {
+            unreachable!();
+        };
+        definition.compensation = Some(StepCompensation {
+            handler: "refund".into(),
+            params: serde_json::Value::Null,
+            depends_on: vec![BlockId::new("charge")],
+            verification: CompensationVerificationPolicy::HandlerResult,
+        });
+        assert!(sample_seq(vec![block]).validate().is_err());
     }
 
     #[test]

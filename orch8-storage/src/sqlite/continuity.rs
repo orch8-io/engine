@@ -10,7 +10,9 @@ use orch8_types::continuity::{
     HandoffState, PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities,
     RuntimeId, StreamFrame, StreamId,
 };
-use orch8_types::continuity_advanced::{LiveMigrationRecord, MigrationPlanId};
+use orch8_types::continuity_advanced::{
+    CompensationRunId, CompensationRunRecord, LiveMigrationRecord, MigrationPlanId,
+};
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
@@ -1477,5 +1479,66 @@ impl crate::ContinuityStore for SqliteStorage {
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(true)
+    }
+
+    async fn create_compensation_run(
+        &self,
+        run: &CompensationRunRecord,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO compensation_runs
+             (id,tenant_id,continuity_id,state,version,record,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?)",
+        )
+        .bind(run.id.to_string())
+        .bind(run.tenant_id.as_str())
+        .bind(run.continuity_id.to_string())
+        .bind(state_name(run.state)?)
+        .bind(to_i64(run.version, "compensation version")?)
+        .bind(encode(run)?)
+        .bind(run.created_at.to_rfc3339())
+        .bind(run.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn get_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        id: CompensationRunId,
+    ) -> Result<Option<CompensationRunRecord>, StorageError> {
+        let row = sqlx::query("SELECT record FROM compensation_runs WHERE tenant_id=? AND id=?")
+            .bind(tenant_id.as_str())
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(&row.get::<String, _>("record")))
+            .transpose()
+    }
+
+    async fn cas_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        expected_version: u64,
+        next: &CompensationRunRecord,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE compensation_runs SET state=?,version=?,record=?,updated_at=?
+             WHERE tenant_id=? AND id=? AND version=?",
+        )
+        .bind(state_name(next.state)?)
+        .bind(to_i64(next.version, "compensation version")?)
+        .bind(encode(next)?)
+        .bind(next.updated_at.to_rfc3339())
+        .bind(tenant_id.as_str())
+        .bind(next.id.to_string())
+        .bind(to_i64(expected_version, "expected compensation version")?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
     }
 }

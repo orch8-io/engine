@@ -161,6 +161,42 @@ pub enum ExecutionCmd {
         migration_id: Uuid,
         request: PathBuf,
     },
+    /// Preview receipt-derived compensation ordering and hazards.
+    CompensationPreview {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// Create a durable compensation run from committed effect receipts.
+    CompensationCreate {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// Inspect a durable compensation run.
+    CompensationGet {
+        run_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Claim the next ordered compensation step.
+    CompensationClaim { run_id: Uuid, request: PathBuf },
+    /// Complete a claimed compensation step.
+    CompensationComplete {
+        run_id: Uuid,
+        effect_id: Uuid,
+        request: PathBuf,
+    },
+    /// Record a failed or outcome-unknown compensation attempt.
+    CompensationFail {
+        run_id: Uuid,
+        effect_id: Uuid,
+        request: PathBuf,
+    },
+    /// Verify a manual or uncertain compensation outcome.
+    CompensationVerify {
+        run_id: Uuid,
+        effect_id: Uuid,
+        request: PathBuf,
+    },
     /// Generate bounded fault/state-space scenarios from a JSON request.
     GenerateScenarios { request: PathBuf },
     /// Minimize an incident reproduction from a JSON request.
@@ -589,6 +625,86 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/migrations/{migration_id}/rollback"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationPreview {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/compensations/preview"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationCreate {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/compensations"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationGet { run_id, tenant_id } => {
+            let response = client
+                .get(format!("{base}/continuity/compensations/{run_id}"))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::CompensationClaim { run_id, request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/compensations/{run_id}/claim"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationComplete {
+            run_id,
+            effect_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/compensations/{run_id}/steps/{effect_id}/complete"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationFail {
+            run_id,
+            effect_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/compensations/{run_id}/steps/{effect_id}/fail"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CompensationVerify {
+            run_id,
+            effect_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/compensations/{run_id}/steps/{effect_id}/verify"),
                 &request,
                 format,
             )

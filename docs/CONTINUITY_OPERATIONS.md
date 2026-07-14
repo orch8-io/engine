@@ -86,6 +86,53 @@ orch8 execution migration-apply <plan-id> approval.json
 orch8 execution migration-rollback <plan-id> rollback.json
 ```
 
+## Upgrade to migration 065
+
+Migration `065_compensation_runs.sql` adds the durable compensation run ledger;
+`066_compensation_active_run.sql` adds the database-enforced single-active-run
+invariant. Its parameters, provider receipt identifiers, and failure evidence
+may contain sensitive values, so keep `ORCH8_ENCRYPTION_KEY` configured. SQLite
+schema version 31 creates the equivalent embedded table and index.
+
+## Receipt-backed compensation
+
+Compensation is a new external action, not time travel. Configure it on the
+step that creates the original effect:
+
+```json
+{
+  "type": "step",
+  "id": "charge",
+  "handler": "payments.charge",
+  "params": { "amount": 4200 },
+  "compensation": {
+    "handler": "payments.refund",
+    "params": { "amount": 4200 },
+    "depends_on": ["reserve_inventory"],
+    "verification": "provider_receipt"
+  }
+}
+```
+
+Preview first. The planner considers only `committed` and `verified` effect
+receipts and reverses the declared forward dependencies; a block observed in
+the execution tree without a committed receipt is never compensated. Missing
+rules and unknown original effects appear as stable hazards. Starting a run
+does not erase those hazards.
+
+Workers claim exactly one ordered compensation step under a bounded lease.
+Every step carries `compensate:<original-effect-id>` as its immutable
+idempotency key. A lease that expires before completion becomes `unknown` and
+blocks later steps until an operator verifies the provider outcome; it is not
+blindly redelivered. `provider_receipt` policy requires provider evidence,
+while `manual` holds the step in `verification_pending`. Only accepted evidence
+advances the original receipt to `compensated`.
+
+A run may finish as `completed_with_residuals`. This is expected when an
+original effect is unknown, no compensation rule exists, a compensation fails,
+or outcome evidence remains inconclusive. Treat the residual list as required
+operator work; never describe compensation as restoring the world perfectly.
+
 ## Capability and locality routing
 
 Runtime advertisements are short-lived, tenant-scoped facts. Alongside

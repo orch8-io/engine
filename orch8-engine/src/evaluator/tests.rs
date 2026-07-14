@@ -24,6 +24,7 @@ fn find_block_in_flat_list() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))];
 
     let found = find_block(&blocks, &BlockId::new("step_1"));
@@ -57,6 +58,7 @@ fn find_block_nested_in_parallel() {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             }))]],
         },
     ))];
@@ -86,6 +88,7 @@ fn block_meta_returns_correct_types() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }));
     let (id, bt) = block_meta(&step);
     assert_eq!(id.as_str(), "s");
@@ -112,6 +115,7 @@ fn mk_step(id: &str) -> BlockDefinition {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 

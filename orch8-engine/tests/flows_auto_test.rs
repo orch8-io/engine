@@ -54,6 +54,7 @@ fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 

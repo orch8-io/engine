@@ -75,6 +75,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))],
         interceptors: None,
         input_schema: None,

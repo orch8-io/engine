@@ -139,6 +139,7 @@ fn make_sequence_definition_with_tenant(
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -1202,6 +1203,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             })),
             BlockDefinition::Step(Box::new(StepDef {
                 id: BlockId::new("s2"),
@@ -1222,6 +1224,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             })),
             BlockDefinition::Step(Box::new(StepDef {
                 id: BlockId::new("s3"),
@@ -1242,6 +1245,7 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             })),
         ],
         interceptors: None,

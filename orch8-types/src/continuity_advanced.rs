@@ -6,7 +6,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::continuity::{
-    ContinuityId, DataClassification, EffectKind, ExecutionEpoch, RuntimeId, RuntimeTrustLevel,
+    ContinuityId, DataClassification, EffectId, EffectKind, ExecutionEpoch, RuntimeId,
+    RuntimeTrustLevel,
 };
 use crate::ids::{BlockId, InstanceId, SequenceId, TenantId};
 use crate::instance::BudgetUsage;
@@ -51,6 +52,7 @@ macro_rules! uuid_id {
 uuid_id!(InvariantId);
 uuid_id!(InvariantResultId);
 uuid_id!(MigrationPlanId);
+uuid_id!(CompensationRunId);
 uuid_id!(ScenarioId);
 uuid_id!(IncidentCaseId);
 uuid_id!(BudgetReservationId);
@@ -256,6 +258,74 @@ pub struct LiveMigrationRecord {
     pub rollback_expires_at: DateTime<Utc>,
     pub applied_at: Option<DateTime<Utc>>,
     pub rolled_back_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CompensationPlanStep {
+    pub effect_id: EffectId,
+    pub effect_block_id: BlockId,
+    pub handler: String,
+    pub params: serde_json::Value,
+    pub idempotency_key: String,
+    pub verification: crate::sequence::CompensationVerificationPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CompensationPlan {
+    pub steps: Vec<CompensationPlanStep>,
+    /// Stable machine-readable reasons why compensation may be incomplete.
+    pub hazards: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationStepState {
+    Pending,
+    Claimed,
+    Succeeded,
+    VerificationPending,
+    Verified,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CompensationExecutionStep {
+    pub plan: CompensationPlanStep,
+    pub state: CompensationStepState,
+    pub attempt: u32,
+    pub lease_owner: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub provider_receipt_id: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompensationRunState {
+    Planned,
+    Running,
+    AwaitingVerification,
+    Completed,
+    CompletedWithResiduals,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CompensationRunRecord {
+    pub id: CompensationRunId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub source_instance_id: InstanceId,
+    pub state: CompensationRunState,
+    pub version: u64,
+    pub steps: Vec<CompensationExecutionStep>,
+    pub hazards: Vec<String>,
+    pub residual_effects: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]

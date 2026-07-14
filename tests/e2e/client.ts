@@ -377,6 +377,58 @@ export class Orch8Client {
     return this.#post(`/continuity/migrations/${id}/rollback`, req);
   }
 
+  async previewContinuityCompensation(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/executions/${continuityId}/compensations/preview`,
+      req,
+    );
+  }
+
+  async createContinuityCompensation(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/compensations`, req);
+  }
+
+  async getContinuityCompensation(id: string, tenantId: string): Promise<ApiResponse> {
+    return this.#get(
+      `/continuity/compensations/${id}${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  async claimContinuityCompensation(
+    id: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/compensations/${id}/claim`, req);
+  }
+
+  async completeContinuityCompensation(
+    id: string,
+    effectId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/compensations/${id}/steps/${effectId}/complete`,
+      req,
+    );
+  }
+
+  async verifyContinuityCompensation(
+    id: string,
+    effectId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/compensations/${id}/steps/${effectId}/verify`,
+      req,
+    );
+  }
+
   async extractContinuityTestFixture(
     continuityId: string,
     req: Record<string, unknown>,

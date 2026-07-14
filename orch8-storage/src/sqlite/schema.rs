@@ -903,6 +903,24 @@ CREATE TABLE IF NOT EXISTS live_migrations (
 CREATE INDEX IF NOT EXISTS idx_live_migrations_execution
     ON live_migrations(tenant_id, continuity_id, created_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS compensation_runs (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version >= 0),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_compensation_runs_execution
+    ON compensation_runs(tenant_id, continuity_id, created_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_compensation_runs_active
+    ON compensation_runs(tenant_id, continuity_id)
+    WHERE state IN ('planned', 'running', 'awaiting_verification');
+
 CREATE TABLE IF NOT EXISTS evaluation_scores (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -968,4 +986,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 30;
+pub(super) const SCHEMA_VERSION: i64 = 31;

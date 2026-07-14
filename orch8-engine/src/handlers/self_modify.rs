@@ -196,6 +196,7 @@ mod tests {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             },
         )))
         .unwrap()
@@ -287,6 +288,7 @@ mod tests {
                             cache_key: None,
                             output_schema: None,
                             when: None,
+                            compensation: None,
                         },
                     ))],
                 }],

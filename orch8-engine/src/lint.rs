@@ -976,6 +976,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))
     }
 
@@ -1361,6 +1362,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1402,6 +1404,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);
@@ -1433,6 +1436,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         };
         let mut warnings = Vec::new();
         lint_step(&s, &mut warnings);

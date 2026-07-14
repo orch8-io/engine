@@ -80,6 +80,7 @@ fn mk_seq(name: &str) -> SequenceDefinition {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))],
         interceptors: None,
         input_schema: None,
@@ -1970,6 +1971,7 @@ async fn handler_99_self_modify_valid() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     })))
     .unwrap();
     let ctx = StepContext {

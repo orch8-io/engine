@@ -144,6 +144,7 @@ fn mk_step_def(id: &str, handler: &str, params: serde_json::Value) -> StepDef {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }
 }
 

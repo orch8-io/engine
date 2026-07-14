@@ -901,6 +901,7 @@ async fn ensure_tree_handles_injected_blocks() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .unwrap();
     storage.inject_blocks(inst.id, &injected).await.unwrap();
@@ -1102,6 +1103,7 @@ async fn sla_deadline_breached_fails_node() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1154,6 +1156,7 @@ async fn sla_deadline_with_escalation_handler_called() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
 
@@ -1193,6 +1196,7 @@ async fn sla_deadline_escalation_handler_not_found_still_fails() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1243,6 +1247,7 @@ async fn sla_deadline_escalation_handler_fails_still_fails_node() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
 
@@ -1367,6 +1372,7 @@ async fn sla_deadline_multiple_nodes_some_breached() {
                 cache_key: None,
                 output_schema: None,
                 when: None,
+                compensation: None,
             }))],
         ],
     }));
@@ -1407,6 +1413,7 @@ async fn sla_deadline_zero_duration_immediately_breaches() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1459,6 +1466,7 @@ async fn sla_deadline_records_block_output_on_breach() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();
@@ -1502,6 +1510,7 @@ async fn sla_deadline_breach_metadata_in_output() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))])
     .await;
     let reg = registry_with_retryable_fail();

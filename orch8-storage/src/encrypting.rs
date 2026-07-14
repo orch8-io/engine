@@ -290,6 +290,47 @@ impl EncryptingStorage {
         Ok(record)
     }
 
+    fn encrypt_compensation_run(
+        &self,
+        run: &orch8_types::continuity_advanced::CompensationRunRecord,
+    ) -> Result<orch8_types::continuity_advanced::CompensationRunRecord, StorageError> {
+        let mut encrypted = run.clone();
+        for step in &mut encrypted.steps {
+            step.plan.params = self.encrypt_json_value(&step.plan.params)?;
+            step.provider_receipt_id = step
+                .provider_receipt_id
+                .as_deref()
+                .map(|value| self.encrypt_string_field(value))
+                .transpose()?;
+            step.error = step
+                .error
+                .as_deref()
+                .map(|value| self.encrypt_string_field(value))
+                .transpose()?;
+        }
+        Ok(encrypted)
+    }
+
+    fn decrypt_compensation_run(
+        &self,
+        mut run: orch8_types::continuity_advanced::CompensationRunRecord,
+    ) -> Result<orch8_types::continuity_advanced::CompensationRunRecord, StorageError> {
+        for step in &mut run.steps {
+            step.plan.params = self.decrypt_json_value(&step.plan.params)?;
+            step.provider_receipt_id = step
+                .provider_receipt_id
+                .as_deref()
+                .map(|value| self.decrypt_string_field(value))
+                .transpose()?;
+            step.error = step
+                .error
+                .as_deref()
+                .map(|value| self.decrypt_string_field(value))
+                .transpose()?;
+        }
+        Ok(run)
+    }
+
     /// Encrypt `BlockOutput.output` -- handler results (LLM responses, HTTP
     /// bodies, etc.) are the same data class as `context.data`, so they get
     /// the same at-rest protection. Returns a borrowed `Cow` when the value
@@ -648,6 +689,23 @@ passthrough_impl! {
                     checkpoint: &encrypted_checkpoint,
                     forbid_effects_epoch: transition.forbid_effects_epoch,
                 })
+                .await
+        }
+        async fn create_compensation_run(&self, run: &orch8_types::continuity_advanced::CompensationRunRecord) -> Result<bool, StorageError> {
+            let encrypted = self.encrypt_compensation_run(run)?;
+            self.inner.create_compensation_run(&encrypted).await
+        }
+        async fn get_compensation_run(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::CompensationRunId) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError> {
+            self.inner
+                .get_compensation_run(tenant_id, id)
+                .await?
+                .map(|run| self.decrypt_compensation_run(run))
+                .transpose()
+        }
+        async fn cas_compensation_run(&self, tenant_id: &orch8_types::ids::TenantId, expected_version: u64, next: &orch8_types::continuity_advanced::CompensationRunRecord) -> Result<bool, StorageError> {
+            let encrypted = self.encrypt_compensation_run(next)?;
+            self.inner
+                .cas_compensation_run(tenant_id, expected_version, &encrypted)
                 .await
         }
     }

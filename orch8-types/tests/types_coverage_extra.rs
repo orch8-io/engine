@@ -44,6 +44,7 @@ fn make_step(id: &str, handler: &str) -> BlockDefinition {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -141,6 +142,7 @@ fn full_step(id: &str) -> StepDef {
             "required": ["status"]
         })),
         when: None,
+        compensation: None,
     }
 }
 

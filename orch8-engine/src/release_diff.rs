@@ -56,6 +56,7 @@ struct StepFacts {
     fallback_handler: Option<String>,
     output_schema: Option<serde_json::Value>,
     when: Option<String>,
+    compensation: Option<serde_json::Value>,
     /// DFS position for reorder detection.
     position: usize,
 }
@@ -90,6 +91,15 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                         let position = facts.order.len();
                         let params = map.get("params").cloned().unwrap_or(Value::Null);
                         collect_output_refs(id, &params, facts);
+                        let compensation = map
+                            .get("compensation")
+                            .cloned()
+                            .filter(|value| !value.is_null());
+                        if let Some(compensation_params) =
+                            compensation.as_ref().and_then(|value| value.get("params"))
+                        {
+                            collect_output_refs(id, compensation_params, facts);
+                        }
                         facts.steps.insert(
                             id.to_string(),
                             StepFacts {
@@ -114,6 +124,7 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                                     .cloned()
                                     .filter(|v| !v.is_null()),
                                 when: str_field(map, "when"),
+                                compensation,
                                 position,
                             },
                         );
@@ -406,6 +417,14 @@ pub fn semantic_diff(
                 format!("step '{id}' conditional guard changed"),
             );
         }
+        if old_step.compensation != new_step.compensation {
+            push(
+                "compensation_changed",
+                DiffSeverity::SideEffectRisk,
+                Some(id),
+                format!("step '{id}' compensation policy changed"),
+            );
+        }
     }
 
     // --- routers, A/B, sub-sequences ---
@@ -653,6 +672,22 @@ mod tests {
         let e = entry(&diff, "handler_changed");
         assert_eq!(e.severity, DiffSeverity::SideEffectRisk);
         assert!(e.summary.contains("'log' → 'http_request'"));
+    }
+
+    #[test]
+    fn compensation_change_is_side_effect_risk() {
+        let old = seq(json!([
+            {"type": "step", "id": "charge", "handler": "http_request", "params": {}}
+        ]));
+        let new = seq(json!([
+            {"type": "step", "id": "charge", "handler": "http_request", "params": {},
+             "compensation": {"handler": "refund", "params": {"mode": "full"}}}
+        ]));
+        let diff = semantic_diff(&old, &new);
+        assert_eq!(
+            entry(&diff, "compensation_changed").severity,
+            DiffSeverity::SideEffectRisk
+        );
     }
 
     #[test]

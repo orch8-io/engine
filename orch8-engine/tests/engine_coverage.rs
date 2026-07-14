@@ -3114,6 +3114,7 @@ async fn step_with_context_access_restriction() {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }));
     let (storage, seq, inst) =
         setup_with_ctx(vec![step], json!({"allowed_field": "yes", "secret": "no"})).await;

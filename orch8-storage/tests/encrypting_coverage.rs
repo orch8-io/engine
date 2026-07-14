@@ -24,18 +24,20 @@ use orch8_storage::{
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::continuity::{
-    ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
+    ContinuityExecution, ContinuityId, EffectId, ExecutionEpoch, OwnershipState, RuntimeId,
 };
 use orch8_types::continuity_advanced::{
-    CheckpointBoundary, ForkEffectMode, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
-    MigrationDisposition, MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+    CheckpointBoundary, CompensationExecutionStep, CompensationPlanStep, CompensationRunId,
+    CompensationRunRecord, CompensationRunState, CompensationStepState, ForkEffectMode,
+    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
+    MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::output::BlockOutput;
-use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
+use orch8_types::sequence::{CompensationVerificationPolicy, SequenceDefinition, SequenceStatus};
 use orch8_types::signal::{Signal, SignalType};
 use orch8_types::step_log::StepLogEntry;
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
@@ -1446,4 +1448,88 @@ async fn live_migration_rollback_state_is_encrypted_at_rest() {
         json!({"secret": "checkpoint"})
     );
     assert_eq!(decrypted.source_context, record.source_context);
+}
+
+#[tokio::test]
+async fn compensation_parameters_and_evidence_are_encrypted_at_rest() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let tenant_id = TenantId::new("tenant-compensation").unwrap();
+    let continuity_id = ContinuityId::new();
+    let instance_id = InstanceId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant_id.clone(),
+            current_instance_id: instance_id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let run = CompensationRunRecord {
+        id: CompensationRunId::new(),
+        tenant_id: tenant_id.clone(),
+        continuity_id,
+        source_instance_id: instance_id,
+        state: CompensationRunState::Running,
+        version: 1,
+        steps: vec![CompensationExecutionStep {
+            plan: CompensationPlanStep {
+                effect_id: EffectId::new(),
+                effect_block_id: BlockId::new("charge"),
+                handler: "refund".into(),
+                params: json!({"card": "sensitive"}),
+                idempotency_key: "compensate:charge".into(),
+                verification: CompensationVerificationPolicy::ProviderReceipt,
+            },
+            state: CompensationStepState::Failed,
+            attempt: 1,
+            lease_owner: None,
+            lease_expires_at: None,
+            provider_receipt_id: Some("provider-secret".into()),
+            error: Some("customer-sensitive failure".into()),
+            updated_at: now,
+        }],
+        hazards: Vec::new(),
+        residual_effects: vec!["COMPENSATION_FAILED".into()],
+        created_at: now,
+        updated_at: now,
+        completed_at: Some(now),
+    };
+    assert!(storage.create_compensation_run(&run).await.unwrap());
+    let raw = inner
+        .get_compensation_run(&tenant_id, run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(FieldEncryptor::is_encrypted(&raw.steps[0].plan.params));
+    assert_ne!(
+        raw.steps[0].provider_receipt_id.as_deref(),
+        Some("provider-secret")
+    );
+    assert_ne!(
+        raw.steps[0].error.as_deref(),
+        Some("customer-sensitive failure")
+    );
+    let decrypted = storage
+        .get_compensation_run(&tenant_id, run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(decrypted.steps[0].plan.params, json!({"card": "sensitive"}));
+    assert_eq!(
+        decrypted.steps[0].provider_receipt_id.as_deref(),
+        Some("provider-secret")
+    );
+    assert_eq!(
+        decrypted.steps[0].error.as_deref(),
+        Some("customer-sensitive failure")
+    );
 }

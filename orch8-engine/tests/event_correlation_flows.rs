@@ -80,6 +80,7 @@ async fn create_parked_instance(
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         }))],
         interceptors: None,
         input_schema: None,

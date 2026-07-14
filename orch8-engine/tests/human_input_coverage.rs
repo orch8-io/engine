@@ -51,6 +51,7 @@ fn mk_step(id: &str, human: HumanInputDef) -> StepDef {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }
 }
 

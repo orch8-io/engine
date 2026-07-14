@@ -47,6 +47,7 @@ pub fn mk_step(id: &str, handler: &str) -> BlockDefinition {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -70,6 +71,7 @@ pub fn mk_step_with_params(id: &str, handler: &str, params: Value) -> BlockDefin
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -100,6 +102,7 @@ pub fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDe
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -135,6 +138,7 @@ pub fn mk_step_with_retry_backoff(
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -172,6 +176,7 @@ pub fn mk_step_with_conditional_retry(
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -195,6 +200,7 @@ pub fn mk_step_with_timeout(id: &str, handler: &str, timeout_ms: u64) -> BlockDe
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -225,6 +231,7 @@ pub fn mk_step_with_delay(id: &str, handler: &str, duration: Duration) -> BlockD
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -248,6 +255,7 @@ pub fn mk_step_with_deadline(id: &str, handler: &str, deadline: Duration) -> Blo
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -279,6 +287,7 @@ pub fn mk_step_with_deadline_and_escalation(
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -302,6 +311,7 @@ pub fn mk_step_with_fallback(id: &str, handler: &str, fallback: &str) -> BlockDe
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -325,6 +335,7 @@ pub fn mk_step_with_rate_limit(id: &str, handler: &str, key: &str) -> BlockDefin
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -348,6 +359,7 @@ pub fn mk_step_with_queue(id: &str, handler: &str, queue: &str) -> BlockDefiniti
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -371,6 +383,7 @@ pub fn mk_step_with_cache_key(id: &str, handler: &str, cache_key: &str) -> Block
         cache_key: Some(cache_key.into()),
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -394,6 +407,7 @@ pub fn mk_step_with_delay_spec(id: &str, handler: &str, delay: DelaySpec) -> Blo
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -417,6 +431,7 @@ pub fn mk_step_with_send_window(id: &str, handler: &str, window: SendWindow) -> 
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 
@@ -445,6 +460,7 @@ pub fn mk_step_with_output_schema(
         cache_key: None,
         output_schema: Some(schema),
         when: None,
+        compensation: None,
     }))
 }
 
@@ -468,6 +484,7 @@ pub fn mk_step_with_when(id: &str, handler: &str, when_expr: &str) -> BlockDefin
         cache_key: None,
         output_schema: None,
         when: Some(when_expr.into()),
+        compensation: None,
     }))
 }
 
@@ -496,6 +513,7 @@ pub fn mk_step_with_when_and_params(
         cache_key: None,
         output_schema: None,
         when: Some(when_expr.into()),
+        compensation: None,
     }))
 }
 
@@ -519,6 +537,7 @@ pub fn mk_non_cancellable_step(id: &str, handler: &str) -> BlockDefinition {
         cache_key: None,
         output_schema: None,
         when: None,
+        compensation: None,
     }))
 }
 

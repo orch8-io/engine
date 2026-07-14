@@ -678,6 +678,7 @@ mod tests {
             cache_key: None,
             output_schema: None,
             when: None,
+            compensation: None,
         };
 
         let result = dispatch_step_to_external_worker(
