@@ -680,6 +680,8 @@ CREATE TABLE IF NOT EXISTS continuity_executions (
 );
 CREATE INDEX IF NOT EXISTS idx_continuity_executions_tenant
     ON continuity_executions(tenant_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_continuity_executions_current_instance
+    ON continuity_executions(tenant_id, json_extract(record, '$.current_instance_id'));
 
 CREATE TABLE IF NOT EXISTS execution_handoffs (
     id TEXT PRIMARY KEY,
@@ -741,6 +743,8 @@ CREATE TABLE IF NOT EXISTS effect_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_effect_receipts_continuity
     ON effect_receipts(tenant_id, continuity_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_effect_receipts_unresolved_instance
+    ON effect_receipts(tenant_id, continuity_id, instance_id, state, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS provenance_entries (
     id TEXT PRIMARY KEY,
@@ -922,4 +926,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 26;
+pub(super) const SCHEMA_VERSION: i64 = 27;

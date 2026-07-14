@@ -5,8 +5,23 @@ import assert from "node:assert/strict";
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
+import type { WorkerTask } from "../types.ts";
 
 const client = new Orch8Client();
+
+async function waitForWorkerTask(
+  handler: string,
+  workerId: string,
+  timeoutMs = 10_000,
+): Promise<WorkerTask> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const [task] = await client.pollWorkerTasks(handler, workerId);
+    if (task) return task;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timeout waiting for worker task for ${handler}`);
+}
 
 describe("Portable Continuity", () => {
   let server: ServerHandle | undefined;
@@ -46,6 +61,18 @@ describe("Portable Continuity", () => {
     });
     assert.equal(execution.epoch, 0);
     assert.equal(execution.owner_runtime_id, sourceRuntimeId);
+    await assert.rejects(
+      () =>
+        client.createContinuityExecution({
+          tenant_id: tenantId,
+          instance_id: instance.id,
+          runtime_id: uuid(),
+        }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
 
     const now = Date.now();
     await client.registerRuntime({
@@ -316,6 +343,88 @@ describe("Portable Continuity", () => {
     assert.equal(preview.compatible, false);
     assert.ok(preview.findings.some((finding: any) => finding.code === "HANDLERS_MISSING"));
     assert.ok(preview.findings.some((finding: any) => finding.code === "TRUST_TOO_LOW"));
+  });
+
+  it("classifies external worker effects across dispatch and completion", async () => {
+    const tenantId = `continuity-effect-${uuid().slice(0, 8)}`;
+    const handler = `effect_worker_${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      "portable-effect",
+      [
+        step("arm", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Arm effect dispatch?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+        step(
+          "charge",
+          handler,
+          { amount: 4200, idempotency_key: "order-effect-1" },
+        ),
+      ],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+
+    await client.sendSignal(
+      instance.id,
+      { custom: "human_input:arm" } as unknown as string,
+      { value: "continue" },
+    );
+    const task = await waitForWorkerTask(handler, "effect-worker-1");
+    const dispatched = await client.listContinuityEffects(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0]!.state, "dispatched");
+
+    await assert.rejects(
+      () =>
+        client.completeWorkerTask(task.id, "wrong-effect-worker", {
+          provider_receipt_id: "forged-receipt",
+        }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 404);
+        return true;
+      },
+    );
+    const afterRejectedCallback = await client.listContinuityEffects(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(afterRejectedCallback[0]!.state, "dispatched");
+    assert.equal(afterRejectedCallback[0]!.provider_receipt_id, null);
+
+    await client.completeWorkerTask(task.id, "effect-worker-1", {
+      ok: true,
+      provider_receipt_id: "provider-effect-42",
+    });
+    await client.waitForState(instance.id, "completed");
+
+    const receipts = await client.listContinuityEffects(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]!.block_id, "charge");
+    assert.equal(receipts[0]!.kind, "worker");
+    assert.equal(receipts[0]!.state, "committed");
+    assert.equal(receipts[0]!.idempotency_key, "order-effect-1");
+    assert.equal(receipts[0]!.provider_receipt_id, "provider-effect-42");
+    assert.match(receipts[0]!.request_sha256, /^[0-9a-f]{64}$/);
   });
 
   it("rejects self-asserted elevated runtime trust", async () => {

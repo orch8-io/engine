@@ -179,6 +179,21 @@ pub async fn execute_step_dry(
         }
     })?;
 
+    let mut effect_guard = if exec.context.runtime.dry_run {
+        None
+    } else {
+        crate::effect_guard::EffectGuard::begin(
+            storage.as_ref(),
+            &exec.tenant_id,
+            exec.instance_id,
+            &exec.block_id,
+            &exec.handler_name,
+            &exec.params,
+            exec.attempt,
+        )
+        .await?
+    };
+
     let instance_id = exec.instance_id;
     let block_id = exec.block_id.clone();
     let attempt = exec.attempt;
@@ -212,21 +227,25 @@ pub async fn execute_step_dry(
 
     let handler_fut = handler(step_ctx).instrument(step_span);
     let result = if let Some(dur) = timeout {
-        match tokio::time::timeout(dur, handler_fut).await {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(EngineError::StepTimeout {
-                    block_id,
-                    timeout: dur,
-                });
+        let Ok(result) = tokio::time::timeout(dur, handler_fut).await else {
+            if let Some(guard) = effect_guard.take() {
+                guard.mark_unknown().await?;
             }
-        }
+            return Err(EngineError::StepTimeout {
+                block_id,
+                timeout: dur,
+            });
+        };
+        result
     } else {
         handler_fut.await
     };
 
     match result {
         Ok(output) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.commit(&output).await?;
+            }
             validate_output_schema(output_schema.as_ref(), &output, instance_id, &block_id)?;
 
             // Save to cache if cache_key is set.
@@ -269,6 +288,9 @@ pub async fn execute_step_dry(
             Ok(block_output)
         }
         Err(step_err) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.mark_unknown().await?;
+            }
             warn!(
                 instance_id = %instance_id,
                 attempt = attempt,
@@ -359,6 +381,21 @@ pub async fn execute_step(
         }
     })?;
 
+    let mut effect_guard = if exec.context.runtime.dry_run {
+        None
+    } else {
+        crate::effect_guard::EffectGuard::begin(
+            storage.as_ref(),
+            &exec.tenant_id,
+            exec.instance_id,
+            &exec.block_id,
+            &exec.handler_name,
+            &exec.params,
+            exec.attempt,
+        )
+        .await?
+    };
+
     // Save fields needed after move into step_ctx.
     let instance_id = exec.instance_id;
     let block_id = exec.block_id.clone();
@@ -392,21 +429,25 @@ pub async fn execute_step(
     // Execute with optional timeout.
     let handler_fut = handler(step_ctx).instrument(step_span);
     let result = if let Some(dur) = timeout {
-        match tokio::time::timeout(dur, handler_fut).await {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(EngineError::StepTimeout {
-                    block_id,
-                    timeout: dur,
-                });
+        let Ok(result) = tokio::time::timeout(dur, handler_fut).await else {
+            if let Some(guard) = effect_guard.take() {
+                guard.mark_unknown().await?;
             }
-        }
+            return Err(EngineError::StepTimeout {
+                block_id,
+                timeout: dur,
+            });
+        };
+        result
     } else {
         handler_fut.await
     };
 
     match result {
         Ok(output) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.commit(&output).await?;
+            }
             validate_output_schema(output_schema.as_ref(), &output, instance_id, &block_id)?;
 
             if let Some(ref ck) = cache_key {
@@ -450,6 +491,9 @@ pub async fn execute_step(
             Ok(block_output.output)
         }
         Err(step_err) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.mark_unknown().await?;
+            }
             warn!(
                 instance_id = %instance_id,
                 attempt = attempt,

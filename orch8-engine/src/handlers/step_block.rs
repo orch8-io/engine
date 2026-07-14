@@ -18,7 +18,7 @@ use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::step::StepExecParams;
 
 use super::step_dispatch::{
-    dispatch_plugin, dispatch_step_to_external_worker, resolve_plugin_source,
+    dispatch_plugin_with_effect, dispatch_step_to_external_worker, resolve_plugin_source,
 };
 
 /// Walk `context.data` top-level fields and inflate any externalization
@@ -385,6 +385,15 @@ pub async fn execute_step_node(
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
     // env-configured sidecar, and piece/action names live in the handler string.
     if super::activepieces::is_ap_handler(&step_def.handler) {
+        let effect_guard = begin_effect_guard(
+            storage.as_ref(),
+            instance,
+            step_def,
+            &resolved_params,
+            attempt,
+            &step_context,
+        )
+        .await?;
         let handler_name = step_def.handler.clone();
         let ctx = super::StepContext {
             instance_id: instance.id,
@@ -396,12 +405,13 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(
+        return dispatch_plugin_with_effect(
             storage.as_ref(),
             node,
             attempt,
             move || async move { super::activepieces::handle_ap(ctx, &handler_name).await },
             step_def.output_schema.as_ref(),
+            effect_guard,
         )
         .await;
     }
@@ -421,6 +431,15 @@ pub async fn execute_step_node(
         };
         let mut params = resolved_params;
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
+        let effect_guard = begin_effect_guard(
+            storage.as_ref(),
+            instance,
+            step_def,
+            &params,
+            attempt,
+            &step_context,
+        )
+        .await?;
         let ctx = super::StepContext {
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
@@ -431,12 +450,13 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(
+        return dispatch_plugin_with_effect(
             storage.as_ref(),
             node,
             attempt,
             || super::grpc_plugin::handle_grpc_plugin(ctx),
             step_def.output_schema.as_ref(),
+            effect_guard,
         )
         .await;
     }
@@ -475,12 +495,22 @@ pub async fn execute_step_node(
             storage: Arc::clone(storage),
             wait_for_input: step_def.wait_for_input.clone(),
         };
-        return dispatch_plugin(
+        let effect_guard = begin_effect_guard(
+            storage.as_ref(),
+            instance,
+            step_def,
+            &ctx.params,
+            attempt,
+            ctx.context.as_ref(),
+        )
+        .await?;
+        return dispatch_plugin_with_effect(
             storage.as_ref(),
             node,
             attempt,
             || super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path),
             step_def.output_schema.as_ref(),
+            effect_guard,
         )
         .await;
     }
@@ -685,6 +715,30 @@ pub async fn execute_step_node(
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             Err(e)
         }
+    }
+}
+
+async fn begin_effect_guard<'a>(
+    storage: &'a dyn StorageBackend,
+    instance: &TaskInstance,
+    step_def: &StepDef,
+    params: &serde_json::Value,
+    attempt: u32,
+    context: &ExecutionContext,
+) -> Result<Option<crate::effect_guard::EffectGuard<'a>>, EngineError> {
+    if context.runtime.dry_run {
+        Ok(None)
+    } else {
+        crate::effect_guard::EffectGuard::begin(
+            storage,
+            &instance.tenant_id,
+            instance.id,
+            &step_def.id,
+            &step_def.handler,
+            params,
+            attempt,
+        )
+        .await
     }
 }
 

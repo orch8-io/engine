@@ -335,6 +335,17 @@ async fn create_execution(
     if instance.tenant_id != tenant_id {
         return Err(ApiError::NotFound("instance".into()));
     }
+    if let Some(existing) = state
+        .storage
+        .get_continuity_execution_by_instance(&tenant_id, body.instance_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+    {
+        return Err(ApiError::Conflict(format!(
+            "instance already belongs to continuity execution {}",
+            existing.continuity_id
+        )));
+    }
     let execution = ContinuityExecution {
         continuity_id: ContinuityId::new(),
         tenant_id,

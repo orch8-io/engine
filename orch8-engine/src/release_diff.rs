@@ -35,7 +35,7 @@ const SIDE_EFFECT_BUILTINS: &[&str] = &[
     "embed",
 ];
 
-fn handler_has_side_effects(handler: &str) -> bool {
+pub(crate) fn handler_has_side_effects(handler: &str) -> bool {
     SIDE_EFFECT_BUILTINS.contains(&handler) || !BUILTIN_HANDLER_NAMES.contains(&handler)
 }
 

@@ -19,7 +19,8 @@ use crate::evaluator;
 /// saves step outputs. Previously the output was discarded, leaving plugin
 /// steps invisible to templating and causing `getOutputs` to miss them.
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn dispatch_plugin<F, Fut>(
+#[cfg(test)]
+async fn dispatch_plugin<F, Fut>(
     storage: &dyn StorageBackend,
     node: &ExecutionNode,
     attempt: u32,
@@ -30,9 +31,28 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
 {
+    dispatch_plugin_with_effect(storage, node, attempt, handler_fn, output_schema, None).await
+}
+
+#[allow(clippy::too_many_lines)] // one linear branch keeps effect and node transitions auditable
+pub(crate) async fn dispatch_plugin_with_effect<F, Fut>(
+    storage: &dyn StorageBackend,
+    node: &ExecutionNode,
+    attempt: u32,
+    handler_fn: F,
+    output_schema: Option<&serde_json::Value>,
+    mut effect_guard: Option<crate::effect_guard::EffectGuard<'_>>,
+) -> Result<bool, EngineError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<serde_json::Value, orch8_types::error::StepError>>,
+{
     #[allow(clippy::single_match_else)]
     match handler_fn().await {
         Ok(output) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.commit(&output).await?;
+            }
             if let Some(schema) = output_schema
                 && let Ok(validator) = jsonschema::validator_for(schema)
             {
@@ -91,6 +111,9 @@ where
             Ok(true)
         }
         Err(step_err) => {
+            if let Some(guard) = effect_guard.take() {
+                guard.mark_unknown().await?;
+            }
             // Previously the StepError was matched as `Err(_)` — the error
             // message, details, and retryable flag were all discarded before
             // `fail_node`. That left operators staring at a silently-failed
@@ -184,6 +207,21 @@ pub(crate) async fn dispatch_step_to_external_worker(
         step_def.queue_name.clone(),
     )
     .await;
+
+    let _effect_guard = if step_context.runtime.dry_run {
+        None
+    } else {
+        crate::effect_guard::EffectGuard::begin(
+            storage,
+            &instance.tenant_id,
+            instance.id,
+            &step_def.id,
+            &step_def.handler,
+            &resolved_params,
+            attempt,
+        )
+        .await?
+    };
 
     let task = WorkerTask {
         id: uuid::Uuid::now_v7(),

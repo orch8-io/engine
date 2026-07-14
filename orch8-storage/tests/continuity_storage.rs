@@ -78,6 +78,13 @@ async fn ownership_cas_allows_only_one_epoch_winner() {
         .create_continuity_execution(&execution)
         .await
         .unwrap();
+    assert_eq!(
+        storage
+            .get_continuity_execution_by_instance(&tenant, execution.current_instance_id)
+            .await
+            .unwrap(),
+        Some(execution.clone())
+    );
 
     let destination = RuntimeId::new();
     let mut next = execution.clone();
@@ -147,6 +154,13 @@ async fn effect_state_cas_and_provenance_are_durable() {
         updated_at: now,
     };
     storage.create_effect_receipt(&receipt).await.unwrap();
+    let mut duplicate = receipt.clone();
+    duplicate.destination_fingerprint = "different".into();
+    assert_eq!(
+        storage.ensure_effect_receipt(&duplicate).await.unwrap(),
+        receipt,
+        "ensure must return the first durable receipt rather than overwrite evidence"
+    );
     let mut unknown = receipt.clone();
     unknown
         .transition(EffectState::Unknown, now + Duration::seconds(1))

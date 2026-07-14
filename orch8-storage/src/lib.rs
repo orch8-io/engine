@@ -2479,6 +2479,12 @@ pub trait ContinuityStore: Send + Sync + 'static {
         id: ContinuityId,
     ) -> Result<Option<ContinuityExecution>, StorageError>;
 
+    async fn get_continuity_execution_by_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Option<ContinuityExecution>, StorageError>;
+
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,
@@ -2579,6 +2585,21 @@ pub trait ContinuityStore: Send + Sync + 'static {
     ) -> Result<Vec<RuntimeCapabilities>, StorageError>;
 
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
+
+    /// Insert a deterministic receipt if absent and return the durable value.
+    /// This is the crash/retry-safe entry point used by dispatch paths.
+    async fn ensure_effect_receipt(
+        &self,
+        receipt: &EffectReceipt,
+    ) -> Result<EffectReceipt, StorageError>;
+
+    async fn find_unresolved_effect_receipt(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        instance_id: InstanceId,
+        block_id: &orch8_types::ids::BlockId,
+    ) -> Result<Option<EffectReceipt>, StorageError>;
 
     async fn get_effect_receipt(
         &self,

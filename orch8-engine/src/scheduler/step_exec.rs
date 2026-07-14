@@ -1153,6 +1153,21 @@ pub(super) async fn dispatch_to_external_worker(
 ) -> Result<StepOutcome, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
+    let _effect_guard = if step_context.runtime.dry_run {
+        None
+    } else {
+        crate::effect_guard::EffectGuard::begin(
+            storage,
+            &instance.tenant_id,
+            instance.id,
+            &step_def.id,
+            &step_def.handler,
+            &resolved_params,
+            attempt,
+        )
+        .await?
+    };
+
     // Apply dynamic queue routing: a (tenant, handler) rule may override the
     // step's declared queue at enqueue time.
     let queue_name = crate::queue_routing::resolve_queue(

@@ -34,6 +34,15 @@ pub enum EngineError {
         timeout: Duration,
     },
 
+    #[error(
+        "effect {effect_id} for block {block_id} is {state:?}; automatic redispatch is blocked"
+    )]
+    EffectBlocked {
+        effect_id: orch8_types::continuity::EffectId,
+        block_id: BlockId,
+        state: orch8_types::continuity::EffectState,
+    },
+
     #[error("max iterations exceeded in loop {block_id}")]
     MaxIterationsExceeded { block_id: BlockId },
 

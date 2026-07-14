@@ -645,6 +645,11 @@ pub(crate) async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    if pre_task.state != WorkerTaskState::Claimed
+        || pre_task.worker_id.as_deref() != Some(req.worker_id.as_str())
+    {
+        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
+    }
     // Verify tenant access via the task's owning instance. If the instance is
     // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
     // caller cannot operate on orphaned tasks from another tenant.
@@ -659,7 +664,17 @@ pub(crate) async fn complete_task(
         &inst.tenant_id,
         &format!("worker_task {task_id}"),
     )?;
+    let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
+
+    orch8_engine::effect_guard::commit_external_worker_effect(
+        state.storage.as_ref(),
+        &tenant_id,
+        &pre_task,
+        &req.output,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
 
     let updated = state
         .storage
@@ -876,6 +891,11 @@ pub(crate) async fn fail_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    if pre_task.state != WorkerTaskState::Claimed
+        || pre_task.worker_id.as_deref() != Some(req.worker_id.as_str())
+    {
+        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
+    }
     // Verify tenant access via the task's owning instance. If the instance is
     // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
     // caller cannot operate on orphaned tasks from another tenant.
@@ -890,7 +910,16 @@ pub(crate) async fn fail_task(
         &inst.tenant_id,
         &format!("worker_task {task_id}"),
     )?;
+    let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
+
+    orch8_engine::effect_guard::mark_external_worker_effect_unknown(
+        state.storage.as_ref(),
+        &tenant_id,
+        &pre_task,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
 
     let updated = state
         .storage

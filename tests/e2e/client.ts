@@ -181,6 +181,15 @@ export class Orch8Client {
     return this.#get(`/continuity/handoffs/${id}${toQuery({ tenant_id: tenantId })}`);
   }
 
+  async listContinuityEffects(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/effects${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
   async issueContinuationGrant(req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post("/continuity/grants", req);
   }

@@ -75,6 +75,23 @@ impl crate::ContinuityStore for PostgresStorage {
         row.map(|row| decode(row.get("record"))).transpose()
     }
 
+    async fn get_continuity_execution_by_instance(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+    ) -> Result<Option<ContinuityExecution>, StorageError> {
+        let row = sqlx::query(
+            "SELECT record FROM continuity_executions
+             WHERE tenant_id = $1 AND record->>'current_instance_id' = $2",
+        )
+        .bind(tenant_id.as_str())
+        .bind(instance_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,
@@ -557,6 +574,55 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
+    }
+
+    async fn ensure_effect_receipt(
+        &self,
+        receipt: &EffectReceipt,
+    ) -> Result<EffectReceipt, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO effect_receipts
+             (id, continuity_id, tenant_id, instance_id, state, record, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (id) DO UPDATE SET id = EXCLUDED.id
+             RETURNING record",
+        )
+        .bind(receipt.id.into_uuid())
+        .bind(receipt.continuity_id.into_uuid())
+        .bind(receipt.tenant_id.as_str())
+        .bind(receipt.instance_id.into_uuid())
+        .bind(state_name(receipt.state)?)
+        .bind(encode(receipt)?)
+        .bind(receipt.created_at)
+        .bind(receipt.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        decode(row.get("record"))
+    }
+
+    async fn find_unresolved_effect_receipt(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        instance_id: InstanceId,
+        block_id: &orch8_types::ids::BlockId,
+    ) -> Result<Option<EffectReceipt>, StorageError> {
+        let row = sqlx::query(
+            "SELECT record FROM effect_receipts
+             WHERE tenant_id=$1 AND continuity_id=$2 AND instance_id=$3
+               AND state IN ('dispatched','unknown')
+               AND record->>'block_id'=$4
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.into_uuid())
+        .bind(instance_id.into_uuid())
+        .bind(block_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
     }
 
     async fn get_effect_receipt(

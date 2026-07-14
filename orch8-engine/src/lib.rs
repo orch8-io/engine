@@ -13,6 +13,7 @@ pub mod clock {
     pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
 }
 pub mod doctor;
+pub mod effect_guard;
 pub mod error;
 pub mod evaluator;
 pub mod event_correlation;
