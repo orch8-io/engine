@@ -10,6 +10,7 @@
 )]
 
 mod config;
+mod continuity;
 mod error;
 mod handlers;
 mod lifecycle;
@@ -39,6 +40,7 @@ use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
 pub use crate::config::MobileEngineConfig;
+pub use crate::continuity::ContinuityImportResult;
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
 pub use crate::sync::{RootKey, SyncResult};
@@ -515,6 +517,52 @@ impl MobileEngine {
             self.lifecycle
                 .complete_step(&instance_id, &_step_name, &output)
                 .await
+        })
+    }
+
+    /// Verify and import an encrypted portable capsule into paused local
+    /// quarantine. The sequence referenced by the capsule must already be
+    /// loaded, and the destination-generated transfer key never persists.
+    pub fn import_continuity_capsule(
+        &self,
+        capsule_json: String,
+        payload_base64: String,
+        payload_key_base64: String,
+        destination_runtime_id: String,
+        destination_instance_id: String,
+    ) -> Result<ContinuityImportResult, MobileError> {
+        let payload_key_base64 = zeroize::Zeroizing::new(payload_key_base64);
+        self.run_with_timeout(async {
+            continuity::import_capsule(
+                self.storage.as_ref(),
+                &self.config.root_public_key,
+                &capsule_json,
+                &payload_base64,
+                payload_key_base64.as_str(),
+                &destination_runtime_id,
+                &destination_instance_id,
+            )
+            .await
+        })
+    }
+
+    /// Activate a previously imported capsule after the control plane has
+    /// accepted its handoff. Ownership is advanced locally before scheduling,
+    /// so a crash can delay execution but cannot run an unowned effect.
+    pub fn activate_continuity_capsule(
+        &self,
+        capsule_id: String,
+        destination_runtime_id: String,
+        destination_instance_id: String,
+    ) -> Result<(), MobileError> {
+        self.run_with_timeout(async {
+            continuity::activate_capsule(
+                self.storage.as_ref(),
+                &capsule_id,
+                &destination_runtime_id,
+                &destination_instance_id,
+            )
+            .await
         })
     }
 

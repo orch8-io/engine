@@ -15,6 +15,7 @@ use orch8_publisher::grant::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use orch8_engine::continuity::{CompatibilityFinding, assess_compatibility};
 use orch8_types::continuity::{
@@ -669,13 +670,33 @@ async fn get_handoff(
     Ok(Json(handoff))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ExportHandoffRequest {
     tenant_id: TenantId,
     #[serde(default)]
     requirements: CapsuleRequirements,
     #[serde(default = "default_capsule_ttl_seconds")]
     expires_in_seconds: u32,
+    /// Destination-generated, single-transfer AES-256 key. Keeping this key
+    /// out of server configuration lets an isolated runtime decrypt the
+    /// transported payload without receiving the engine master key.
+    payload_key_base64: Option<TransferPayloadKey>,
+}
+
+#[derive(Deserialize)]
+#[serde(transparent)]
+struct TransferPayloadKey(String);
+
+impl TransferPayloadKey {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Drop for TransferPayloadKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 const fn default_capsule_ttl_seconds() -> u32 {
@@ -686,6 +707,25 @@ const fn default_capsule_ttl_seconds() -> u32 {
 struct ExportHandoffResponse {
     handoff: ExecutionHandoff,
     capsule: SignedCapsuleManifest,
+    /// Encrypted capsule artifact transported independently of object storage.
+    payload_base64: String,
+}
+
+fn transfer_payload_encryptor(
+    encoded: &str,
+) -> Result<(orch8_types::encryption::FieldEncryptor, String), ApiError> {
+    let decoded = Zeroizing::new(
+        BASE64
+            .decode(encoded)
+            .map_err(|_| ApiError::InvalidArgument("payload key is not valid base64".into()))?,
+    );
+    let key: &[u8; 32] = decoded.as_slice().try_into().map_err(|_| {
+        ApiError::InvalidArgument("payload key must decode to exactly 32 bytes".into())
+    })?;
+    Ok((
+        orch8_types::encryption::FieldEncryptor::from_bytes(key),
+        format!("continuity-transfer-{}", &hex_sha256(key)[..16]),
+    ))
 }
 
 async fn mark_capsule_export_failed(
@@ -730,6 +770,16 @@ async fn export_handoff(
             "capsule export is disabled without a configured engine encryption key".into(),
         )
     })?;
+    let transfer_crypto = body
+        .payload_key_base64
+        .as_ref()
+        .map(TransferPayloadKey::expose)
+        .map(transfer_payload_encryptor)
+        .transpose()?;
+    let (payload_encryptor, encryption_key_id) = transfer_crypto.as_ref().map_or_else(
+        || (&crypto.payload_encryptor, crypto.encryption_key_id.clone()),
+        |(encryptor, key_id)| (encryptor, key_id.clone()),
+    );
     let handoff = state
         .storage
         .get_handoff(&tenant_id, id)
@@ -789,10 +839,10 @@ async fn export_handoff(
             requirements: body.requirements,
             expires_at: now + Duration::seconds(i64::from(body.expires_in_seconds)),
             signing_key_id: crypto.signing_key_id.clone(),
-            encryption_key_id: crypto.encryption_key_id.clone(),
+            encryption_key_id,
         },
         &crypto.signing_key,
-        &crypto.payload_encryptor,
+        payload_encryptor,
     )
     .await;
     let capsule = match capsule_result {
@@ -807,6 +857,42 @@ async fn export_handoff(
             .await);
         }
     };
+    let payload_result = state
+        .storage
+        .get_artifact(&capsule.manifest.payload_artifact.key)
+        .await;
+    let payload = match payload_result {
+        Ok(Some(payload)) => payload,
+        Ok(None) => {
+            return Err(mark_capsule_export_failed(
+                &state,
+                &tenant_id,
+                &quiescing,
+                "exported capsule payload is unavailable".into(),
+            )
+            .await);
+        }
+        Err(error) => {
+            return Err(mark_capsule_export_failed(
+                &state,
+                &tenant_id,
+                &quiescing,
+                format!("cannot read exported capsule payload: {error}"),
+            )
+            .await);
+        }
+    };
+    if payload.len() as u64 != capsule.manifest.payload_artifact.bytes
+        || hex_sha256(&payload) != capsule.manifest.payload_artifact.sha256
+    {
+        return Err(mark_capsule_export_failed(
+            &state,
+            &tenant_id,
+            &quiescing,
+            "exported capsule payload does not match its signed manifest".into(),
+        )
+        .await);
+    }
     let mut exported = quiescing.clone();
     exported.state = HandoffState::Exported;
     exported.capsule_id = Some(capsule.manifest.capsule_id);
@@ -827,15 +913,19 @@ async fn export_handoff(
     Ok(Json(ExportHandoffResponse {
         handoff: exported,
         capsule,
+        payload_base64: BASE64.encode(payload),
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ImportCapsuleRequest {
     tenant_id: TenantId,
     destination_runtime_id: RuntimeId,
     expected_epoch: ExecutionEpoch,
+    destination_instance_id: Option<InstanceId>,
     capsule: SignedCapsuleManifest,
+    payload_base64: Option<String>,
+    payload_key_base64: Option<TransferPayloadKey>,
 }
 
 #[derive(Debug, Serialize)]
@@ -855,21 +945,55 @@ async fn import_capsule(
             "capsule import is disabled without a configured engine encryption key".into(),
         )
     })?;
+    let transfer_crypto = body
+        .payload_key_base64
+        .as_ref()
+        .map(TransferPayloadKey::expose)
+        .map(transfer_payload_encryptor)
+        .transpose()?;
+    let payload_encryptor = transfer_crypto
+        .as_ref()
+        .map_or(&crypto.payload_encryptor, |(encryptor, _)| encryptor);
     let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
-    let (instance, _) = orch8_engine::capsule::verify_and_import_paused_capsule(
-        state.storage.as_ref(),
-        &body.capsule,
-        orch8_engine::capsule::CapsuleImportRequest {
-            tenant_id: &tenant_id,
-            destination_runtime_id: body.destination_runtime_id,
-            expected_epoch: body.expected_epoch,
-            trusted_public_keys: &[trusted_key],
-            now: Utc::now(),
-        },
-        &crypto.payload_encryptor,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let request = orch8_engine::capsule::CapsuleImportRequest {
+        tenant_id: &tenant_id,
+        destination_runtime_id: body.destination_runtime_id,
+        destination_instance_id: body.destination_instance_id,
+        expected_epoch: body.expected_epoch,
+        trusted_public_keys: &[trusted_key],
+        now: Utc::now(),
+    };
+    let imported = if let Some(encoded) = body.payload_base64 {
+        let declared_bytes = usize::try_from(body.capsule.manifest.payload_artifact.bytes)
+            .map_err(|_| ApiError::PayloadTooLarge("capsule payload size is unsupported".into()))?;
+        let max_sealed_bytes = orch8_types::continuity::CapsulePayload::MAX_ENCODED_BYTES + 64;
+        let max_base64_bytes = declared_bytes.saturating_add(2) / 3 * 4;
+        if declared_bytes > max_sealed_bytes || encoded.len() > max_base64_bytes {
+            return Err(ApiError::PayloadTooLarge(
+                "transported capsule payload exceeds protocol bounds".into(),
+            ));
+        }
+        let sealed = BASE64
+            .decode(encoded)
+            .map_err(|_| ApiError::InvalidArgument("capsule payload is not valid base64".into()))?;
+        orch8_engine::capsule::verify_and_import_paused_capsule_bytes(
+            state.storage.as_ref(),
+            &body.capsule,
+            &sealed,
+            request,
+            payload_encryptor,
+        )
+        .await
+    } else {
+        orch8_engine::capsule::verify_and_import_paused_capsule(
+            state.storage.as_ref(),
+            &body.capsule,
+            request,
+            payload_encryptor,
+        )
+        .await
+    };
+    let (instance, _) = imported.map_err(|error| ApiError::Conflict(error.to_string()))?;
     Ok((
         StatusCode::CREATED,
         Json(ImportCapsuleResponse {

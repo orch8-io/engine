@@ -34,6 +34,7 @@ ed25519-dalek.workspace = true
 rand.workspace = true
 bytes.workspace = true
 base64.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

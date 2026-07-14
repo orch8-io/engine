@@ -40,6 +40,10 @@ pub struct CapsuleExportRequest {
 pub struct CapsuleImportRequest<'a> {
     pub tenant_id: &'a TenantId,
     pub destination_runtime_id: RuntimeId,
+    /// Runtime-local identity chosen by an isolated destination. Supplying it
+    /// lets the control plane and the offline runtime record the same global
+    /// location instead of inventing unrelated shadow identities.
+    pub destination_instance_id: Option<InstanceId>,
     pub expected_epoch: ExecutionEpoch,
     pub trusted_public_keys: &'a [String],
     pub now: DateTime<Utc>,
@@ -254,6 +258,24 @@ pub async fn verify_and_import_paused_capsule(
     request: CapsuleImportRequest<'_>,
     payload_encryptor: &FieldEncryptor,
 ) -> Result<(TaskInstance, CapsulePayload), CapsuleServiceError> {
+    let sealed = storage
+        .get_artifact(&signed.manifest.payload_artifact.key)
+        .await?
+        .ok_or(CapsuleServiceError::MissingArtifact)?;
+    verify_and_import_paused_capsule_bytes(storage, signed, &sealed, request, payload_encryptor)
+        .await
+}
+
+/// Verify and import a capsule whose encrypted payload traveled with its
+/// signed manifest. This is the portable boundary used by isolated runtimes
+/// that cannot read the source runtime's artifact store.
+pub async fn verify_and_import_paused_capsule_bytes(
+    storage: &dyn StorageBackend,
+    signed: &SignedCapsuleManifest,
+    sealed: &[u8],
+    request: CapsuleImportRequest<'_>,
+    payload_encryptor: &FieldEncryptor,
+) -> Result<(TaskInstance, CapsulePayload), CapsuleServiceError> {
     verify_signed_capsule(signed)?;
     check_capsule_key_trust(signed, request.trusted_public_keys)?;
     signed.manifest.validate_for_import(
@@ -265,11 +287,10 @@ pub async fn verify_and_import_paused_capsule(
     if signed.manifest.epoch != request.expected_epoch {
         return Err(CapsuleServiceError::StaleEpoch);
     }
-    let sealed = storage
-        .get_artifact(&signed.manifest.payload_artifact.key)
-        .await?
-        .ok_or(CapsuleServiceError::MissingArtifact)?;
-    let actual_hash = sha256_hex(&sealed);
+    if u64::try_from(sealed.len()).ok() != Some(signed.manifest.payload_artifact.bytes) {
+        return Err(CapsuleServiceError::ArtifactSubstitution);
+    }
+    let actual_hash = sha256_hex(sealed);
     let equal: bool = actual_hash
         .as_bytes()
         .ct_eq(signed.manifest.payload_artifact.sha256.as_bytes())
@@ -308,7 +329,9 @@ pub async fn verify_and_import_paused_capsule(
     }
     let now = request.now;
     let candidate = TaskInstance {
-        id: InstanceId::new(),
+        id: request
+            .destination_instance_id
+            .unwrap_or_else(InstanceId::new),
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),
         namespace: payload.instance.namespace.clone(),

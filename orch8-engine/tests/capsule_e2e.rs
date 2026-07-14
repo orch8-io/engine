@@ -4,7 +4,7 @@ use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use orch8_engine::capsule::{
     CapsuleExportRequest, CapsuleImportRequest, CapsuleServiceError, export_paused_capsule,
-    verify_and_import_paused_capsule,
+    verify_and_import_paused_capsule, verify_and_import_paused_capsule_bytes,
 };
 use orch8_engine::continuity::ContinuityServiceError;
 use orch8_storage::artifacts::ObjectArtifactStore;
@@ -88,12 +88,51 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
     .unwrap();
 
     let trusted = [signed.public_key.clone()];
+    let isolated: Arc<dyn StorageBackend> = Arc::new(
+        SqliteStorage::in_memory()
+            .await
+            .unwrap()
+            .with_artifact_store(Arc::new(ObjectArtifactStore::memory())),
+    );
+    isolated.create_sequence(&sequence).await.unwrap();
+    let sealed = source
+        .get_artifact(&signed.manifest.payload_artifact.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let destination_instance_id = orch8_types::ids::InstanceId::new();
+    let (portable_import, _) = verify_and_import_paused_capsule_bytes(
+        isolated.as_ref(),
+        &signed,
+        &sealed,
+        CapsuleImportRequest {
+            tenant_id: &instance.tenant_id,
+            destination_runtime_id: destination_runtime,
+            destination_instance_id: Some(destination_instance_id),
+            expected_epoch: ExecutionEpoch::initial(),
+            trusted_public_keys: &trusted,
+            now: Utc::now(),
+        },
+        &encryptor,
+    )
+    .await
+    .unwrap();
+    assert_eq!(portable_import.id, destination_instance_id);
+    assert!(
+        isolated
+            .get_artifact(&signed.manifest.payload_artifact.key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     let (imported, payload) = verify_and_import_paused_capsule(
         destination.as_ref(),
         &signed,
         CapsuleImportRequest {
             tenant_id: &instance.tenant_id,
             destination_runtime_id: destination_runtime,
+            destination_instance_id: None,
             expected_epoch: ExecutionEpoch::initial(),
             trusted_public_keys: &trusted,
             now: Utc::now(),
@@ -121,6 +160,7 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         CapsuleImportRequest {
             tenant_id: &instance.tenant_id,
             destination_runtime_id: destination_runtime,
+            destination_instance_id: None,
             expected_epoch: ExecutionEpoch::initial(),
             trusted_public_keys: &trusted,
             now: Utc::now(),
@@ -203,6 +243,7 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         CapsuleImportRequest {
             tenant_id: &instance.tenant_id,
             destination_runtime_id: RuntimeId::new(),
+            destination_instance_id: None,
             expected_epoch: ExecutionEpoch::initial(),
             trusted_public_keys: &trusted,
             now: Utc::now(),

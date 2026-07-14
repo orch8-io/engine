@@ -1,6 +1,7 @@
 /** E2E: portable continuity identity, capabilities, preview, and handoff request. */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
@@ -393,22 +394,73 @@ describe("Portable Continuity", () => {
       requirements: { handlers: ["human_review"] },
       preview_sha256: preview.preview_sha256,
     });
+    const payloadKey = randomBytes(32).toString("base64");
+    const destinationInstanceId = uuid();
     const exported = await client.exportHandoff(handoff.id, {
       tenant_id: tenantId,
       requirements: { handlers: ["human_review"] },
       expires_in_seconds: 60,
+      payload_key_base64: payloadKey,
     });
+    assert.match(exported.payload_base64, /^[A-Za-z0-9+/]+=*$/);
+    assert.match(
+      exported.capsule.manifest.encryption_key_id,
+      /^continuity-transfer-/,
+    );
+    const transported = Buffer.from(exported.payload_base64, "base64");
+    assert.ok(transported.length > 0);
+    const finalByte = transported.length - 1;
+    transported[finalByte] = (transported[finalByte] ?? 0) ^ 1;
+    await assert.rejects(
+      () =>
+        client.importContinuityCapsule({
+          tenant_id: tenantId,
+          destination_runtime_id: destinationRuntimeId,
+          destination_instance_id: destinationInstanceId,
+          expected_epoch: 0,
+          capsule: exported.capsule,
+          payload_base64: transported.toString("base64"),
+          payload_key_base64: payloadKey,
+        }),
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 409 &&
+        /artifact hash mismatch/.test(error.message),
+    );
+    await assert.rejects(
+      () =>
+        client.importContinuityCapsule({
+          tenant_id: tenantId,
+          destination_runtime_id: destinationRuntimeId,
+          destination_instance_id: destinationInstanceId,
+          expected_epoch: 0,
+          capsule: exported.capsule,
+          payload_base64: exported.payload_base64,
+          payload_key_base64: randomBytes(32).toString("base64"),
+        }),
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 409 &&
+        /decryption failed/.test(error.message),
+    );
     const imported = await client.importContinuityCapsule({
       tenant_id: tenantId,
       destination_runtime_id: destinationRuntimeId,
+      destination_instance_id: destinationInstanceId,
       expected_epoch: 0,
       capsule: exported.capsule,
+      payload_base64: exported.payload_base64,
+      payload_key_base64: payloadKey,
     });
+    assert.equal(imported.instance_id, destinationInstanceId);
     const redelivered = await client.importContinuityCapsule({
       tenant_id: tenantId,
       destination_runtime_id: destinationRuntimeId,
+      destination_instance_id: destinationInstanceId,
       expected_epoch: 0,
       capsule: exported.capsule,
+      payload_base64: exported.payload_base64,
+      payload_key_base64: payloadKey,
     });
     assert.equal(redelivered.instance_id, imported.instance_id);
 

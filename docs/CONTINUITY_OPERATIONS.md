@@ -43,6 +43,45 @@ Query the ordered path with
 wall-clock time—is authoritative if timestamps from different runtimes disagree.
 SQLite schema version 28 creates the same ledger for embedded runtimes.
 
+## Portable mobile capsule transport
+
+An isolated mobile runtime cannot read the server's object store and must
+never receive the engine master encryption key. For device-bound handoffs, the
+device generates a fresh random 32-byte transfer key and a runtime-local
+instance UUID. Send the base64 key only over the authenticated handoff request:
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "expires_in_seconds": 300,
+  "payload_key_base64": "<32 random bytes, base64>"
+}
+```
+
+The export response includes `capsule` (the signed manifest) and
+`payload_base64` (the separately transported encrypted artifact). The
+manifest binds the ciphertext hash, byte count, destination runtime, source
+epoch, expiry, and transfer-key identifier. Never reuse a transfer key.
+
+Before disconnecting:
+
+1. Load the exact signed sequence version on the device.
+2. Import the bundle into server quarantine with
+   `POST /continuity/capsules/import`, including the payload, transfer key, and
+   device-selected `destination_instance_id`.
+3. Import the same bundle through the mobile SDK's
+   `importContinuityCapsule`; it verifies the trusted Ed25519 root, ciphertext
+   hash, destination, tenant, epoch, expiry, sequence hash, and AEAD binding,
+   then leaves the local instance paused.
+4. Accept the server handoff using that same destination-local instance ID.
+5. Call mobile `activateContinuityCapsule`. Local ownership advances before
+   scheduling, so a process kill can delay work but cannot execute the capsule
+   under the source epoch.
+
+Import, activation, and redelivery are idempotent. Preserve the bundle and key
+only until both quarantine imports are confirmed; then erase the transfer key.
+The device may execute with networking disabled after activation.
+
 ## Unknown external effects
 
 An effect receipt enters `unknown` when dispatch was durable but the engine did
