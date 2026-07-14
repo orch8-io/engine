@@ -99,6 +99,10 @@ pub fn routes() -> Router<AppState> {
             post(evaluate_invariants),
         )
         .route(
+            "/continuity/executions/{id}/invariants/results",
+            get(list_invariant_results),
+        )
+        .route(
             "/continuity/executions/{id}/evaluations",
             get(list_evaluations).post(append_evaluation),
         )
@@ -1948,6 +1952,11 @@ async fn create_invariant(
             "terminal-state invariants require between 1 and 16 states".into(),
         ));
     }
+    if body.commit_guard && !matches!(&body.rule, InvariantRule::EffectAtMostOnce { .. }) {
+        return Err(ApiError::InvalidArgument(
+            "commit_guard is supported only for effect_at_most_once invariants".into(),
+        ));
+    }
     let invariant = WorkflowInvariant {
         id: InvariantId::new(),
         tenant_id,
@@ -2060,6 +2069,27 @@ async fn evaluate_invariants(
             .map_err(|error| ApiError::from_storage(error, "invariant result"))?;
         results.push(result);
     }
+    Ok(Json(results))
+}
+
+async fn list_invariant_results(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<Vec<InvariantResult>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let results = state
+        .storage
+        .list_invariant_results(&tenant_id, id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "invariant results"))?;
     Ok(Json(results))
 }
 

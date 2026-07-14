@@ -902,6 +902,98 @@ describe("Portable Continuity", () => {
     assert.match(receipts[0]!.request_sha256, /^[0-9a-f]{64}$/);
   });
 
+  it("blocks duplicate effects before dispatch and records one violation", async () => {
+    const tenantId = `continuity-dedup-${uuid().slice(0, 8)}`;
+    const handler = `dedup_worker_${uuid().slice(0, 8)}`;
+    const params = { provider: "payments", amount: 4200 };
+    const sequence = testSequence(
+      "portable-effect-dedup",
+      [
+        step("arm", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Arm guarded effect dispatch?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+        step("charge-a", handler, params),
+        step("charge-b", handler, params),
+      ],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const invariant = await client.createContinuityInvariant({
+      tenant_id: tenantId,
+      sequence_id: createdSequence.id,
+      sequence_version: createdSequence.version,
+      name: "worker request at most once",
+      rule: { type: "effect_at_most_once", kind: "worker" },
+      commit_guard: true,
+    });
+    await assert.rejects(
+      () => client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: createdSequence.id,
+        sequence_version: createdSequence.version,
+        name: "unsupported commit guard",
+        rule: { type: "no_unknown_effects" },
+        commit_guard: true,
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 400);
+        return true;
+      },
+    );
+
+    await client.sendSignal(
+      instance.id,
+      { custom: "human_input:arm" } as unknown as string,
+      { value: "continue" },
+    );
+    const first = await waitForWorkerTask(handler, "dedup-worker");
+    await client.completeWorkerTask(first.id, "dedup-worker", {
+      provider_receipt_id: "provider-dedup-1",
+    });
+    await client.waitForState(instance.id, "failed");
+
+    assert.deepEqual(
+      await client.pollWorkerTasks(handler, "dedup-worker"),
+      [],
+      "the duplicate must never be published to a worker",
+    );
+    const receipts = await client.listContinuityEffects(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(
+      receipts.filter((receipt) =>
+        ["dispatched", "committed"].includes(String(receipt.state))
+      ).length,
+      1,
+    );
+    const results = await client.listContinuityInvariantResults(
+      execution.continuity_id,
+      tenantId,
+    );
+    const failures = results.filter((result) => result.status === "fail");
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]!.invariant_id, invariant.id);
+    assert.match(
+      String(failures[0]!.summary),
+      /duplicate effect dispatch or commit evidence/,
+    );
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

@@ -7,7 +7,10 @@
 use chrono::Utc;
 use orch8_publisher::manifest::canonical_json;
 use orch8_storage::StorageBackend;
-use orch8_types::continuity::{EffectId, EffectKind, EffectReceipt, EffectState};
+use orch8_types::continuity::{
+    EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt, EffectState,
+};
+use orch8_types::continuity_advanced::{InvariantRule, WorkflowInvariant};
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -103,7 +106,7 @@ impl<'a> EffectGuard<'a> {
             EffectState::Prepared => {}
             _ => return Err(blocked(&guard.receipt)),
         }
-        guard.advance(EffectState::Dispatched).await?;
+        guard.dispatch().await?;
         Ok(Some(guard))
     }
 
@@ -114,6 +117,43 @@ impl<'a> EffectGuard<'a> {
 
     pub(crate) async fn mark_unknown(mut self) -> Result<(), EngineError> {
         self.advance(EffectState::Unknown).await
+    }
+
+    async fn dispatch(&mut self) -> Result<(), EngineError> {
+        let guards = load_effect_commit_guards(self.storage, &self.receipt).await?;
+        if guards.is_empty() {
+            return self.advance(EffectState::Dispatched).await;
+        }
+        let mut updated = self.receipt.clone();
+        updated
+            .transition(EffectState::Dispatched, Utc::now())
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
+        match self
+            .storage
+            .dispatch_effect_receipt_at_most_once(&updated.tenant_id, &updated)
+            .await?
+        {
+            EffectDispatchOutcome::Dispatched => {
+                self.receipt = updated;
+                record_effect_guard_results(self.storage, &guards, &self.receipt, false).await?;
+                Ok(())
+            }
+            EffectDispatchOutcome::Duplicate => {
+                record_effect_guard_results(self.storage, &guards, &updated, true).await?;
+                Err(EngineError::InvariantViolation {
+                    invariant_id: guards[0].id,
+                    block_id: updated.block_id,
+                })
+            }
+            EffectDispatchOutcome::Stale => {
+                let current = self
+                    .storage
+                    .get_effect_receipt(&updated.tenant_id, updated.id)
+                    .await?
+                    .unwrap_or(self.receipt.clone());
+                Err(blocked(&current))
+            }
+        }
     }
 
     async fn advance(&mut self, next: EffectState) -> Result<(), EngineError> {
@@ -137,6 +177,67 @@ impl<'a> EffectGuard<'a> {
         self.receipt = updated;
         Ok(())
     }
+}
+
+async fn load_effect_commit_guards(
+    storage: &dyn StorageBackend,
+    receipt: &EffectReceipt,
+) -> Result<Vec<WorkflowInvariant>, EngineError> {
+    let Some(instance) = storage.get_instance(receipt.instance_id).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(sequence) = storage.get_sequence(instance.sequence_id).await? else {
+        return Ok(Vec::new());
+    };
+    let invariants = storage
+        .list_workflow_invariants(&receipt.tenant_id, sequence.id, sequence.version, 10_000)
+        .await?;
+    Ok(invariants
+        .into_iter()
+        .filter(|invariant| {
+            invariant.commit_guard
+                && matches!(
+                    invariant.rule,
+                    InvariantRule::EffectAtMostOnce { kind } if kind == receipt.kind
+                )
+        })
+        .collect())
+}
+
+async fn record_effect_guard_results(
+    storage: &dyn StorageBackend,
+    guards: &[WorkflowInvariant],
+    candidate: &EffectReceipt,
+    include_candidate: bool,
+) -> Result<(), EngineError> {
+    let mut receipts = storage
+        .list_effect_receipts(&candidate.tenant_id, candidate.continuity_id, 10_000)
+        .await?;
+    if include_candidate {
+        receipts.retain(|receipt| receipt.id != candidate.id);
+        receipts.push(candidate.clone());
+    }
+    let output_paths = std::collections::BTreeSet::new();
+    let evidence = crate::continuity_advanced::InvariantEvidence {
+        receipts: &receipts,
+        terminal_state: None,
+        budget_breached: None,
+        output_paths: &output_paths,
+    };
+    let now = Utc::now();
+    for invariant in guards {
+        let result = crate::continuity_advanced::evaluate_invariant(
+            invariant,
+            candidate.continuity_id,
+            candidate.epoch,
+            &evidence,
+            now,
+        );
+        let _ = storage
+            .append_invariant_result(&candidate.tenant_id, &result)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Commit the receipt created when an external worker task was dispatched.
@@ -323,13 +424,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
-    use orch8_storage::{ContinuityStore, InstanceStore, sqlite::SqliteStorage};
+    use orch8_storage::{
+        ContinuityStore, InstanceStore, InvariantStore, SequenceStore, sqlite::SqliteStorage,
+    };
     use orch8_types::context::ExecutionContext;
     use orch8_types::continuity::{
         ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
     };
+    use orch8_types::continuity_advanced::{
+        EvidenceStatus, InvariantId, InvariantRule, WorkflowInvariant,
+    };
     use orch8_types::ids::{Namespace, SequenceId};
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+    use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus, StepDef};
 
     use super::*;
     use crate::handlers::HandlerRegistry;
@@ -373,6 +480,67 @@ mod tests {
             .await
             .unwrap();
         (storage, instance, execution)
+    }
+
+    async fn add_sequence_and_effect_guard(
+        storage: &SqliteStorage,
+        instance: &TaskInstance,
+        kind: EffectKind,
+    ) -> InvariantId {
+        storage
+            .create_sequence(&SequenceDefinition {
+                id: instance.sequence_id,
+                tenant_id: instance.tenant_id.clone(),
+                namespace: instance.namespace.clone(),
+                name: "guarded-effects".into(),
+                version: 1,
+                deprecated: false,
+                status: SequenceStatus::Production,
+                blocks: vec![BlockDefinition::Step(Box::new(StepDef {
+                    id: BlockId::new("placeholder"),
+                    handler: "noop".into(),
+                    params: serde_json::json!({}),
+                    delay: None,
+                    retry: None,
+                    timeout: None,
+                    rate_limit_key: None,
+                    send_window: None,
+                    context_access: None,
+                    cancellable: true,
+                    wait_for_input: None,
+                    queue_name: None,
+                    deadline: None,
+                    on_deadline_breach: None,
+                    fallback_handler: None,
+                    cache_key: None,
+                    output_schema: None,
+                    when: None,
+                }))],
+                interceptors: None,
+                input_schema: None,
+                sla: None,
+                on_failure: None,
+                on_cancel: None,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let id = InvariantId::new();
+        storage
+            .create_workflow_invariant(&WorkflowInvariant {
+                id,
+                tenant_id: instance.tenant_id.clone(),
+                sequence_id: instance.sequence_id,
+                sequence_version: Some(1),
+                name: "charge only once".into(),
+                rule: InvariantRule::EffectAtMostOnce { kind },
+                commit_guard: true,
+                enabled: true,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        id
     }
 
     #[tokio::test]
@@ -534,5 +702,81 @@ mod tests {
             .unwrap();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].state, EffectState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn commit_guard_blocks_duplicate_before_dispatch_and_deduplicates_violation() {
+        let (storage, instance, execution) = continuity_storage().await;
+        let invariant_id =
+            add_sequence_and_effect_guard(&storage, &instance, EffectKind::Worker).await;
+        let params = serde_json::json!({"provider": "payments", "amount": 100});
+        let first = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("charge-a"),
+            "custom_charge",
+            &params,
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        first
+            .commit(&serde_json::json!({"receipt_id": "provider-1"}))
+            .await
+            .unwrap();
+
+        for block in ["charge-b", "charge-c"] {
+            let duplicate = EffectGuard::begin(
+                &storage,
+                &instance.tenant_id,
+                instance.id,
+                &BlockId::new(block),
+                "custom_charge",
+                &params,
+                0,
+            )
+            .await;
+            assert!(matches!(
+                duplicate,
+                Err(EngineError::InvariantViolation {
+                    invariant_id: observed,
+                    ..
+                }) if observed == invariant_id
+            ));
+        }
+
+        let results = storage
+            .list_invariant_results(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.status == EvidenceStatus::Fail)
+                .count(),
+            1,
+            "repeated duplicate evidence must produce one violation"
+        );
+        assert!(results.iter().any(|result| {
+            result.invariant_id == invariant_id && result.status == EvidenceStatus::Pass
+        }));
+        let receipts = storage
+            .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| {
+                    matches!(
+                        receipt.state,
+                        EffectState::Dispatched | EffectState::Committed
+                    )
+                })
+                .count(),
+            1
+        );
     }
 }

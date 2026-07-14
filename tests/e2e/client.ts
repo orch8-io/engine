@@ -288,6 +288,17 @@ export class Orch8Client {
     return this.#post(`/continuity/executions/${continuityId}/invariants/evaluate`, req);
   }
 
+  async listContinuityInvariantResults(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/invariants/results${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
   async appendContinuityEvaluation(
     continuityId: string,
     req: Record<string, unknown>,

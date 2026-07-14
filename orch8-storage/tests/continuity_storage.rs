@@ -4,11 +4,11 @@ use orch8_storage::{ContinuityStore, InstanceStore};
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
     ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
-    ContinuityId, ContinuityStream, EffectId, EffectKind, EffectReceipt, EffectState,
-    ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState, OwnershipState,
-    PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome, ProvenanceEntry,
-    RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel, StreamFrame, StreamFrameState,
-    StreamId,
+    ContinuityId, ContinuityStream, EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt,
+    EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
+    OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome,
+    ProvenanceEntry, RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel, StreamFrame,
+    StreamFrameState, StreamId,
 };
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -229,6 +229,83 @@ async fn effect_state_cas_and_provenance_are_durable() {
             .await
             .unwrap(),
         [provenance]
+    );
+}
+
+#[tokio::test]
+async fn guarded_effect_dispatch_has_one_concurrent_winner() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant = tenant("tenant-effect-race");
+    let continuity_id = ContinuityId::new();
+    let instance = InstanceId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant.clone(),
+            current_instance_id: instance,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+
+    let prepared = |block: &str, created_at| EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: tenant.clone(),
+        continuity_id,
+        epoch: ExecutionEpoch::initial(),
+        instance_id: instance,
+        block_id: BlockId::new(block),
+        kind: EffectKind::Worker,
+        state: EffectState::Prepared,
+        destination_fingerprint: "worker:payments".into(),
+        idempotency_key: None,
+        request_sha256: "a".repeat(64),
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at,
+        updated_at: created_at,
+    };
+    let first = prepared("charge-a", now);
+    let second = prepared("charge-b", now + Duration::milliseconds(1));
+    storage.create_effect_receipt(&first).await.unwrap();
+    storage.create_effect_receipt(&second).await.unwrap();
+
+    let mut first_dispatch = first.clone();
+    first_dispatch
+        .transition(EffectState::Dispatched, now + Duration::seconds(1))
+        .unwrap();
+    let mut second_dispatch = second.clone();
+    second_dispatch
+        .transition(EffectState::Dispatched, now + Duration::seconds(1))
+        .unwrap();
+    let (first_outcome, second_outcome) = tokio::join!(
+        storage.dispatch_effect_receipt_at_most_once(&tenant, &first_dispatch),
+        storage.dispatch_effect_receipt_at_most_once(&tenant, &second_dispatch),
+    );
+
+    assert_eq!(first_outcome.unwrap(), EffectDispatchOutcome::Dispatched);
+    assert_eq!(second_outcome.unwrap(), EffectDispatchOutcome::Duplicate);
+    let receipts = storage
+        .list_effect_receipts(&tenant, continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt.state == EffectState::Dispatched)
+            .count(),
+        1
+    );
+    assert_eq!(
+        receipts
+            .iter()
+            .filter(|receipt| receipt.state == EffectState::Prepared)
+            .count(),
+        1
     );
 }
 

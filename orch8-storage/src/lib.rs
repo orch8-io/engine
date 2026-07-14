@@ -2622,6 +2622,15 @@ pub trait ContinuityStore: Send + Sync + 'static {
         next: &EffectReceipt,
     ) -> Result<bool, StorageError>;
 
+    /// Atomically transition a prepared receipt to dispatched only when it is
+    /// the first active effect with the same kind, destination, and request
+    /// fingerprint in this continuity execution.
+    async fn dispatch_effect_receipt_at_most_once(
+        &self,
+        tenant_id: &TenantId,
+        next: &EffectReceipt,
+    ) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
+
     async fn list_effect_receipts(
         &self,
         tenant_id: &TenantId,

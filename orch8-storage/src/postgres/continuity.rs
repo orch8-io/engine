@@ -5,10 +5,10 @@ use sqlx::Row;
 
 use orch8_types::continuity::{
     CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
-    ContinuityExecution, ContinuityId, ContinuityLocation, ContinuityStream, EffectId,
-    EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState,
-    PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId,
-    StreamFrame, StreamId,
+    ContinuityExecution, ContinuityId, ContinuityLocation, ContinuityStream, EffectDispatchOutcome,
+    EffectId, EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId,
+    HandoffState, PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities,
+    RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
@@ -786,6 +786,109 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn dispatch_effect_receipt_at_most_once(
+        &self,
+        tenant_id: &TenantId,
+        next: &EffectReceipt,
+    ) -> Result<EffectDispatchOutcome, StorageError> {
+        if next.state != EffectState::Dispatched {
+            return Err(StorageError::Query(
+                "guarded effect dispatch requires a dispatched receipt".into(),
+            ));
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let kind = state_name(next.kind)?;
+        let guard_key = format!(
+            "effect|{}|{}|{}|{}|{}",
+            tenant_id, next.continuity_id, kind, next.destination_fingerprint, next.request_sha256
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(guard_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let rows = sqlx::query(
+            "SELECT record FROM effect_receipts
+             WHERE tenant_id = $1 AND continuity_id = $2
+               AND (id = $3 OR (
+                 record->>'kind' = $4
+                 AND record->>'destination_fingerprint' = $5
+                 AND record->>'request_sha256' = $6
+               ))
+             ORDER BY created_at, id FOR UPDATE",
+        )
+        .bind(tenant_id.as_str())
+        .bind(next.continuity_id.into_uuid())
+        .bind(next.id.into_uuid())
+        .bind(kind)
+        .bind(&next.destination_fingerprint)
+        .bind(&next.request_sha256)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let receipts = rows
+            .into_iter()
+            .map(|row| decode::<EffectReceipt>(row.get("record")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let current = receipts.iter().find(|receipt| receipt.id == next.id);
+        if current.is_none_or(|receipt| receipt.state != EffectState::Prepared) {
+            tx.rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(EffectDispatchOutcome::Stale);
+        }
+        let duplicate = receipts.iter().any(|receipt| {
+            receipt.id != next.id
+                && receipt.kind == next.kind
+                && receipt.destination_fingerprint == next.destination_fingerprint
+                && receipt.request_sha256 == next.request_sha256
+                && !matches!(
+                    receipt.state,
+                    EffectState::Abandoned | EffectState::Compensated
+                )
+                && (matches!(
+                    receipt.state,
+                    EffectState::Dispatched
+                        | EffectState::Committed
+                        | EffectState::Unknown
+                        | EffectState::Verified
+                ) || (receipt.created_at, receipt.id) < (next.created_at, next.id))
+        });
+        if duplicate {
+            tx.rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(EffectDispatchOutcome::Duplicate);
+        }
+        let updated = sqlx::query(
+            "UPDATE effect_receipts SET state = $1, record = $2, updated_at = $3
+             WHERE tenant_id = $4 AND id = $5 AND state = $6",
+        )
+        .bind(state_name(next.state)?)
+        .bind(encode(next)?)
+        .bind(next.updated_at)
+        .bind(tenant_id.as_str())
+        .bind(next.id.into_uuid())
+        .bind(state_name(EffectState::Prepared)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        if updated.rows_affected() != 1 {
+            tx.rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(EffectDispatchOutcome::Stale);
+        }
+        tx.commit()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(EffectDispatchOutcome::Dispatched)
     }
 
     async fn list_effect_receipts(

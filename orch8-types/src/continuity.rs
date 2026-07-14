@@ -664,6 +664,15 @@ pub enum EffectState {
     Abandoned,
 }
 
+/// Outcome of atomically applying an at-most-once invariant at the durable
+/// dispatch boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectDispatchOutcome {
+    Dispatched,
+    Duplicate,
+    Stale,
+}
+
 impl EffectState {
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {

@@ -182,3 +182,30 @@ enqueued. Only the worker that currently owns the claimed task may settle it.
 The complete callback commits the receipt before completing the task; the fail
 callback marks it unknown before applying task retry handling. Repeated
 callbacks are idempotent, but callbacks from another worker are rejected.
+
+## Synchronous at-most-once invariants
+
+Use a synchronous guard only for a safety property that must stop provider
+dispatch. Create a sequence/version-scoped `effect_at_most_once` invariant with
+`commit_guard: true` and the matching effect kind. Other invariant rules cannot
+be commit guards and are rejected at creation time.
+
+At each matching effect, Orch8 atomically compares the effect kind,
+destination fingerprint, and canonical request hash against active receipts in
+the same continuity execution. The first prepared receipt advances to
+`dispatched`; an identical concurrent or later receipt remains `prepared` and
+the step fails before invoking its handler or publishing an external-worker
+task. This is conservative: `dispatched`, `committed`, `unknown`, and `verified`
+evidence all block a duplicate, because provider outcome ambiguity must not be
+treated as permission to retry.
+
+Inspect continuously recorded evidence with:
+
+```text
+GET /continuity/executions/{continuity_id}/invariants/results?tenant_id={tenant_id}
+```
+
+Results are deduplicated by invariant and evidence, so repeated observation of
+the same duplicate produces one violation. Keep provider idempotency keys as a
+second layer of protection; an invariant guard cannot make a non-idempotent
+provider transaction exactly once after network or process failure.

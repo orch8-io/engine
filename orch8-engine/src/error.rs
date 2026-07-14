@@ -43,6 +43,12 @@ pub enum EngineError {
         state: orch8_types::continuity::EffectState,
     },
 
+    #[error("effect dispatch for block {block_id} violates invariant {invariant_id}")]
+    InvariantViolation {
+        invariant_id: orch8_types::continuity_advanced::InvariantId,
+        block_id: BlockId,
+    },
+
     #[error("max iterations exceeded in loop {block_id}")]
     MaxIterationsExceeded { block_id: BlockId },
 

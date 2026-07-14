@@ -93,14 +93,23 @@ fn effect_at_most_once(
 ) -> InvariantOutcome {
     let matching: Vec<_> = receipts
         .iter()
-        .filter(|receipt| receipt.kind == kind && receipt.state == EffectState::Committed)
-        .collect();
-    let duplicates = matching.iter().any(|receipt| {
-        matching.iter().any(|other| {
-            receipt.id != other.id
-                && receipt.destination_fingerprint == other.destination_fingerprint
-                && receipt.request_sha256 == other.request_sha256
+        .filter(|receipt| {
+            receipt.kind == kind
+                && matches!(
+                    receipt.state,
+                    EffectState::Dispatched
+                        | EffectState::Committed
+                        | EffectState::Unknown
+                        | EffectState::Verified
+                )
         })
+        .collect();
+    let mut observed_requests = std::collections::HashSet::with_capacity(matching.len());
+    let duplicates = matching.iter().any(|receipt| {
+        !observed_requests.insert((
+            receipt.destination_fingerprint.as_str(),
+            receipt.request_sha256.as_str(),
+        ))
     });
     (
         if duplicates {
@@ -109,9 +118,9 @@ fn effect_at_most_once(
             EvidenceStatus::Pass
         },
         if duplicates {
-            "duplicate committed effect evidence detected"
+            "duplicate effect dispatch or commit evidence detected"
         } else {
-            "no duplicate committed effect evidence detected"
+            "no duplicate effect dispatch or commit evidence detected"
         }
         .to_owned(),
         matching
