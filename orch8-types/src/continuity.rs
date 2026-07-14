@@ -137,7 +137,9 @@ impl CapsuleSchemaVersion {
 }
 
 /// Physical class of a runtime eligible to own or execute work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RuntimeKind {
@@ -158,6 +160,18 @@ pub enum RuntimeTrustLevel {
     Attested,
 }
 
+/// Current network path reported by a runtime for bounded locality decisions.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeConnectivity {
+    Offline,
+    Metered,
+    Wifi,
+    Ethernet,
+}
+
 /// Bounded facts used by compatibility and placement decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeCapabilities {
@@ -168,12 +182,30 @@ pub struct RuntimeCapabilities {
     pub handlers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<String>,
+    /// Tenant-local credential references available to this runtime. Values
+    /// identify configured bindings, never secret material.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hardware: Vec<String>,
     #[serde(default)]
     pub offline_capable: bool,
+    /// Current connectivity is deliberately distinct from offline capability:
+    /// a device may support offline execution while presently using Wi-Fi.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connectivity: Option<RuntimeConnectivity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_microunits: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_latency_ms: Option<u64>,
+    /// Draining runtimes remain discoverable for evidence but cannot receive
+    /// new work.
+    #[serde(default)]
+    pub draining: bool,
     /// Base64 Ed25519 key authorized to sign capsules emitted by this runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule_signing_public_key: Option<String>,
@@ -346,6 +378,9 @@ pub struct ExecutionHandoff {
     pub expected_epoch: ExecutionEpoch,
     pub state: HandoffState,
     pub capsule_id: Option<CapsuleId>,
+    /// Durable evidence that authorized this destination at dispatch time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_decision_id: Option<PlacementDecisionId>,
     pub preview_sha256: String,
     pub version: u64,
     pub failure_code: Option<String>,
@@ -419,10 +454,11 @@ impl ContinuationGrant {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DataClassification {
     Public,
+    #[default]
     Internal,
     Confidential,
     Restricted,
@@ -431,11 +467,22 @@ pub enum DataClassification {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LocalityRule {
     pub classification: DataClassification,
+    /// An empty list means any runtime. A non-empty list supports policies such
+    /// as "PII stays on this device" without embedding executable code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_runtime_ids: Vec<RuntimeId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_runtime_kinds: Vec<RuntimeKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_regions: Vec<String>,
     pub minimum_trust: Option<RuntimeTrustLevel>,
     pub require_offline: Option<bool>,
     pub require_hardware: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_connectivity: Vec<RuntimeConnectivity>,
+    pub minimum_battery_percent: Option<u8>,
+    pub maximum_cost_microunits: Option<u64>,
+    pub maximum_latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -468,6 +515,12 @@ pub struct PlacementDecision {
     pub continuity_id: ContinuityId,
     pub epoch: ExecutionEpoch,
     pub selected_runtime_id: Option<RuntimeId>,
+    #[serde(default)]
+    pub requirements: CapsuleRequirements,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<LocalityPolicy>,
+    #[serde(default)]
+    pub classification: DataClassification,
     pub policy_version: Option<u32>,
     pub candidates: Vec<PlacementEvidence>,
     pub created_at: DateTime<Utc>,

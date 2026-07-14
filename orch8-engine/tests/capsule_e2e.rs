@@ -194,6 +194,7 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         expected_epoch: ExecutionEpoch::initial(),
         state: HandoffState::Exported,
         capsule_id: Some(signed.manifest.capsule_id),
+        placement_decision_id: None,
         preview_sha256: "a".repeat(64),
         version: 2,
         failure_code: None,

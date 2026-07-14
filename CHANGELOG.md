@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dispatch-bound capability and locality routing**: runtime advertisements now expose bounded live facts for connectivity, battery, estimated cost/latency, and drain state. The declarative locality AST supports exact-device and runtime-kind pinning, residency/trust/hardware rules, Wi-Fi constraints, battery floors, and cost/latency ceilings; missing security-sensitive facts remain `unknown` and cannot be selected. Handoff previews persist the selected runtime and every rejected candidate, requests bind that placement decision, and the engine re-evaluates the complete policy and capability snapshot both when creating the handoff and immediately before capsule export. Explicit destinations may override soft scores but never hard denials. Rust tests cover pinned restricted data, Wi-Fi/cost inference, contradictory policy detection, and stale/draining camera runtimes; Node E2E covers capability mutation between preview and dispatch. See `docs/CONTINUITY_OPERATIONS.md`.
+
 - **Object-store-independent cloud ↔ device capsule transfer**: device-bound exports can use a destination-generated, one-time AES-256 transfer key and transport the encrypted payload beside its signed manifest. Imports bind one destination-local instance ID across control-plane and mobile quarantine and reject substitution, wrong keys, stale epochs, destinations, tenants, expiries, signatures, and sequence drift. The mobile SDK adds paused import, ownership-before-scheduling activation, and device export through a host `CapsuleSigner`, keeping Secure Enclave/KeyStore private keys outside Rust. Runtime registrations bind capsule-signing public keys; the return attach endpoint verifies the live owning runtime, imports quarantine, and advances the handoff atomically with idempotent redelivery. Regenerated Swift bindings expose the full round trip. Rust tests cover independent artifact stores, explicit identity, untrusted roots, activation, restart redelivery, and host-signed return export; Node E2E covers AES-GCM transport, tampering, wrong keys, device Ed25519 return, three ownership epochs, return redelivery, and terminal completion. See `docs/CONTINUITY_OPERATIONS.md`.
 
 - **Deterministic typed-dataflow compiler and SDK bindings**: draft and stored sequence endpoints now analyze direct `data.*`, `outputs.*`, `state.*`, and `config.*` references across parameters, inputs, guards, loops, and router conditions. Missing producers, closed-schema path violations, and optional or nullable values without explicit fallbacks fail preflight with the exact producer/reference/consumer chain; undeclared and dynamic shapes remain visible `TYPE_UNKNOWN` warnings. The bounded compiler generates matching, byte-stable TypeScript, Python, and canonical schema artifacts tagged with `orch8-dataflow-v1` and a normalized sequence SHA-256. `orch8 sequence dataflow` supports CI-safe analysis and atomic artifact writes. Rust tests cover schema soundness, spoof-resistant block discovery, deterministic generation, and resource limits; Node E2E covers draft/stored generation and failed preflight. See `docs/TYPED_DATAFLOW.md`.
@@ -72,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — placement-bound handoff requests**: `POST /continuity/handoffs` now requires the `placement_decision_id` returned by the matching handoff preview, plus the same requirements, policy, and classification. This closes advisory-only and preview-to-dispatch bypasses; clients must preview immediately before requesting a handoff.
+
 - **Contemporary Rust dependency and crate hygiene**: upgraded to Reqwest 0.13 and Tonic/Prost 0.14, centralized the supported Rust version across all crates, removed unused dependencies, narrowed the `orch8` facade's default feature surface, and pinned the audited upstream `object_store` fix for the affected `quick-xml` versions until its next release.
 - **Async gRPC authentication**: replaced blocking authentication inside the async request path with a Tower layer that resolves root and tenant API keys asynchronously.
 
@@ -82,6 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bounded, deduplicated hot paths**: public webhooks now enforce a bounded per-peer/slug request rate; FCM access-token refreshes use single-flight caching; and mobile HTTP clients stream responses through hard size limits instead of buffering unbounded bodies.
 
 ### Security
+
+- **Fail-closed handoff placement**: handoffs without durable placement evidence cannot export, expired or draining runtime advertisements cannot receive new work, and any change that makes the selected runtime violate trust, hardware, connectivity, battery, cost, latency, requirements, policy, or ownership-epoch constraints invalidates dispatch before capsule bytes are emitted.
 
 - **Fail-closed external effect retries**: a timeout, crash, or negative worker callback after durable dispatch no longer permits an ambiguous side effect to be sent again. Unknown effects require explicit evidence-backed resolution, duplicate continuity identities are rejected at both API and storage boundaries, and only the worker holding a task claim may settle its effect receipt.
 

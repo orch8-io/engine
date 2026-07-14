@@ -334,11 +334,11 @@ mod tests {
     use chrono::{Duration, Utc};
     use ed25519_dalek::{Signer as _, SigningKey};
     use orch8_engine::capsule::{CapsuleExportRequest, export_paused_capsule};
+    use orch8_storage::artifacts::ObjectArtifactStore;
+    use orch8_storage::sqlite::SqliteStorage;
     use orch8_storage::{
         ContinuityStore as _, InstanceStore as _, ResourceStore as _, SequenceStore as _,
     };
-    use orch8_storage::artifacts::ObjectArtifactStore;
-    use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::checkpoint::Checkpoint;
     use orch8_types::context::ExecutionContext;
     use orch8_types::continuity::{

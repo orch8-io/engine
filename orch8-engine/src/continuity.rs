@@ -40,6 +40,24 @@ pub fn assess_compatibility(
     now: DateTime<Utc>,
 ) -> Vec<CompatibilityFinding> {
     let mut findings = Vec::new();
+    assess_runtime_availability(capabilities, now, &mut findings);
+    assess_declared_requirements(requirements, capabilities, &mut findings);
+    assess_interaction_requirements(requirements, capabilities, &mut findings);
+    if findings.is_empty() {
+        findings.push(CompatibilityFinding {
+            code: "COMPATIBLE",
+            status: CompatibilityStatus::Pass,
+            summary: "all declared requirements are satisfied".into(),
+        });
+    }
+    findings
+}
+
+fn assess_runtime_availability(
+    capabilities: &RuntimeCapabilities,
+    now: DateTime<Utc>,
+    findings: &mut Vec<CompatibilityFinding>,
+) {
     if capabilities.expires_at <= now {
         findings.push(CompatibilityFinding {
             code: "CAPABILITIES_EXPIRED",
@@ -47,26 +65,47 @@ pub fn assess_compatibility(
             summary: "runtime capability advertisement has expired".into(),
         });
     }
+    if capabilities.draining {
+        findings.push(CompatibilityFinding {
+            code: "RUNTIME_DRAINING",
+            status: CompatibilityStatus::Fail,
+            summary: "runtime is draining and cannot receive new work".into(),
+        });
+    }
+}
+
+fn assess_declared_requirements(
+    requirements: &CapsuleRequirements,
+    capabilities: &RuntimeCapabilities,
+    findings: &mut Vec<CompatibilityFinding>,
+) {
     compare_set(
         "HANDLERS_MISSING",
         "handler",
         &requirements.handlers,
         &capabilities.handlers,
-        &mut findings,
+        findings,
     );
     compare_set(
         "PLUGINS_MISSING",
         "plugin",
         &requirements.plugins,
         &capabilities.plugins,
-        &mut findings,
+        findings,
+    );
+    compare_set(
+        "CREDENTIALS_MISSING",
+        "credential binding",
+        &requirements.credentials,
+        &capabilities.credentials,
+        findings,
     );
     compare_set(
         "HARDWARE_MISSING",
         "hardware capability",
         &requirements.hardware,
         &capabilities.hardware,
-        &mut findings,
+        findings,
     );
     if !requirements.regions.is_empty()
         && !requirements
@@ -92,6 +131,13 @@ pub fn assess_compatibility(
             ),
         });
     }
+}
+
+fn assess_interaction_requirements(
+    requirements: &CapsuleRequirements,
+    capabilities: &RuntimeCapabilities,
+    findings: &mut Vec<CompatibilityFinding>,
+) {
     if requirements.requires_human_ui
         && !matches!(
             capabilities.kind,
@@ -106,14 +152,23 @@ pub fn assess_compatibility(
             summary: "runtime kind does not prove an interactive human UI is available".into(),
         });
     }
-    if findings.is_empty() {
-        findings.push(CompatibilityFinding {
-            code: "COMPATIBLE",
-            status: CompatibilityStatus::Pass,
-            summary: "all declared requirements are satisfied".into(),
-        });
+    if requirements.requires_network {
+        match capabilities.connectivity {
+            Some(orch8_types::continuity::RuntimeConnectivity::Offline) => {
+                findings.push(CompatibilityFinding {
+                    code: "NETWORK_UNAVAILABLE",
+                    status: CompatibilityStatus::Fail,
+                    summary: "runtime currently has no network connection".into(),
+                });
+            }
+            None => findings.push(CompatibilityFinding {
+                code: "NETWORK_UNKNOWN",
+                status: CompatibilityStatus::Unknown,
+                summary: "runtime did not advertise current connectivity".into(),
+            }),
+            Some(_) => {}
+        }
     }
-    findings
 }
 
 fn compare_set(
@@ -529,9 +584,15 @@ mod tests {
                 trust: RuntimeTrustLevel::Registered,
                 handlers: Vec::new(),
                 plugins: Vec::new(),
+                credentials: Vec::new(),
                 regions: vec!["br-south".into()],
                 hardware: Vec::new(),
                 offline_capable: true,
+                connectivity: None,
+                battery_percent: None,
+                estimated_cost_microunits: None,
+                estimated_latency_ms: None,
+                draining: false,
                 capsule_signing_public_key: None,
                 observed_at: now - chrono::Duration::minutes(2),
                 expires_at: now - chrono::Duration::minutes(1),
@@ -545,6 +606,41 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[test]
+    fn compatibility_requires_declared_credential_bindings() {
+        let now = Utc::now();
+        let capabilities = RuntimeCapabilities {
+            runtime_id: RuntimeId::new(),
+            kind: RuntimeKind::Server,
+            trust: RuntimeTrustLevel::Registered,
+            handlers: Vec::new(),
+            plugins: Vec::new(),
+            credentials: vec!["configured".into()],
+            regions: Vec::new(),
+            hardware: Vec::new(),
+            offline_capable: false,
+            connectivity: None,
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
+            capsule_signing_public_key: None,
+            observed_at: now,
+            expires_at: now + chrono::Duration::minutes(1),
+        };
+        let findings = assess_compatibility(
+            &CapsuleRequirements {
+                credentials: vec!["payments".into()],
+                ..CapsuleRequirements::default()
+            },
+            &capabilities,
+            now,
+        );
+        assert!(findings.iter().any(|finding| {
+            finding.code == "CREDENTIALS_MISSING" && finding.status == CompatibilityStatus::Fail
+        }));
     }
 
     #[test]

@@ -22,8 +22,9 @@ use orch8_types::continuity::{
     CapsuleRequirements, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
     ContinuityExecution, ContinuityId, ContinuityStream, DataClassification, EffectReceipt,
     EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
-    LocalityPolicy, OwnershipState, PlacementDecision, RuntimeCapabilities, RuntimeId,
-    RuntimeTrustLevel, StreamFrame, StreamFrameState, StreamId,
+    LocalityPolicy, OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence,
+    PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel, StreamFrame,
+    StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
@@ -417,12 +418,44 @@ struct RuntimeRegistrationRequest {
     capabilities: RuntimeCapabilities,
 }
 
+const MAX_RUNTIME_FACTS_PER_KIND: usize = 256;
+const MAX_RUNTIME_FACT_LENGTH: usize = 256;
+
+fn validate_runtime_facts(capabilities: &RuntimeCapabilities) -> Result<(), ApiError> {
+    let fact_groups = [
+        capabilities.handlers.as_slice(),
+        capabilities.plugins.as_slice(),
+        capabilities.credentials.as_slice(),
+        capabilities.regions.as_slice(),
+        capabilities.hardware.as_slice(),
+    ];
+    if fact_groups
+        .iter()
+        .any(|facts| facts.len() > MAX_RUNTIME_FACTS_PER_KIND)
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "runtime capability lists may contain at most {MAX_RUNTIME_FACTS_PER_KIND} facts"
+        )));
+    }
+    if fact_groups.iter().any(|facts| {
+        facts
+            .iter()
+            .any(|fact| fact.trim().is_empty() || fact.len() > MAX_RUNTIME_FACT_LENGTH)
+    }) {
+        return Err(ApiError::InvalidArgument(format!(
+            "runtime capability facts must be non-empty and at most {MAX_RUNTIME_FACT_LENGTH} bytes"
+        )));
+    }
+    Ok(())
+}
+
 async fn register_runtime(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<RuntimeRegistrationRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    validate_runtime_facts(&body.capabilities)?;
     let now = Utc::now();
     if body.capabilities.expires_at <= now {
         return Err(ApiError::InvalidArgument(
@@ -439,6 +472,15 @@ async fn register_runtime(
     {
         return Err(ApiError::InvalidArgument(
             "runtime capability lifetime must be positive and no longer than five minutes".into(),
+        ));
+    }
+    if body
+        .capabilities
+        .battery_percent
+        .is_some_and(|percentage| percentage > 100)
+    {
+        return Err(ApiError::InvalidArgument(
+            "runtime battery_percent must be at most 100".into(),
         ));
     }
     if body.capabilities.trust > RuntimeTrustLevel::Registered {
@@ -490,6 +532,9 @@ struct HandoffPreviewRequest {
     destination_runtime_id: RuntimeId,
     #[serde(default)]
     requirements: CapsuleRequirements,
+    policy: Option<LocalityPolicy>,
+    #[serde(default = "default_classification")]
+    classification: DataClassification,
 }
 
 #[derive(Debug, Serialize)]
@@ -500,6 +545,7 @@ struct HandoffPreviewResponse {
     compatible: bool,
     findings: Vec<CompatibilityFinding>,
     unresolved_effects: Vec<EffectReceipt>,
+    placement_decision: PlacementDecision,
     preview_sha256: String,
 }
 
@@ -510,6 +556,10 @@ struct HandoffPreviewEvidence<'a> {
     source_runtime_id: RuntimeId,
     destination: &'a RuntimeCapabilities,
     requirements: &'a CapsuleRequirements,
+    policy: Option<&'a LocalityPolicy>,
+    classification: DataClassification,
+    selected_runtime_id: Option<RuntimeId>,
+    placement_candidates: &'a [PlacementEvidence],
     compatible: bool,
     findings: &'a [CompatibilityFinding],
     unresolved_effects: &'a [EffectReceipt],
@@ -521,7 +571,15 @@ async fn build_handoff_preview(
     continuity_id: ContinuityId,
     destination_runtime_id: RuntimeId,
     requirements: &CapsuleRequirements,
+    policy: Option<&LocalityPolicy>,
+    classification: DataClassification,
 ) -> Result<HandoffPreviewResponse, ApiError> {
+    orch8_engine::placement::validate_requirements(requirements)
+        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    if let Some(policy) = policy {
+        orch8_engine::placement::validate_policy(policy)
+            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    }
     let execution = state
         .storage
         .get_continuity_execution(tenant_id, continuity_id)
@@ -538,6 +596,17 @@ async fn build_handoff_preview(
         .find(|runtime| runtime.runtime_id == destination_runtime_id)
         .ok_or_else(|| ApiError::NotFound("destination runtime".into()))?;
     let findings = assess_compatibility(requirements, destination, Utc::now());
+    let mut placement_decision = orch8_engine::placement::choose_runtime(
+        tenant_id.clone(),
+        continuity_id,
+        execution.epoch,
+        requirements,
+        policy,
+        classification,
+        &runtimes,
+        Some(execution.owner_runtime_id),
+        Utc::now(),
+    );
     let unresolved_effects: Vec<_> = state
         .storage
         .list_effect_receipts(tenant_id, continuity_id, 10_000)
@@ -546,9 +615,19 @@ async fn build_handoff_preview(
         .into_iter()
         .filter(|receipt| !receipt.state.is_resolved())
         .collect();
-    let compatible = findings
-        .iter()
-        .all(|finding| finding.status != orch8_engine::continuity::CompatibilityStatus::Fail)
+    let destination_allowed = placement_decision.candidates.iter().any(|candidate| {
+        candidate.runtime_id == destination_runtime_id && candidate.outcome == PolicyOutcome::Allow
+    });
+    // An explicit handoff destination overrides soft score preferences (for
+    // example, staying on the current runtime), but never hard capability or
+    // locality outcomes. The persisted decision records that explicit choice.
+    if destination_allowed {
+        placement_decision.selected_runtime_id = Some(destination_runtime_id);
+    }
+    let compatible = destination_allowed
+        && findings
+            .iter()
+            .all(|finding| finding.status != orch8_engine::continuity::CompatibilityStatus::Fail)
         && unresolved_effects.is_empty();
     let evidence = HandoffPreviewEvidence {
         continuity_id,
@@ -556,6 +635,10 @@ async fn build_handoff_preview(
         source_runtime_id: execution.owner_runtime_id,
         destination,
         requirements,
+        policy,
+        classification,
+        selected_runtime_id: placement_decision.selected_runtime_id,
+        placement_candidates: &placement_decision.candidates,
         compatible,
         findings: &findings,
         unresolved_effects: &unresolved_effects,
@@ -575,6 +658,7 @@ async fn build_handoff_preview(
         compatible,
         findings,
         unresolved_effects,
+        placement_decision,
         preview_sha256,
     })
 }
@@ -586,15 +670,22 @@ async fn handoff_preview(
     Json(body): Json<HandoffPreviewRequest>,
 ) -> Result<Json<HandoffPreviewResponse>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    build_handoff_preview(
+    let preview = build_handoff_preview(
         &state,
         &tenant_id,
         id,
         body.destination_runtime_id,
         &body.requirements,
+        body.policy.as_ref(),
+        body.classification,
     )
-    .await
-    .map(Json)
+    .await?;
+    state
+        .storage
+        .save_placement_decision(&preview.placement_decision)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "placement decision"))?;
+    Ok(Json(preview))
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,6 +695,10 @@ struct CreateHandoffRequest {
     destination_runtime_id: RuntimeId,
     #[serde(default)]
     requirements: CapsuleRequirements,
+    policy: Option<LocalityPolicy>,
+    #[serde(default = "default_classification")]
+    classification: DataClassification,
+    placement_decision_id: PlacementDecisionId,
     preview_sha256: String,
 }
 
@@ -623,12 +718,20 @@ async fn create_handoff(
             "preview_sha256 must be a 64-character hexadecimal digest".into(),
         ));
     }
+    let authorized = state
+        .storage
+        .get_placement_decision(&tenant_id, body.placement_decision_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "placement decision"))?
+        .ok_or_else(|| ApiError::NotFound("placement decision".into()))?;
     let preview = build_handoff_preview(
         &state,
         &tenant_id,
         body.continuity_id,
         body.destination_runtime_id,
         &body.requirements,
+        body.policy.as_ref(),
+        body.classification,
     )
     .await?;
     if !preview.compatible {
@@ -642,6 +745,21 @@ async fn create_handoff(
     {
         return Err(ApiError::Conflict(
             "handoff preview is stale or does not match the requested requirements".into(),
+        ));
+    }
+    if authorized.continuity_id != body.continuity_id
+        || authorized.tenant_id != tenant_id
+        || authorized.epoch != preview.placement_decision.epoch
+        || authorized.selected_runtime_id != Some(body.destination_runtime_id)
+        || preview.placement_decision.selected_runtime_id != Some(body.destination_runtime_id)
+        || authorized.requirements != body.requirements
+        || authorized.policy != body.policy
+        || authorized.classification != body.classification
+        || authorized.policy_version != preview.placement_decision.policy_version
+        || authorized.candidates != preview.placement_decision.candidates
+    {
+        return Err(ApiError::Conflict(
+            "placement decision is stale or does not authorize this handoff".into(),
         ));
     }
     let execution = state
@@ -660,6 +778,7 @@ async fn create_handoff(
         expected_epoch: execution.epoch,
         state: HandoffState::Requested,
         capsule_id: None,
+        placement_decision_id: Some(body.placement_decision_id),
         preview_sha256: body.preview_sha256,
         version: 0,
         failure_code: None,
@@ -817,6 +936,50 @@ async fn export_handoff(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let placement_id = handoff.placement_decision_id.ok_or_else(|| {
+        ApiError::Conflict("handoff is missing dispatch placement evidence".into())
+    })?;
+    let authorized = state
+        .storage
+        .get_placement_decision(&tenant_id, placement_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "placement decision"))?
+        .ok_or_else(|| ApiError::Conflict("handoff placement evidence no longer exists".into()))?;
+    if authorized.requirements != body.requirements
+        || authorized.continuity_id != handoff.continuity_id
+        || authorized.epoch != execution.epoch
+        || authorized.selected_runtime_id != Some(handoff.destination_runtime_id)
+    {
+        return Err(ApiError::Conflict(
+            "handoff requirements or ownership no longer match placement evidence".into(),
+        ));
+    }
+    let placement_now = Utc::now();
+    let candidates = state
+        .storage
+        .list_runtime_capabilities(&tenant_id, placement_now, 1_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let current = orch8_engine::placement::choose_runtime(
+        tenant_id.clone(),
+        handoff.continuity_id,
+        execution.epoch,
+        &authorized.requirements,
+        authorized.policy.as_ref(),
+        authorized.classification,
+        &candidates,
+        Some(execution.owner_runtime_id),
+        placement_now,
+    );
+    let destination_allowed = current.candidates.iter().any(|candidate| {
+        candidate.runtime_id == handoff.destination_runtime_id
+            && candidate.outcome == PolicyOutcome::Allow
+    });
+    if !destination_allowed {
+        return Err(ApiError::Conflict(
+            "runtime capabilities or locality policy changed before dispatch".into(),
+        ));
+    }
     let instance = state
         .storage
         .get_instance(execution.current_instance_id)
@@ -1517,6 +1680,8 @@ async fn choose_placement(
     Json(body): Json<PlacementRequest>,
 ) -> Result<Json<PlacementDecision>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    orch8_engine::placement::validate_requirements(&body.requirements)
+        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
     if let Some(policy) = &body.policy {
         orch8_engine::placement::validate_policy(policy)
             .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;

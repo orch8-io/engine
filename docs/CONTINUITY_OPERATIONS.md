@@ -43,6 +43,60 @@ Query the ordered path with
 wall-clock time—is authoritative if timestamps from different runtimes disagree.
 SQLite schema version 28 creates the same ledger for embedded runtimes.
 
+## Capability and locality routing
+
+Runtime advertisements are short-lived, tenant-scoped facts. Alongside
+handlers, plugins, hardware, regions, trust, and offline support, a runtime may
+advertise its current `connectivity`, `battery_percent`,
+`estimated_cost_microunits`, and `estimated_latency_ms`. Set `draining: true`
+before maintenance: the runtime remains visible in rejected-candidate evidence
+but cannot receive new work. Advertisements live for at most five minutes and
+must be refreshed monotonically.
+
+Locality policies are bounded data, not executable code. A rule applies to one
+data classification and may constrain exact runtime IDs, runtime kinds,
+regions, trust, offline support, hardware, connectivity, battery, cost, and
+latency. Multiple matching rules are conjunctive. Contradictory device or
+region intersections are rejected statically. Missing connectivity, battery,
+cost, latency, or region facts produce `unknown`; confidential, restricted,
+residency, and trust-sensitive work is never routed on an unknown result.
+
+For example, restricted PII can be pinned to one device:
+
+```json
+{
+  "version": 1,
+  "rules": [{
+    "classification": "restricted",
+    "allowed_runtime_ids": ["<device-runtime-id>"],
+    "minimum_trust": "registered"
+  }]
+}
+```
+
+Cloud inference can require Wi-Fi and a cost ceiling:
+
+```json
+{
+  "version": 2,
+  "rules": [{
+    "classification": "confidential",
+    "allowed_connectivity": ["wifi"],
+    "maximum_cost_microunits": 50000,
+    "maximum_latency_ms": 1000
+  }]
+}
+```
+
+Call the handoff preview with the requirements, policy, and classification.
+The response contains a `placement_decision` with the chosen runtime and every
+candidate's outcome, score, and finding codes. Create the handoff using the
+same inputs plus `placement_decision_id` and `preview_sha256`. The engine
+re-evaluates live facts at creation and again at export; a changed or expired
+advertisement returns conflict before transfer begins. An explicit destination
+may override a soft score preference, such as remaining on the current
+runtime, but cannot override a hard denial.
+
 ## Portable mobile capsule transport
 
 An isolated mobile runtime cannot read the server's object store and must

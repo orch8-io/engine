@@ -69,6 +69,28 @@ function sealCapsule(payload: unknown, key: Buffer, aad: Buffer): Buffer {
   return Buffer.concat([nonce, ciphertext, cipher.getAuthTag()]);
 }
 
+function cameraRuntimeCapabilities(
+  runtimeId: string,
+  observedAt: number,
+  estimatedCostMicrounits: number,
+): Record<string, unknown> {
+  return {
+    runtime_id: runtimeId,
+    kind: "mobile",
+    trust: "registered",
+    handlers: ["camera", "noop"],
+    regions: ["br-south"],
+    hardware: ["camera"],
+    offline_capable: true,
+    connectivity: "wifi",
+    battery_percent: 80,
+    estimated_cost_microunits: estimatedCostMicrounits,
+    estimated_latency_ms: 100,
+    observed_at: new Date(observedAt).toISOString(),
+    expires_at: new Date(observedAt + 60_000).toISOString(),
+  };
+}
+
 async function waitForWorkerTask(
   handler: string,
   workerId: string,
@@ -144,17 +166,7 @@ describe("Portable Continuity", () => {
     const now = Date.now();
     await client.registerRuntime({
       tenant_id: tenantId,
-      capabilities: {
-        runtime_id: destinationRuntimeId,
-        kind: "mobile",
-        trust: "registered",
-        handlers: ["camera", "noop"],
-        regions: ["br-south"],
-        hardware: ["camera"],
-        offline_capable: true,
-        observed_at: new Date(now).toISOString(),
-        expires_at: new Date(now + 60_000).toISOString(),
-      },
+      capabilities: cameraRuntimeCapabilities(destinationRuntimeId, now, 40),
     });
     const runtimes = await client.listRuntimes(tenantId);
     assert.ok(runtimes.some((runtime) => runtime.runtime_id === destinationRuntimeId));
@@ -188,6 +200,71 @@ describe("Portable Continuity", () => {
       },
     );
 
+    const localityPolicy = {
+      version: 1,
+      rules: [{
+        classification: "restricted",
+        allowed_runtime_ids: [destinationRuntimeId],
+        allowed_runtime_kinds: ["mobile"],
+        allowed_regions: ["br-south"],
+        minimum_trust: "registered",
+        require_hardware: "camera",
+        allowed_connectivity: ["wifi"],
+        minimum_battery_percent: 20,
+        maximum_cost_microunits: 50,
+        maximum_latency_ms: 500,
+      }],
+    };
+    const initialPreview = await client.previewHandoff(execution.continuity_id, {
+      tenant_id: tenantId,
+      destination_runtime_id: destinationRuntimeId,
+      requirements: {
+        handlers: ["camera"],
+        regions: ["br-south"],
+        hardware: ["camera"],
+        minimum_trust: "registered",
+      },
+      policy: localityPolicy,
+      classification: "restricted",
+    });
+    assert.equal(initialPreview.compatible, true);
+    assert.deepEqual(initialPreview.unresolved_effects, []);
+    assert.equal(initialPreview.placement_decision.selected_runtime_id, destinationRuntimeId);
+
+    // A live capability change between preview and mutation must invalidate
+    // dispatch, even when the caller replays the original evidence hash.
+    const changedAt = Date.now();
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: cameraRuntimeCapabilities(destinationRuntimeId, changedAt, 100),
+    });
+    await assert.rejects(
+      () => client.createHandoff({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destinationRuntimeId,
+        requirements: {
+          handlers: ["camera"],
+          regions: ["br-south"],
+          hardware: ["camera"],
+          minimum_trust: "registered",
+        },
+        policy: localityPolicy,
+        classification: "restricted",
+        placement_decision_id: initialPreview.placement_decision.id,
+        preview_sha256: initialPreview.preview_sha256,
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+
+    const restoredAt = Date.now() + 5;
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: cameraRuntimeCapabilities(destinationRuntimeId, restoredAt, 40),
+    });
     const preview = await client.previewHandoff(execution.continuity_id, {
       tenant_id: tenantId,
       destination_runtime_id: destinationRuntimeId,
@@ -197,14 +274,15 @@ describe("Portable Continuity", () => {
         hardware: ["camera"],
         minimum_trust: "registered",
       },
+      policy: localityPolicy,
+      classification: "restricted",
     });
-    assert.equal(preview.compatible, true);
-    assert.deepEqual(preview.unresolved_effects, []);
 
     const placement = await client.choosePlacement(execution.continuity_id, {
       tenant_id: tenantId,
       requirements: { handlers: ["camera"] },
-      classification: "internal",
+      policy: localityPolicy,
+      classification: "restricted",
     });
     assert.equal(placement.selected_runtime_id, destinationRuntimeId);
 
@@ -220,6 +298,9 @@ describe("Portable Continuity", () => {
             hardware: ["camera"],
             minimum_trust: "registered",
           },
+          policy: localityPolicy,
+          classification: "restricted",
+          placement_decision_id: preview.placement_decision.id,
           preview_sha256: "a".repeat(64),
         }),
       (error: unknown) => {
@@ -238,6 +319,9 @@ describe("Portable Continuity", () => {
         hardware: ["camera"],
         minimum_trust: "registered",
       },
+      policy: localityPolicy,
+      classification: "restricted",
+      placement_decision_id: preview.placement_decision.id,
       preview_sha256: preview.preview_sha256,
     });
     assert.equal(handoff.state, "requested");
@@ -456,6 +540,7 @@ describe("Portable Continuity", () => {
       continuity_id: execution.continuity_id,
       destination_runtime_id: destinationRuntimeId,
       requirements: { handlers: ["human_review"] },
+      placement_decision_id: preview.placement_decision.id,
       preview_sha256: preview.preview_sha256,
     });
     const payloadKey = randomBytes(32).toString("base64");
@@ -600,6 +685,7 @@ describe("Portable Continuity", () => {
       continuity_id: execution.continuity_id,
       destination_runtime_id: sourceRuntimeId,
       requirements: { handlers: ["human_review"] },
+      placement_decision_id: returnPreview.placement_decision.id,
       preview_sha256: returnPreview.preview_sha256,
     });
     const portablePayload = openCapsule(

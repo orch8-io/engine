@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use orch8_types::continuity::{
     CapsuleRequirements, ContinuityId, DataClassification, ExecutionEpoch, LocalityPolicy,
-    PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome, RuntimeCapabilities,
-    RuntimeId, RuntimeTrustLevel,
+    LocalityRule, PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome,
+    RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
 };
 use orch8_types::ids::TenantId;
 use thiserror::Error;
@@ -14,7 +14,53 @@ use thiserror::Error;
 use crate::continuity::{CompatibilityStatus, assess_compatibility};
 
 pub const MAX_POLICY_RULES: usize = 256;
+pub const MAX_POLICY_FACTS_PER_RULE: usize = 64;
+pub const MAX_POLICY_FACT_LENGTH: usize = 256;
 pub const MAX_CANDIDATES: usize = 1_000;
+pub const MAX_REQUIREMENT_FACTS_PER_KIND: usize = 64;
+pub const MAX_REQUIREMENT_FACT_LENGTH: usize = 256;
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum RequirementsValidationError {
+    #[error("a placement requirement exceeds {MAX_REQUIREMENT_FACTS_PER_KIND} facts")]
+    TooManyFacts,
+    #[error("a placement requirement contains an empty fact")]
+    EmptyFact,
+    #[error("a placement requirement fact exceeds {MAX_REQUIREMENT_FACT_LENGTH} bytes")]
+    FactTooLong,
+}
+
+pub fn validate_requirements(
+    requirements: &CapsuleRequirements,
+) -> Result<(), RequirementsValidationError> {
+    let fact_groups = [
+        requirements.handlers.as_slice(),
+        requirements.plugins.as_slice(),
+        requirements.credentials.as_slice(),
+        requirements.regions.as_slice(),
+        requirements.hardware.as_slice(),
+    ];
+    if fact_groups
+        .iter()
+        .any(|facts| facts.len() > MAX_REQUIREMENT_FACTS_PER_KIND)
+    {
+        return Err(RequirementsValidationError::TooManyFacts);
+    }
+    if fact_groups
+        .iter()
+        .any(|facts| facts.iter().any(|fact| fact.trim().is_empty()))
+    {
+        return Err(RequirementsValidationError::EmptyFact);
+    }
+    if fact_groups.iter().any(|facts| {
+        facts
+            .iter()
+            .any(|fact| fact.len() > MAX_REQUIREMENT_FACT_LENGTH)
+    }) {
+        return Err(RequirementsValidationError::FactTooLong);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyValidationError {
@@ -24,8 +70,30 @@ pub enum PolicyValidationError {
     TooManyRules,
     #[error("locality policy contains an empty region or hardware capability")]
     EmptyFact,
+    #[error("a locality policy rule exceeds {MAX_POLICY_FACTS_PER_RULE} facts")]
+    TooManyFacts,
+    #[error("a locality policy string fact exceeds {MAX_POLICY_FACT_LENGTH} bytes")]
+    FactTooLong,
+    #[error("locality policy battery percentage must be at most 100")]
+    InvalidBatteryPercentage,
     #[error("locality policy has contradictory region rules for {0:?}")]
     ContradictoryRegions(DataClassification),
+    #[error("locality policy has contradictory runtime rules for {0:?}")]
+    ContradictoryRuntimes(DataClassification),
+    #[error("locality policy has contradictory runtime-kind rules for {0:?}")]
+    ContradictoryRuntimeKinds(DataClassification),
+    #[error("locality policy has contradictory connectivity rules for {0:?}")]
+    ContradictoryConnectivity(DataClassification),
+}
+
+fn has_empty_intersection<T: Ord + Clone>(mut sets: impl Iterator<Item = BTreeSet<T>>) -> bool {
+    let Some(mut intersection) = sets.next() else {
+        return false;
+    };
+    for values in sets {
+        intersection = intersection.intersection(&values).cloned().collect();
+    }
+    intersection.is_empty()
 }
 
 pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationError> {
@@ -36,10 +104,40 @@ pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationEr
         return Err(PolicyValidationError::TooManyRules);
     }
     if policy.rules.iter().any(|rule| {
-        rule.allowed_regions.iter().any(String::is_empty)
-            || rule.require_hardware.as_ref().is_some_and(String::is_empty)
+        rule.allowed_runtime_ids.len() > MAX_POLICY_FACTS_PER_RULE
+            || rule.allowed_runtime_kinds.len() > MAX_POLICY_FACTS_PER_RULE
+            || rule.allowed_regions.len() > MAX_POLICY_FACTS_PER_RULE
+            || rule.allowed_connectivity.len() > MAX_POLICY_FACTS_PER_RULE
+    }) {
+        return Err(PolicyValidationError::TooManyFacts);
+    }
+    if policy.rules.iter().any(|rule| {
+        rule.allowed_regions
+            .iter()
+            .any(|value| value.trim().is_empty())
+            || rule
+                .require_hardware
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty())
     }) {
         return Err(PolicyValidationError::EmptyFact);
+    }
+    if policy.rules.iter().any(|rule| {
+        rule.allowed_regions
+            .iter()
+            .any(|value| value.len() > MAX_POLICY_FACT_LENGTH)
+            || rule
+                .require_hardware
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_POLICY_FACT_LENGTH)
+    }) {
+        return Err(PolicyValidationError::FactTooLong);
+    }
+    if policy.rules.iter().any(|rule| {
+        rule.minimum_battery_percent
+            .is_some_and(|value| value > 100)
+    }) {
+        return Err(PolicyValidationError::InvalidBatteryPercentage);
     }
     for classification in [
         DataClassification::Public,
@@ -47,7 +145,7 @@ pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationEr
         DataClassification::Confidential,
         DataClassification::Restricted,
     ] {
-        let mut region_sets = policy
+        let region_sets = policy
             .rules
             .iter()
             .filter(|rule| rule.classification == classification)
@@ -58,13 +156,44 @@ pub fn validate_policy(policy: &LocalityPolicy) -> Result<(), PolicyValidationEr
                     .map(String::as_str)
                     .collect::<BTreeSet<_>>()
             });
-        if let Some(mut intersection) = region_sets.next() {
-            for regions in region_sets {
-                intersection = intersection.intersection(&regions).copied().collect();
-            }
-            if intersection.is_empty() {
-                return Err(PolicyValidationError::ContradictoryRegions(classification));
-            }
+        if has_empty_intersection(region_sets) {
+            return Err(PolicyValidationError::ContradictoryRegions(classification));
+        }
+        let runtime_sets = policy
+            .rules
+            .iter()
+            .filter(|rule| rule.classification == classification)
+            .filter(|rule| !rule.allowed_runtime_ids.is_empty())
+            .map(|rule| {
+                rule.allowed_runtime_ids
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            });
+        if has_empty_intersection(runtime_sets) {
+            return Err(PolicyValidationError::ContradictoryRuntimes(classification));
+        }
+        let kind_sets = policy
+            .rules
+            .iter()
+            .filter(|rule| rule.classification == classification)
+            .filter(|rule| !rule.allowed_runtime_kinds.is_empty())
+            .map(|rule| rule.allowed_runtime_kinds.iter().copied().collect());
+        if has_empty_intersection(kind_sets) {
+            return Err(PolicyValidationError::ContradictoryRuntimeKinds(
+                classification,
+            ));
+        }
+        let connectivity_sets = policy
+            .rules
+            .iter()
+            .filter(|rule| rule.classification == classification)
+            .filter(|rule| !rule.allowed_connectivity.is_empty())
+            .map(|rule| rule.allowed_connectivity.iter().copied().collect());
+        if has_empty_intersection(connectivity_sets) {
+            return Err(PolicyValidationError::ContradictoryConnectivity(
+                classification,
+            ));
         }
     }
     Ok(())
@@ -110,33 +239,8 @@ pub fn evaluate_locality(
     let mut codes: Vec<String> = Vec::new();
     let mut unknown = false;
     for rule in rules {
-        if !rule.allowed_regions.is_empty() {
-            if runtime.regions.is_empty() {
-                unknown = true;
-                codes.push("RUNTIME_REGION_UNKNOWN".into());
-            } else if !rule
-                .allowed_regions
-                .iter()
-                .any(|region| runtime.regions.contains(region))
-            {
-                codes.push("REGION_DENIED".into());
-            }
-        }
-        if let Some(minimum) = rule.minimum_trust
-            && runtime.trust < minimum
-        {
-            codes.push("TRUST_DENIED".into());
-        }
-        if let Some(required) = rule.require_offline
-            && runtime.offline_capable != required
-        {
-            codes.push("CONNECTIVITY_DENIED".into());
-        }
-        if let Some(hardware) = &rule.require_hardware
-            && !runtime.hardware.contains(hardware)
-        {
-            codes.push("HARDWARE_DENIED".into());
-        }
+        evaluate_identity_and_residency(rule, runtime, &mut unknown, &mut codes);
+        evaluate_runtime_environment(rule, runtime, &mut unknown, &mut codes);
     }
     codes.sort();
     codes.dedup();
@@ -154,6 +258,115 @@ pub fn evaluate_locality(
     PolicyEvaluation {
         outcome,
         finding_codes: codes,
+    }
+}
+
+fn evaluate_identity_and_residency(
+    rule: &LocalityRule,
+    runtime: &RuntimeCapabilities,
+    unknown: &mut bool,
+    codes: &mut Vec<String>,
+) {
+    if !rule.allowed_runtime_ids.is_empty()
+        && !rule.allowed_runtime_ids.contains(&runtime.runtime_id)
+    {
+        codes.push("RUNTIME_ID_DENIED".into());
+    }
+    if !rule.allowed_runtime_kinds.is_empty() && !rule.allowed_runtime_kinds.contains(&runtime.kind)
+    {
+        codes.push("RUNTIME_KIND_DENIED".into());
+    }
+    if !rule.allowed_regions.is_empty() {
+        if runtime.regions.is_empty() {
+            *unknown = true;
+            codes.push("RUNTIME_REGION_UNKNOWN".into());
+        } else if !rule
+            .allowed_regions
+            .iter()
+            .any(|region| runtime.regions.contains(region))
+        {
+            codes.push("REGION_DENIED".into());
+        }
+    }
+    if let Some(minimum) = rule.minimum_trust
+        && runtime.trust < minimum
+    {
+        codes.push("TRUST_DENIED".into());
+    }
+}
+
+fn evaluate_runtime_environment(
+    rule: &LocalityRule,
+    runtime: &RuntimeCapabilities,
+    unknown: &mut bool,
+    codes: &mut Vec<String>,
+) {
+    if let Some(required) = rule.require_offline
+        && runtime.offline_capable != required
+    {
+        codes.push("CONNECTIVITY_DENIED".into());
+    }
+    if let Some(hardware) = &rule.require_hardware
+        && !runtime.hardware.contains(hardware)
+    {
+        codes.push("HARDWARE_DENIED".into());
+    }
+    if !rule.allowed_connectivity.is_empty() {
+        match runtime.connectivity {
+            Some(connectivity) if rule.allowed_connectivity.contains(&connectivity) => {}
+            Some(_) => codes.push("CONNECTIVITY_DENIED".into()),
+            None => {
+                *unknown = true;
+                codes.push("RUNTIME_CONNECTIVITY_UNKNOWN".into());
+            }
+        }
+    }
+    compare_maximum(
+        runtime.estimated_cost_microunits,
+        rule.maximum_cost_microunits,
+        "RUNTIME_COST_UNKNOWN",
+        "COST_DENIED",
+        unknown,
+        codes,
+    );
+    compare_maximum(
+        runtime.estimated_latency_ms,
+        rule.maximum_latency_ms,
+        "RUNTIME_LATENCY_UNKNOWN",
+        "LATENCY_DENIED",
+        unknown,
+        codes,
+    );
+    if let Some(minimum) = rule.minimum_battery_percent {
+        match runtime.battery_percent {
+            Some(actual) if actual >= minimum => {}
+            Some(_) => codes.push("BATTERY_DENIED".into()),
+            None => {
+                *unknown = true;
+                codes.push("RUNTIME_BATTERY_UNKNOWN".into());
+            }
+        }
+    }
+}
+
+fn compare_maximum(
+    actual: Option<u64>,
+    maximum: Option<u64>,
+    unknown_code: &str,
+    denied_code: &str,
+    unknown: &mut bool,
+    codes: &mut Vec<String>,
+) {
+    let Some(maximum) = maximum else {
+        return;
+    };
+    match actual {
+        Some(actual) if actual <= maximum => {}
+        Some(_) => codes.push(denied_code.into()),
+        None => {
+            *unknown = true;
+            codes.push(unknown_code.into());
+        }
     }
 }
 
@@ -231,6 +444,9 @@ pub fn choose_runtime(
         continuity_id,
         epoch,
         selected_runtime_id,
+        requirements: requirements.clone(),
+        policy: policy.cloned(),
+        classification,
         policy_version: policy.map(|value| value.version),
         candidates: evidence,
         created_at: now,
@@ -240,7 +456,7 @@ pub fn choose_runtime(
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use orch8_types::continuity::{LocalityRule, RuntimeKind};
+    use orch8_types::continuity::{LocalityRule, RuntimeConnectivity, RuntimeKind};
 
     use super::*;
 
@@ -252,12 +468,34 @@ mod tests {
             trust,
             handlers: vec!["camera".into()],
             plugins: Vec::new(),
+            credentials: Vec::new(),
             regions: vec![region.into()],
             hardware: vec!["camera".into()],
             offline_capable: true,
+            connectivity: None,
+            battery_percent: None,
+            estimated_cost_microunits: None,
+            estimated_latency_ms: None,
+            draining: false,
             capsule_signing_public_key: None,
             observed_at: now,
             expires_at: now + Duration::minutes(1),
+        }
+    }
+
+    fn locality_rule(classification: DataClassification) -> LocalityRule {
+        LocalityRule {
+            classification,
+            allowed_runtime_ids: Vec::new(),
+            allowed_runtime_kinds: Vec::new(),
+            allowed_regions: Vec::new(),
+            minimum_trust: None,
+            require_offline: None,
+            require_hardware: None,
+            allowed_connectivity: Vec::new(),
+            minimum_battery_percent: None,
+            maximum_cost_microunits: None,
+            maximum_latency_ms: None,
         }
     }
 
@@ -277,18 +515,12 @@ mod tests {
             version: 1,
             rules: vec![
                 LocalityRule {
-                    classification: DataClassification::Restricted,
                     allowed_regions: vec!["br-south".into()],
-                    minimum_trust: None,
-                    require_offline: None,
-                    require_hardware: None,
+                    ..locality_rule(DataClassification::Restricted)
                 },
                 LocalityRule {
-                    classification: DataClassification::Restricted,
                     allowed_regions: vec!["eu-west".into()],
-                    minimum_trust: None,
-                    require_offline: None,
-                    require_hardware: None,
+                    ..locality_rule(DataClassification::Restricted)
                 },
             ],
         };
@@ -301,6 +533,41 @@ mod tests {
     }
 
     #[test]
+    fn contradictory_connectivity_policy_is_rejected() {
+        let policy = LocalityPolicy {
+            version: 1,
+            rules: vec![
+                LocalityRule {
+                    allowed_connectivity: vec![RuntimeConnectivity::Wifi],
+                    ..locality_rule(DataClassification::Confidential)
+                },
+                LocalityRule {
+                    allowed_connectivity: vec![RuntimeConnectivity::Offline],
+                    ..locality_rule(DataClassification::Confidential)
+                },
+            ],
+        };
+        assert_eq!(
+            validate_policy(&policy),
+            Err(PolicyValidationError::ContradictoryConnectivity(
+                DataClassification::Confidential
+            ))
+        );
+    }
+
+    #[test]
+    fn placement_requirements_are_bounded() {
+        let requirements = CapsuleRequirements {
+            handlers: vec!["handler".into(); MAX_REQUIREMENT_FACTS_PER_KIND + 1],
+            ..CapsuleRequirements::default()
+        };
+        assert_eq!(
+            validate_requirements(&requirements),
+            Err(RequirementsValidationError::TooManyFacts)
+        );
+    }
+
+    #[test]
     fn placement_filters_hard_requirements_and_breaks_ties_deterministically() {
         let tenant = TenantId::new("tenant-a").unwrap();
         let eligible = RuntimeId::from_uuid(uuid::Uuid::from_u128(1));
@@ -308,11 +575,11 @@ mod tests {
         let policy = LocalityPolicy {
             version: 1,
             rules: vec![LocalityRule {
-                classification: DataClassification::Restricted,
                 allowed_regions: vec!["br-south".into()],
                 minimum_trust: Some(RuntimeTrustLevel::Signed),
                 require_offline: Some(true),
                 require_hardware: Some("camera".into()),
+                ..locality_rule(DataClassification::Restricted)
             }],
         };
         let decision = choose_runtime(
@@ -335,5 +602,113 @@ mod tests {
         );
         assert_eq!(decision.selected_runtime_id, Some(eligible));
         assert_eq!(decision.candidates.len(), 2);
+    }
+
+    #[test]
+    fn stale_or_draining_camera_runtime_cannot_receive_work() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let now = Utc::now();
+        let mut expired = runtime(RuntimeId::new(), "br-south", RuntimeTrustLevel::Registered);
+        expired.expires_at = now;
+        let mut draining = runtime(RuntimeId::new(), "br-south", RuntimeTrustLevel::Registered);
+        draining.draining = true;
+        let decision = choose_runtime(
+            tenant,
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            &CapsuleRequirements {
+                handlers: vec!["camera".into()],
+                ..CapsuleRequirements::default()
+            },
+            None,
+            DataClassification::Internal,
+            &[expired, draining],
+            None,
+            now,
+        );
+        assert_eq!(decision.selected_runtime_id, None);
+        assert!(decision.candidates.iter().all(|candidate| {
+            candidate.outcome == PolicyOutcome::Deny
+                && candidate
+                    .finding_codes
+                    .iter()
+                    .any(|code| code == "CAPABILITIES_EXPIRED" || code == "RUNTIME_DRAINING")
+        }));
+    }
+
+    #[test]
+    fn restricted_data_can_be_pinned_to_one_device() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let pinned = RuntimeId::new();
+        let other = RuntimeId::new();
+        let policy = LocalityPolicy {
+            version: 7,
+            rules: vec![LocalityRule {
+                allowed_runtime_ids: vec![pinned],
+                ..locality_rule(DataClassification::Restricted)
+            }],
+        };
+        let decision = choose_runtime(
+            tenant,
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            &CapsuleRequirements::default(),
+            Some(&policy),
+            DataClassification::Restricted,
+            &[
+                runtime(other, "br-south", RuntimeTrustLevel::Registered),
+                runtime(pinned, "br-south", RuntimeTrustLevel::Registered),
+            ],
+            None,
+            Utc::now(),
+        );
+        assert_eq!(decision.selected_runtime_id, Some(pinned));
+    }
+
+    #[test]
+    fn cloud_inference_requires_wifi_and_bounded_cost() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let eligible = RuntimeId::new();
+        let metered = RuntimeId::new();
+        let policy = LocalityPolicy {
+            version: 3,
+            rules: vec![LocalityRule {
+                allowed_connectivity: vec![RuntimeConnectivity::Wifi],
+                maximum_cost_microunits: Some(50),
+                maximum_latency_ms: Some(250),
+                ..locality_rule(DataClassification::Confidential)
+            }],
+        };
+        let mut wifi = runtime(eligible, "br-south", RuntimeTrustLevel::Registered);
+        wifi.connectivity = Some(RuntimeConnectivity::Wifi);
+        wifi.estimated_cost_microunits = Some(40);
+        wifi.estimated_latency_ms = Some(200);
+        let mut expensive = runtime(metered, "br-south", RuntimeTrustLevel::Registered);
+        expensive.connectivity = Some(RuntimeConnectivity::Metered);
+        expensive.estimated_cost_microunits = Some(100);
+        expensive.estimated_latency_ms = Some(200);
+        let decision = choose_runtime(
+            tenant,
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            &CapsuleRequirements::default(),
+            Some(&policy),
+            DataClassification::Confidential,
+            &[expensive, wifi],
+            None,
+            Utc::now(),
+        );
+        assert_eq!(decision.selected_runtime_id, Some(eligible));
+        let rejected = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.runtime_id == metered)
+            .unwrap();
+        assert!(
+            rejected
+                .finding_codes
+                .contains(&"CONNECTIVITY_DENIED".into())
+        );
+        assert!(rejected.finding_codes.contains(&"COST_DENIED".into()));
     }
 }
