@@ -2137,6 +2137,17 @@ async fn retract_stream_frames(
     if stream.epoch != body.epoch {
         return Err(ApiError::Conflict("stream epoch does not match".into()));
     }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, stream.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if execution.epoch != stream.epoch {
+        return Err(ApiError::Conflict(
+            "stream belongs to a stale execution epoch".into(),
+        ));
+    }
     let retracted = state
         .storage
         .retract_stream_frames(&tenant_id, id, body.epoch, body.after_sequence)

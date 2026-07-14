@@ -2295,18 +2295,15 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
   });
 
-  describe("A. stream retraction vs append react differently to a migration epoch bump", () => {
-    it("append re-validates against the LIVE execution epoch post-migration (409), but retract only checks the stream's own fixed epoch (still succeeds)", async () => {
-      // retract_stream_frames compares body.epoch only against the stream's
-      // own stored `epoch` field (set once at stream creation) — unlike
-      // append_stream_frame, it never re-fetches the owning execution to
-      // compare against the LIVE epoch (see orch8-api/src/continuity.rs
-      // retract_stream_frames: `if stream.epoch != body.epoch`, with no
-      // `continuity_instance`/`get_continuity_execution` call at all). So a
-      // migration that bumps the execution's epoch does NOT make a
-      // previously-valid retraction request stale, even though it DOES make
-      // the equivalent append request stale. This test pins down that
-      // asymmetry precisely rather than assuming symmetry.
+  describe("A. stream retraction and append both react to a migration epoch bump", () => {
+    it("append and retract both re-validate against the LIVE execution epoch post-migration (409)", async () => {
+      // retract_stream_frames re-fetches the owning execution and compares
+      // its LIVE epoch against the stream's stored epoch, exactly like
+      // append_stream_frame does (see orch8-api/src/continuity.rs
+      // retract_stream_frames). So a migration that bumps the execution's
+      // epoch makes a previously-valid retraction request stale in the same
+      // way it makes the equivalent append request stale. This test pins
+      // down that symmetry rather than assuming it.
       const tenantId = tid("int-strm-retract-mig");
       const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-strm-retract-mig");
       const stream = await client.createContinuityStream({
@@ -2347,15 +2344,17 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         "append must re-check the live execution epoch",
       );
 
-      // Retract with that SAME pre-migration epoch still succeeds, because
-      // it is checked only against the stream's own stored epoch, which the
-      // migration never touched.
-      const retracted = await client.retractContinuityFrames(stream.stream_id, {
-        tenant_id: tenantId,
-        epoch: stream.epoch,
-        after_sequence: 1,
-      });
-      assert.equal(retracted.retracted, 1);
+      // Retract with that SAME pre-migration epoch is likewise rejected,
+      // since retract now re-checks the live execution epoch too.
+      await rejects(
+        client.retractContinuityFrames(stream.stream_id, {
+          tenant_id: tenantId,
+          epoch: stream.epoch,
+          after_sequence: 1,
+        }),
+        409,
+        "retract must re-check the live execution epoch, just like append",
+      );
     });
   });
 
