@@ -84,6 +84,10 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
         mobile_sync_enabled,
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        continuity_crypto: Some(Arc::new(
+            crate::ContinuityCrypto::from_master_key(&"11".repeat(32))
+                .expect("test continuity key is valid"),
+        )),
     };
 
     // Attach auth + tenant middleware. API-key auth is disabled for the

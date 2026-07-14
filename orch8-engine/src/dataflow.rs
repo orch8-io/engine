@@ -168,7 +168,7 @@ fn parse_references(text: &str, output: &mut BTreeSet<Reference>) {
                 })
                 .collect();
             let segments: Vec<String> = token
-                .split(|character| matches!(character, '.' | '[' | ']'))
+                .split(|character| ['.', '[', ']'].contains(&character))
                 .filter(|segment| !segment.is_empty())
                 .map(ToOwned::to_owned)
                 .collect();
@@ -281,7 +281,7 @@ mod tests {
 
     use super::*;
 
-    fn sequence(blocks: Value, input_schema: Option<Value>) -> SequenceDefinition {
+    fn sequence(blocks: &Value, input_schema: Option<Value>) -> SequenceDefinition {
         let mut value = json!({
             "id": uuid::Uuid::now_v7(),
             "tenant_id": "test",
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn rejects_missing_producer() {
         let report = compile(&sequence(
-            json!([{"type":"step","id":"use","handler":"noop","params":{"x":"{{ outputs.absent.id }}"}}]),
+            &json!([{"type":"step","id":"use","handler":"noop","params":{"x":"{{ outputs.absent.id }}"}}]),
             None,
         ));
         assert!(!report.is_compatible());
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn rejects_field_excluded_by_closed_schema() {
         let report = compile(&sequence(
-            json!([
+            &json!([
                 {"type":"step","id":"source","handler":"noop","params":{},"output_schema":{
                     "type":"object","properties":{"id":{"type":"string"}},"additionalProperties":false
                 }},
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn accepts_declared_input_and_output_paths() {
         let report = compile(&sequence(
-            json!([
+            &json!([
                 {"type":"step","id":"source","handler":"noop","params":{"user":"{{ data.user.id }}"},"output_schema":{
                     "type":"object","properties":{"result":{"type":"object","properties":{"ok":{"type":"boolean"}},"additionalProperties":false}},"additionalProperties":false
                 }},
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn undeclared_schema_is_unknown_not_false_pass() {
         let report = compile(&sequence(
-            json!([
+            &json!([
                 {"type":"step","id":"source","handler":"noop","params":{}},
                 {"type":"step","id":"use","handler":"noop","params":{"x":"{{ outputs.source.value }}"}}
             ]),

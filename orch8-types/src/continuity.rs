@@ -11,7 +11,7 @@ use thiserror::Error;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::ids::{BlockId, InstanceId, SequenceId, TenantId};
+use crate::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 
 macro_rules! uuid_id {
     ($name:ident) => {
@@ -75,6 +75,8 @@ uuid_id!(CapsuleId);
 uuid_id!(HandoffId);
 uuid_id!(EffectId);
 uuid_id!(ContinuationGrantId);
+uuid_id!(PlacementDecisionId);
+uuid_id!(StreamId);
 
 /// Monotonic ownership generation for one portable execution.
 #[derive(
@@ -98,6 +100,11 @@ impl ExecutionEpoch {
     #[must_use]
     pub const fn initial() -> Self {
         Self(0)
+    }
+
+    #[must_use]
+    pub const fn from_u64(value: u64) -> Self {
+        Self(value)
     }
 
     #[must_use]
@@ -211,6 +218,63 @@ pub struct ArtifactReference {
     pub bytes: u64,
 }
 
+/// Bounded, implementation-independent execution state stored in an encrypted
+/// capsule artifact. Large binary values remain external artifact references.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CapsulePayload {
+    pub instance: CapsuleInstanceState,
+    pub checkpoint: crate::checkpoint::Checkpoint,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<crate::output::BlockOutput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_waits: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_signals: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_ids: Vec<EffectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_cursors: Vec<StreamCursor>,
+    #[serde(default)]
+    pub redacted_audit_context: serde_json::Value,
+}
+
+/// Explicit portable subset of a runtime-local task instance. This avoids
+/// turning the engine's SQL/Rust representation into the capsule contract.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CapsuleInstanceState {
+    pub sequence_id: SequenceId,
+    pub namespace: Namespace,
+    pub priority: crate::instance::Priority,
+    pub timezone: String,
+    pub metadata: serde_json::Value,
+    pub context: crate::context::ExecutionContext,
+    pub budget: Option<crate::instance::Budget>,
+    pub parent_instance_id: Option<InstanceId>,
+}
+
+impl CapsulePayload {
+    pub const MAX_OUTPUTS: usize = 10_000;
+    pub const MAX_PENDING_ITEMS: usize = 10_000;
+    pub const MAX_ARTIFACTS: usize = 10_000;
+    pub const MAX_STREAM_CURSORS: usize = 1_000;
+    pub const MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
+
+    pub fn validate_bounds(&self) -> Result<(), ContinuityError> {
+        if self.outputs.len() > Self::MAX_OUTPUTS
+            || self.pending_waits.len() > Self::MAX_PENDING_ITEMS
+            || self.pending_signals.len() > Self::MAX_PENDING_ITEMS
+            || self.effect_ids.len() > Self::MAX_PENDING_ITEMS
+            || self.artifacts.len() > Self::MAX_ARTIFACTS
+            || self.stream_cursors.len() > Self::MAX_STREAM_CURSORS
+        {
+            return Err(ContinuityError::CapsulePayloadTooLarge);
+        }
+        Ok(())
+    }
+}
+
 /// Signed metadata envelope. The encrypted payload is always an artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CapsuleManifest {
@@ -269,6 +333,163 @@ pub struct ExecutionHandoff {
     pub failure_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantAction {
+    Inspect,
+    Accept,
+    Resume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationGrantState {
+    Active,
+    Consumed,
+    Revoked,
+}
+
+/// One-time, destination-bound authorization for an offline ownership claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ContinuationGrant {
+    pub id: ContinuationGrantId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub expected_epoch: ExecutionEpoch,
+    pub destination_runtime_id: RuntimeId,
+    pub subject: Option<String>,
+    pub allowed_actions: Vec<GrantAction>,
+    pub nonce_sha256: String,
+    pub state: ContinuationGrantState,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub signing_key_id: String,
+}
+
+impl ContinuationGrant {
+    pub fn validate_claim(
+        &self,
+        now: DateTime<Utc>,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        expected_epoch: ExecutionEpoch,
+        destination_runtime_id: RuntimeId,
+        action: GrantAction,
+    ) -> Result<(), ContinuityError> {
+        if self.state != ContinuationGrantState::Active {
+            return Err(ContinuityError::GrantUnavailable);
+        }
+        if self.expires_at <= now {
+            return Err(ContinuityError::GrantExpired);
+        }
+        if &self.tenant_id != tenant_id
+            || self.continuity_id != continuity_id
+            || self.expected_epoch != expected_epoch
+        {
+            return Err(ContinuityError::GrantScopeMismatch);
+        }
+        if self.destination_runtime_id != destination_runtime_id {
+            return Err(ContinuityError::WrongDestination);
+        }
+        if !self.allowed_actions.contains(&action) {
+            return Err(ContinuityError::GrantActionDenied);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClassification {
+    Public,
+    Internal,
+    Confidential,
+    Restricted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LocalityRule {
+    pub classification: DataClassification,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_regions: Vec<String>,
+    pub minimum_trust: Option<RuntimeTrustLevel>,
+    pub require_offline: Option<bool>,
+    pub require_hardware: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LocalityPolicy {
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<LocalityRule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyOutcome {
+    Allow,
+    Deny,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PlacementEvidence {
+    pub runtime_id: RuntimeId,
+    pub outcome: PolicyOutcome,
+    pub score: i64,
+    pub finding_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PlacementDecision {
+    pub id: PlacementDecisionId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub epoch: ExecutionEpoch,
+    pub selected_runtime_id: Option<RuntimeId>,
+    pub policy_version: Option<u32>,
+    pub candidates: Vec<PlacementEvidence>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamFrameState {
+    Committed,
+    Retracted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ContinuityStream {
+    pub stream_id: StreamId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub epoch: ExecutionEpoch,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StreamFrame {
+    pub stream_id: StreamId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub epoch: ExecutionEpoch,
+    pub sequence: u64,
+    pub checkpoint_sha256: String,
+    pub state: StreamFrameState,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StreamCursor {
+    pub stream_id: StreamId,
+    pub last_committed_sequence: u64,
 }
 
 impl CapsuleManifest {
@@ -465,6 +686,16 @@ pub enum ContinuityError {
     CapsuleExpired,
     #[error("capsule is bound to another destination runtime")]
     WrongDestination,
+    #[error("capsule payload exceeds protocol bounds")]
+    CapsulePayloadTooLarge,
+    #[error("continuation grant is consumed or revoked")]
+    GrantUnavailable,
+    #[error("continuation grant has expired")]
+    GrantExpired,
+    #[error("continuation grant scope does not match this claim")]
+    GrantScopeMismatch,
+    #[error("continuation grant does not authorize this action")]
+    GrantActionDenied,
     #[error("invalid effect transition from {from:?} to {to:?}")]
     InvalidEffectTransition { from: EffectState, to: EffectState },
 }

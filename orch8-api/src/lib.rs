@@ -97,6 +97,70 @@ pub struct AppState {
     /// a server whose scheduler has died — otherwise the process would keep
     /// answering HTTP while executing nothing.
     pub engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Stable capsule signing and destination payload keys. Absent in
+    /// explicitly insecure local mode, where export/import stays disabled.
+    pub continuity_crypto: Option<Arc<ContinuityCrypto>>,
+}
+
+#[derive(Clone)]
+pub struct ContinuityCrypto {
+    pub signing_key: ed25519_dalek::SigningKey,
+    pub payload_encryptor: orch8_types::encryption::FieldEncryptor,
+    pub signing_key_id: String,
+    pub encryption_key_id: String,
+}
+
+impl std::fmt::Debug for ContinuityCrypto {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ContinuityCrypto")
+            .field("signing_key", &"<redacted>")
+            .field("payload_encryptor", &"<redacted>")
+            .field("signing_key_id", &self.signing_key_id)
+            .field("encryption_key_id", &self.encryption_key_id)
+            .finish()
+    }
+}
+
+impl ContinuityCrypto {
+    /// Derive domain-separated capsule keys from the engine master key. The
+    /// derivation is stable across restarts; the master key itself is never
+    /// stored in this structure or exposed through debug output.
+    pub fn from_master_key(hex_key: &str) -> Result<Self, String> {
+        use sha2::{Digest, Sha256};
+
+        let payload_encryptor = orch8_types::encryption::FieldEncryptor::from_hex_key(hex_key)
+            .map_err(|error| error.to_string())?;
+        let mut signing_hasher = Sha256::new();
+        signing_hasher.update(b"orch8-continuity-signing-v1\0");
+        signing_hasher.update(hex_key.as_bytes());
+        let digest = signing_hasher.finalize();
+        let seed: [u8; 32] = digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| "derived signing seed has an invalid length".to_owned())?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let signing_key_id = short_key_id(&signing_key.verifying_key().to_bytes());
+        let encryption_key_id = short_key_id(hex_key.as_bytes());
+        Ok(Self {
+            signing_key,
+            payload_encryptor,
+            signing_key_id: format!("continuity-signing-{signing_key_id}"),
+            encryption_key_id: format!("continuity-payload-{encryption_key_id}"),
+        })
+    }
+}
+
+fn short_key_id(value: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(value);
+    let mut output = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
 }
 
 /// Compute the built-in handler name list for [`AppState::builtin_handlers`].

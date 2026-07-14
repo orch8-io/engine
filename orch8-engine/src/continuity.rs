@@ -10,6 +10,7 @@ use orch8_types::continuity::{
     RuntimeCapabilities,
 };
 use orch8_types::error::StorageError;
+use orch8_types::ids::InstanceId;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -139,6 +140,10 @@ fn compare_set(
 pub enum ContinuityServiceError {
     #[error("handoff must be exported before it can be accepted")]
     HandoffNotExported,
+    #[error("handoff must be quiescing before export can commit")]
+    HandoffNotQuiescing,
+    #[error("handoff must be accepted before the destination can resume")]
+    HandoffNotAccepted,
     #[error("handoff identity, tenant, continuity id, or destination changed")]
     HandoffIdentityChanged,
     #[error("handoff version must increment by exactly one")]
@@ -151,6 +156,54 @@ pub enum ContinuityServiceError {
     StaleClaim,
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+
+pub async fn commit_handoff_export(
+    storage: &dyn StorageBackend,
+    expected_handoff: &ExecutionHandoff,
+    exported_handoff: &ExecutionHandoff,
+    expected_execution: &ContinuityExecution,
+    transferring_execution: &ContinuityExecution,
+) -> Result<(), ContinuityServiceError> {
+    if expected_handoff.state != HandoffState::Quiescing
+        || exported_handoff.state != HandoffState::Exported
+    {
+        return Err(ContinuityServiceError::HandoffNotQuiescing);
+    }
+    if expected_handoff.id != exported_handoff.id
+        || expected_handoff.tenant_id != exported_handoff.tenant_id
+        || expected_handoff.continuity_id != exported_handoff.continuity_id
+        || expected_handoff.destination_runtime_id != exported_handoff.destination_runtime_id
+        || exported_handoff.capsule_id.is_none()
+    {
+        return Err(ContinuityServiceError::HandoffIdentityChanged);
+    }
+    if expected_handoff.version.checked_add(1) != Some(exported_handoff.version) {
+        return Err(ContinuityServiceError::InvalidHandoffVersion);
+    }
+    if expected_execution.continuity_id != transferring_execution.continuity_id
+        || expected_execution.tenant_id != transferring_execution.tenant_id
+        || expected_execution.owner_runtime_id != transferring_execution.owner_runtime_id
+        || expected_execution.current_instance_id != transferring_execution.current_instance_id
+        || expected_execution.epoch != transferring_execution.epoch
+        || expected_execution.state != orch8_types::continuity::OwnershipState::Owned
+        || transferring_execution.state != orch8_types::continuity::OwnershipState::Transferring
+    {
+        return Err(ContinuityServiceError::ExecutionIdentityChanged);
+    }
+    let committed = storage
+        .commit_handoff_export(
+            &expected_handoff.tenant_id,
+            expected_handoff,
+            exported_handoff,
+            expected_execution,
+            transferring_execution,
+        )
+        .await?;
+    if !committed {
+        return Err(ContinuityServiceError::StaleClaim);
+    }
+    Ok(())
 }
 
 pub async fn accept_handoff(
@@ -179,6 +232,9 @@ pub async fn accept_handoff(
         || expected_execution.tenant_id != accepted_execution.tenant_id
         || expected_execution.continuity_id != expected_handoff.continuity_id
         || expected_execution.epoch != expected_handoff.expected_epoch
+        || expected_execution.owner_runtime_id != expected_handoff.source_runtime_id
+        || expected_execution.state != orch8_types::continuity::OwnershipState::Transferring
+        || accepted_execution.state != orch8_types::continuity::OwnershipState::Owned
     {
         return Err(ContinuityServiceError::ExecutionIdentityChanged);
     }
@@ -202,6 +258,41 @@ pub async fn accept_handoff(
     Ok(())
 }
 
+pub async fn resume_handoff(
+    storage: &dyn StorageBackend,
+    expected_handoff: &ExecutionHandoff,
+    resumed_handoff: &ExecutionHandoff,
+    destination_instance_id: InstanceId,
+) -> Result<(), ContinuityServiceError> {
+    if expected_handoff.state != HandoffState::Accepted
+        || resumed_handoff.state != HandoffState::Resumed
+    {
+        return Err(ContinuityServiceError::HandoffNotAccepted);
+    }
+    if expected_handoff.id != resumed_handoff.id
+        || expected_handoff.tenant_id != resumed_handoff.tenant_id
+        || expected_handoff.continuity_id != resumed_handoff.continuity_id
+        || expected_handoff.destination_runtime_id != resumed_handoff.destination_runtime_id
+    {
+        return Err(ContinuityServiceError::HandoffIdentityChanged);
+    }
+    if expected_handoff.version.checked_add(1) != Some(resumed_handoff.version) {
+        return Err(ContinuityServiceError::InvalidHandoffVersion);
+    }
+    let resumed = storage
+        .resume_handoff(
+            &expected_handoff.tenant_id,
+            expected_handoff,
+            resumed_handoff,
+            destination_instance_id,
+        )
+        .await?;
+    if !resumed {
+        return Err(ContinuityServiceError::StaleClaim);
+    }
+    Ok(())
+}
+
 #[must_use]
 pub fn build_provenance_entry(
     execution: &ContinuityExecution,
@@ -212,18 +303,13 @@ pub fn build_provenance_entry(
 ) -> ProvenanceEntry {
     let kind = kind.into();
     let payload_sha256 = payload_sha256.into();
-    let mut hash = Sha256::new();
-    hash.update(execution.continuity_id.to_string());
-    hash.update(execution.epoch.get().to_be_bytes());
-    hash.update(kind.as_bytes());
-    hash.update(payload_sha256.as_bytes());
-    if let Some(previous) = &previous_sha256 {
-        hash.update(previous.as_bytes());
-    }
-    let mut entry_sha256 = String::with_capacity(64);
-    for byte in hash.finalize() {
-        write!(&mut entry_sha256, "{byte:02x}").expect("writing to String cannot fail");
-    }
+    let entry_sha256 = provenance_hash(
+        execution.continuity_id,
+        execution.epoch,
+        &kind,
+        &payload_sha256,
+        previous_sha256.as_deref(),
+    );
     ProvenanceEntry {
         id: Uuid::now_v7(),
         continuity_id: execution.continuity_id,
@@ -236,6 +322,89 @@ pub fn build_provenance_entry(
         signing_key_id: None,
         signature: None,
         created_at: now,
+    }
+}
+
+fn provenance_hash(
+    continuity_id: orch8_types::continuity::ContinuityId,
+    epoch: orch8_types::continuity::ExecutionEpoch,
+    kind: &str,
+    payload_sha256: &str,
+    previous_sha256: Option<&str>,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(continuity_id.to_string());
+    hash.update(epoch.get().to_be_bytes());
+    hash.update(kind.as_bytes());
+    hash.update(payload_sha256.as_bytes());
+    if let Some(previous) = previous_sha256 {
+        hash.update(previous.as_bytes());
+    }
+    let mut output = String::with_capacity(64);
+    for byte in hash.finalize() {
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProvenanceVerification {
+    pub valid: bool,
+    pub entries_checked: usize,
+    pub first_invalid_index: Option<usize>,
+    pub code: Option<&'static str>,
+    pub head_sha256: Option<String>,
+}
+
+#[must_use]
+pub fn verify_provenance_chain(
+    entries: &[ProvenanceEntry],
+    expected_head: Option<&str>,
+) -> ProvenanceVerification {
+    let mut previous: Option<&str> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.previous_sha256.as_deref() != previous {
+            return ProvenanceVerification {
+                valid: false,
+                entries_checked: index,
+                first_invalid_index: Some(index),
+                code: Some("PROVENANCE_LINK_MISMATCH"),
+                head_sha256: previous.map(ToOwned::to_owned),
+            };
+        }
+        let actual = provenance_hash(
+            entry.continuity_id,
+            entry.epoch,
+            &entry.kind,
+            &entry.payload_sha256,
+            entry.previous_sha256.as_deref(),
+        );
+        if actual != entry.entry_sha256 {
+            return ProvenanceVerification {
+                valid: false,
+                entries_checked: index,
+                first_invalid_index: Some(index),
+                code: Some("PROVENANCE_HASH_MISMATCH"),
+                head_sha256: previous.map(ToOwned::to_owned),
+            };
+        }
+        previous = Some(&entry.entry_sha256);
+    }
+    if expected_head.is_some() && expected_head != previous {
+        return ProvenanceVerification {
+            valid: false,
+            entries_checked: entries.len(),
+            first_invalid_index: None,
+            code: Some("PROVENANCE_HEAD_MISMATCH"),
+            head_sha256: previous.map(ToOwned::to_owned),
+        };
+    }
+    ProvenanceVerification {
+        valid: true,
+        entries_checked: entries.len(),
+        first_invalid_index: None,
+        code: None,
+        head_sha256: previous.map(ToOwned::to_owned),
     }
 }
 
@@ -274,5 +443,34 @@ mod tests {
                 .count(),
             3
         );
+    }
+
+    #[test]
+    fn provenance_verification_finds_the_first_tampered_boundary() {
+        let execution = ContinuityExecution {
+            continuity_id: orch8_types::continuity::ContinuityId::new(),
+            tenant_id: orch8_types::ids::TenantId::new("tenant-a").unwrap(),
+            current_instance_id: orch8_types::ids::InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: orch8_types::continuity::ExecutionEpoch::initial(),
+            state: orch8_types::continuity::OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        let first = build_provenance_entry(&execution, "created", "a".repeat(64), None, Utc::now());
+        let mut second = build_provenance_entry(
+            &execution,
+            "handoff",
+            "b".repeat(64),
+            Some(first.entry_sha256.clone()),
+            Utc::now(),
+        );
+        let valid =
+            verify_provenance_chain(&[first.clone(), second.clone()], Some(&second.entry_sha256));
+        assert!(valid.valid);
+
+        second.kind = "tampered".into();
+        let invalid = verify_provenance_chain(&[first, second], None);
+        assert_eq!(invalid.first_invalid_index, Some(1));
+        assert_eq!(invalid.code, Some("PROVENANCE_HASH_MISMATCH"));
     }
 }

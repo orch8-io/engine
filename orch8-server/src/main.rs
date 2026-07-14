@@ -267,6 +267,21 @@ fn build_app_state(
         tracing::info!("Mobile sync endpoints enabled");
     }
 
+    let env_key = std::env::var("ORCH8_ENCRYPTION_KEY").unwrap_or_default();
+    let master_key = if config.engine.encryption_key.is_empty() {
+        env_key.as_str()
+    } else {
+        config.engine.encryption_key.expose()
+    };
+    let continuity_crypto = if master_key.is_empty() {
+        None
+    } else {
+        Some(Arc::new(
+            orch8_api::ContinuityCrypto::from_master_key(master_key)
+                .expect("master encryption key was validated before AppState construction"),
+        ))
+    };
+
     AppState {
         storage,
         shutdown,
@@ -281,6 +296,7 @@ fn build_app_state(
         mobile_sync_enabled,
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
+        continuity_crypto,
     }
 }
 

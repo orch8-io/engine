@@ -12,7 +12,12 @@ describe("Portable Continuity", () => {
   let server: ServerHandle | undefined;
 
   before(async () => {
-    server = await startServer();
+    server = await startServer({
+      env: {
+        ORCH8_ENCRYPTION_KEY: "42".repeat(32),
+        ORCH8_LOG_LEVEL: "error",
+      },
+    });
   });
 
   after(async () => {
@@ -60,6 +65,35 @@ describe("Portable Continuity", () => {
     const runtimes = await client.listRuntimes(tenantId);
     assert.ok(runtimes.some((runtime) => runtime.runtime_id === destinationRuntimeId));
 
+    const issuedGrant = await client.issueContinuationGrant({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      destination_runtime_id: destinationRuntimeId,
+      allowed_actions: ["accept"],
+      subject: "e2e-device",
+      ttl_seconds: 60,
+    });
+    const consumedGrant = await client.consumeContinuationGrant({
+      tenant_id: tenantId,
+      action: "accept",
+      token: issuedGrant.token,
+      signed_grant: issuedGrant.signed_grant,
+    });
+    assert.equal(consumedGrant.state, "consumed");
+    await assert.rejects(
+      () =>
+        client.consumeContinuationGrant({
+          tenant_id: tenantId,
+          action: "accept",
+          token: issuedGrant.token,
+          signed_grant: issuedGrant.signed_grant,
+        }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+
     const preview = await client.previewHandoff(execution.continuity_id, {
       tenant_id: tenantId,
       destination_runtime_id: destinationRuntimeId,
@@ -72,6 +106,13 @@ describe("Portable Continuity", () => {
     });
     assert.equal(preview.compatible, true);
     assert.deepEqual(preview.unresolved_effects, []);
+
+    const placement = await client.choosePlacement(execution.continuity_id, {
+      tenant_id: tenantId,
+      requirements: { handlers: ["camera"] },
+      classification: "internal",
+    });
+    assert.equal(placement.selected_runtime_id, destinationRuntimeId);
 
     await assert.rejects(
       () =>
@@ -110,6 +151,38 @@ describe("Portable Continuity", () => {
     assert.equal(
       (await client.getHandoff(handoff.id, tenantId)).destination_runtime_id,
       destinationRuntimeId,
+    );
+
+    const stream = await client.createContinuityStream({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      ttl_seconds: 60,
+    });
+    for (const sequenceNumber of [0, 1]) {
+      await client.appendContinuityFrame(stream.stream_id, {
+        tenant_id: tenantId,
+        sequence: sequenceNumber,
+        checkpoint_sha256: "b".repeat(64),
+        payload: { token: `part-${sequenceNumber}` },
+      });
+    }
+    assert.equal(
+      (await client.listContinuityFrames(stream.stream_id, tenantId, 0))[0].payload.token,
+      "part-1",
+    );
+    assert.equal(
+      (
+        await client.retractContinuityFrames(stream.stream_id, {
+          tenant_id: tenantId,
+          epoch: execution.epoch,
+          after_sequence: 0,
+        })
+      ).retracted,
+      1,
+    );
+    assert.equal(
+      (await client.listContinuityFrames(stream.stream_id, tenantId, 0))[0].state,
+      "retracted",
     );
 
     await assert.rejects(

@@ -1,5 +1,7 @@
 pub mod ap_poll;
+pub mod capsule;
 pub mod circuit_breaker;
+pub mod compensation;
 pub mod continuity;
 pub mod credentials;
 pub mod cron;
@@ -21,6 +23,7 @@ pub mod interceptors;
 pub mod lifecycle;
 pub mod lint;
 pub mod metrics;
+pub mod placement;
 pub mod preflight;
 pub mod preload;
 pub mod push;

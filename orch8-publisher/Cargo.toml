@@ -21,6 +21,7 @@ hex = "0.4"
 hmac.workspace = true
 async-trait = { workspace = true }
 zeroize.workspace = true
+subtle.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

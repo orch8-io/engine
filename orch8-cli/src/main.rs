@@ -10,6 +10,7 @@ mod templates;
 
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
+use commands::continuity::{ExecutionCmd, RuntimeCmd};
 use commands::cron::CronCmd;
 use commands::dev::DevCmd;
 use commands::inspect_cmd::InspectCmd;
@@ -68,6 +69,12 @@ enum Commands {
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Portable execution handoff, capsules, effects, and provenance.
+    #[command(subcommand)]
+    Execution(ExecutionCmd),
+    /// Runtime capability registration and discovery.
+    #[command(subcommand)]
+    Runtime(RuntimeCmd),
     /// Sequence management.
     #[command(subcommand)]
     Sequence(SequenceCmd),
@@ -321,6 +328,12 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Health => commands::health::run(&client, base).await?,
         Commands::Instance(cmd) => commands::instance::run(&client, base, cmd, format).await?,
+        Commands::Execution(cmd) => {
+            commands::continuity::run_execution(&client, base, cmd, format).await?
+        }
+        Commands::Runtime(cmd) => {
+            commands::continuity::run_runtime(&client, base, cmd, format).await?
+        }
         Commands::Sequence(cmd) => commands::sequence::run(&client, base, cmd, format).await?,
         Commands::Cron(cmd) => commands::cron::run(&client, base, cmd, format).await?,
         Commands::Signal {

@@ -181,6 +181,52 @@ export class Orch8Client {
     return this.#get(`/continuity/handoffs/${id}${toQuery({ tenant_id: tenantId })}`);
   }
 
+  async issueContinuationGrant(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/grants", req);
+  }
+
+  async consumeContinuationGrant(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/grants/consume", req);
+  }
+
+  async choosePlacement(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/placement`, req);
+  }
+
+  async createContinuityStream(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/streams", req);
+  }
+
+  async appendContinuityFrame(
+    streamId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/streams/${streamId}/frames`, req);
+  }
+
+  async listContinuityFrames(
+    streamId: string,
+    tenantId: string,
+    afterSequence?: number,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/streams/${streamId}/frames${toQuery({
+        tenant_id: tenantId,
+        after_sequence: afterSequence,
+      })}`,
+    );
+  }
+
+  async retractContinuityFrames(
+    streamId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/streams/${streamId}/retract`, req);
+  }
+
   async getAuditLog(id: string): Promise<ApiResponse[]> {
     return this.#get<ApiResponse[]>(`/instances/${id}/audit`);
   }

@@ -34,8 +34,7 @@ CREATE TABLE IF NOT EXISTS task_instances (
     parent_instance_id TEXT,
     budget TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (tenant_id, continuity_id)
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS execution_tree (
@@ -100,9 +99,7 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     next_fire_at TEXT,
     last_triggered_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (tenant_id, continuity_id)
-        REFERENCES continuity_executions(tenant_id, continuity_id)
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS worker_tasks (
@@ -678,7 +675,8 @@ CREATE TABLE IF NOT EXISTS continuity_executions (
     owner_runtime_id TEXT NOT NULL,
     state TEXT NOT NULL,
     record TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, continuity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_continuity_executions_tenant
     ON continuity_executions(tenant_id, updated_at DESC);
@@ -748,6 +746,75 @@ CREATE TABLE IF NOT EXISTS provenance_entries (
 CREATE INDEX IF NOT EXISTS idx_provenance_entries_chain
     ON provenance_entries(tenant_id, continuity_id, epoch, created_at, id);
 
+CREATE TABLE IF NOT EXISTS continuation_grants (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    nonce_sha256 TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    record TEXT NOT NULL,
+    UNIQUE (tenant_id, nonce_sha256),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_continuation_grants_active
+    ON continuation_grants(tenant_id, continuity_id, expires_at)
+    WHERE state = 'active';
+
+CREATE TABLE IF NOT EXISTS placement_decisions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    selected_runtime_id TEXT,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_placement_decisions_execution
+    ON placement_decisions(tenant_id, continuity_id, epoch, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS continuity_streams (
+    stream_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    next_sequence INTEGER NOT NULL DEFAULT 0 CHECK (next_sequence >= 0),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    UNIQUE (tenant_id, stream_id),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_continuity_streams_execution
+    ON continuity_streams(tenant_id, continuity_id, epoch);
+
+CREATE TABLE IF NOT EXISTS continuity_stream_frames (
+    stream_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    state TEXT NOT NULL,
+    checkpoint_sha256 TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (stream_id, sequence),
+    FOREIGN KEY (tenant_id, stream_id)
+        REFERENCES continuity_streams(tenant_id, stream_id),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_continuity_stream_resume
+    ON continuity_stream_frames(tenant_id, stream_id, sequence)
+    WHERE state IN ('committed', 'retracted');
+CREATE INDEX IF NOT EXISTS idx_continuity_stream_expiry
+    ON continuity_stream_frames(expires_at);
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -761,4 +828,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 23;
+pub(super) const SCHEMA_VERSION: i64 = 24;

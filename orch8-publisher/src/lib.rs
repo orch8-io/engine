@@ -6,7 +6,9 @@
 //! (M-20), an unused, never-wired-up duplicate whose APNs path was a stub
 //! that always returned an error.
 
+pub mod capsule;
 pub mod cdn;
+pub mod grant;
 pub mod manifest;
 pub mod package;
 pub mod publish;

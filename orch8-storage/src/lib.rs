@@ -15,9 +15,10 @@ use uuid::Uuid;
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::circuit_breaker::CircuitBreakerState;
 use orch8_types::continuity::{
-    CapsuleId, CapsuleManifest, ContinuityExecution, ContinuityId, EffectId, EffectReceipt,
-    EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState, ProvenanceEntry,
-    RuntimeCapabilities, RuntimeId,
+    CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
+    ContinuityExecution, ContinuityId, ContinuityStream, EffectId, EffectReceipt, EffectState,
+    ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState, PlacementDecision,
+    PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::cron::CronSchedule;
 pub use orch8_types::dedupe::DedupeScope;
@@ -2511,6 +2512,27 @@ pub trait ContinuityStore: Send + Sync + 'static {
         accepted_execution: &ContinuityExecution,
     ) -> Result<bool, StorageError>;
 
+    /// Atomically attach an exported capsule and move ownership into the
+    /// transferring state without advancing the epoch.
+    async fn commit_handoff_export(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        exported_handoff: &ExecutionHandoff,
+        expected_execution: &ContinuityExecution,
+        transferring_execution: &ContinuityExecution,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically schedule the paused destination and record the handoff as
+    /// resumed. Returns false when either compare-and-swap token is stale.
+    async fn resume_handoff(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        resumed_handoff: &ExecutionHandoff,
+        destination_instance_id: InstanceId,
+    ) -> Result<bool, StorageError>;
+
     async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError>;
 
     async fn get_capsule_manifest(
@@ -2563,6 +2585,75 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<ProvenanceEntry>, StorageError>;
+
+    async fn create_continuation_grant(
+        &self,
+        grant: &ContinuationGrant,
+    ) -> Result<(), StorageError>;
+
+    async fn get_continuation_grant(
+        &self,
+        tenant_id: &TenantId,
+        id: ContinuationGrantId,
+    ) -> Result<Option<ContinuationGrant>, StorageError>;
+
+    /// Atomically consume an active, unexpired grant. A nonce can win once.
+    async fn consume_continuation_grant(
+        &self,
+        tenant_id: &TenantId,
+        id: ContinuationGrantId,
+        nonce_sha256: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    async fn cas_continuation_grant_state(
+        &self,
+        tenant_id: &TenantId,
+        id: ContinuationGrantId,
+        expected: ContinuationGrantState,
+        next: &ContinuationGrant,
+    ) -> Result<bool, StorageError>;
+
+    async fn save_placement_decision(
+        &self,
+        decision: &PlacementDecision,
+    ) -> Result<(), StorageError>;
+
+    async fn get_placement_decision(
+        &self,
+        tenant_id: &TenantId,
+        id: PlacementDecisionId,
+    ) -> Result<Option<PlacementDecision>, StorageError>;
+
+    async fn create_continuity_stream(&self, stream: &ContinuityStream)
+    -> Result<(), StorageError>;
+
+    async fn get_continuity_stream(
+        &self,
+        tenant_id: &TenantId,
+        stream_id: StreamId,
+    ) -> Result<Option<ContinuityStream>, StorageError>;
+
+    /// Append exactly the next frame in a single transaction. Returns false
+    /// for a stale epoch, expired stream, or non-contiguous sequence number.
+    async fn append_stream_frame(&self, frame: &StreamFrame) -> Result<bool, StorageError>;
+
+    async fn list_stream_frames(
+        &self,
+        tenant_id: &TenantId,
+        stream_id: StreamId,
+        after_sequence: Option<u64>,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<StreamFrame>, StorageError>;
+
+    async fn retract_stream_frames(
+        &self,
+        tenant_id: &TenantId,
+        stream_id: StreamId,
+        epoch: ExecutionEpoch,
+        after_sequence: u64,
+    ) -> Result<u64, StorageError>;
 }
 
 // ============================================================================

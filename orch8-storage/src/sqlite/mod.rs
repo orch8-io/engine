@@ -241,7 +241,13 @@ impl SqliteStorage {
             });
 
         for stmt in &table_stmts {
-            sqlx::query(stmt).execute(&self.pool).await?;
+            sqlx::query(stmt)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| {
+                    let heading = stmt.lines().next().unwrap_or("schema statement");
+                    StorageError::Query(format!("{heading}: {error}"))
+                })?;
         }
         self.reconcile_columns().await?;
         for stmt in &index_stmts {
@@ -286,7 +292,10 @@ impl SqliteStorage {
             .connect_with(ref_opts)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
-        sqlx::query(schema::SCHEMA).execute(&ref_pool).await?;
+        sqlx::query(schema::SCHEMA)
+            .execute(&ref_pool)
+            .await
+            .map_err(|error| StorageError::Query(format!("reference schema: {error}")))?;
 
         let tables: Vec<String> =
             sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")

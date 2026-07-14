@@ -358,6 +358,32 @@ impl FieldEncryptor {
         Ok(out)
     }
 
+    /// Encrypt raw bytes while binding the ciphertext to caller-provided
+    /// associated data. Moving a sealed capsule payload to another tenant,
+    /// continuity identity, epoch, or destination therefore fails to decrypt.
+    pub fn encrypt_bytes_with_aad(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| EncryptionError::EncryptFailed)?;
+        self.record_encryption();
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
     /// Decrypt a buffer produced by [`Self::encrypt_bytes`]. Tries the primary
     /// key, then the old key (if configured) for key rotation.
     ///
@@ -376,6 +402,39 @@ impl FieldEncryptor {
         if let Some(ref old) = self.old_cipher {
             return old
                 .decrypt(nonce, ciphertext)
+                .map_err(|_| EncryptionError::DecryptFailed);
+        }
+        Err(EncryptionError::DecryptFailed)
+    }
+
+    /// Decrypt bytes produced by [`Self::encrypt_bytes_with_aad`]. The same
+    /// associated data used during sealing is required.
+    pub fn decrypt_bytes_with_aad(
+        &self,
+        sealed: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, EncryptionError> {
+        if sealed.len() < 12 {
+            return Err(EncryptionError::InvalidCiphertext);
+        }
+        let (nonce_bytes, ciphertext) = sealed.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let payload = Payload {
+            msg: ciphertext,
+            aad,
+        };
+        if let Ok(plain) = self.cipher.decrypt(nonce, payload) {
+            return Ok(plain);
+        }
+        if let Some(ref old) = self.old_cipher {
+            return old
+                .decrypt(
+                    nonce,
+                    Payload {
+                        msg: ciphertext,
+                        aad,
+                    },
+                )
                 .map_err(|_| EncryptionError::DecryptFailed);
         }
         Err(EncryptionError::DecryptFailed)

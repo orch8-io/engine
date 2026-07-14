@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod config;
+pub mod continuity;
 pub mod cron;
 pub mod dev;
 pub mod dev_server;

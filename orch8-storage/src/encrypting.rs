@@ -514,6 +514,8 @@ passthrough_impl! {
         async fn get_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId) -> Result<Option<orch8_types::continuity::ExecutionHandoff>, StorageError>;
         async fn cas_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId, expected_state: orch8_types::continuity::HandoffState, expected_version: u64, next: &orch8_types::continuity::ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, accepted_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, accepted_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn commit_handoff_export(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, exported_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, transferring_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn resume_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, resumed_handoff: &orch8_types::continuity::ExecutionHandoff, destination_instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &orch8_types::continuity::CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::CapsuleId) -> Result<Option<orch8_types::continuity::CapsuleManifest>, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;
@@ -524,6 +526,17 @@ passthrough_impl! {
         async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
+        async fn create_continuation_grant(&self, grant: &orch8_types::continuity::ContinuationGrant) -> Result<(), StorageError>;
+        async fn get_continuation_grant(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId) -> Result<Option<orch8_types::continuity::ContinuationGrant>, StorageError>;
+        async fn consume_continuation_grant(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId, nonce_sha256: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn cas_continuation_grant_state(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId, expected: orch8_types::continuity::ContinuationGrantState, next: &orch8_types::continuity::ContinuationGrant) -> Result<bool, StorageError>;
+        async fn save_placement_decision(&self, decision: &orch8_types::continuity::PlacementDecision) -> Result<(), StorageError>;
+        async fn get_placement_decision(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::PlacementDecisionId) -> Result<Option<orch8_types::continuity::PlacementDecision>, StorageError>;
+        async fn create_continuity_stream(&self, stream: &orch8_types::continuity::ContinuityStream) -> Result<(), StorageError>;
+        async fn get_continuity_stream(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId) -> Result<Option<orch8_types::continuity::ContinuityStream>, StorageError>;
+        async fn append_stream_frame(&self, frame: &orch8_types::continuity::StreamFrame) -> Result<bool, StorageError>;
+        async fn list_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, after_sequence: Option<u64>, now: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::StreamFrame>, StorageError>;
+        async fn retract_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, epoch: orch8_types::continuity::ExecutionEpoch, after_sequence: u64) -> Result<u64, StorageError>;
     }
 }
 
