@@ -14,12 +14,12 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use orch8_engine::template_trace::trace_params;
+use orch8_engine::template_trace::{debug_template, trace_params};
 use orch8_types::context::ExecutionContext;
 use orch8_types::ids::{BlockId, InstanceId, SequenceId};
 use orch8_types::redaction::RedactionPolicy;
 use orch8_types::sequence::SequenceDefinition;
-use orch8_types::template_trace::ResolutionTrace;
+use orch8_types::template_trace::{DebugTemplateRequest, DebugTemplateResponse, ResolutionTrace};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -27,6 +27,7 @@ use crate::error::ApiError;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sequences/inspect-template", post(inspect_draft))
+        .route("/debug/template", post(debug_template_endpoint))
         .route(
             "/instances/{id}/blocks/{block_id}/resolved-input",
             get(inspect_instance_block),
@@ -114,6 +115,29 @@ pub(crate) async fn inspect_draft(
         &RedactionPolicy::default(),
     );
     Ok(Json(trace))
+}
+
+#[utoipa::path(post, path = "/debug/template", tag = "debug",
+    request_body = DebugTemplateRequest,
+    responses(
+        (status = 200, description = "Resolved template value with provenance trace", body = DebugTemplateResponse),
+    )
+)]
+pub(crate) async fn debug_template_endpoint(
+    Json(req): Json<DebugTemplateRequest>,
+) -> impl IntoResponse {
+    let context = ExecutionContext {
+        data: req.context_data,
+        config: req.context_config,
+        ..Default::default()
+    };
+    let resp = debug_template(
+        &req.template,
+        &context,
+        &req.outputs,
+        &RedactionPolicy::default(),
+    );
+    Json(resp)
 }
 
 #[derive(Deserialize)]

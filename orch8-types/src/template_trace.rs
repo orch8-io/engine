@@ -68,6 +68,40 @@ pub struct ResolutionTrace {
     pub entries: Vec<ResolutionEntry>,
 }
 
+/// Request body for the lightweight template debugger.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct DebugTemplateRequest {
+    /// Raw template string to resolve (e.g. `"{{ context.data.name | upper }}"`).
+    pub template: String,
+    /// `context.data` fixture.
+    #[serde(default)]
+    pub context_data: serde_json::Value,
+    /// `context.config` fixture.
+    #[serde(default)]
+    pub context_config: serde_json::Value,
+    /// Prior block outputs fixture: `{block_id: output}`.
+    #[serde(default)]
+    pub outputs: serde_json::Value,
+}
+
+/// Response from the template debugger.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DebugTemplateResponse {
+    /// The resolved value after template evaluation, redacted.
+    /// `None` when the entire resolution failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// JSON type of the resolved value (`string`, `number`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<String>,
+    /// Per-expression provenance trace.
+    pub entries: Vec<ResolutionEntry>,
+    /// Top-level error when the template string is malformed or resolution
+    /// fails entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

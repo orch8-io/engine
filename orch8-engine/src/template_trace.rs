@@ -20,7 +20,9 @@ use serde_json::Value;
 
 use orch8_types::context::ExecutionContext;
 use orch8_types::redaction::{REDACTED, RedactionPolicy};
-use orch8_types::template_trace::{ResolutionEntry, ResolutionStatus, ResolutionTrace};
+use orch8_types::template_trace::{
+    DebugTemplateResponse, ResolutionEntry, ResolutionStatus, ResolutionTrace,
+};
 
 use crate::template;
 
@@ -45,6 +47,51 @@ pub fn trace_params(
         block_id: block_id.to_string(),
         resolved_params,
         entries,
+    }
+}
+
+/// Debug-resolve a raw template string.
+///
+/// Unlike [`trace_params`] which expects a block's params object, this
+/// takes a single template expression such as
+/// `"{{ context.data.name | upper }}"` and returns the resolved value
+/// with per-expression provenance entries.
+#[must_use]
+pub fn debug_template(
+    raw_template: &str,
+    context: &ExecutionContext,
+    outputs: &Value,
+    redaction: &RedactionPolicy,
+) -> DebugTemplateResponse {
+    let wrapped = Value::String(raw_template.to_string());
+    let mut entries = Vec::new();
+    walk(
+        "_",
+        &wrapped,
+        context,
+        outputs,
+        None,
+        redaction,
+        &mut entries,
+    );
+
+    match template::resolve(&wrapped, context, outputs) {
+        Ok(resolved) => {
+            let redacted = redaction.redacted(&resolved);
+            let result_type = Some(json_type_name(&redacted).to_string());
+            DebugTemplateResponse {
+                result: Some(redacted),
+                result_type,
+                entries,
+                error: None,
+            }
+        }
+        Err(e) => DebugTemplateResponse {
+            result: None,
+            result_type: None,
+            entries,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -502,5 +549,146 @@ mod tests {
         assert_eq!(e.result_type.as_deref(), Some("object"));
         assert!(!e.coerced_to_string);
         assert_eq!(e.value, Some(json!({"id": 7, "name": "Ada"})));
+    }
+
+    // ─── debug_template tests ───
+
+    fn dbg(template: &str, data: Value, outputs: &Value) -> DebugTemplateResponse {
+        debug_template(template, &ctx(data), outputs, &RedactionPolicy::default())
+    }
+
+    fn dbg_entry<'a>(r: &'a DebugTemplateResponse, expr: &str) -> &'a ResolutionEntry {
+        r.entries
+            .iter()
+            .find(|e| e.expression == expr)
+            .unwrap_or_else(|| panic!("no entry for expr {expr}: {:#?}", r.entries))
+    }
+
+    #[test]
+    fn debug_template_resolves_simple_expression() {
+        let r = dbg(
+            "{{ context.data.name }}",
+            json!({"name": "Alice"}),
+            &json!({}),
+        );
+        assert!(r.error.is_none());
+        assert_eq!(r.result, Some(json!("Alice")));
+        assert_eq!(r.result_type.as_deref(), Some("string"));
+        assert_eq!(r.entries.len(), 1);
+        let e = &r.entries[0];
+        assert_eq!(e.status, ResolutionStatus::Ok);
+        assert_eq!(e.source.as_deref(), Some("context.data.name"));
+    }
+
+    #[test]
+    fn debug_template_numeric_value_preserves_type() {
+        let r = dbg(
+            "{{ outputs.calc.total }}",
+            json!({}),
+            &json!({"calc": {"total": 99}}),
+        );
+        assert_eq!(r.result, Some(json!(99)));
+        assert_eq!(r.result_type.as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn debug_template_missing_path_returns_null_status() {
+        let r = dbg("{{ context.data.nope }}", json!({}), &json!({}));
+        assert!(r.error.is_none());
+        let e = dbg_entry(&r, "context.data.nope");
+        assert_eq!(e.status, ResolutionStatus::Missing);
+    }
+
+    #[test]
+    fn debug_template_explicit_null_returns_null_status() {
+        let r = dbg("{{ context.data.val }}", json!({"val": null}), &json!({}));
+        let e = dbg_entry(&r, "context.data.val");
+        assert_eq!(e.status, ResolutionStatus::Null);
+    }
+
+    #[test]
+    fn debug_template_fallback_chain() {
+        let r = dbg(
+            "{{ context.data.primary | context.data.secondary }}",
+            json!({"secondary": "backup"}),
+            &json!({}),
+        );
+        assert_eq!(r.result, Some(json!("backup")));
+        let e = dbg_entry(&r, "context.data.primary | context.data.secondary");
+        assert!(e.fallback_used);
+        assert_eq!(e.source.as_deref(), Some("context.data.secondary"));
+    }
+
+    #[test]
+    fn debug_template_pipe_filter() {
+        let r = dbg(
+            "{{ context.data.name | upper }}",
+            json!({"name": "alice"}),
+            &json!({}),
+        );
+        assert_eq!(r.result, Some(json!("ALICE")));
+    }
+
+    #[test]
+    fn debug_template_unknown_root_is_error() {
+        let r = dbg("{{ bogus.path }}", json!({}), &json!({}));
+        assert!(r.error.is_some());
+        assert!(r.result.is_none());
+        assert!(r.result_type.is_none());
+    }
+
+    #[test]
+    fn debug_template_inline_interpolation() {
+        let r = dbg(
+            "Hello {{ context.data.name }}, welcome!",
+            json!({"name": "Bob"}),
+            &json!({}),
+        );
+        assert_eq!(r.result, Some(json!("Hello Bob, welcome!")));
+        assert_eq!(r.result_type.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn debug_template_object_result() {
+        let r = dbg(
+            "{{ context.data.user }}",
+            json!({"user": {"id": 1, "name": "X"}}),
+            &json!({}),
+        );
+        assert_eq!(r.result, Some(json!({"id": 1, "name": "X"})));
+        assert_eq!(r.result_type.as_deref(), Some("object"));
+    }
+
+    #[test]
+    fn debug_template_redacts_sensitive_values() {
+        let r = dbg(
+            "{{ context.data.tok }}",
+            json!({"tok": "sk_live_abc123"}),
+            &json!({}),
+        );
+        assert_eq!(r.result, Some(json!(REDACTED)));
+        let e = dbg_entry(&r, "context.data.tok");
+        assert_eq!(e.status, ResolutionStatus::Redacted);
+    }
+
+    #[test]
+    fn debug_template_no_template_returns_literal() {
+        let r = dbg("plain text", json!({}), &json!({}));
+        assert_eq!(r.result, Some(json!("plain text")));
+        assert!(r.entries.is_empty());
+    }
+
+    #[test]
+    fn debug_template_config_reference() {
+        let r = debug_template(
+            "{{ context.config.region }}",
+            &ExecutionContext {
+                config: json!({"region": "us-east"}),
+                ..Default::default()
+            },
+            &json!({}),
+            &RedactionPolicy::default(),
+        );
+        assert_eq!(r.result, Some(json!("us-east")));
     }
 }

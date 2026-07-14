@@ -536,6 +536,17 @@ export class Orch8Client {
     return { status: res.status };
   }
 
+  // --- Debug ---
+
+  async debugTemplate(body: {
+    template: string;
+    context_data?: Record<string, unknown>;
+    context_config?: Record<string, unknown>;
+    outputs?: Record<string, unknown>;
+  }): Promise<ApiResponse> {
+    return this.#post("/debug/template", body);
+  }
+
   // --- Metrics ---
 
   async metrics(): Promise<string> {

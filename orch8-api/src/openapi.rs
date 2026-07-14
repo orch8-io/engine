@@ -64,6 +64,8 @@ use utoipa::OpenApi;
         // Template inspector
         crate::inspect::inspect_draft,
         crate::inspect::inspect_instance_block,
+        // Template debugger
+        crate::inspect::debug_template_endpoint,
         // Events
         crate::events::ingest_event,
         crate::events::list_events,
@@ -183,6 +185,8 @@ use utoipa::OpenApi;
         orch8_types::template_trace::ResolutionEntry,
         orch8_types::template_trace::ResolutionStatus,
         crate::inspect::InspectTemplateRequest,
+        orch8_types::template_trace::DebugTemplateRequest,
+        orch8_types::template_trace::DebugTemplateResponse,
         orch8_types::webhook_delivery::WebhookDeliveryAttempt,
         orch8_types::webhook_delivery::WebhookDeliverySummary,
         orch8_types::webhook_delivery::DeliveryErrorClass,
