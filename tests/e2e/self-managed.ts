@@ -60,6 +60,7 @@ export const SELF_MANAGED_SUITES: readonly SelfManagedSuite[] = [
   // Need their own server started with a specific env the shared server lacks.
   { file: "features/encryption_at_rest.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "features/portable_continuity.test.ts", reason: "needs continuity encryption and local artifact storage" },
+  { file: "features/continuity_fault_lab_dlq.test.ts", reason: "needs ORCH8_CONTINUITY_LAB_ENABLED=true at boot" },
   { file: "security/credential_encryption_at_rest.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "security/api_key_auth_enforcement.test.ts", reason: "needs ORCH8_API_KEY + ORCH8_REQUIRE_TENANT_HEADER" },
   { file: "handlers/activepieces_scenarios.test.ts", reason: "needs ORCH8_ACTIVEPIECES_URL → local mock" },
