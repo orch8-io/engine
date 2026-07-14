@@ -525,6 +525,25 @@ pub struct ProviderDecision {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationScope {
+    pub sequence_id: Option<SequenceId>,
+    pub sequence_version: Option<i32>,
+    pub block_id: Option<BlockId>,
+    pub model: Option<String>,
+    pub prompt_sha256: Option<String>,
+    pub toolset_sha256: Option<String>,
+    pub release_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationOutcome {
+    #[default]
+    Complete,
+    Pending,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct EvaluationScore {
     pub id: EvaluationId,
@@ -534,9 +553,23 @@ pub struct EvaluationScore {
     pub score_millipoints: i64,
     pub sample_size: u64,
     pub deferred: bool,
+    #[serde(default)]
+    pub outcome: EvaluationOutcome,
+    #[serde(default)]
+    pub scope: EvaluationScope,
     pub dedupe_key: String,
     pub evidence_sha256: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct EvaluationGateEvidence {
+    pub status: EvidenceStatus,
+    pub baseline_score_millipoints: Option<i64>,
+    pub candidate_score_millipoints: Option<i64>,
+    pub baseline_samples: u64,
+    pub candidate_samples: u64,
+    pub pending_outcomes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

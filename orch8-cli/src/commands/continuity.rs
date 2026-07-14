@@ -232,6 +232,8 @@ pub enum ExecutionCmd {
     RecommendOptimizations { request: PathBuf },
     /// Evaluate a continuous-quality promotion gate.
     EvaluationGate { request: PathBuf },
+    /// Evaluate a gate from tenant-scoped durable evidence.
+    StoredEvaluationGate { request: PathBuf },
     /// Produce fail-closed residency evidence.
     EvaluateResidency { request: PathBuf },
     /// Minimize confidential disclosure according to an allowlist.
@@ -839,6 +841,15 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/evaluations/gate"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::StoredEvaluationGate { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/evaluations/stored-gate"),
                 &request,
                 format,
             )

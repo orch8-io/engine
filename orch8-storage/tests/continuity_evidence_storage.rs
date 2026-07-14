@@ -6,8 +6,8 @@ use orch8_types::continuity::{
 };
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
-    EvaluationId, EvaluationScore, EvidenceStatus, InvariantId, InvariantResult, InvariantResultId,
-    InvariantRule, ReservationState, WorkflowInvariant,
+    EvaluationId, EvaluationOutcome, EvaluationScope, EvaluationScore, EvidenceStatus, InvariantId,
+    InvariantResult, InvariantResultId, InvariantRule, ReservationState, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::BudgetUsage;
@@ -99,6 +99,8 @@ async fn invariant_and_evaluation_evidence_is_deduplicated() {
         score_millipoints: 900,
         sample_size: 1,
         deferred: true,
+        outcome: EvaluationOutcome::Complete,
+        scope: EvaluationScope::default(),
         dedupe_key: "eval-one".into(),
         evidence_sha256: "b".repeat(64),
         created_at: now,

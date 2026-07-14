@@ -408,6 +408,12 @@ export class Orch8Client {
     return this.#post(`/continuity/executions/${continuityId}/evaluations`, req);
   }
 
+  async evaluateStoredContinuityGate(
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post("/continuity/evaluations/stored-gate", req);
+  }
+
   async createAttentionTask(req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post("/continuity/attention", req);
   }

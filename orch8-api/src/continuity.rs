@@ -31,13 +31,14 @@ use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
     CheckpointBoundary, CompensationExecutionStep, CompensationPlan, CompensationRunId,
     CompensationRunRecord, CompensationRunState, CompensationStepState, DeviceDelegation,
-    DurableWritePhase, EvaluationId, EvaluationScore, ExtractedEffectMock, ExtractedTestFixture,
-    FaultInjection, FaultKind, FaultLabRun, FaultProfile, FederationEnvelope, FederationPeer,
-    ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
-    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
-    MigrationPlanId, MigrationRollbackCapsule, OwnershipTransition, ProviderCandidate,
-    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
-    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
+    DurableWritePhase, EvaluationId, EvaluationOutcome, EvaluationScope, EvaluationScore,
+    ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
+    FaultProfile, FederationEnvelope, FederationPeer, ForkEffectMode, GeneratedScenario,
+    InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
+    LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
+    OwnershipTransition, ProviderCandidate, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
+    WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
@@ -189,6 +190,10 @@ pub fn routes() -> Router<AppState> {
             post(recommend_optimizations),
         )
         .route("/continuity/evaluations/gate", post(evaluate_gate))
+        .route(
+            "/continuity/evaluations/stored-gate",
+            post(evaluate_stored_gate),
+        )
         .route("/continuity/residency/evaluate", post(evaluate_residency))
         .route("/continuity/disclosure/minimize", post(minimize_disclosure))
         .route("/continuity/federation/verify", post(verify_federation))
@@ -2353,6 +2358,10 @@ struct AppendEvaluationRequest {
     sample_size: u64,
     #[serde(default)]
     deferred: bool,
+    #[serde(default)]
+    outcome: EvaluationOutcome,
+    #[serde(default)]
+    scope: EvaluationScope,
     evidence_sha256: String,
 }
 
@@ -2365,10 +2374,11 @@ async fn append_evaluation(
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
     if body.evaluator.is_empty() || body.evaluator.len() > 128 || body.sample_size == 0 {
         return Err(ApiError::InvalidArgument(
-            "evaluation requires a bounded evaluator name and positive sample_size".into(),
+            "evaluation requires bounded scope fields and a positive sample_size".into(),
         ));
     }
     validate_sha256(&body.evidence_sha256, "evidence_sha256")?;
+    validate_evaluation_scope(&body.scope)?;
     if state
         .storage
         .get_continuity_execution(&tenant_id, id)
@@ -2378,15 +2388,15 @@ async fn append_evaluation(
     {
         return Err(ApiError::NotFound("continuity execution".into()));
     }
-    let dedupe_key = hex_sha256(
-        format!(
-            "{}:{id}:{}:{}",
-            tenant_id.as_str(),
-            body.evaluator,
-            body.evidence_sha256
-        )
-        .as_bytes(),
-    );
+    let dedupe_material = serde_json::to_vec(&serde_json::json!({
+        "tenant_id": &tenant_id,
+        "continuity_id": id,
+        "evaluator": &body.evaluator,
+        "scope": &body.scope,
+        "evidence_sha256": &body.evidence_sha256,
+    }))
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let dedupe_key = hex_sha256(&dedupe_material);
     let score = EvaluationScore {
         id: EvaluationId::new(),
         tenant_id,
@@ -2395,6 +2405,8 @@ async fn append_evaluation(
         score_millipoints: body.score_millipoints,
         sample_size: body.sample_size,
         deferred: body.deferred,
+        outcome: body.outcome,
+        scope: body.scope,
         dedupe_key,
         evidence_sha256: body.evidence_sha256,
         created_at: Utc::now(),
@@ -2704,6 +2716,25 @@ fn validate_sha256(value: &str, field: &str) -> Result<(), ApiError> {
             "{field} must be a 64-character hexadecimal digest"
         )))
     }
+}
+
+fn validate_evaluation_scope(scope: &EvaluationScope) -> Result<(), ApiError> {
+    if scope
+        .model
+        .as_ref()
+        .is_some_and(|model| model.is_empty() || model.len() > 256)
+    {
+        return Err(ApiError::InvalidArgument(
+            "evaluation scope model must contain between 1 and 256 bytes".into(),
+        ));
+    }
+    if let Some(hash) = &scope.prompt_sha256 {
+        validate_sha256(hash, "scope.prompt_sha256")?;
+    }
+    if let Some(hash) = &scope.toolset_sha256 {
+        validate_sha256(hash, "scope.toolset_sha256")?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5341,6 +5372,78 @@ async fn evaluate_gate(
             body.maximum_regression_millipoints,
         ),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredEvaluationGateRequest {
+    tenant_id: TenantId,
+    baseline_continuity_id: ContinuityId,
+    candidate_continuity_id: ContinuityId,
+    evaluator: String,
+    #[serde(default)]
+    scope: EvaluationScope,
+    minimum_samples: u64,
+    maximum_regression_millipoints: i64,
+}
+
+async fn evaluate_stored_gate(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<StoredEvaluationGateRequest>,
+) -> Result<Json<orch8_types::continuity_advanced::EvaluationGateEvidence>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.evaluator.is_empty()
+        || body.evaluator.len() > 128
+        || body.minimum_samples == 0
+        || body.maximum_regression_millipoints < 0
+    {
+        return Err(ApiError::InvalidArgument(
+            "stored evaluation gate requires a bounded evaluator, positive samples, and non-negative regression allowance".into(),
+        ));
+    }
+    validate_evaluation_scope(&body.scope)?;
+    let baseline_execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, body.baseline_continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "baseline continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("baseline continuity execution".into()))?;
+    let candidate_execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, body.candidate_continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "candidate continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("candidate continuity execution".into()))?;
+    let (baseline, candidate) = tokio::try_join!(
+        state
+            .storage
+            .list_evaluation_scores(&tenant_id, baseline_execution.continuity_id, 10_000,),
+        state
+            .storage
+            .list_evaluation_scores(&tenant_id, candidate_execution.continuity_id, 10_000,),
+    )
+    .map_err(|error| ApiError::from_storage(error, "evaluation scores"))?;
+    let select = |scores: Vec<EvaluationScore>| {
+        scores
+            .into_iter()
+            .filter(|score| score.evaluator == body.evaluator && score.scope == body.scope)
+            .collect::<Vec<_>>()
+    };
+    let report = orch8_engine::continuity_advanced::evaluation_gate_from_evidence(
+        &select(baseline),
+        &select(candidate),
+        body.minimum_samples,
+        body.maximum_regression_millipoints,
+    );
+    append_provenance_boundary(
+        &state,
+        &candidate_execution,
+        "evaluation_gate",
+        "stored evaluation gate recorded",
+        &report,
+    )
+    .await?;
+    Ok(Json(report))
 }
 
 #[derive(Debug, Deserialize)]

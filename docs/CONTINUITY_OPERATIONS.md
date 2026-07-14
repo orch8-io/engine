@@ -28,6 +28,17 @@ orch8 execution choose-provider provider-request.json
 
 Tenant-linked requests must include both `tenant_id` and `continuity_id`. The selected provider, model, pricing version, stable cohort, and policy findings are appended to execution provenance without recording prompts or provider payloads.
 
+## Gate candidates with retained evaluation evidence
+
+Append direct or deferred evaluation results to each continuity execution with an explicit scope. Scope can bind evidence to a sequence/version, block, model, prompt hash, tool-set hash, and release. Mark delayed results as `outcome: pending`; a stored gate with any matching pending result is inconclusive and cannot pass.
+
+```bash
+orch8 execution append-evaluation "$CONTINUITY_ID" score.json
+orch8 execution stored-evaluation-gate stored-gate.json
+```
+
+The stored gate loads both baseline and candidate scores server-side, matches the evaluator and full scope, weights each score by `sample_size`, and records the report in candidate provenance. A positive `minimum_samples` and non-negative regression allowance are required.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.

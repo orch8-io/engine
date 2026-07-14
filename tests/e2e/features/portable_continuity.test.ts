@@ -1829,6 +1829,79 @@ describe("Portable Continuity", () => {
     assert.ok(provenance.some((entry) => entry.kind === "provider_selected"));
   });
 
+  it("gates candidates from scoped durable evaluation evidence", async () => {
+    const tenantId = `continuity-eval-${uuid().slice(0, 8)}`;
+    const created = await client.createSequence(testSequence(
+      `eval-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const createExecution = async () => {
+      const instance = await client.createInstance({
+        sequence_id: created.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+      return client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+    };
+    const baseline = await createExecution();
+    const candidate = await createExecution();
+    const scope = {
+      sequence_id: created.id,
+      sequence_version: created.version,
+      block_id: "work",
+      model: "agent-medium",
+      release_id: uuid(),
+    };
+    const append = (
+      continuityId: string,
+      score: number,
+      evidence: string,
+      outcome = "complete",
+    ) => client.appendContinuityEvaluation(continuityId, {
+      tenant_id: tenantId,
+      evaluator: "quality-v2",
+      score_millipoints: score,
+      sample_size: 100,
+      deferred: false,
+      outcome,
+      scope,
+      evidence_sha256: evidence.repeat(64),
+    });
+    await append(baseline.continuity_id, 900, "a");
+    await append(candidate.continuity_id, 850, "b");
+    const gateRequest = {
+      tenant_id: tenantId,
+      baseline_continuity_id: baseline.continuity_id,
+      candidate_continuity_id: candidate.continuity_id,
+      evaluator: "quality-v2",
+      scope,
+      minimum_samples: 100,
+      maximum_regression_millipoints: 20,
+    };
+    const failed = await client.evaluateStoredContinuityGate(gateRequest);
+    assert.equal(failed.status, "fail");
+    assert.equal(failed.baseline_score_millipoints, 900);
+    assert.equal(failed.candidate_score_millipoints, 850);
+    await append(candidate.continuity_id, 1_000, "c", "pending");
+    const pending = await client.evaluateStoredContinuityGate(gateRequest);
+    assert.equal(pending.status, "inconclusive");
+    assert.equal(pending.pending_outcomes, 1);
+    const provenance = await client.listContinuityProvenance(
+      candidate.continuity_id,
+      tenantId,
+    );
+    assert.equal(
+      provenance.filter((entry) => entry.kind === "evaluation_gate").length,
+      2,
+    );
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

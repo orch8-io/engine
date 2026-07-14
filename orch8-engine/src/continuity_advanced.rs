@@ -8,11 +8,12 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use orch8_types::continuity::{EffectReceipt, EffectState, RuntimeTrustLevel};
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, BudgetReservation, DeviceDelegation, DisclosureResult,
-    DurableWritePhase, EvidenceStatus, FaultInjection, FaultLabRun, FaultProfile,
-    FederationEnvelope, FederationPeer, GeneratedScenario, IncidentCaseId, IncidentReproduction,
-    InvariantResult, InvariantResultId, InvariantRule, LiveMigrationPlan, MigrationDisposition,
-    MigrationPlanId, OptimizationRecommendation, OwnershipTransition, ProviderCandidate,
-    ProviderDecision, ProviderDecisionId, RecommendationId, ReservationState, ResidencyEvidence,
+    DurableWritePhase, EvaluationGateEvidence, EvaluationOutcome, EvaluationScore, EvidenceStatus,
+    FaultInjection, FaultLabRun, FaultProfile, FederationEnvelope, FederationPeer,
+    GeneratedScenario, IncidentCaseId, IncidentReproduction, InvariantResult, InvariantResultId,
+    InvariantRule, LiveMigrationPlan, MigrationDisposition, MigrationPlanId,
+    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, ProviderDecision,
+    ProviderDecisionId, RecommendationId, ReservationState, ResidencyEvidence,
     ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfScenario,
     WorkflowInvariant,
 };
@@ -887,6 +888,70 @@ pub fn evaluation_gate(
 }
 
 #[must_use]
+pub fn evaluation_gate_from_evidence(
+    baseline: &[EvaluationScore],
+    candidate: &[EvaluationScore],
+    minimum_samples: u64,
+    maximum_regression_millipoints: i64,
+) -> EvaluationGateEvidence {
+    let pending_outcomes = u64::try_from(
+        baseline
+            .iter()
+            .chain(candidate)
+            .filter(|score| score.outcome == EvaluationOutcome::Pending)
+            .count(),
+    )
+    .unwrap_or(u64::MAX);
+    let (baseline_samples, baseline_score) = weighted_evaluation_mean(baseline);
+    let (candidate_samples, candidate_score) = weighted_evaluation_mean(candidate);
+    let status = if minimum_samples == 0
+        || pending_outcomes > 0
+        || baseline_samples < minimum_samples
+        || candidate_samples < minimum_samples
+    {
+        EvidenceStatus::Inconclusive
+    } else if candidate_score
+        .zip(baseline_score)
+        .is_some_and(|(candidate, baseline)| {
+            candidate.saturating_add(maximum_regression_millipoints) < baseline
+        })
+    {
+        EvidenceStatus::Fail
+    } else if baseline_score.is_some() && candidate_score.is_some() {
+        EvidenceStatus::Pass
+    } else {
+        EvidenceStatus::Inconclusive
+    };
+    EvaluationGateEvidence {
+        status,
+        baseline_score_millipoints: baseline_score,
+        candidate_score_millipoints: candidate_score,
+        baseline_samples,
+        candidate_samples,
+        pending_outcomes,
+    }
+}
+
+fn weighted_evaluation_mean(scores: &[EvaluationScore]) -> (u64, Option<i64>) {
+    let (samples, total) = scores
+        .iter()
+        .filter(|score| score.outcome == EvaluationOutcome::Complete)
+        .fold((0_u64, 0_i128), |(samples, total), score| {
+            (
+                samples.saturating_add(score.sample_size),
+                total.saturating_add(
+                    i128::from(score.score_millipoints)
+                        .saturating_mul(i128::from(score.sample_size)),
+                ),
+            )
+        });
+    let mean = (samples > 0)
+        .then(|| total / i128::from(samples))
+        .and_then(|value| i64::try_from(value).ok());
+    (samples, mean)
+}
+
+#[must_use]
 pub fn assign_attention_task(
     task: &mut AttentionTask,
     reviewers: &[ReviewerCapabilities],
@@ -1493,6 +1558,36 @@ mod tests {
         assert_eq!(
             evaluation_gate(&[900, 900], &[700, 700], 2, 50),
             EvidenceStatus::Fail
+        );
+    }
+
+    #[test]
+    fn stored_evaluation_gate_weights_samples_and_waits_for_pending_outcomes() {
+        let tenant = TenantId::new("tenant-a").unwrap();
+        let score = |value, samples, outcome| EvaluationScore {
+            id: orch8_types::continuity_advanced::EvaluationId::new(),
+            tenant_id: tenant.clone(),
+            continuity_id: ContinuityId::new(),
+            evaluator: "quality".into(),
+            score_millipoints: value,
+            sample_size: samples,
+            deferred: false,
+            outcome,
+            scope: orch8_types::continuity_advanced::EvaluationScope::default(),
+            dedupe_key: uuid::Uuid::now_v7().to_string(),
+            evidence_sha256: "a".repeat(64),
+            created_at: Utc::now(),
+        };
+        let baseline = [score(900, 100, EvaluationOutcome::Complete)];
+        let candidate = [score(850, 100, EvaluationOutcome::Complete)];
+        assert_eq!(
+            evaluation_gate_from_evidence(&baseline, &candidate, 100, 20).status,
+            EvidenceStatus::Fail
+        );
+        let pending = [score(1_000, 100, EvaluationOutcome::Pending)];
+        assert_eq!(
+            evaluation_gate_from_evidence(&baseline, &pending, 100, 20).status,
+            EvidenceStatus::Inconclusive
         );
     }
 
