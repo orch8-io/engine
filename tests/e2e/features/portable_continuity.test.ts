@@ -1902,6 +1902,106 @@ describe("Portable Continuity", () => {
     );
   });
 
+  it("converts an authentic optimization into an idempotent draft release", async () => {
+    const tenantId = `continuity-advisor-${uuid().slice(0, 8)}`;
+    const created = await client.createSequence(testSequence(
+      `advisor-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    await client.saveCheckpoint(instance.id, {
+      block_id: "work",
+      completed_blocks: [],
+      context_snapshot: {},
+    });
+    const [source] = await client.listContinuityCheckpoints(
+      execution.continuity_id,
+      tenantId,
+    );
+    const baseScenario = {
+      id: uuid(),
+      tenant_id: tenantId,
+      source,
+      context_patch: {},
+      config_patch: {},
+      output_overrides: {},
+      handler_mocks: {},
+      block_param_overrides: {},
+      signals: [],
+      target_sequence_version: null,
+      effect_mode: "blocked",
+      virtual_time: true,
+      retain_full_evidence: false,
+    };
+    const recommendations = await client.recommendContinuityOptimizations({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      serial_work_millipoints: 0,
+      retry_rate_millipoints: 0,
+      average_payload_bytes: 2_000_000,
+      average_cost_microunits: 0,
+      dead_branch_count: 0,
+      base_scenario: baseScenario,
+    });
+    assert.equal(recommendations.length, 1);
+    assert.equal(recommendations[0]!.kind, "payload_compaction");
+    const request = {
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      recommendation: recommendations[0],
+    };
+    const accepted = await client.acceptContinuityOptimization(
+      recommendations[0]!.id,
+      request,
+    );
+    assert.equal(accepted.draft_sequence.status, "draft");
+    assert.equal(accepted.draft_sequence.id, recommendations[0]!.id);
+    assert.equal(accepted.release.id, recommendations[0]!.id);
+    assert.equal(accepted.release.state, "draft");
+    assert.equal(
+      accepted.release.validation_summary.optimization_recommendation_id,
+      recommendations[0]!.id,
+    );
+    const repeated = await client.acceptContinuityOptimization(
+      recommendations[0]!.id,
+      request,
+    );
+    assert.equal(repeated.draft_sequence.id, accepted.draft_sequence.id);
+    assert.equal(repeated.release.id, accepted.release.id);
+    await assert.rejects(
+      () => client.acceptContinuityOptimization(recommendations[0]!.id, {
+        ...request,
+        recommendation: {
+          ...recommendations[0],
+          estimated_impact_millipoints: 999,
+        },
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+    const provenance = await client.listContinuityProvenance(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(
+      provenance.filter((entry) => entry.kind === "optimization_accepted").length,
+      1,
+    );
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

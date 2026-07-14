@@ -230,6 +230,11 @@ pub enum ExecutionCmd {
     ChooseProvider { request: PathBuf },
     /// Generate evidence-backed workflow optimization recommendations.
     RecommendOptimizations { request: PathBuf },
+    /// Convert an issued recommendation into a draft sequence and release.
+    AcceptOptimization {
+        recommendation_id: Uuid,
+        request: PathBuf,
+    },
     /// Evaluate a continuous-quality promotion gate.
     EvaluationGate { request: PathBuf },
     /// Evaluate a gate from tenant-scoped durable evidence.
@@ -832,6 +837,18 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/optimizations/recommend"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::AcceptOptimization {
+            recommendation_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/optimizations/{recommendation_id}/accept"),
                 &request,
                 format,
             )

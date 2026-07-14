@@ -36,11 +36,13 @@ use orch8_types::continuity_advanced::{
     FaultProfile, FederationEnvelope, FederationPeer, ForkEffectMode, GeneratedScenario,
     InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
     LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
-    OwnershipTransition, ProviderCandidate, ReservationState, ResidencyEvidence,
-    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
-    WhatIfScenario, WorkflowInvariant,
+    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
+    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
+    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
+use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
+use orch8_types::sequence::SequenceStatus;
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -188,6 +190,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/continuity/optimizations/recommend",
             post(recommend_optimizations),
+        )
+        .route(
+            "/continuity/optimizations/{id}/accept",
+            post(accept_optimization),
         )
         .route("/continuity/evaluations/gate", post(evaluate_gate))
         .route(
@@ -5320,6 +5326,8 @@ async fn choose_provider(
 
 #[derive(Debug, Deserialize)]
 struct OptimizationRequest {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
     serial_work_millipoints: u16,
     retry_rate_millipoints: u16,
     average_payload_bytes: u64,
@@ -5329,9 +5337,38 @@ struct OptimizationRequest {
 }
 
 async fn recommend_optimizations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<OptimizationRequest>,
-) -> Json<Vec<orch8_types::continuity_advanced::OptimizationRecommendation>> {
-    Json(orch8_engine::continuity_advanced::recommend_optimizations(
+) -> Result<Json<Vec<OptimizationRecommendation>>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.serial_work_millipoints > 1_000
+        || body.retry_rate_millipoints > 1_000
+        || body.average_cost_microunits < 0
+        || body.base_scenario.tenant_id != tenant_id
+        || body.base_scenario.source.continuity_id != body.continuity_id
+        || !body.base_scenario.virtual_time
+        || body.base_scenario.effect_mode
+            != orch8_types::continuity_advanced::ForkEffectMode::Blocked
+    {
+        return Err(ApiError::InvalidArgument(
+            "optimization evidence must be bounded and use an effect-free virtual-time scenario"
+                .into(),
+        ));
+    }
+    let (execution, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization sequence"))?
+        .ok_or_else(|| ApiError::NotFound("optimization sequence".into()))?;
+    let invariants = state
+        .storage
+        .list_workflow_invariants(&tenant_id, sequence.id, sequence.version, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization invariants"))?;
+    let mut recommendations = orch8_engine::continuity_advanced::recommend_optimizations(
         orch8_engine::continuity_advanced::WorkflowAggregate {
             serial_work_millipoints: body.serial_work_millipoints,
             retry_rate_millipoints: body.retry_rate_millipoints,
@@ -5340,7 +5377,247 @@ async fn recommend_optimizations(
             dead_branch_count: body.dead_branch_count,
         },
         &body.base_scenario,
-    ))
+    );
+    recommendations.retain(|recommendation| {
+        invariants.is_empty()
+            || !matches!(
+                recommendation.kind.as_str(),
+                "parallelization" | "dead_branch"
+            )
+    });
+    for recommendation in &recommendations {
+        append_provenance_boundary(
+            &state,
+            &execution,
+            "optimization_recommended",
+            "evidence-backed optimization recommendation recorded",
+            recommendation,
+        )
+        .await?;
+    }
+    Ok(Json(recommendations))
+}
+
+#[derive(Debug, Deserialize)]
+struct AcceptOptimizationRequest {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    recommendation: OptimizationRecommendation,
+}
+
+#[derive(Debug, Serialize)]
+struct AcceptedOptimization {
+    recommendation_id: RecommendationId,
+    draft_sequence: orch8_types::sequence::SequenceDefinition,
+    release: WorkflowRelease,
+}
+
+#[allow(clippy::too_many_lines)] // authenticity, policy re-check, idempotent draft, release, and audit
+async fn accept_optimization(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<RecommendationId>,
+    Json(body): Json<AcceptOptimizationRequest>,
+) -> Result<Json<AcceptedOptimization>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.recommendation.id != id
+        || body.recommendation.what_if.tenant_id != tenant_id
+        || body.recommendation.what_if.source.continuity_id != body.continuity_id
+        || !body.recommendation.what_if.virtual_time
+        || body.recommendation.what_if.effect_mode
+            != orch8_types::continuity_advanced::ForkEffectMode::Blocked
+    {
+        return Err(ApiError::InvalidArgument(
+            "recommendation identity or effect-free scenario boundary is invalid".into(),
+        ));
+    }
+    let (execution, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    let encoded = serde_json::to_vec(&body.recommendation)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let recommendation_sha256 = hex_sha256(&encoded);
+    let provenance = state
+        .storage
+        .list_provenance(&tenant_id, body.continuity_id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization provenance"))?;
+    if !provenance.iter().any(|entry| {
+        entry.kind == "optimization_recommended" && entry.payload_sha256 == recommendation_sha256
+    }) {
+        return Err(ApiError::Conflict(
+            "recommendation was not issued for this execution or was modified".into(),
+        ));
+    }
+    let source = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization source sequence"))?
+        .ok_or_else(|| ApiError::NotFound("optimization source sequence".into()))?;
+    let invariants = state
+        .storage
+        .list_workflow_invariants(&tenant_id, source.id, source.version, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization invariants"))?;
+    if !invariants.is_empty()
+        && matches!(
+            body.recommendation.kind.as_str(),
+            "parallelization" | "dead_branch"
+        )
+    {
+        return Err(ApiError::Conflict(
+            "recommendation is suppressed by active workflow invariants".into(),
+        ));
+    }
+
+    let deterministic_id = id.into_uuid();
+    let draft_id = SequenceId::from_uuid(deterministic_id);
+    let draft_sequence = if let Some(existing) = state
+        .storage
+        .get_sequence(draft_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization draft"))?
+    {
+        if existing.tenant_id != tenant_id
+            || existing.name != source.name
+            || existing.namespace != source.namespace
+        {
+            return Err(ApiError::Conflict(
+                "recommendation id is already bound to another draft".into(),
+            ));
+        }
+        existing
+    } else {
+        let next_version = state
+            .storage
+            .list_sequence_versions(&tenant_id, &source.namespace, &source.name)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "sequence versions"))?
+            .into_iter()
+            .map(|sequence| sequence.version)
+            .max()
+            .unwrap_or(source.version)
+            .saturating_add(1);
+        let mut draft = source.clone();
+        draft.id = draft_id;
+        draft.version = next_version;
+        draft.status = SequenceStatus::Draft;
+        draft.deprecated = false;
+        draft.created_at = Utc::now();
+        match state.storage.create_sequence(&draft).await {
+            Ok(()) => draft,
+            Err(create_error) => {
+                let existing = state
+                    .storage
+                    .get_sequence(draft_id)
+                    .await
+                    .map_err(|error| ApiError::from_storage(error, "optimization draft"))?;
+                match existing {
+                    Some(existing)
+                        if existing.tenant_id == tenant_id
+                            && existing.name == source.name
+                            && existing.namespace == source.namespace =>
+                    {
+                        existing
+                    }
+                    _ => {
+                        return Err(ApiError::from_storage(create_error, "optimization draft"));
+                    }
+                }
+            }
+        }
+    };
+    let (release, release_created) = if let Some(existing) = state
+        .storage
+        .get_release(deterministic_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "optimization release"))?
+    {
+        (existing, false)
+    } else {
+        let now = Utc::now();
+        let release = WorkflowRelease {
+            id: deterministic_id,
+            tenant_id: tenant_id.clone(),
+            namespace: source.namespace.clone(),
+            sequence_name: source.name.clone(),
+            baseline_sequence_id: source.id,
+            baseline_version: source.version,
+            candidate_sequence_id: draft_sequence.id,
+            candidate_version: draft_sequence.version,
+            state: ReleaseState::Draft,
+            canary_percent: 0,
+            gates: Vec::new(),
+            in_flight_policy: InFlightPolicy::Pin,
+            validation_summary: Some(serde_json::json!({
+                "optimization_recommendation_id": id,
+                "kind": body.recommendation.kind,
+                "evidence": body.recommendation.evidence,
+                "what_if_scenario_id": body.recommendation.what_if.id,
+                "requires_operator_edit": true,
+            })),
+            canary_started_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(create_error) = state.storage.create_release(&release).await {
+            let existing = state
+                .storage
+                .get_release(deterministic_id)
+                .await
+                .map_err(|error| ApiError::from_storage(error, "optimization release"))?;
+            if let Some(existing) = existing {
+                (existing, false)
+            } else {
+                return Err(ApiError::from_storage(create_error, "optimization release"));
+            }
+        } else {
+            (release, true)
+        }
+    };
+    if release.tenant_id != tenant_id
+        || release.baseline_sequence_id != source.id
+        || release.candidate_sequence_id != draft_sequence.id
+    {
+        return Err(ApiError::Conflict(
+            "recommendation id is already bound to another release".into(),
+        ));
+    }
+    if release_created {
+        state
+            .storage
+            .record_release_decision(&ReleaseDecision {
+                id: uuid::Uuid::now_v7(),
+                release_id: release.id,
+                from_state: ReleaseState::Draft,
+                to_state: ReleaseState::Draft,
+                actor: "optimization_advisor".into(),
+                reason: format!("draft created from recommendation {id}"),
+                decided_at: release.created_at,
+            })
+            .await
+            .map_err(|error| ApiError::from_storage(error, "optimization decision"))?;
+    }
+    let accepted = AcceptedOptimization {
+        recommendation_id: id,
+        draft_sequence,
+        release,
+    };
+    let accepted_sha256 = hex_sha256(
+        &serde_json::to_vec(&accepted).map_err(|error| ApiError::Internal(error.to_string()))?,
+    );
+    if !provenance.iter().any(|entry| {
+        entry.kind == "optimization_accepted" && entry.payload_sha256 == accepted_sha256
+    }) {
+        append_provenance_boundary(
+            &state,
+            &execution,
+            "optimization_accepted",
+            "optimization converted to draft release candidate",
+            &accepted,
+        )
+        .await?;
+    }
+    Ok(Json(accepted))
 }
 
 #[derive(Debug, Deserialize)]

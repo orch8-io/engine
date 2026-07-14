@@ -313,6 +313,22 @@ export class Orch8Client {
     return this.#post("/continuity/providers/choose", req);
   }
 
+  async recommendContinuityOptimizations(
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse[]> {
+    return this.#post("/continuity/optimizations/recommend", req);
+  }
+
+  async acceptContinuityOptimization(
+    recommendationId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/optimizations/${recommendationId}/accept`,
+      req,
+    );
+  }
+
   async verifyContinuityProvenance(
     continuityId: string,
     tenantId: string,

@@ -39,6 +39,17 @@ orch8 execution stored-evaluation-gate stored-gate.json
 
 The stored gate loads both baseline and candidate scores server-side, matches the evaluator and full scope, weights each score by `sample_size`, and records the report in candidate provenance. A positive `minimum_samples` and non-negative regression allowance are required.
 
+## Convert advisor evidence into a draft release
+
+Optimization recommendation requests are linked to a tenant and continuity execution and must include an effect-blocked virtual-time what-if scenario. The server records the exact recommendation digest in provenance and suppresses structural suggestions when active invariants make them unsafe.
+
+```bash
+orch8 execution recommend-optimizations recommendation-input.json
+orch8 execution accept-optimization "$RECOMMENDATION_ID" acceptance.json
+```
+
+Acceptance verifies that the recommendation was actually issued and was not edited, then rechecks current invariants. A deterministic draft sequence and draft release are created with the recommendation evidence and experiment attached. Repeating the same acceptance returns those same resources. The draft deliberately clones the source workflow: an operator or authoring tool must apply and validate the proposed edit before release validation or canary promotion.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.
