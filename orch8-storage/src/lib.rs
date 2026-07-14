@@ -2640,6 +2640,13 @@ pub trait ContinuityStore: Send + Sync + 'static {
 
     async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
 
+    /// Return the current chain head without loading the retained history.
+    async fn get_provenance_head(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Option<ProvenanceEntry>, StorageError>;
+
     async fn list_provenance(
         &self,
         tenant_id: &TenantId,

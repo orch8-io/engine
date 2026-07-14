@@ -1552,6 +1552,65 @@ describe("Portable Continuity", () => {
     assert.deepEqual((minimized.scenario as any).policy_facts, []);
   });
 
+  it("records signed payload-free provenance and verifies the retained head", async () => {
+    const tenantId = `continuity-provenance-${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      `provenance-${uuid().slice(0, 8)}`,
+      [
+        step("wait", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Hold for provenance inspection?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+      ],
+      { tenantId },
+    );
+    const created = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const packageDigest = createHash("sha256")
+      .update("package-with-secret-that-must-not-be-stored")
+      .digest("hex");
+    await client.recordContinuityProvenance(execution.continuity_id, {
+      tenant_id: tenantId,
+      kind: "package_identity",
+      payload_sha256: packageDigest,
+    });
+    const terminal = await client.recordContinuityProvenance(execution.continuity_id, {
+      tenant_id: tenantId,
+      kind: "terminal_outcome",
+      payload_sha256: createHash("sha256").update("completed").digest("hex"),
+    });
+    const entries = await client.listContinuityProvenance(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(
+      entries.map((entry) => entry.kind),
+      ["execution_created", "package_identity", "terminal_outcome"],
+    );
+    assert.ok(entries.every((entry) => typeof entry.signature === "string"));
+    assert.ok(entries.every((entry) => !("payload" in entry)));
+    assert.ok(!JSON.stringify(entries).includes("package-with-secret"));
+    const verification = await client.verifyContinuityProvenance(
+      execution.continuity_id,
+      tenantId,
+      String(terminal.entry_sha256),
+    );
+    assert.equal(verification.valid, true);
+    assert.equal(verification.entries_checked, 3);
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

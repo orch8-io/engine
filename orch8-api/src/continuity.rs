@@ -75,7 +75,7 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/effects/{id}/resolve", post(resolve_effect))
         .route(
             "/continuity/executions/{id}/provenance",
-            get(list_provenance),
+            get(list_provenance).post(record_provenance_boundary),
         )
         .route(
             "/continuity/executions/{id}/provenance/verify",
@@ -207,6 +207,62 @@ fn hex_sha256(bytes: &[u8]) -> String {
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
     encoded
+}
+
+/// Append a payload-free, signed provenance boundary. Concurrent writers race
+/// on the predecessor uniqueness constraint and retry from the new head, so a
+/// successful append cannot fork the retained chain.
+async fn append_provenance_boundary<T: Serialize + ?Sized>(
+    state: &AppState,
+    execution: &ContinuityExecution,
+    kind: &str,
+    summary: &str,
+    evidence: &T,
+) -> Result<(), ApiError> {
+    let encoded = serde_json::to_vec(evidence)
+        .map_err(|error| ApiError::Internal(format!("serialize provenance evidence: {error}")))?;
+    let payload_sha256 = hex_sha256(&encoded);
+    append_provenance_digest(state, execution, kind, summary, &payload_sha256).await
+}
+
+async fn append_provenance_digest(
+    state: &AppState,
+    execution: &ContinuityExecution,
+    kind: &str,
+    summary: &str,
+    payload_sha256: &str,
+) -> Result<(), ApiError> {
+    for attempt in 0..8 {
+        let previous = state
+            .storage
+            .get_provenance_head(&execution.tenant_id, execution.continuity_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "provenance head"))?
+            .map(|entry| entry.entry_sha256);
+        let mut entry = orch8_engine::continuity::build_provenance_entry_with_summary(
+            execution,
+            kind,
+            Some(summary.into()),
+            payload_sha256,
+            previous,
+            Utc::now(),
+        );
+        if let Some(crypto) = &state.continuity_crypto {
+            entry = orch8_engine::continuity::sign_provenance_entry(
+                entry,
+                crypto.signing_key_id.clone(),
+                &crypto.signing_key,
+            );
+        }
+        match state.storage.append_provenance(&entry).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == 7 => {
+                return Err(ApiError::from_storage(error, "provenance append"));
+            }
+            Err(_) => tokio::task::yield_now().await,
+        }
+    }
+    unreachable!("bounded provenance append loop always returns")
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,6 +475,14 @@ async fn create_execution(
         .create_continuity_execution(&execution)
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?;
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "execution_created",
+        "continuity execution created",
+        &execution,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(execution)))
 }
 
@@ -1145,6 +1209,14 @@ async fn export_handoff(
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    append_provenance_boundary(
+        &state,
+        &transferring,
+        "capsule_exported",
+        "signed capsule exported",
+        &capsule.manifest,
+    )
+    .await?;
     Ok(Json(ExportHandoffResponse {
         handoff: exported,
         capsule,
@@ -1487,6 +1559,14 @@ async fn accept_handoff(
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    append_provenance_boundary(
+        &state,
+        &accepted_execution,
+        "runtime_claimed",
+        "destination runtime claimed ownership",
+        &accepted_handoff,
+    )
+    .await?;
     Ok(Json(AcceptHandoffResponse {
         handoff: accepted_handoff,
         execution: accepted_execution,
@@ -1603,6 +1683,14 @@ async fn resume_handoff(
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "execution_resumed",
+        "destination execution resumed",
+        &resumed,
+    )
+    .await?;
     Ok(Json(resumed))
 }
 
@@ -1656,6 +1744,20 @@ async fn resolve_effect(
             "effect receipt changed concurrently; reload before resolving".into(),
         ));
     }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, receipt.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "effect_resolved",
+        "effect receipt resolved",
+        &receipt,
+    )
+    .await?;
     Ok(Json(receipt))
 }
 
@@ -1672,6 +1774,54 @@ async fn list_provenance(
         .await
         .map_err(|error| ApiError::from_storage(error, "provenance"))?;
     Ok(Json(entries))
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordProvenanceRequest {
+    tenant_id: TenantId,
+    kind: String,
+    payload_sha256: String,
+}
+
+async fn record_provenance_boundary(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<RecordProvenanceRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    validate_sha256(&body.payload_sha256, "payload_sha256")?;
+    let summary = match body.kind.as_str() {
+        "package_identity" => "workflow package identity recorded",
+        "model_selected" => "model routing decision recorded",
+        "terminal_outcome" => "terminal execution outcome recorded",
+        _ => {
+            return Err(ApiError::InvalidArgument(
+                "kind must be package_identity, model_selected, or terminal_outcome".into(),
+            ));
+        }
+    };
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    append_provenance_digest(
+        &state,
+        &execution,
+        &body.kind,
+        summary,
+        &body.payload_sha256,
+    )
+    .await?;
+    let head = state
+        .storage
+        .get_provenance_head(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "provenance head"))?
+        .ok_or_else(|| ApiError::Internal("provenance append produced no head".into()))?;
+    Ok((StatusCode::CREATED, Json(head)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1692,7 +1842,7 @@ async fn verify_provenance(
         .list_provenance(&tenant_id, id, 10_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "provenance"))?;
-    let trusted_keys =
+    let mut trusted_keys =
         state
             .continuity_crypto
             .as_ref()
@@ -1702,6 +1852,17 @@ async fn verify_provenance(
                     BASE64.encode(crypto.signing_key.verifying_key().to_bytes()),
                 )])
             });
+    if let Ok(encoded) = std::env::var("ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON") {
+        let historical: std::collections::BTreeMap<String, String> = serde_json::from_str(&encoded)
+            .map_err(|error| {
+                ApiError::Internal(format!(
+                    "invalid ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON: {error}"
+                ))
+            })?;
+        for (key_id, public_key) in historical {
+            trusted_keys.entry(key_id).or_insert(public_key);
+        }
+    }
     Ok(Json(
         orch8_engine::continuity::verify_provenance_chain_with_keys(
             &entries,
@@ -2413,6 +2574,20 @@ async fn assign_attention_task(
             "attention task was assigned concurrently".into(),
         ));
     }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, assigned.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "human_assignment",
+        "human review assigned",
+        &assigned,
+    )
+    .await?;
     Ok(Json(assigned))
 }
 
@@ -4019,6 +4194,14 @@ async fn apply_live_migration(
             "migration apply lost a concurrent compare-and-swap".into(),
         ));
     }
+    append_provenance_boundary(
+        &state,
+        &next_execution,
+        "migration_applied",
+        "live migration applied",
+        &next_record,
+    )
+    .await?;
     Ok(Json(next_record))
 }
 
@@ -4115,6 +4298,14 @@ async fn rollback_live_migration(
             "rollback was rejected by stale state or committed target effects".into(),
         ));
     }
+    append_provenance_boundary(
+        &state,
+        &next_execution,
+        "migration_rolled_back",
+        "live migration rolled back",
+        &next_record,
+    )
+    .await?;
     Ok(Json(next_record))
 }
 
@@ -4856,6 +5047,8 @@ async fn reproduce_incident(
 
 #[derive(Debug, Deserialize)]
 struct ChooseProviderRequest {
+    tenant_id: Option<TenantId>,
+    continuity_id: Option<ContinuityId>,
     candidates: Vec<ProviderCandidate>,
     #[serde(default)]
     allowed_regions: std::collections::BTreeSet<String>,
@@ -4868,6 +5061,7 @@ struct ChooseProviderRequest {
 }
 
 async fn choose_provider(
+    State(state): State<AppState>,
     Json(body): Json<ChooseProviderRequest>,
 ) -> Result<Json<orch8_types::continuity_advanced::ProviderDecision>, ApiError> {
     if body.candidates.len() > 1_000 || body.cohort_key.len() > 256 {
@@ -4875,7 +5069,12 @@ async fn choose_provider(
             "provider candidates or cohort key exceed bounded limits".into(),
         ));
     }
-    Ok(Json(orch8_engine::continuity_advanced::choose_provider(
+    if body.tenant_id.is_some() != body.continuity_id.is_some() {
+        return Err(ApiError::InvalidArgument(
+            "tenant_id and continuity_id must be supplied together".into(),
+        ));
+    }
+    let decision = orch8_engine::continuity_advanced::choose_provider(
         &body.candidates,
         &orch8_engine::continuity_advanced::ProviderRequirements {
             allowed_regions: body.allowed_regions,
@@ -4886,7 +5085,24 @@ async fn choose_provider(
         },
         &body.cohort_key,
         Utc::now(),
-    )))
+    );
+    if let (Some(tenant_id), Some(continuity_id)) = (&body.tenant_id, body.continuity_id) {
+        let execution = state
+            .storage
+            .get_continuity_execution(tenant_id, continuity_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+            .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+        append_provenance_boundary(
+            &state,
+            &execution,
+            "provider_selected",
+            "provider routing decision recorded",
+            &decision,
+        )
+        .await?;
+    }
+    Ok(Json(decision))
 }
 
 #[derive(Debug, Deserialize)]

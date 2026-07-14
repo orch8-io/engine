@@ -307,12 +307,23 @@ async fn effect_state_cas_and_provenance_are_durable() {
             .unwrap()
     );
 
+    assert_provenance_chain_is_structural_and_fork_safe(&storage, &tenant, continuity_id, now)
+        .await;
+}
+
+async fn assert_provenance_chain_is_structural_and_fork_safe(
+    storage: &SqliteStorage,
+    tenant: &TenantId,
+    continuity_id: ContinuityId,
+    now: chrono::DateTime<Utc>,
+) {
     let provenance = ProvenanceEntry {
         id: uuid::Uuid::now_v7(),
         continuity_id,
-        tenant_id: tenant.clone(),
+        tenant_id: tenant.to_owned(),
         epoch: ExecutionEpoch::initial(),
         kind: "effect_unknown".into(),
+        redacted_summary: None,
         payload_sha256: "b".repeat(64),
         previous_sha256: None,
         entry_sha256: "c".repeat(64),
@@ -321,12 +332,34 @@ async fn effect_state_cas_and_provenance_are_durable() {
         created_at: now,
     };
     storage.append_provenance(&provenance).await.unwrap();
+    let mut fork = provenance.clone();
+    fork.id = uuid::Uuid::now_v7();
+    fork.entry_sha256 = "d".repeat(64);
+    assert!(
+        storage.append_provenance(&fork).await.is_err(),
+        "one predecessor must not admit two chain children"
+    );
+    let follower = ProvenanceEntry {
+        id: uuid::Uuid::now_v7(),
+        previous_sha256: Some(provenance.entry_sha256.clone()),
+        entry_sha256: "e".repeat(64),
+        created_at: now - Duration::days(1),
+        ..provenance.clone()
+    };
+    storage.append_provenance(&follower).await.unwrap();
     assert_eq!(
         storage
-            .list_provenance(&tenant, continuity_id, 10)
+            .get_provenance_head(tenant, continuity_id)
             .await
             .unwrap(),
-        [provenance]
+        Some(follower.clone())
+    );
+    assert_eq!(
+        storage
+            .list_provenance(tenant, continuity_id, 10)
+            .await
+            .unwrap(),
+        [provenance, follower]
     );
 }
 

@@ -4,6 +4,24 @@ This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.
 
+## Verify execution provenance
+
+Every retained entry contains only a payload digest and a bounded redacted
+summary. List a chain with
+`GET /continuity/executions/{id}/provenance?tenant_id=...`, then verify it with
+`GET /continuity/executions/{id}/provenance/verify?tenant_id=...&expected_head=...`.
+Always retain the expected head outside the execution database when deletion
+detection matters; a chain cannot prove that its own final entries were removed
+without that anchor.
+
+The active continuity signing key is trusted automatically. During rotation,
+set `ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON` to a JSON object mapping old
+key IDs to base64 Ed25519 public keys. Never put private keys in this registry.
+Package builders, model routers, and terminal-state observers can append their
+already-computed digest with `POST /continuity/executions/{id}/provenance` using
+`package_identity`, `model_selected`, or `terminal_outcome`; raw payloads are not
+accepted or stored.
+
 ## Upgrade to migration 061
 
 Migration `061_continuity_instance_lookup.sql` adds a unique PostgreSQL index

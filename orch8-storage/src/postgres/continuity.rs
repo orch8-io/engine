@@ -936,6 +936,30 @@ impl crate::ContinuityStore for PostgresStorage {
         Ok(())
     }
 
+    async fn get_provenance_head(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Option<ProvenanceEntry>, StorageError> {
+        let row = sqlx::query(
+            "SELECT head.record FROM provenance_entries head
+             WHERE head.tenant_id = $1 AND head.continuity_id = $2
+               AND NOT EXISTS (
+                   SELECT 1 FROM provenance_entries child
+                   WHERE child.tenant_id = head.tenant_id
+                     AND child.continuity_id = head.continuity_id
+                     AND child.previous_sha256 = head.entry_sha256
+               )
+             LIMIT 1",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.into_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
     async fn list_provenance(
         &self,
         tenant_id: &TenantId,
@@ -943,8 +967,17 @@ impl crate::ContinuityStore for PostgresStorage {
         limit: u32,
     ) -> Result<Vec<ProvenanceEntry>, StorageError> {
         let rows = sqlx::query(
-            "SELECT record FROM provenance_entries WHERE tenant_id = $1 AND continuity_id = $2
-             ORDER BY epoch, created_at, id LIMIT $3",
+            "WITH RECURSIVE chain AS (
+                 SELECT record, entry_sha256, 0::BIGINT AS depth
+                 FROM provenance_entries
+                 WHERE tenant_id = $1 AND continuity_id = $2 AND previous_sha256 IS NULL
+                 UNION ALL
+                 SELECT child.record, child.entry_sha256, chain.depth + 1
+                 FROM provenance_entries child
+                 JOIN chain ON child.previous_sha256 = chain.entry_sha256
+                 WHERE child.tenant_id = $1 AND child.continuity_id = $2
+             )
+             SELECT record FROM chain ORDER BY depth LIMIT $3",
         )
         .bind(tenant_id.as_str())
         .bind(continuity_id.into_uuid())

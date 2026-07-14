@@ -725,6 +725,9 @@ pub struct ProvenanceEntry {
     pub tenant_id: TenantId,
     pub epoch: ExecutionEpoch,
     pub kind: String,
+    /// Bounded operator-safe description. Never contains raw event payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted_summary: Option<String>,
     pub payload_sha256: String,
     pub previous_sha256: Option<String>,
     pub entry_sha256: String,

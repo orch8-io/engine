@@ -638,6 +638,7 @@ passthrough_impl! {
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
+        async fn get_provenance_head(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn create_continuation_grant(&self, grant: &orch8_types::continuity::ContinuationGrant) -> Result<(), StorageError>;
         async fn get_continuation_grant(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId) -> Result<Option<orch8_types::continuity::ContinuationGrant>, StorageError>;

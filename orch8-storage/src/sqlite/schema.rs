@@ -777,6 +777,10 @@ CREATE TABLE IF NOT EXISTS provenance_entries (
 );
 CREATE INDEX IF NOT EXISTS idx_provenance_entries_chain
     ON provenance_entries(tenant_id, continuity_id, epoch, created_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_provenance_chain_predecessor
+    ON provenance_entries(tenant_id, continuity_id, COALESCE(previous_sha256, ''));
+CREATE INDEX IF NOT EXISTS idx_provenance_chain_predecessor_lookup
+    ON provenance_entries(tenant_id, continuity_id, previous_sha256);
 
 CREATE TABLE IF NOT EXISTS continuation_grants (
     id TEXT PRIMARY KEY,
@@ -986,4 +990,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 31;
+pub(super) const SCHEMA_VERSION: i64 = 32;

@@ -374,12 +374,25 @@ pub fn build_provenance_entry(
     previous_sha256: Option<String>,
     now: DateTime<Utc>,
 ) -> ProvenanceEntry {
+    build_provenance_entry_with_summary(execution, kind, None, payload_sha256, previous_sha256, now)
+}
+
+#[must_use]
+pub fn build_provenance_entry_with_summary(
+    execution: &ContinuityExecution,
+    kind: impl Into<String>,
+    redacted_summary: Option<String>,
+    payload_sha256: impl Into<String>,
+    previous_sha256: Option<String>,
+    now: DateTime<Utc>,
+) -> ProvenanceEntry {
     let kind = kind.into();
     let payload_sha256 = payload_sha256.into();
     let entry_sha256 = provenance_hash(
         execution.continuity_id,
         execution.epoch,
         &kind,
+        redacted_summary.as_deref(),
         &payload_sha256,
         previous_sha256.as_deref(),
     );
@@ -389,6 +402,7 @@ pub fn build_provenance_entry(
         tenant_id: execution.tenant_id.clone(),
         epoch: execution.epoch,
         kind,
+        redacted_summary,
         payload_sha256,
         previous_sha256,
         entry_sha256,
@@ -414,22 +428,42 @@ fn provenance_hash(
     continuity_id: orch8_types::continuity::ContinuityId,
     epoch: orch8_types::continuity::ExecutionEpoch,
     kind: &str,
+    redacted_summary: Option<&str>,
     payload_sha256: &str,
     previous_sha256: Option<&str>,
 ) -> String {
     let mut hash = Sha256::new();
-    hash.update(continuity_id.to_string());
-    hash.update(epoch.get().to_be_bytes());
-    hash.update(kind.as_bytes());
-    hash.update(payload_sha256.as_bytes());
-    if let Some(previous) = previous_sha256 {
-        hash.update(previous.as_bytes());
+    if let Some(summary) = redacted_summary {
+        hash.update(b"orch8-provenance-v2\0");
+        hash.update(continuity_id.into_uuid().as_bytes());
+        hash.update(epoch.get().to_be_bytes());
+        hash_framed(&mut hash, kind.as_bytes());
+        hash_framed(&mut hash, summary.as_bytes());
+        hash_framed(&mut hash, payload_sha256.as_bytes());
+        hash.update([u8::from(previous_sha256.is_some())]);
+        if let Some(previous) = previous_sha256 {
+            hash_framed(&mut hash, previous.as_bytes());
+        }
+    } else {
+        // Preserve verification compatibility with retained v1 entries.
+        hash.update(continuity_id.to_string());
+        hash.update(epoch.get().to_be_bytes());
+        hash.update(kind.as_bytes());
+        hash.update(payload_sha256.as_bytes());
+        if let Some(previous) = previous_sha256 {
+            hash.update(previous.as_bytes());
+        }
     }
     let mut output = String::with_capacity(64);
     for byte in hash.finalize() {
         write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
     }
     output
+}
+
+fn hash_framed(hash: &mut Sha256, value: &[u8]) {
+    hash.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hash.update(value);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -461,6 +495,7 @@ pub fn verify_provenance_chain(
             entry.continuity_id,
             entry.epoch,
             &entry.kind,
+            entry.redacted_summary.as_deref(),
             &entry.payload_sha256,
             entry.previous_sha256.as_deref(),
         );
@@ -666,7 +701,11 @@ mod tests {
             verify_provenance_chain(&[first.clone(), second.clone()], Some(&second.entry_sha256));
         assert!(valid.valid);
 
-        second.kind = "tampered".into();
+        let deleted =
+            verify_provenance_chain(std::slice::from_ref(&first), Some(&second.entry_sha256));
+        assert_eq!(deleted.code, Some("PROVENANCE_HEAD_MISMATCH"));
+
+        second.redacted_summary = Some("tampered operator summary".into());
         let invalid = verify_provenance_chain(&[first, second], None);
         assert_eq!(invalid.first_invalid_index, Some(1));
         assert_eq!(invalid.code, Some("PROVENANCE_HASH_MISMATCH"));

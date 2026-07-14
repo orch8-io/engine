@@ -103,6 +103,11 @@ pub enum ExecutionCmd {
         #[arg(long)]
         expected_head: Option<String>,
     },
+    /// Append an approved package, model, or terminal provenance digest.
+    RecordProvenance {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
     /// List checkpoint boundaries for time-travel inspection.
     Checkpoints {
         continuity_id: Uuid,
@@ -491,6 +496,18 @@ pub async fn run_execution(
                 .send()
                 .await?;
             print_response(response, format).await
+        }
+        ExecutionCmd::RecordProvenance {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/provenance"),
+                &request,
+                format,
+            )
+            .await
         }
         ExecutionCmd::Checkpoints {
             continuity_id,

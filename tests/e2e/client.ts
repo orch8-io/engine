@@ -231,6 +231,35 @@ export class Orch8Client {
     );
   }
 
+  async listContinuityProvenance(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/provenance${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  async verifyContinuityProvenance(
+    continuityId: string,
+    tenantId: string,
+    expectedHead?: string,
+  ): Promise<ApiResponse> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/provenance/verify${toQuery({
+        tenant_id: tenantId,
+        expected_head: expectedHead,
+      })}`,
+    );
+  }
+
+  async recordContinuityProvenance(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/provenance`, req);
+  }
+
   async issueContinuationGrant(req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post("/continuity/grants", req);
   }
