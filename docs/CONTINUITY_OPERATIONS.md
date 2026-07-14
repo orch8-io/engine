@@ -62,6 +62,24 @@ orch8 execution decide-attention "$TASK_ID" decision-hash.json
 
 An assignment is a lease. After expiry, another eligible reviewer can claim it through a compare-and-set transition; before expiry, reassignment fails. The active reviewer submits a SHA-256 decision digest rather than contents. One concurrent decision wins, the attention reservation reconciles to actual units, and provenance records the payload-free boundary.
 
+## Enforce sovereign-edge boundaries from registered facts
+
+Residency requests identify the tenant, continuity execution, destination runtime, data classification, operation boundary, and allowed regions. Source/destination regions and destination trust are loaded from live runtime registrations; callers cannot provide those facts. Confidential/restricted operations fail closed when either region is ambiguous or the destination lacks verified signed trust.
+
+The server-side disclosure minimizer accepts only public/internal payloads. Confidential and restricted values must be transformed on the trusted runtime into an approved summary, digest, attestation, or encrypted artifact reference before any cloud request.
+
+Device delegation additionally verifies current ownership epoch, live same-tenant source/destination registrations, every handler required by the isolated sub-sequence, a destination-bound signed grant, and its one-time token. The accepted delegation is recorded in provenance; shared mutable execution state is not transferred.
+
+Federation peers are explicit operator configuration:
+
+```bash
+export ORCH8_FEDERATION_PEERS='[{"id":"...","name":"partner-a","trust_root_sha256":"...","public_key":"...","endpoint":"https://peer.example","allowed_tenants":["tenant-a"],"revoked_at":null}]'
+```
+
+The list is bounded to 128 unique peers; each peer requires a bounded HTTPS endpoint, a non-empty tenant allowlist, and a SHA-256 trust-root digest. Any invalid entry disables federation rather than retaining a partially trusted configuration.
+
+Verification uses that configured key—not a request-supplied key—and binds peer, tenant, continuity ID, epoch, destination, payload digest, issue time, and expiry. Envelopes have a maximum five-minute lifetime. A durable database receipt admits exactly one concurrent delivery for each tenant/peer/message tuple; expired receipts are pruned at ingestion because their envelopes can no longer verify. Accepted envelope digests enter provenance while contents remain encrypted or referenced.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.

@@ -14,9 +14,10 @@ use orch8_types::continuity::{
 use orch8_types::continuity_advanced::IncidentCaseId;
 use orch8_types::continuity_advanced::{
     CheckpointBoundary, CompensationExecutionStep, CompensationPlanStep, CompensationRunId,
-    CompensationRunRecord, CompensationRunState, CompensationStepState, ForkEffectMode,
-    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
-    MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+    CompensationRunRecord, CompensationRunState, CompensationStepState, FederationEnvelope,
+    FederationMessageId, FederationPeerId, ForkEffectMode, LiveMigrationPlan, LiveMigrationRecord,
+    LiveMigrationState, MigrationDisposition, MigrationPlanId, ScenarioId, WhatIfRunRecord,
+    WhatIfScenario,
 };
 use orch8_types::dlq::{DlqIncidentReproduction, ReproductionStatus};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
@@ -25,6 +26,61 @@ use orch8_types::sequence::CompensationVerificationPolicy;
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
+}
+
+#[tokio::test]
+async fn federation_receipts_admit_one_concurrent_delivery() {
+    let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let tenant_id = tenant("tenant-federation-receipt");
+    let continuity_id = ContinuityId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant_id.clone(),
+            current_instance_id: InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let envelope = FederationEnvelope {
+        id: FederationMessageId::new(),
+        peer_id: FederationPeerId::new(),
+        tenant_id,
+        continuity_id,
+        epoch: ExecutionEpoch::initial(),
+        destination_runtime_id: RuntimeId::new(),
+        payload_sha256: "a".repeat(64),
+        issued_at: now,
+        expires_at: now + Duration::minutes(2),
+        signature: "signed".into(),
+    };
+    let digest = "b".repeat(64);
+    let left = {
+        let storage = std::sync::Arc::clone(&storage);
+        let envelope = envelope.clone();
+        let digest = digest.clone();
+        tokio::spawn(async move {
+            storage
+                .accept_federation_message(&envelope, &digest, now)
+                .await
+                .unwrap()
+        })
+    };
+    let right = {
+        let storage = std::sync::Arc::clone(&storage);
+        tokio::spawn(async move {
+            storage
+                .accept_federation_message(&envelope, &digest, now)
+                .await
+                .unwrap()
+        })
+    };
+    let accepted = [left.await.unwrap(), right.await.unwrap()];
+    assert_eq!(accepted.into_iter().filter(|value| *value).count(), 1);
 }
 
 #[tokio::test]

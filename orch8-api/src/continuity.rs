@@ -33,12 +33,12 @@ use orch8_types::continuity_advanced::{
     CompensationRunRecord, CompensationRunState, CompensationStepState, DeviceDelegation,
     DurableWritePhase, EvaluationId, EvaluationOutcome, EvaluationScope, EvaluationScore,
     ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
-    FaultProfile, FederationEnvelope, FederationPeer, ForkEffectMode, GeneratedScenario,
-    InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
-    LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
-    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
-    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
-    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
+    FaultProfile, FederationEnvelope, ForkEffectMode, GeneratedScenario, InvariantId,
+    InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
+    MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule, OptimizationRecommendation,
+    OwnershipTransition, ProviderCandidate, RecommendationId, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
+    WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
@@ -5897,24 +5897,82 @@ async fn evaluate_stored_gate(
 
 #[derive(Debug, Deserialize)]
 struct ResidencyRequest {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
     classification: DataClassification,
     operation: String,
-    source_region: Option<String>,
-    destination_region: Option<String>,
+    destination_runtime_id: RuntimeId,
     #[serde(default)]
     allowed_regions: std::collections::BTreeSet<String>,
-    destination_trust: Option<RuntimeTrustLevel>,
 }
 
-async fn evaluate_residency(Json(body): Json<ResidencyRequest>) -> Json<ResidencyEvidence> {
-    Json(orch8_engine::continuity_advanced::evaluate_residency(
+const RESIDENCY_OPERATIONS: &[&str] = &[
+    "artifact_creation",
+    "capsule_transfer",
+    "handler_dispatch",
+    "logging",
+    "telemetry",
+    "backup_export",
+    "retry",
+    "fallback",
+    "fork",
+    "migration",
+    "operator_override",
+    "device_delegation",
+    "federation",
+];
+
+async fn evaluate_residency(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<ResidencyRequest>,
+) -> Result<Json<ResidencyEvidence>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if !RESIDENCY_OPERATIONS.contains(&body.operation.as_str()) || body.allowed_regions.len() > 256
+    {
+        return Err(ApiError::InvalidArgument(
+            "residency operation or allowed-region policy is invalid".into(),
+        ));
+    }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, body.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let capabilities = state
+        .storage
+        .list_runtime_capabilities(&tenant_id, Utc::now(), 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let source = capabilities
+        .iter()
+        .find(|capability| capability.runtime_id == execution.owner_runtime_id);
+    let destination = capabilities
+        .iter()
+        .find(|capability| capability.runtime_id == body.destination_runtime_id);
+    let single_region = |capability: Option<&RuntimeCapabilities>| {
+        capability.and_then(|capability| {
+            (capability.regions.len() == 1).then(|| capability.regions[0].clone())
+        })
+    };
+    let report = orch8_engine::continuity_advanced::evaluate_residency(
         body.classification,
         body.operation,
-        body.source_region,
-        body.destination_region,
+        single_region(source),
+        single_region(destination),
         &body.allowed_regions,
-        body.destination_trust,
-    ))
+        destination.map(|capability| capability.trust),
+    );
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "residency_evaluated",
+        "runtime-derived residency evidence recorded",
+        &report,
+    )
+    .await?;
+    Ok(Json(report))
 }
 
 #[derive(Debug, Deserialize)]
@@ -5928,6 +5986,14 @@ struct MinimizeDisclosureRequest {
 async fn minimize_disclosure(
     Json(body): Json<MinimizeDisclosureRequest>,
 ) -> Result<Json<orch8_types::continuity_advanced::DisclosureResult>, ApiError> {
+    if matches!(
+        body.classification,
+        DataClassification::Confidential | DataClassification::Restricted
+    ) {
+        return Err(ApiError::InvalidArgument(
+            "confidential and restricted payloads must be minimized on the trusted runtime; upload only an approved summary, hash, attestation, or encrypted artifact reference".into(),
+        ));
+    }
     if body.allowed_top_level_fields.len() > 256 {
         return Err(ApiError::PayloadTooLarge(
             "disclosure allowlist exceeds 256 fields".into(),
@@ -5944,7 +6010,7 @@ async fn minimize_disclosure(
 
 #[derive(Debug, Deserialize)]
 struct VerifyFederationRequest {
-    peer: FederationPeer,
+    tenant_id: TenantId,
     envelope: FederationEnvelope,
     payload_base64: String,
 }
@@ -5955,8 +6021,14 @@ struct VerifyFederationResponse {
 }
 
 async fn verify_federation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<VerifyFederationRequest>,
 ) -> Result<Json<VerifyFederationResponse>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.envelope.tenant_id != tenant_id {
+        return Err(ApiError::NotFound("federation envelope".into()));
+    }
     if body.payload_base64.len() > 16 * 1024 * 1024 {
         return Err(ApiError::PayloadTooLarge(
             "federation payload exceeds the encoded 16 MiB limit".into(),
@@ -5965,13 +6037,51 @@ async fn verify_federation(
     let payload = BASE64
         .decode(body.payload_base64)
         .map_err(|_| ApiError::InvalidArgument("payload_base64 is invalid".into()))?;
+    let peer = state
+        .federation_peers
+        .iter()
+        .find(|peer| peer.id == body.envelope.peer_id)
+        .ok_or_else(|| ApiError::Conflict("federation peer is not configured".into()))?;
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, body.envelope.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "federation execution"))?
+        .ok_or_else(|| ApiError::NotFound("federation execution".into()))?;
+    if execution.epoch != body.envelope.epoch {
+        return Err(ApiError::Conflict(
+            "federation envelope carries a stale execution epoch".into(),
+        ));
+    }
     orch8_engine::continuity_advanced::verify_federation_envelope(
-        &body.peer,
+        peer,
         &body.envelope,
         &payload,
         Utc::now(),
     )
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let envelope_sha256 = hex_sha256(
+        &serde_json::to_vec(&body.envelope)
+            .map_err(|error| ApiError::Internal(error.to_string()))?,
+    );
+    let accepted = state
+        .storage
+        .accept_federation_message(&body.envelope, &envelope_sha256, Utc::now())
+        .await
+        .map_err(|error| ApiError::from_storage(error, "federation receipt"))?;
+    if !accepted {
+        return Err(ApiError::Conflict(
+            "federation envelope was already accepted".into(),
+        ));
+    }
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "federation_received",
+        "configured-peer federation envelope accepted",
+        &body.envelope,
+    )
+    .await?;
     Ok(Json(VerifyFederationResponse { valid: true }))
 }
 
@@ -5992,6 +6102,7 @@ async fn claim_delegation(
     if body.delegation.tenant_id != tenant_id {
         return Err(ApiError::NotFound("delegation".into()));
     }
+    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
     let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
         ApiError::Unavailable(
             "device delegation is disabled without a configured engine encryption key".into(),
@@ -6030,5 +6141,74 @@ async fn claim_delegation(
             "delegation grant is expired, revoked, invalid, or already consumed".into(),
         ));
     }
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "device_delegation",
+        "destination-bound device delegation claimed",
+        &body.delegation,
+    )
+    .await?;
     Ok(Json(body.delegation))
+}
+
+async fn validate_delegation_control_plane(
+    state: &AppState,
+    tenant_id: &TenantId,
+    delegation: &DeviceDelegation,
+) -> Result<ContinuityExecution, ApiError> {
+    let execution = state
+        .storage
+        .get_continuity_execution(tenant_id, delegation.parent_continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation execution"))?
+        .ok_or_else(|| ApiError::NotFound("delegation execution".into()))?;
+    if execution.epoch != delegation.parent_epoch
+        || execution.owner_runtime_id != delegation.source_runtime_id
+    {
+        return Err(ApiError::Conflict(
+            "delegation source is not the current execution owner".into(),
+        ));
+    }
+    let capabilities = state
+        .storage
+        .list_runtime_capabilities(tenant_id, Utc::now(), 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?;
+    let source = capabilities
+        .iter()
+        .find(|capability| capability.runtime_id == delegation.source_runtime_id)
+        .ok_or_else(|| ApiError::Conflict("delegation source runtime is not reachable".into()))?;
+    let destination = capabilities
+        .iter()
+        .find(|capability| capability.runtime_id == delegation.destination_runtime_id)
+        .ok_or_else(|| {
+            ApiError::Conflict("delegation destination runtime is not reachable".into())
+        })?;
+    if source.trust < RuntimeTrustLevel::Registered
+        || destination.trust < RuntimeTrustLevel::Registered
+    {
+        return Err(ApiError::Conflict(
+            "device delegation requires registered source and destination runtimes".into(),
+        ));
+    }
+    let sub_sequence = state
+        .storage
+        .get_sequence(delegation.sub_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
+        .filter(|sequence| &sequence.tenant_id == tenant_id)
+        .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
+    let missing_handlers = sub_sequence
+        .handler_names()
+        .into_iter()
+        .filter(|handler| !destination.handlers.contains(handler))
+        .collect::<Vec<_>>();
+    if !missing_handlers.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "delegation destination lacks handlers: {}",
+            missing_handlers.join(", ")
+        )));
+    }
+    Ok(execution)
 }

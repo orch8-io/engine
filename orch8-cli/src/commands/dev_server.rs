@@ -72,6 +72,7 @@ impl DevServer {
             // command; report ready unconditionally.
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             continuity_crypto: None,
+            federation_peers: Arc::new(Vec::new()),
             continuity_lab_enabled: false,
         };
 

@@ -998,7 +998,13 @@ pub fn verify_federation_envelope(
     expected_payload: &[u8],
     now: DateTime<Utc>,
 ) -> Result<(), AdvancedContinuityError> {
-    if envelope.issued_at > now || envelope.expires_at <= now {
+    const MAX_FEDERATION_TTL_SECONDS: i64 = 300;
+    if envelope.issued_at > now
+        || envelope.expires_at <= now
+        || envelope.issued_at < now - chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS)
+        || envelope.expires_at - envelope.issued_at
+            > chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS)
+    {
         return Err(AdvancedContinuityError::FederationEnvelopeExpired);
     }
     if peer.revoked_at.is_some_and(|revoked| revoked <= now)
@@ -1047,14 +1053,22 @@ pub fn evaluate_residency(
         classification,
         DataClassification::Confidential | DataClassification::Restricted
     );
-    let (outcome, finding) = match (&destination_region, destination_trust) {
-        (None, _) if regulated => (EvidenceStatus::Fail, "DESTINATION_REGION_UNKNOWN"),
-        (None, _) => (EvidenceStatus::Unknown, "DESTINATION_REGION_UNKNOWN"),
-        (Some(region), _) if !allowed_regions.is_empty() && !allowed_regions.contains(region) => {
+    let (outcome, finding) = match (&source_region, &destination_region, destination_trust) {
+        (None, _, _) if regulated => (EvidenceStatus::Fail, "SOURCE_REGION_UNKNOWN"),
+        (Some(region), _, _)
+            if regulated && !allowed_regions.is_empty() && !allowed_regions.contains(region) =>
+        {
+            (EvidenceStatus::Fail, "SOURCE_REGION_DENIED")
+        }
+        (_, None, _) if regulated => (EvidenceStatus::Fail, "DESTINATION_REGION_UNKNOWN"),
+        (_, None, _) => (EvidenceStatus::Unknown, "DESTINATION_REGION_UNKNOWN"),
+        (_, Some(region), _)
+            if !allowed_regions.is_empty() && !allowed_regions.contains(region) =>
+        {
             (EvidenceStatus::Fail, "DESTINATION_REGION_DENIED")
         }
-        (_, None) if regulated => (EvidenceStatus::Fail, "DESTINATION_TRUST_UNKNOWN"),
-        (_, Some(trust)) if regulated && trust < RuntimeTrustLevel::Signed => {
+        (_, _, None) if regulated => (EvidenceStatus::Fail, "DESTINATION_TRUST_UNKNOWN"),
+        (_, _, Some(trust)) if regulated && trust < RuntimeTrustLevel::Signed => {
             (EvidenceStatus::Fail, "DESTINATION_TRUST_TOO_LOW")
         }
         _ => (EvidenceStatus::Pass, "RESIDENCY_POLICY_SATISFIED"),

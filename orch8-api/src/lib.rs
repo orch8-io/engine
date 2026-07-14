@@ -101,6 +101,8 @@ pub struct AppState {
     /// Stable capsule signing and destination payload keys. Absent in
     /// explicitly insecure local mode, where export/import stays disabled.
     pub continuity_crypto: Option<Arc<ContinuityCrypto>>,
+    /// Explicit operator-configured federation trust roots, keyed by peer id.
+    pub federation_peers: Arc<Vec<orch8_types::continuity_advanced::FederationPeer>>,
     /// Enables bounded fault/state-space lab endpoints. Kept off in
     /// production unless an operator explicitly opts in.
     pub continuity_lab_enabled: bool,

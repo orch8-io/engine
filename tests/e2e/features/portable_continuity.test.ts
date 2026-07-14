@@ -29,6 +29,26 @@ import type { WorkerTask } from "../types.ts";
 const client = new Orch8Client();
 const artifactDir = `/tmp/o8-continuity-e2e-${uuid().slice(0, 8)}`;
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const federationTenantId = "continuity-federation-e2e";
+const federationPeerId = uuid();
+const {
+  publicKey: federationPublicKey,
+  privateKey: federationPrivateKey,
+} = generateKeyPairSync("ed25519");
+const federationPublicDer = federationPublicKey.export({
+  format: "der",
+  type: "spki",
+});
+const federationPublicRaw = federationPublicDer.subarray(-32);
+const federationPeer = {
+  id: federationPeerId,
+  name: "e2e-peer",
+  trust_root_sha256: createHash("sha256").update(federationPublicRaw).digest("hex"),
+  public_key: federationPublicRaw.toString("base64"),
+  endpoint: "https://peer.example.invalid",
+  allowed_tenants: [federationTenantId],
+  revoked_at: null,
+};
 
 function findCliBinary(): string {
   const target = resolve(projectRoot, "target");
@@ -140,6 +160,7 @@ describe("Portable Continuity", () => {
         ORCH8_ARTIFACT_PATH: artifactDir,
         ORCH8_LOG_LEVEL: "error",
         ORCH8_CONTINUITY_LAB_ENABLED: "true",
+        ORCH8_FEDERATION_PEERS: JSON.stringify([federationPeer]),
       },
     });
   });
@@ -2100,6 +2121,159 @@ describe("Portable Continuity", () => {
     );
     assert.equal(reservations[0].state, "reconciled");
     assert.equal(reservations[0].actual.attention_units, 2);
+  });
+
+  it("derives sovereign-edge trust and accepts only configured federation peers", async () => {
+    const tenantId = federationTenantId;
+    const sourceRuntimeId = uuid();
+    const destinationRuntimeId = uuid();
+    const observedAt = Date.now();
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: cameraRuntimeCapabilities(sourceRuntimeId, observedAt, 10),
+    });
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: {
+        ...cameraRuntimeCapabilities(destinationRuntimeId, observedAt, 5),
+        kind: "desktop",
+        hardware: [],
+      },
+    });
+    const parentSequence = await client.createSequence(testSequence(
+      `sovereign-parent-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const subSequence = await client.createSequence(testSequence(
+      `sovereign-child-${uuid().slice(0, 8)}`,
+      [step("delegated", "noop")],
+      { tenantId },
+    ));
+    const instance = await client.createInstance({
+      sequence_id: parentSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: sourceRuntimeId,
+    });
+    const publicResidency = await client.evaluateContinuityResidency({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      classification: "public",
+      operation: "device_delegation",
+      destination_runtime_id: destinationRuntimeId,
+      allowed_regions: ["br-south"],
+    });
+    assert.equal(publicResidency.outcome, "pass");
+    const protectedResidency = await client.evaluateContinuityResidency({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      classification: "restricted",
+      operation: "device_delegation",
+      destination_runtime_id: destinationRuntimeId,
+      allowed_regions: ["br-south"],
+    });
+    assert.equal(protectedResidency.outcome, "fail");
+    assert.ok(protectedResidency.finding_codes.includes("DESTINATION_TRUST_TOO_LOW"));
+    await assert.rejects(
+      () => client.minimizeContinuityDisclosure({
+        classification: "restricted",
+        payload: { secret: "must-never-reach-server-minimization" },
+        allowed_top_level_fields: [],
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 400);
+        return true;
+      },
+    );
+    const grant = await client.issueContinuationGrant({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      destination_runtime_id: destinationRuntimeId,
+      subject: "device-mesh-child",
+      allowed_actions: ["accept"],
+      ttl_seconds: 60,
+    });
+    const delegation = {
+      id: uuid(),
+      tenant_id: tenantId,
+      parent_continuity_id: execution.continuity_id,
+      parent_epoch: execution.epoch,
+      source_runtime_id: sourceRuntimeId,
+      destination_runtime_id: destinationRuntimeId,
+      sub_sequence_id: subSequence.id,
+      grant_id: grant.signed_grant.grant.id,
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+    };
+    const claimed = await client.claimDeviceDelegation({
+      tenant_id: tenantId,
+      delegation,
+      signed_grant: grant.signed_grant,
+      token: grant.token,
+    });
+    assert.equal(claimed.destination_runtime_id, destinationRuntimeId);
+    await assert.rejects(
+      () => client.claimDeviceDelegation({
+        tenant_id: tenantId,
+        delegation,
+        signed_grant: grant.signed_grant,
+        token: grant.token,
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+
+    const federationPayload = Buffer.from("encrypted-artifact-reference-only");
+    const unsignedEnvelope = {
+      id: uuid(),
+      peer_id: federationPeerId,
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      epoch: execution.epoch,
+      destination_runtime_id: destinationRuntimeId,
+      payload_sha256: createHash("sha256").update(federationPayload).digest("hex"),
+      issued_at: new Date(Date.now() - 100).toISOString(),
+      expires_at: new Date(Date.now() + 30_000).toISOString(),
+      signature: "",
+    };
+    const signature = sign(
+      null,
+      Buffer.from(JSON.stringify(unsignedEnvelope)),
+      federationPrivateKey,
+    ).toString("base64");
+    const federationRequest = {
+      tenant_id: tenantId,
+      envelope: { ...unsignedEnvelope, signature },
+      payload_base64: federationPayload.toString("base64"),
+    };
+    const deliveries = await Promise.allSettled([
+      client.verifyFederationEnvelope(federationRequest),
+      client.verifyFederationEnvelope(federationRequest),
+    ]);
+    assert.equal(
+      deliveries.filter((delivery) => delivery.status === "fulfilled").length,
+      1,
+      "the durable federation inbox must admit one concurrent delivery",
+    );
+    const replay = deliveries.find(
+      (delivery): delivery is PromiseRejectedResult => delivery.status === "rejected",
+    );
+    assert.ok(replay);
+    assert.equal((replay.reason as ApiError).status, 409);
+    const provenance = await client.listContinuityProvenance(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.ok(provenance.some((entry) => entry.kind === "residency_evaluated"));
+    assert.ok(provenance.some((entry) => entry.kind === "device_delegation"));
+    assert.ok(provenance.some((entry) => entry.kind === "federation_received"));
   });
 
   it("rejects self-asserted elevated runtime trust", async () => {

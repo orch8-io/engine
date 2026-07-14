@@ -329,6 +329,22 @@ export class Orch8Client {
     );
   }
 
+  async evaluateContinuityResidency(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/residency/evaluate", req);
+  }
+
+  async minimizeContinuityDisclosure(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/disclosure/minimize", req);
+  }
+
+  async claimDeviceDelegation(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/delegations/claim", req);
+  }
+
+  async verifyFederationEnvelope(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/federation/verify", req);
+  }
+
   async verifyContinuityProvenance(
     continuityId: string,
     tenantId: string,

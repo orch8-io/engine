@@ -281,6 +281,7 @@ fn build_app_state(
                 .expect("master encryption key was validated before AppState construction"),
         ))
     };
+    let federation_peers = configured_federation_peers();
 
     AppState {
         storage,
@@ -297,9 +298,71 @@ fn build_app_state(
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
         continuity_crypto,
+        federation_peers: Arc::new(federation_peers),
         continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
     }
+}
+
+fn configured_federation_peers() -> Vec<orch8_types::continuity_advanced::FederationPeer> {
+    let Ok(encoded) = std::env::var("ORCH8_FEDERATION_PEERS") else {
+        return Vec::new();
+    };
+    match parse_federation_peers(&encoded) {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::error!(%error, "ORCH8_FEDERATION_PEERS is invalid; federation disabled");
+            Vec::new()
+        }
+    }
+}
+
+fn parse_federation_peers(
+    encoded: &str,
+) -> Result<Vec<orch8_types::continuity_advanced::FederationPeer>, String> {
+    const MAX_PEERS: usize = 128;
+    const MAX_TENANTS_PER_PEER: usize = 256;
+    let peers =
+        serde_json::from_str::<Vec<orch8_types::continuity_advanced::FederationPeer>>(encoded)
+            .map_err(|error| error.to_string())?;
+    if peers.len() > MAX_PEERS {
+        return Err(format!(
+            "at most {MAX_PEERS} federation peers may be configured"
+        ));
+    }
+    let mut ids = std::collections::HashSet::with_capacity(peers.len());
+    for peer in &peers {
+        if !ids.insert(peer.id) {
+            return Err(format!("duplicate federation peer id {}", peer.id));
+        }
+        if peer.name.is_empty() || peer.name.len() > 128 {
+            return Err(format!("federation peer {} has an invalid name", peer.id));
+        }
+        if !peer.endpoint.starts_with("https://") || peer.endpoint.len() > 2_048 {
+            return Err(format!(
+                "federation peer {} requires a bounded HTTPS endpoint",
+                peer.id
+            ));
+        }
+        if peer.allowed_tenants.is_empty() || peer.allowed_tenants.len() > MAX_TENANTS_PER_PEER {
+            return Err(format!(
+                "federation peer {} has an invalid tenant allowlist",
+                peer.id
+            ));
+        }
+        if peer.trust_root_sha256.len() != 64
+            || !peer
+                .trust_root_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "federation peer {} has an invalid trust-root digest",
+                peer.id
+            ));
+        }
+    }
+    Ok(peers)
 }
 
 fn validate_auth_config(
@@ -978,6 +1041,30 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn federation_peer_configuration_fails_closed_on_ambiguous_identity() {
+        let peer = serde_json::json!({
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "name": "peer-a",
+            "trust_root_sha256": "a".repeat(64),
+            "public_key": "unused-at-configuration-time",
+            "endpoint": "https://peer.example",
+            "allowed_tenants": ["tenant-a"],
+            "revoked_at": null
+        });
+        assert_eq!(
+            parse_federation_peers(&serde_json::to_string(&[&peer]).unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        let duplicate = serde_json::to_string(&[&peer, &peer]).unwrap();
+        assert!(parse_federation_peers(&duplicate).is_err());
+        let mut insecure = peer;
+        insecure["endpoint"] = serde_json::json!("http://peer.example");
+        assert!(parse_federation_peers(&serde_json::to_string(&[insecure]).unwrap()).is_err());
+    }
 
     /// Endpoint set/unset env parsing in ONE test: `std::env` is process-global
     /// and tests run in parallel, so splitting these into separate tests would

@@ -987,6 +987,25 @@ CREATE TABLE IF NOT EXISTS budget_reservations (
 CREATE INDEX IF NOT EXISTS idx_budget_reservations_active
     ON budget_reservations(tenant_id, continuity_id, epoch) WHERE state = 'reserved';
 
+CREATE TABLE IF NOT EXISTS federation_receipts (
+    tenant_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch >= 0),
+    envelope_sha256 TEXT NOT NULL CHECK(length(envelope_sha256) = 64),
+    accepted_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    record TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, peer_id, message_id),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_federation_receipts_continuity
+    ON federation_receipts(tenant_id, continuity_id, epoch, accepted_at);
+CREATE INDEX IF NOT EXISTS idx_federation_receipts_expiry
+    ON federation_receipts(expires_at);
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -1000,4 +1019,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 33;
+pub(super) const SCHEMA_VERSION: i64 = 34;

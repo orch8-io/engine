@@ -1748,6 +1748,7 @@ fn report_contains_all_checks_in_stable_order() {
             "lint_clean",
             "input_schema_valid",
             "output_schemas_valid",
+            "typed_dataflow_compatible",
             "when_guards_valid",
             "handlers_have_workers",
             "plugins_enabled",

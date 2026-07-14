@@ -1,3 +1,4 @@
+-- Revert the portable-continuity foundation tables.
 DROP TABLE IF EXISTS provenance_entries;
 DROP TABLE IF EXISTS effect_receipts;
 DROP TABLE IF EXISTS runtime_capabilities;

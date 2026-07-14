@@ -21,8 +21,8 @@ use orch8_types::continuity::{
     PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::continuity_advanced::{
-    AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, InvariantResult,
-    WorkflowInvariant,
+    AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, FederationEnvelope,
+    InvariantResult, WorkflowInvariant,
 };
 use orch8_types::cron::CronSchedule;
 pub use orch8_types::dedupe::DedupeScope;
@@ -2654,6 +2654,18 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<ProvenanceEntry>, StorageError>;
+
+    /// Persist a verified federation message exactly once.
+    ///
+    /// Returns `false` when the peer/message tuple was already retained. The
+    /// uniqueness constraint is the replay boundary; callers must verify the
+    /// signature and epoch before invoking this method.
+    async fn accept_federation_message(
+        &self,
+        envelope: &FederationEnvelope,
+        envelope_sha256: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
 
     async fn save_incident_reproduction(
         &self,

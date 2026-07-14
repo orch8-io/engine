@@ -11,7 +11,8 @@ use orch8_types::continuity::{
     RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::continuity_advanced::{
-    CompensationRunId, CompensationRunRecord, LiveMigrationRecord, MigrationPlanId,
+    CompensationRunId, CompensationRunRecord, FederationEnvelope, LiveMigrationRecord,
+    MigrationPlanId,
 };
 use orch8_types::dlq::DlqIncidentReproduction;
 use orch8_types::error::StorageError;
@@ -520,9 +521,10 @@ impl crate::ContinuityStore for PostgresStorage {
     }
 
     async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO execution_capsules (id, continuity_id, tenant_id, expires_at, manifest)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(manifest.capsule_id.into_uuid())
         .bind(manifest.continuity_id.into_uuid())
@@ -532,6 +534,17 @@ impl crate::ContinuityStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
+        if result.rows_affected() == 0
+            && self
+                .get_capsule_manifest(&manifest.tenant_id, manifest.capsule_id)
+                .await?
+                .as_ref()
+                != Some(manifest)
+        {
+            return Err(StorageError::Query(
+                "capsule id is already bound to a different manifest".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -989,6 +1002,39 @@ impl crate::ContinuityStore for PostgresStorage {
         rows.into_iter()
             .map(|row| decode(row.get("record")))
             .collect()
+    }
+
+    async fn accept_federation_message(
+        &self,
+        envelope: &FederationEnvelope,
+        envelope_sha256: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        sqlx::query("DELETE FROM federation_receipts WHERE expires_at <= $1")
+            .bind(accepted_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let result = sqlx::query(
+            "INSERT INTO federation_receipts
+             (tenant_id, peer_id, message_id, continuity_id, epoch, envelope_sha256,
+              accepted_at, expires_at, record)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (tenant_id, peer_id, message_id) DO NOTHING",
+        )
+        .bind(envelope.tenant_id.as_str())
+        .bind(envelope.peer_id.into_uuid())
+        .bind(envelope.id.into_uuid())
+        .bind(envelope.continuity_id.into_uuid())
+        .bind(to_i64(envelope.epoch.get(), "federation epoch")?)
+        .bind(envelope_sha256)
+        .bind(accepted_at)
+        .bind(envelope.expires_at)
+        .bind(encode(envelope)?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
     }
 
     async fn save_incident_reproduction(

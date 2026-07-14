@@ -11,7 +11,8 @@ use orch8_types::continuity::{
     RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::continuity_advanced::{
-    CompensationRunId, CompensationRunRecord, LiveMigrationRecord, MigrationPlanId,
+    CompensationRunId, CompensationRunRecord, FederationEnvelope, LiveMigrationRecord,
+    MigrationPlanId,
 };
 use orch8_types::dlq::DlqIncidentReproduction;
 use orch8_types::error::StorageError;
@@ -526,9 +527,10 @@ impl crate::ContinuityStore for SqliteStorage {
     }
 
     async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError> {
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO execution_capsules (id, continuity_id, tenant_id, expires_at, manifest)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
         )
         .bind(manifest.capsule_id.to_string())
         .bind(manifest.continuity_id.to_string())
@@ -538,6 +540,17 @@ impl crate::ContinuityStore for SqliteStorage {
         .execute(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
+        if result.rows_affected() == 0
+            && self
+                .get_capsule_manifest(&manifest.tenant_id, manifest.capsule_id)
+                .await?
+                .as_ref()
+                != Some(manifest)
+        {
+            return Err(StorageError::Query(
+                "capsule id is already bound to a different manifest".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -1008,6 +1021,38 @@ impl crate::ContinuityStore for SqliteStorage {
         rows.into_iter()
             .map(|row| decode(&row.get::<String, _>("record")))
             .collect()
+    }
+
+    async fn accept_federation_message(
+        &self,
+        envelope: &FederationEnvelope,
+        envelope_sha256: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        sqlx::query("DELETE FROM federation_receipts WHERE expires_at <= ?")
+            .bind(accepted_at.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO federation_receipts
+             (tenant_id, peer_id, message_id, continuity_id, epoch, envelope_sha256,
+              accepted_at, expires_at, record)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(envelope.tenant_id.as_str())
+        .bind(envelope.peer_id.to_string())
+        .bind(envelope.id.to_string())
+        .bind(envelope.continuity_id.to_string())
+        .bind(to_i64(envelope.epoch.get(), "federation epoch")?)
+        .bind(envelope_sha256)
+        .bind(accepted_at.to_rfc3339())
+        .bind(envelope.expires_at.to_rfc3339())
+        .bind(encode(envelope)?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
     }
 
     async fn save_incident_reproduction(
