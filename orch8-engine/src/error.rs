@@ -25,6 +25,7 @@ pub enum EngineError {
         block_id: BlockId,
         message: String,
         retryable: bool,
+        details: Option<serde_json::Value>,
     },
 
     #[error("step timed out: {block_id} after {timeout:?}")]
@@ -93,6 +94,7 @@ impl EngineError {
                 message: format!("step timed out after {timeout:?}"),
                 block_id,
                 retryable: true,
+                details: None,
             },
             other => other,
         }
@@ -154,6 +156,7 @@ mod tests {
             block_id: BlockId::new("b1"),
             message: "boom".into(),
             retryable: true,
+            details: None,
         };
         let msg = err.to_string();
         assert!(msg.contains("b1"));
@@ -221,6 +224,7 @@ mod tests {
                 block_id,
                 retryable,
                 message,
+                ..
             } => {
                 assert_eq!(got_id, instance_id);
                 assert_eq!(block_id.as_str(), "slow");
@@ -241,6 +245,7 @@ mod tests {
             block_id: BlockId::new("b"),
             message: "permanent".into(),
             retryable: false,
+            details: None,
         };
         let normalized = err.normalize_timeout_as_retryable(instance_id);
         assert!(matches!(

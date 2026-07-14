@@ -111,6 +111,8 @@ fn seq_14_retry_policy_validation_via_sequence() {
             initial_backoff: Duration::from_secs(60),
             max_backoff: Duration::from_secs(5),
             backoff_multiplier: 2.0,
+            retry_if: None,
+            non_retryable_codes: None,
         });
     }
     let seq = make_seq(vec![s]);
@@ -127,6 +129,8 @@ fn seq_15_retry_policy_rejects_zero_multiplier() {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
             backoff_multiplier: 0.0,
+            retry_if: None,
+            non_retryable_codes: None,
         });
     }
     let seq = make_seq(vec![s]);

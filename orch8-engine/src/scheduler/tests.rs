@@ -278,6 +278,8 @@ async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
         initial_backoff: std::time::Duration::from_millis(0),
         max_backoff: std::time::Duration::from_millis(0),
         backoff_multiplier: 1.0,
+        retry_if: None,
+        non_retryable_codes: None,
     });
 
     let mut registry = HandlerRegistry::new();

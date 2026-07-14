@@ -793,6 +793,7 @@ pub(super) async fn execute_step_block(
         Err(EngineError::StepFailed {
             retryable: true,
             ref message,
+            ref details,
             ..
         }) => {
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
@@ -871,6 +872,7 @@ pub(super) async fn execute_step_block(
                 attempt,
                 webhook_config,
                 message,
+                details.as_ref(),
                 cancel,
                 clock,
             )
@@ -925,6 +927,50 @@ pub(super) async fn execute_step_block(
     }
 }
 
+/// Transition the instance to `Failed`, emit the standard `instance.failed`
+/// webhook (carrying `error`/`attempts`/`block_id`), and wake the parent
+/// instance if this is a child. Shared by every terminal-failure exit of
+/// [`handle_retryable_failure`] — max-attempts exhausted and a `retry_if`/
+/// `non_retryable_codes` denial both end here with the same payload shape.
+async fn fail_retryable_instance(
+    storage: &dyn StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    step_def: &orch8_types::sequence::StepDef,
+    attempt: u32,
+    webhook_config: &WebhookConfig,
+    message: &str,
+    cancel: &CancellationToken,
+) -> Result<(), EngineError> {
+    let instance_id = instance.id;
+    crate::lifecycle::transition_instance(
+        storage,
+        instance_id,
+        Some(&instance.tenant_id),
+        InstanceState::Running,
+        InstanceState::Failed,
+        None,
+    )
+    .await?;
+
+    crate::webhooks::emit(
+        webhook_config,
+        &crate::webhooks::instance_event(
+            "instance.failed",
+            instance_id,
+            serde_json::json!({
+                "error": message,
+                "attempts": attempt,
+                "block_id": step_def.id.as_str(),
+            }),
+        ),
+        cancel,
+    );
+
+    wake_parent_if_child(storage, instance).await;
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_retryable_failure(
     storage: &dyn StorageBackend,
@@ -933,6 +979,7 @@ pub(super) async fn handle_retryable_failure(
     attempt: u32,
     webhook_config: &WebhookConfig,
     message: &str,
+    details: Option<&serde_json::Value>,
     cancel: &CancellationToken,
     clock: &SharedClock,
 ) -> Result<(), EngineError> {
@@ -947,34 +994,43 @@ pub(super) async fn handle_retryable_failure(
                 max_attempts = retry.max_attempts,
                 "max retry attempts exhausted, failing instance"
             );
-
-            crate::lifecycle::transition_instance(
+            fail_retryable_instance(
                 storage,
-                instance_id,
-                Some(&instance.tenant_id),
-                InstanceState::Running,
-                InstanceState::Failed,
-                None,
+                instance,
+                step_def,
+                attempt,
+                webhook_config,
+                message,
+                cancel,
             )
             .await?;
+            return Ok(());
+        }
 
-            crate::webhooks::emit(
-                webhook_config,
-                &crate::webhooks::instance_event(
-                    "instance.failed",
-                    instance_id,
-                    serde_json::json!({
-                        "error": message,
-                        "attempts": attempt,
-                        "block_id": step_def.id.as_str(),
-                    }),
-                ),
-                cancel,
+        if !crate::handlers::step::should_retry(
+            retry,
+            message,
+            details,
+            &instance.context,
+            &serde_json::Value::Null,
+        ) {
+            warn!(
+                instance_id = %instance_id,
+                block_id = %step_def.id,
+                attempt = attempt,
+                message = %message,
+                "retry_if / non_retryable_codes denied retry, failing instance"
             );
-
-            // Wake parent: max retries exhausted -> terminal Failed.
-            wake_parent_if_child(storage, instance).await;
-
+            fail_retryable_instance(
+                storage,
+                instance,
+                step_def,
+                attempt,
+                webhook_config,
+                message,
+                cancel,
+            )
+            .await?;
             return Ok(());
         }
 

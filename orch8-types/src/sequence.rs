@@ -501,6 +501,10 @@ pub struct RetryPolicy {
     pub max_backoff: Duration,
     #[serde(default = "default_backoff_multiplier")]
     pub backoff_multiplier: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_if: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_retryable_codes: Option<Vec<String>>,
 }
 
 const fn default_backoff_multiplier() -> f64 {
@@ -897,6 +901,19 @@ fn validate_step(
             return Err(block_err(
                 id,
                 "retry.initial_backoff must be <= retry.max_backoff",
+            ));
+        }
+        if let Some(expr) = &retry.retry_if
+            && expr.trim().is_empty()
+        {
+            return Err(block_err(id, "retry.retry_if must not be empty"));
+        }
+        if let Some(codes) = &retry.non_retryable_codes
+            && codes.iter().any(|c| c.trim().is_empty())
+        {
+            return Err(block_err(
+                id,
+                "retry.non_retryable_codes must not contain empty strings",
             ));
         }
     }
@@ -2220,6 +2237,8 @@ mod tests {
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(10),
                 backoff_multiplier: 2.0,
+                retry_if: None,
+                non_retryable_codes: None,
             });
         }
         let seq = sample_seq(vec![s]);
@@ -2236,6 +2255,8 @@ mod tests {
                 initial_backoff: Duration::from_secs(60),
                 max_backoff: Duration::from_secs(10),
                 backoff_multiplier: 2.0,
+                retry_if: None,
+                non_retryable_codes: None,
             });
         }
         let seq = sample_seq(vec![s]);
@@ -2300,6 +2321,8 @@ mod tests {
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(30),
                 backoff_multiplier: 2.0,
+                retry_if: None,
+                non_retryable_codes: None,
             });
         }
         let seq = sample_seq(vec![s]);

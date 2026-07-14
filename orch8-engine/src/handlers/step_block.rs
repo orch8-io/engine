@@ -543,6 +543,7 @@ pub async fn execute_step_node(
         Err(EngineError::StepFailed {
             retryable: true,
             ref message,
+            ref details,
             ..
         }) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
@@ -599,6 +600,23 @@ pub async fn execute_step_node(
                         max_attempts = retry.max_attempts,
                         message = %message,
                         "tree path: max retry attempts exhausted, failing node"
+                    );
+                    evaluator::fail_node(storage.as_ref(), node.id).await?;
+                    return Ok(false);
+                }
+                if !crate::handlers::step::should_retry(
+                    retry,
+                    message,
+                    details.as_ref(),
+                    &instance.context,
+                    &serde_json::Value::Null,
+                ) {
+                    tracing::warn!(
+                        instance_id = %instance.id,
+                        block_id = %step_def.id,
+                        attempt,
+                        message = %message,
+                        "tree path: retry_if / non_retryable_codes denied retry, failing node"
                     );
                     evaluator::fail_node(storage.as_ref(), node.id).await?;
                     return Ok(false);

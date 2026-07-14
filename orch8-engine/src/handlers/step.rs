@@ -73,6 +73,7 @@ fn validate_output_schema(
                 block_id: block_id.clone(),
                 message: format!("output_schema is not a valid JSON Schema: {e}"),
                 retryable: false,
+                details: None,
             });
         }
     };
@@ -98,6 +99,7 @@ fn validate_output_schema(
                 errors.join("; ")
             ),
             retryable: false,
+            details: None,
         })
     }
 }
@@ -503,19 +505,87 @@ async fn maybe_externalize(
 
 fn map_step_error(err: StepError, instance_id: InstanceId, block_id: &BlockId) -> EngineError {
     match err {
-        StepError::Retryable { message, .. } => EngineError::StepFailed {
+        StepError::Retryable { message, details } => EngineError::StepFailed {
             instance_id,
             block_id: block_id.clone(),
             message,
             retryable: true,
+            details,
         },
-        StepError::Permanent { message, .. } => EngineError::StepFailed {
+        StepError::Permanent { message, details } => EngineError::StepFailed {
             instance_id,
             block_id: block_id.clone(),
             message,
             retryable: false,
+            details,
         },
     }
+}
+
+/// Evaluate the conditional retry policy (`retry_if` / `non_retryable_codes`)
+/// against the current error. Returns `true` if the retry should proceed,
+/// `false` if the error should be treated as permanent.
+pub fn should_retry(
+    retry: &orch8_types::sequence::RetryPolicy,
+    error_message: &str,
+    error_details: Option<&serde_json::Value>,
+    context: &orch8_types::context::ExecutionContext,
+    outputs: &serde_json::Value,
+) -> bool {
+    if let Some(codes) = &retry.non_retryable_codes
+        && let Some(details) = error_details
+    {
+        // Handlers vary in what they call the discriminator: HTTP-based
+        // handlers (`http_request`, ActivePieces sidecar) set a numeric
+        // `status`, while others may set a string `error_code`/`code`.
+        // Check all three so `non_retryable_codes: ["404", "429"]`
+        // matches an HTTP handler's `details.status` without requiring
+        // every handler to also duplicate it under `error_code`.
+        let candidates = [
+            details.get("error_code"),
+            details.get("code"),
+            details.get("status"),
+        ];
+        let matched = candidates.into_iter().flatten().any(|v| {
+            if let Some(s) = v.as_str() {
+                codes.iter().any(|c| c == s)
+            } else {
+                let as_str = v.to_string();
+                codes.iter().any(|c| c == &as_str)
+            }
+        });
+        if matched {
+            return false;
+        }
+    }
+
+    if let Some(expr) = &retry.retry_if {
+        let mut eval_ctx = context.clone();
+        let error_obj = match error_details {
+            Some(d) => serde_json::json!({
+                "message": error_message,
+                "details": d,
+            }),
+            None => serde_json::json!({
+                "message": error_message,
+            }),
+        };
+        // `context.data` defaults to `Value::Null` and is not guaranteed to be
+        // an object (a caller can supply any JSON value as instance context),
+        // so coerce non-object data into an empty object before merging in
+        // `_error` rather than risking a panic on `.as_object_mut()`.
+        if !eval_ctx.data.is_object() {
+            eval_ctx.data = serde_json::json!({});
+        }
+        eval_ctx
+            .data
+            .as_object_mut()
+            .expect("just coerced to an object above")
+            .insert("_error".into(), error_obj);
+        return crate::expression::evaluate_condition(expr, &eval_ctx, outputs);
+    }
+
+    true
 }
 
 /// Calculate the backoff duration for a given retry attempt.
@@ -809,5 +879,189 @@ mod tests {
             fields.get("instance_id").cloned(),
             Some(instance_id.to_string())
         );
+    }
+
+    // --- should_retry (conditional retry policies) ---
+
+    fn base_retry() -> orch8_types::sequence::RetryPolicy {
+        orch8_types::sequence::RetryPolicy {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(10),
+            backoff_multiplier: 2.0,
+            retry_if: None,
+            non_retryable_codes: None,
+        }
+    }
+
+    fn empty_context() -> orch8_types::context::ExecutionContext {
+        orch8_types::context::ExecutionContext::default()
+    }
+
+    #[test]
+    fn should_retry_true_when_no_conditions_configured() {
+        let retry = base_retry();
+        assert!(should_retry(
+            &retry,
+            "boom",
+            None,
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_true_when_retry_if_evaluates_truthy() {
+        let mut retry = base_retry();
+        retry.retry_if = Some("contains(_error.message, \"timeout\")".into());
+        assert!(should_retry(
+            &retry,
+            "connection timeout",
+            None,
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_false_when_retry_if_evaluates_falsy() {
+        let mut retry = base_retry();
+        retry.retry_if = Some("contains(_error.message, \"timeout\")".into());
+        assert!(!should_retry(
+            &retry,
+            "permission denied",
+            None,
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_retry_if_sees_error_details() {
+        let mut retry = base_retry();
+        retry.retry_if = Some("_error.details.status == 503".into());
+        let details = serde_json::json!({"status": 503});
+        assert!(should_retry(
+            &retry,
+            "service unavailable",
+            Some(&details),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+
+        let details_ok = serde_json::json!({"status": 400});
+        assert!(!should_retry(
+            &retry,
+            "bad request",
+            Some(&details_ok),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_retry_if_sees_instance_data() {
+        let mut retry = base_retry();
+        retry.retry_if = Some("data.allow_retry == true".into());
+        let mut ctx = empty_context();
+        ctx.data = serde_json::json!({"allow_retry": true});
+        assert!(should_retry(
+            &retry,
+            "boom",
+            None,
+            &ctx,
+            &serde_json::Value::Null,
+        ));
+
+        ctx.data = serde_json::json!({"allow_retry": false});
+        assert!(!should_retry(
+            &retry,
+            "boom",
+            None,
+            &ctx,
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_non_object_context_data_does_not_panic() {
+        let mut retry = base_retry();
+        retry.retry_if = Some("contains(_error.message, \"x\")".into());
+        let mut ctx = empty_context();
+        ctx.data = serde_json::Value::String("not an object".into());
+        // Must not panic even though context.data isn't an object.
+        let _ = should_retry(&retry, "xyz", None, &ctx, &serde_json::Value::Null);
+    }
+
+    #[test]
+    fn should_retry_false_when_error_code_in_non_retryable_list() {
+        let mut retry = base_retry();
+        retry.non_retryable_codes = Some(vec!["INVALID_INPUT".into(), "AUTH_FAILED".into()]);
+        let details = serde_json::json!({"error_code": "AUTH_FAILED"});
+        assert!(!should_retry(
+            &retry,
+            "unauthorized",
+            Some(&details),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_true_when_error_code_not_in_non_retryable_list() {
+        let mut retry = base_retry();
+        retry.non_retryable_codes = Some(vec!["INVALID_INPUT".into()]);
+        let details = serde_json::json!({"error_code": "RATE_LIMITED"});
+        assert!(should_retry(
+            &retry,
+            "too many requests",
+            Some(&details),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_non_retryable_codes_checks_code_alias() {
+        let mut retry = base_retry();
+        retry.non_retryable_codes = Some(vec!["FATAL".into()]);
+        let details = serde_json::json!({"code": "FATAL"});
+        assert!(!should_retry(
+            &retry,
+            "unrecoverable",
+            Some(&details),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_non_retryable_codes_with_no_details_falls_through() {
+        let mut retry = base_retry();
+        retry.non_retryable_codes = Some(vec!["FATAL".into()]);
+        // No details supplied — the denylist can't match, so retry proceeds.
+        assert!(should_retry(
+            &retry,
+            "unrecoverable",
+            None,
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
+    }
+
+    #[test]
+    fn should_retry_non_retryable_codes_wins_over_retry_if() {
+        let mut retry = base_retry();
+        retry.non_retryable_codes = Some(vec!["FATAL".into()]);
+        // retry_if alone would say "retry", but the denylist takes priority.
+        retry.retry_if = Some("true".into());
+        let details = serde_json::json!({"error_code": "FATAL"});
+        assert!(!should_retry(
+            &retry,
+            "unrecoverable",
+            Some(&details),
+            &empty_context(),
+            &serde_json::Value::Null,
+        ));
     }
 }

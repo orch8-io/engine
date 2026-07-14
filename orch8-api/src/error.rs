@@ -254,6 +254,7 @@ mod tests {
             block_id: orch8_types::ids::BlockId::new("b"),
             message: "boom".into(),
             retryable: false,
+            details: None,
         }
         .into();
         assert_eq!(status_of(err), StatusCode::INTERNAL_SERVER_ERROR);

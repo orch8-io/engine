@@ -804,6 +804,8 @@ async fn retry_with_timeout_per_step() {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 1.0,
+            retry_if: None,
+            non_retryable_codes: None,
         }),
         timeout: Some(Duration::from_secs(5)),
         rate_limit_key: None,

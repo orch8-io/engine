@@ -52,6 +52,8 @@ const fn mk_retry(max_attempts: u32) -> RetryPolicy {
         initial_backoff: StdDuration::from_millis(50),
         max_backoff: StdDuration::from_secs(5),
         backoff_multiplier: 2.0,
+        retry_if: None,
+        non_retryable_codes: None,
     }
 }
 

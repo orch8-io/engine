@@ -271,6 +271,7 @@ pub(super) async fn dispatch_block(
                             "sub-sequence spawn depth exceeds the maximum of {MAX_SUB_SEQUENCE_DEPTH}"
                         ),
                         retryable: false,
+                        details: None,
                     });
                 }
 
@@ -288,6 +289,7 @@ pub(super) async fn dispatch_block(
                         block_id: ss_def.id.clone(),
                         message: format!("sub-sequence '{}' not found", ss_def.sequence_name),
                         retryable: false,
+                        details: None,
                     })?;
 
                 let now = chrono::Utc::now();
