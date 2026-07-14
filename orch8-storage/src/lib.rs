@@ -2545,6 +2545,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         id: CapsuleId,
     ) -> Result<Option<CapsuleManifest>, StorageError>;
 
+    /// Idempotently import a capsule by atomically claiming the destination,
+    /// creating its paused local instance, and storing its checkpoint.
+    async fn import_capsule_instance(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance: &TaskInstance,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError>;
+
     async fn upsert_runtime_capabilities(
         &self,
         tenant_id: &TenantId,

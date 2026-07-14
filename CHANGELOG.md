@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Crash-safe capsule redelivery**: capsule import now claims its `(tenant, capsule, destination runtime)` identity, creates the paused destination instance, and persists its checkpoint in one database transaction. Redelivery returns the original imported instance instead of creating duplicates, while encrypted-storage decorators preserve field encryption across the atomic path. PostgreSQL migration `060_capsule_import_idempotency.sql` and SQLite schema v26 add the durable import ledger; the encrypted capsule integration test now covers idempotent redelivery.
+
 - **Cross-crate failure propagation**: historical release validation, DLQ grouping, and `{{ state.* }}` template resolution now surface backend failures instead of treating missing evidence/state as an empty successful result. Mobile dedup lookup failures no longer fall through to creating a duplicate workflow, and mobile sync aborts a cycle when its local outbox cannot be read rather than sending a partial request.
 - **Shutdown and cleanup observability**: server, facade-engine, and mobile lifecycle shutdown/cleanup paths now report failed background tasks and persisted dedup cleanup errors instead of silently discarding them.
 - **Workbench evidence fails closed**: execution views, run comparisons, and fork previews now propagate storage failures instead of silently converting them into empty trees, outputs, logs, or audit trails that could produce false operator conclusions.

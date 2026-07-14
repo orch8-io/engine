@@ -57,6 +57,8 @@ pub enum CapsuleServiceError {
     MissingCheckpoint,
     #[error("sequence referenced by the capsule is unavailable")]
     MissingSequence,
+    #[error("capsule import record references an unavailable instance")]
+    MissingImportedInstance,
     #[error("capsule payload exceeds the protocol byte limit")]
     PayloadTooLarge,
     #[error("capsule artifact is missing")]
@@ -305,7 +307,7 @@ pub async fn verify_and_import_paused_capsule(
         return Err(CapsuleServiceError::PayloadIdentityMismatch);
     }
     let now = request.now;
-    let imported = TaskInstance {
+    let candidate = TaskInstance {
         id: InstanceId::new(),
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),
@@ -325,14 +327,27 @@ pub async fn verify_and_import_paused_capsule(
         created_at: now,
         updated_at: now,
     };
-    storage.create_instance(&imported).await?;
-    storage
-        .save_checkpoint(&orch8_types::checkpoint::Checkpoint {
-            id: uuid::Uuid::now_v7(),
-            instance_id: imported.id,
-            checkpoint_data: payload.checkpoint.checkpoint_data.clone(),
-            created_at: now,
-        })
+    let checkpoint = orch8_types::checkpoint::Checkpoint {
+        id: uuid::Uuid::now_v7(),
+        instance_id: candidate.id,
+        checkpoint_data: payload.checkpoint.checkpoint_data.clone(),
+        created_at: now,
+    };
+    let imported_id = storage
+        .import_capsule_instance(
+            signed.manifest.capsule_id,
+            request.destination_runtime_id,
+            &candidate,
+            &checkpoint,
+        )
         .await?;
+    let imported = if imported_id == candidate.id {
+        candidate
+    } else {
+        storage
+            .get_instance(imported_id)
+            .await?
+            .ok_or(CapsuleServiceError::MissingImportedInstance)?
+    };
     Ok((imported, payload))
 }

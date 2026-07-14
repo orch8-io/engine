@@ -114,6 +114,30 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
             .is_some()
     );
 
+    let (redelivered, redelivered_payload) = verify_and_import_paused_capsule(
+        destination.as_ref(),
+        &signed,
+        CapsuleImportRequest {
+            tenant_id: &instance.tenant_id,
+            destination_runtime_id: destination_runtime,
+            expected_epoch: ExecutionEpoch::initial(),
+            trusted_public_keys: &trusted,
+            now: Utc::now(),
+        },
+        &encryptor,
+    )
+    .await
+    .unwrap();
+    assert_eq!(redelivered.id, imported.id);
+    assert_eq!(
+        redelivered_payload.checkpoint.checkpoint_data,
+        payload.checkpoint.checkpoint_data
+    );
+    assert_eq!(
+        redelivered_payload.instance.sequence_id,
+        payload.instance.sequence_id
+    );
+
     let wrong_destination = verify_and_import_paused_capsule(
         destination.as_ref(),
         &signed,

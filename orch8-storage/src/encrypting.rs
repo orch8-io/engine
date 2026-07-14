@@ -518,6 +518,14 @@ passthrough_impl! {
         async fn resume_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, resumed_handoff: &orch8_types::continuity::ExecutionHandoff, destination_instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &orch8_types::continuity::CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::CapsuleId) -> Result<Option<orch8_types::continuity::CapsuleManifest>, StorageError>;
+        async fn import_capsule_instance(&self, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance: &orch8_types::instance::TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<orch8_types::ids::InstanceId, StorageError> {
+            let encrypted_instance = self.encrypt_instance(instance)?;
+            let mut encrypted_checkpoint = checkpoint.clone();
+            if !FieldEncryptor::is_encrypted(&encrypted_checkpoint.checkpoint_data) {
+                encrypted_checkpoint.checkpoint_data = self.encrypt_json_value(&encrypted_checkpoint.checkpoint_data)?;
+            }
+            self.inner.import_capsule_instance(capsule_id, destination_runtime_id, encrypted_instance.as_ref(), &encrypted_checkpoint).await
+        }
         async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;
         async fn list_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, observed_after: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::RuntimeCapabilities>, StorageError>;
         async fn create_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<(), StorageError>;

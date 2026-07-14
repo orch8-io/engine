@@ -11,6 +11,7 @@ use orch8_types::continuity::{
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
+use orch8_types::instance::TaskInstance;
 
 use super::SqliteStorage;
 
@@ -406,6 +407,78 @@ impl crate::ContinuityStore for SqliteStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(&row.get::<String, _>("manifest")))
             .transpose()
+    }
+
+    async fn import_capsule_instance(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance: &TaskInstance,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let claim = sqlx::query(
+            "INSERT OR IGNORE INTO capsule_imports
+             (tenant_id,capsule_id,destination_runtime_id,instance_id,imported_at)
+             VALUES (?,?,?,?,?)",
+        )
+        .bind(instance.tenant_id.as_str())
+        .bind(capsule_id.to_string())
+        .bind(destination_runtime_id.to_string())
+        .bind(instance.id.to_string())
+        .bind(instance.created_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        if claim.rows_affected() == 0 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            let row = sqlx::query(
+                "SELECT instance_id FROM capsule_imports
+                 WHERE tenant_id=? AND capsule_id=? AND destination_runtime_id=?",
+            )
+            .bind(instance.tenant_id.as_str())
+            .bind(capsule_id.to_string())
+            .bind(destination_runtime_id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+            let id = row
+                .get::<String, _>("instance_id")
+                .parse::<uuid::Uuid>()
+                .map(InstanceId::from_uuid)
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(id);
+        }
+        super::instances::bind_instance_insert(
+            sqlx::query(super::instances::INSTANCE_INSERT_SQL),
+            instance,
+        )?
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
+             VALUES (?,?,?,?)",
+        )
+        .bind(checkpoint.id.to_string())
+        .bind(checkpoint.instance_id.to_string())
+        .bind(serde_json::to_string(&checkpoint.checkpoint_data)?)
+        .bind(checkpoint.created_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(instance.id)
     }
 
     async fn upsert_runtime_capabilities(

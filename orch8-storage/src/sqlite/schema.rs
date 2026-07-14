@@ -704,6 +704,18 @@ CREATE TABLE IF NOT EXISTS execution_capsules (
         REFERENCES continuity_executions(tenant_id, continuity_id)
 );
 
+CREATE TABLE IF NOT EXISTS capsule_imports (
+    tenant_id TEXT NOT NULL,
+    capsule_id TEXT NOT NULL,
+    destination_runtime_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, capsule_id, destination_runtime_id),
+    UNIQUE (instance_id)
+);
+CREATE INDEX IF NOT EXISTS idx_capsule_imports_instance
+    ON capsule_imports(tenant_id, instance_id);
+
 CREATE TABLE IF NOT EXISTS runtime_capabilities (
     tenant_id TEXT NOT NULL,
     runtime_id TEXT NOT NULL,
@@ -910,4 +922,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 25;
+pub(super) const SCHEMA_VERSION: i64 = 26;
