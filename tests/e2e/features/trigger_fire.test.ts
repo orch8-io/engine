@@ -72,10 +72,8 @@ describe("Trigger Fire", () => {
       secret,
     });
 
-    // Webhook endpoint requires x-trigger-secret header.
-    const result = await client.fireWebhook(slug, { via: "webhook" }, {
-      "x-trigger-secret": secret,
-    });
+    // Webhook endpoint requires an HMAC signature over the configured secret.
+    const result = await client.fireWebhook(slug, { via: "webhook" }, {}, secret);
     const instanceId = (result as any).instance_id ?? (result as any).id;
     assert.ok(instanceId, "webhook fire should return instance id");
 

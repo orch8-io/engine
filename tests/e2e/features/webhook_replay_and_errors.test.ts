@@ -38,9 +38,7 @@ describe("Webhook Replay and Errors", () => {
       secret,
     });
 
-    const result = await client.fireWebhook(slug, { ok: true }, {
-      "x-trigger-secret": secret,
-    });
+    const result = await client.fireWebhook(slug, { ok: true }, {}, secret);
     assert.ok((result as any).instance_id, "should return instance_id");
   });
 
@@ -63,7 +61,6 @@ describe("Webhook Replay and Errors", () => {
 
     try {
       await client.fireWebhook(slug, { ok: true }, {
-        "x-trigger-secret": secret,
         "x-trigger-timestamp": "",
         "x-trigger-nonce": "nonce",
       });
@@ -92,7 +89,6 @@ describe("Webhook Replay and Errors", () => {
 
     try {
       await client.fireWebhook(slug, { ok: true }, {
-        "x-trigger-secret": secret,
         "x-trigger-timestamp": String(Math.floor(Date.now() / 1000)),
         "x-trigger-nonce": "",
       });
@@ -122,7 +118,6 @@ describe("Webhook Replay and Errors", () => {
     const expired = String(Math.floor(Date.now() / 1000) - 400); // > 300s window
     try {
       await client.fireWebhook(slug, { ok: true }, {
-        "x-trigger-secret": secret,
         "x-trigger-timestamp": expired,
         "x-trigger-nonce": crypto.randomUUID(),
       });
@@ -150,9 +145,7 @@ describe("Webhook Replay and Errors", () => {
     });
 
     try {
-      await client.fireWebhook(slug, { ok: true }, {
-        "x-trigger-secret": "wrong-secret",
-      });
+      await client.fireWebhook(slug, { ok: true }, {}, "wrong-secret");
       assert.fail("should throw 401");
     } catch (err: any) {
       assert.equal(err.status, 401);
@@ -202,18 +195,25 @@ describe("Webhook Replay and Errors", () => {
     const nonce = crypto.randomUUID();
     const ts = String(Math.floor(Date.now() / 1000));
 
-    await client.fireWebhook(slug, { first: true }, {
-      "x-trigger-secret": secret,
-      "x-trigger-timestamp": ts,
-      "x-trigger-nonce": nonce,
-    });
+    await client.fireWebhook(
+      slug,
+      { first: true },
+      { "x-trigger-timestamp": ts, "x-trigger-nonce": nonce },
+      secret,
+    );
 
     try {
-      await client.fireWebhook(slug, { second: true }, {
-        "x-trigger-secret": secret,
-        "x-trigger-timestamp": ts,
-        "x-trigger-nonce": nonce,
-      });
+      // Same timestamp+nonce as above, but the body differs ("second" vs
+      // "first") — a real attacker replaying a captured request would send
+      // an identical body too, but re-signing here would let a stale
+      // signature slip through unnoticed; matching the nonce is what the
+      // replay guard actually keys on, so this alone must still 401.
+      await client.fireWebhook(
+        slug,
+        { second: true },
+        { "x-trigger-timestamp": ts, "x-trigger-nonce": nonce },
+        secret,
+      );
       assert.fail("should throw 401 on replay");
     } catch (err: any) {
       assert.equal(err.status, 401);

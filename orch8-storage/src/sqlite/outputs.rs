@@ -497,8 +497,12 @@ pub(super) async fn delete_sentinels_for_instance(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<u64, StorageError> {
+    // Both `__in_progress__` (crash-mid-step) and `__error__` (permanent
+    // failure) mark a step that never really finished — DLQ retry must
+    // clear both so the step re-executes. Real outputs (output_ref = NULL
+    // or an externalization pointer) are untouched.
     let result = sqlx::query(
-        "DELETE FROM block_outputs WHERE instance_id=?1 AND output_ref='__in_progress__'",
+        "DELETE FROM block_outputs WHERE instance_id=?1 AND output_ref IN ('__in_progress__', '__error__')",
     )
     .bind(instance_id.into_uuid().to_string())
     .execute(&storage.pool)

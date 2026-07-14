@@ -2234,3 +2234,83 @@ async fn t95_query_instance_usage_totals_sums_per_instance() {
     let (input, output) = s.query_instance_usage_totals(empty.id).await.unwrap();
     assert_eq!((input, output), (0, 0));
 }
+
+/// Regression test: `delete_sentinel_block_outputs` must clear BOTH
+/// `__in_progress__` (crash mid-step) and `__error__` (permanent failure)
+/// markers, and must NOT touch a real completed output. Before this fix,
+/// only `__in_progress__` was cleared, so `POST /instances/{id}/retry`
+/// silently no-opped on permanently-failed steps: the stale `__error__`
+/// row survived, the fast path's memoization treated it as "already has
+/// output" and skipped the handler entirely, and the instance flipped
+/// straight to `completed` without the step ever re-running.
+#[tokio::test]
+async fn t96_delete_sentinel_block_outputs_clears_error_and_in_progress_markers() {
+    let s = store().await;
+    let seq = make_sequence("t");
+    s.create_sequence(&seq).await.unwrap();
+    let inst = make_instance("t", seq.id);
+    s.create_instance(&inst).await.unwrap();
+
+    let error_output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId::new("permanently_failed"),
+        output: json!({"__error__": true, "message": "boom", "retryable": false}),
+        output_ref: Some("__error__".into()),
+        output_size: 10,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    s.save_block_output(&error_output).await.unwrap();
+
+    let in_progress_output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId::new("crashed_mid_step"),
+        output: json!({"_sentinel": true}),
+        output_ref: Some("__in_progress__".into()),
+        output_size: 10,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    s.save_block_output(&in_progress_output).await.unwrap();
+
+    let real_output = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId::new("completed_step"),
+        output: json!({"result": "ok"}),
+        output_ref: None,
+        output_size: 10,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    s.save_block_output(&real_output).await.unwrap();
+
+    let deleted = s.delete_sentinel_block_outputs(inst.id).await.unwrap();
+    assert_eq!(deleted, 2, "should delete both sentinel markers");
+
+    assert!(
+        s.get_block_output(inst.id, &BlockId::new("permanently_failed"))
+            .await
+            .unwrap()
+            .is_none(),
+        "__error__ marker must be cleared so the step can re-execute"
+    );
+    assert!(
+        s.get_block_output(inst.id, &BlockId::new("crashed_mid_step"))
+            .await
+            .unwrap()
+            .is_none(),
+        "__in_progress__ marker must be cleared"
+    );
+    let preserved = s
+        .get_block_output(inst.id, &BlockId::new("completed_step"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        preserved.output["result"], "ok",
+        "a real completed output must survive sentinel cleanup"
+    );
+}

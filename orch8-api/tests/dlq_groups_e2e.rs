@@ -1041,8 +1041,21 @@ async fn refailed_sample_rejoins_its_group() {
     let fp = fingerprint_of_only_group(&c).await;
 
     retry(&c, "t1", &fp, &json!({"mode": "sample"})).await;
-    // The retried instance fails again; its old __error__ row still
-    // carries the evidence, so it lands back in the same group.
+    // The retried instance re-executes the same step and fails again with
+    // the same error. Retry correctly clears the stale __error__ row (so
+    // the step re-runs instead of being silently skipped) — simulate the
+    // real re-execution's failure by planting fresh evidence with the same
+    // block/message before flipping to Failed, exactly as the scheduler
+    // would on a genuine second failure.
+    save_output(
+        &c,
+        sample,
+        "charge",
+        "__error__",
+        json!({"__error__": true, "retryable": false, "message": "http 503"}),
+        Utc::now(),
+    )
+    .await;
     fail_instance(&c, sample).await;
 
     let groups = groups_t1(&c).await;

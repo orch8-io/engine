@@ -984,11 +984,13 @@ pub trait OutputStore: Send + Sync + 'static {
     /// Delete ALL `block_outputs` for an instance.
     async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
 
-    /// Delete only sentinel `block_output` rows (`output_ref = '__in_progress__'`)
-    /// for an instance. Used by DLQ retry to clear in-progress markers from
-    /// permanently-failed steps while preserving real outputs from successfully
-    /// completed steps (so they are skipped on retry, preventing double
-    /// execution of side-effectful handlers like email sends).
+    /// Delete only sentinel `block_output` rows (`output_ref` of
+    /// `'__in_progress__'` — a crash mid-step — or `'__error__'` — a
+    /// permanent failure) for an instance. Used by DLQ retry to clear
+    /// never-finished markers from failed steps so they re-execute, while
+    /// preserving real outputs from successfully completed steps (so they
+    /// are skipped on retry, preventing double execution of side-effectful
+    /// handlers like email sends).
     async fn delete_sentinel_block_outputs(
         &self,
         instance_id: InstanceId,

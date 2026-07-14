@@ -506,13 +506,16 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     Ok(())
 }
 
-/// Delete only sentinel rows (`output_ref = '__in_progress__'`) for an instance.
+/// Delete sentinel rows (`__in_progress__` and `__error__`) for an instance.
+/// Both mark a step that never really finished — DLQ retry must clear both
+/// so the step re-executes. Real outputs (`output_ref` NULL or an
+/// externalization pointer) are untouched.
 pub(super) async fn delete_sentinels_for_instance(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<u64, StorageError> {
     let result = sqlx::query(
-        r"DELETE FROM block_outputs WHERE instance_id = $1 AND output_ref = '__in_progress__'",
+        r"DELETE FROM block_outputs WHERE instance_id = $1 AND output_ref IN ('__in_progress__', '__error__')",
     )
     .bind(instance_id.into_uuid())
     .execute(&store.pool)

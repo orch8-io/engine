@@ -13,6 +13,28 @@ import type { ServerHandle } from "../harness.ts";
 
 const client = new Orch8Client();
 
+/**
+ * US spring-forward is the second Sunday in March. Computed relative to
+ * "now" (rather than hardcoded) so this test never goes stale — a fixed
+ * past date would silently stop exercising the DST transition once the
+ * calendar moved past it.
+ */
+function nextUsSpringForwardDate(): string {
+  const now = new Date();
+  for (const year of [now.getUTCFullYear(), now.getUTCFullYear() + 1]) {
+    const marchFirst = new Date(Date.UTC(year, 2, 1));
+    const firstSunday = 1 + ((7 - marchFirst.getUTCDay()) % 7);
+    const secondSunday = firstSunday + 7;
+    const candidate = new Date(Date.UTC(year, 2, secondSunday));
+    if (candidate.getTime() > now.getTime()) {
+      const mm = String(candidate.getUTCMonth() + 1).padStart(2, "0");
+      const dd = String(candidate.getUTCDate()).padStart(2, "0");
+      return `${candidate.getUTCFullYear()}-${mm}-${dd}`;
+    }
+  }
+  throw new Error("unreachable: two-year search must find a future date");
+}
+
 describe("Timezone-Aware Delays Across DST", () => {
   let server: ServerHandle | undefined;
 
@@ -66,9 +88,11 @@ describe("Timezone-Aware Delays Across DST", () => {
   });
 
   it("honours wall-clock time across DST boundary", async () => {
-    // 2026-03-08 is US spring-forward in America/New_York:
-    // 2:00 AM jumps to 3:00 AM. Local time 02:30 does not exist.
-    // The engine should roll forward to 03:30 EDT = 07:30 UTC.
+    // US spring-forward in America/New_York: 2:00 AM jumps to 3:00 AM.
+    // Local time 02:30 does not exist on that date.
+    // The engine should roll forward to 03:30 EDT = 07:30 UTC (or fire at
+    // the pre-DST 02:30 EST = 06:30 UTC — both are sane DST-aware policies).
+    const dstDate = nextUsSpringForwardDate();
     const tenantId = `tz-dst-${uuid().slice(0, 8)}`;
     const seq = testSequence(
       "tz-dst-wallclock",
@@ -80,7 +104,7 @@ describe("Timezone-Aware Delays Across DST", () => {
           {
             delay: {
               duration: 0,
-              fire_at_local: "2026-03-08T02:30:00",
+              fire_at_local: `${dstDate}T02:30:00`,
               timezone: "America/New_York",
             },
           },
@@ -109,10 +133,10 @@ describe("Timezone-Aware Delays Across DST", () => {
     const utc = new Date(nextFireAt!).toISOString();
     // Both policies represent sane DST-aware resolutions:
     // (a) rolled to 03:30 EDT → 07:30 UTC
-    // (b) fires at pre-DST 02:30 EST → 07:30 UTC
+    // (b) fires at pre-DST 02:30 EST → 06:30 UTC
     const okPolicies = new Set([
-      "2026-03-08T07:30:00.000Z", // rolled to 03:30 EDT
-      "2026-03-08T06:30:00.000Z", // fires at pre-DST 02:30 EST
+      `${dstDate}T07:30:00.000Z`, // rolled to 03:30 EDT
+      `${dstDate}T06:30:00.000Z`, // fires at pre-DST 02:30 EST
     ]);
     assert.ok(
       okPolicies.has(utc),

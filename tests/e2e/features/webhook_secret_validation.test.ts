@@ -1,5 +1,6 @@
 /**
- * Webhook Secret Validation — verifies x-trigger-secret header enforcement.
+ * Webhook Secret Validation — verifies HMAC-signature enforcement
+ * (see orch8-api/src/webhooks.rs: timestamp + nonce + `x-orch8-signature`).
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -75,7 +76,7 @@ describe("Webhook Secret Validation", () => {
     });
 
     try {
-      await client.fireWebhook(slug, { data: 1 }, { "x-trigger-secret": "nope" });
+      await client.fireWebhook(slug, { data: 1 }, {}, "nope");
       assert.fail("should throw 401");
     } catch (err: any) {
       assert.equal(err.status, 401);
@@ -95,7 +96,7 @@ describe("Webhook Secret Validation", () => {
       secret: "shhh",
     });
 
-    const res = await client.fireWebhook(slug, { data: 1 }, { "x-trigger-secret": "shhh" });
+    const res = await client.fireWebhook(slug, { data: 1 }, {}, "shhh");
     assert.ok((res as any).instance_id, "should create instance");
   });
 

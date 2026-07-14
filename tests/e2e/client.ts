@@ -799,6 +799,7 @@ export class Orch8Client {
     slug: string,
     body: Record<string, unknown> = {},
     headers: Record<string, string> = {},
+    secret?: string,
   ): Promise<ApiResponse> {
     // Webhooks with secrets require replay-protection headers.
     // Auto-inject them when the caller hasn't supplied them.
@@ -808,6 +809,23 @@ export class Orch8Client {
     }
     if (h["x-trigger-nonce"] === undefined) {
       h["x-trigger-nonce"] = crypto.randomUUID();
+    }
+    // The server authenticates public webhooks via an HMAC-SHA256 signature
+    // over `timestamp.nonce.body` (see orch8-api/src/webhooks.rs), not a
+    // bare shared-secret header. Auto-sign when the caller supplied a
+    // `secret` and hasn't already set an explicit signature (negative-path
+    // tests that want to send a bad/missing signature pass one directly).
+    if (secret !== undefined && h["x-orch8-signature"] === undefined) {
+      const message = `${h["x-trigger-timestamp"]}.${h["x-trigger-nonce"]}.${JSON.stringify(body)}`;
+      const key = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+      h["x-orch8-signature"] = `v1=${Buffer.from(mac).toString("base64url")}`;
     }
     return this.#rawJson(`/webhooks/${slug}`, "POST", body, h);
   }

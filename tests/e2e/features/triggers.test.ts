@@ -139,9 +139,7 @@ describe("Triggers", () => {
       secret,
     });
 
-    const res = await client.fireWebhook(slug, { payload: 1 }, {
-      "x-trigger-secret": secret,
-    });
+    const res = await client.fireWebhook(slug, { payload: 1 }, {}, secret);
     assert.ok(res.instance_id, "webhook should return instance_id");
 
     const completed = await client.waitForState(res.instance_id as string, "completed", {
@@ -169,7 +167,7 @@ describe("Triggers", () => {
     });
 
     await assert.rejects(
-      () => client.fireWebhook(slug, {}, { "x-trigger-secret": "wrong" }),
+      () => client.fireWebhook(slug, {}, {}, "wrong"),
       (err: unknown) => {
         assert.equal((err as ApiError).status, 401);
         return true;
