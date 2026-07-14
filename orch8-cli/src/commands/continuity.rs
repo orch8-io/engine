@@ -284,7 +284,7 @@ fn print_json_value(value: &Value, _format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-async fn post_json_file(
+pub(crate) async fn post_json_file(
     client: &Client,
     url: String,
     request: &Path,

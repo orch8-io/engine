@@ -2853,6 +2853,19 @@ async fn find_continuity_checkpoint(
         .ok_or_else(|| ApiError::NotFound("checkpoint".into()))
 }
 
+pub(crate) async fn latest_continuity_checkpoint_id(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+) -> Result<Option<uuid::Uuid>, ApiError> {
+    Ok(
+        continuity_checkpoint_records(state, tenant_id, continuity_id, 10_000)
+            .await?
+            .last()
+            .map(|record| record.checkpoint.id),
+    )
+}
+
 async fn continuity_instance(
     state: &AppState,
     tenant_id: &TenantId,
@@ -3661,12 +3674,30 @@ async fn extract_test_fixture(
     Json(body): Json<ExtractFixtureRequest>,
 ) -> Result<Json<ExtractedTestFixture>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    if body.allowlisted_fields.len() > 256 {
+    extract_test_fixture_data(
+        &state,
+        &tenant_id,
+        id,
+        body.checkpoint_id,
+        body.allowlisted_fields,
+    )
+    .await
+    .map(Json)
+}
+
+pub(crate) async fn extract_test_fixture_data(
+    state: &AppState,
+    tenant_id: &TenantId,
+    id: ContinuityId,
+    checkpoint_id: uuid::Uuid,
+    allowlisted_fields: Vec<String>,
+) -> Result<ExtractedTestFixture, ApiError> {
+    if allowlisted_fields.len() > 256 {
         return Err(ApiError::PayloadTooLarge(
             "test fixture allowlist exceeds 256 fields".into(),
         ));
     }
-    let located = find_continuity_checkpoint(&state, &tenant_id, id, body.checkpoint_id).await?;
+    let located = find_continuity_checkpoint(state, tenant_id, id, checkpoint_id).await?;
     let instance = Arc::unwrap_or_clone(located.instance);
     let sequence = Arc::unwrap_or_clone(located.sequence);
     let checkpoint = located.checkpoint;
@@ -3676,7 +3707,7 @@ async fn extract_test_fixture(
         .get("context_snapshot")
         .cloned()
         .unwrap_or_else(|| instance.context.data.clone());
-    let allowlist: std::collections::BTreeSet<_> = body.allowlisted_fields.into_iter().collect();
+    let allowlist: std::collections::BTreeSet<_> = allowlisted_fields.into_iter().collect();
     let selected = context.as_object().map_or_else(
         || serde_json::json!({}),
         |object| {
@@ -3705,7 +3736,7 @@ async fn extract_test_fixture(
     )?;
     let receipts = state
         .storage
-        .list_effect_receipts(&tenant_id, id, 10_000)
+        .list_effect_receipts(tenant_id, id, 10_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
     let (receipt_mocks, effect_mocks) = build_extracted_effect_mocks(&receipts, &redaction);
@@ -3744,7 +3775,7 @@ async fn extract_test_fixture(
         "missing": missing_evidence,
     }))
     .map_err(|error| ApiError::Internal(error.to_string()))?;
-    Ok(Json(ExtractedTestFixture {
+    Ok(ExtractedTestFixture {
         source,
         stable_id: hex_sha256(stable_material.as_bytes()),
         sanitized_context,
@@ -3754,7 +3785,7 @@ async fn extract_test_fixture(
         contract,
         complete: missing_evidence.is_empty(),
         missing_evidence,
-    }))
+    })
 }
 
 #[derive(Debug, Deserialize)]

@@ -1611,6 +1611,64 @@ describe("Portable Continuity", () => {
     assert.equal(verification.entries_checked, 3);
   });
 
+  it("attaches a minimized sanitized reproduction to a real DLQ fingerprint", async () => {
+    const tenantId = `continuity-incident-${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      `incident-${uuid().slice(0, 8)}`,
+      [
+        step("provider", "assert", {
+          condition: "false",
+          message: "upstream connection timeout",
+          api_key: "sk-incident-secret-must-not-survive",
+        }),
+      ],
+      { tenantId },
+    );
+    const created = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 3_000).toISOString(),
+    });
+    await client.waitForState(instance.id, "scheduled");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    await client.saveCheckpoint(instance.id, {
+      block_id: "provider",
+      completed_blocks: [],
+      context_snapshot: {},
+    });
+    await client.waitForState(instance.id, "failed");
+
+    const groups = await client.listDlqGroups(tenantId);
+    const group = groups.find((candidate) =>
+      (candidate.sample_instance_ids as unknown[]).includes(instance.id)
+    );
+    assert.ok(group);
+    const reproduction = await client.reproduceDlqGroup(String(group.fingerprint), {
+      tenant_id: tenantId,
+      allowlisted_fields: [],
+      max_scenarios: 16,
+      seed: 9,
+    });
+    assert.equal(reproduction.status, "reproduced", JSON.stringify(reproduction));
+    assert.equal(reproduction.fingerprint, group.fingerprint);
+    assert.equal(reproduction.source_instance_id, instance.id);
+    assert.equal((reproduction.scenario as any).faults.length, 1);
+    assert.deepEqual((reproduction.scenario as any).event_order, []);
+    assert.equal((reproduction.fixture as any).complete, true);
+    assert.ok(!JSON.stringify(reproduction).includes("sk-incident-secret"));
+    const attached = await client.listDlqReproductions(
+      String(group.fingerprint),
+      tenantId,
+    );
+    assert.equal(attached[0]!.id, reproduction.id);
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

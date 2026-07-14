@@ -640,6 +640,8 @@ passthrough_impl! {
         async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
         async fn get_provenance_head(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
+        async fn save_incident_reproduction(&self, reproduction: &orch8_types::dlq::DlqIncidentReproduction) -> Result<(), StorageError>;
+        async fn list_incident_reproductions(&self, tenant_id: &orch8_types::ids::TenantId, fingerprint: &str, limit: u32) -> Result<Vec<orch8_types::dlq::DlqIncidentReproduction>, StorageError>;
         async fn create_continuation_grant(&self, grant: &orch8_types::continuity::ContinuationGrant) -> Result<(), StorageError>;
         async fn get_continuation_grant(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId) -> Result<Option<orch8_types::continuity::ContinuationGrant>, StorageError>;
         async fn consume_continuation_grant(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuationGrantId, nonce_sha256: &str, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;

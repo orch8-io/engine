@@ -26,6 +26,7 @@ use orch8_types::continuity_advanced::{
 };
 use orch8_types::cron::CronSchedule;
 pub use orch8_types::dedupe::DedupeScope;
+use orch8_types::dlq::DlqIncidentReproduction;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -2653,6 +2654,18 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<ProvenanceEntry>, StorageError>;
+
+    async fn save_incident_reproduction(
+        &self,
+        reproduction: &DlqIncidentReproduction,
+    ) -> Result<(), StorageError>;
+
+    async fn list_incident_reproductions(
+        &self,
+        tenant_id: &TenantId,
+        fingerprint: &str,
+        limit: u32,
+    ) -> Result<Vec<DlqIncidentReproduction>, StorageError>;
 
     async fn create_continuation_grant(
         &self,

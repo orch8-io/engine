@@ -11,12 +11,14 @@ use orch8_types::continuity::{
     ProvenanceEntry, RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel, StreamFrame,
     StreamFrameState, StreamId,
 };
+use orch8_types::continuity_advanced::IncidentCaseId;
 use orch8_types::continuity_advanced::{
     CheckpointBoundary, CompensationExecutionStep, CompensationPlanStep, CompensationRunId,
     CompensationRunRecord, CompensationRunState, CompensationStepState, ForkEffectMode,
     LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
     MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
+use orch8_types::dlq::{DlqIncidentReproduction, ReproductionStatus};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::CompensationVerificationPolicy;
@@ -360,6 +362,44 @@ async fn assert_provenance_chain_is_structural_and_fork_safe(
             .await
             .unwrap(),
         [provenance, follower]
+    );
+}
+
+#[tokio::test]
+async fn incident_reproductions_are_durable_and_tenant_scoped() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant = tenant("tenant-incident");
+    let record = DlqIncidentReproduction {
+        id: IncidentCaseId::new(),
+        tenant_id: tenant.clone(),
+        fingerprint: "a".repeat(64),
+        source_instance_id: InstanceId::new(),
+        stable_failure_code: "UPSTREAM_TIMEOUT".into(),
+        status: ReproductionStatus::InsufficientEvidence,
+        scenario: None,
+        fixture: None,
+        missing_evidence: vec!["continuity_checkpoint".into()],
+        attempts: 0,
+        suggested_remediation: vec!["verify provider health".into()],
+        created_at: Utc::now(),
+    };
+    storage.save_incident_reproduction(&record).await.unwrap();
+    let listed = storage
+        .list_incident_reproductions(&tenant, &record.fingerprint, 10)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, record.id);
+    assert!(
+        storage
+            .list_incident_reproductions(
+                &TenantId::new("tenant-incident-other").unwrap(),
+                &record.fingerprint,
+                10,
+            )
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

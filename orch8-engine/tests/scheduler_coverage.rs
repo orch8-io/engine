@@ -517,6 +517,17 @@ async fn tick_permanent_failure_fails_instance() {
 
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Failed);
+    let outputs = s.get_all_outputs(inst.id).await.unwrap();
+    let error = outputs
+        .iter()
+        .find(|output| output.output_ref.as_deref() == Some("__error__"))
+        .expect("permanent failures retain structured DLQ evidence");
+    assert_eq!(error.output["retryable"], false);
+    assert!(
+        error.output["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
 }
 
 /// 25. Retryable failure with no retry policy fails instance.

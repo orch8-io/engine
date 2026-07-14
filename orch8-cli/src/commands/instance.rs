@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use reqwest::Client;
 use serde_json::Value;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{OutputFormat, colorize_state, humanize_time, print_response, print_table, val_str};
@@ -65,6 +66,17 @@ pub enum InstanceCmd {
         /// individual instances.
         #[arg(long)]
         groups: bool,
+    },
+    /// Search for and persist a minimized regression for a DLQ fingerprint.
+    DlqReproduce {
+        fingerprint: String,
+        request: PathBuf,
+    },
+    /// List durable reproductions attached to a DLQ fingerprint.
+    DlqReproductions {
+        fingerprint: String,
+        #[arg(long)]
+        tenant_id: String,
     },
     /// Diagnose why an instance is not progressing (Stuck Instance
     /// Doctor). Read-only: prints ranked explanations with evidence and
@@ -307,6 +319,31 @@ pub async fn run(
                     .await?;
                 print_response(resp, format).await?;
             }
+        }
+        InstanceCmd::DlqReproduce {
+            fingerprint,
+            request,
+        } => {
+            crate::commands::continuity::post_json_file(
+                client,
+                format!("{base}/instances/dlq/groups/{fingerprint}/reproductions"),
+                &request,
+                format,
+            )
+            .await?;
+        }
+        InstanceCmd::DlqReproductions {
+            fingerprint,
+            tenant_id,
+        } => {
+            let response = client
+                .get(format!(
+                    "{base}/instances/dlq/groups/{fingerprint}/reproductions"
+                ))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await?;
         }
         InstanceCmd::Diagnose { id } => {
             let resp = client

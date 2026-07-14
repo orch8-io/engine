@@ -231,6 +231,35 @@ export class Orch8Client {
     );
   }
 
+  async resolveContinuityEffect(
+    effectId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/effects/${effectId}/resolve`, req);
+  }
+
+  async listDlqGroups(tenantId: string): Promise<ApiResponse[]> {
+    return this.#get(`/instances/dlq/groups${toQuery({ tenant_id: tenantId })}`);
+  }
+
+  async reproduceDlqGroup(
+    fingerprint: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/instances/dlq/groups/${fingerprint}/reproductions`, req);
+  }
+
+  async listDlqReproductions(
+    fingerprint: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/instances/dlq/groups/${fingerprint}/reproductions${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
   async listContinuityProvenance(
     continuityId: string,
     tenantId: string,

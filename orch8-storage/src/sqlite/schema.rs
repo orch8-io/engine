@@ -782,6 +782,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_provenance_chain_predecessor
 CREATE INDEX IF NOT EXISTS idx_provenance_chain_predecessor_lookup
     ON provenance_entries(tenant_id, continuity_id, previous_sha256);
 
+CREATE TABLE IF NOT EXISTS incident_reproductions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_incident_reproductions_group
+    ON incident_reproductions(tenant_id, fingerprint, created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS continuation_grants (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -990,4 +1000,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 32;
+pub(super) const SCHEMA_VERSION: i64 = 33;

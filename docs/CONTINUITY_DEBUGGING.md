@@ -24,6 +24,22 @@ Identical inputs and seeds return identical scenario IDs and schedules.
 policy facts, retries, and delays while preserving the requested stable failure,
 yielding a small fixture suitable for source control.
 
+## Reproduce a DLQ group
+
+Start from `GET /instances/dlq/groups?tenant_id=...`, then submit a bounded JSON
+request to `POST /instances/dlq/groups/{fingerprint}/reproductions` (or
+`orch8 instance dlq-reproduce <fingerprint> <request.json>`). The request must
+include `tenant_id`; optional `allowlisted_fields` are passed through the same
+production-to-test redaction path, and `max_scenarios` is limited to 64.
+
+The response never turns missing evidence into success. `reproduced` includes a
+sanitized runnable contract and minimized fault schedule; `not_reproduced`
+means retained evidence was complete but no supported schedule matched;
+`insufficient_evidence` names the missing checkpoint, continuity identity,
+effect resolution, or offline replay evidence. Retrieve prior attempts with
+`GET /instances/dlq/groups/{fingerprint}/reproductions?tenant_id=...` or
+`orch8 instance dlq-reproductions`.
+
 ## Inspect a boundary
 
 List the bounded checkpoint index:

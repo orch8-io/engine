@@ -13,6 +13,7 @@ use orch8_types::continuity::{
 use orch8_types::continuity_advanced::{
     CompensationRunId, CompensationRunRecord, LiveMigrationRecord, MigrationPlanId,
 };
+use orch8_types::dlq::DlqIncidentReproduction;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
@@ -982,6 +983,48 @@ impl crate::ContinuityStore for PostgresStorage {
         .bind(tenant_id.as_str())
         .bind(continuity_id.into_uuid())
         .bind(i64::from(limit.min(10_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
+    async fn save_incident_reproduction(
+        &self,
+        reproduction: &DlqIncidentReproduction,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO incident_reproductions
+             (id, tenant_id, fingerprint, record, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(reproduction.id.into_uuid())
+        .bind(reproduction.tenant_id.as_str())
+        .bind(&reproduction.fingerprint)
+        .bind(encode(reproduction)?)
+        .bind(reproduction.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_incident_reproductions(
+        &self,
+        tenant_id: &TenantId,
+        fingerprint: &str,
+        limit: u32,
+    ) -> Result<Vec<DlqIncidentReproduction>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM incident_reproductions
+             WHERE tenant_id = $1 AND fingerprint = $2
+             ORDER BY created_at DESC, id DESC LIMIT $3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(fingerprint)
+        .bind(i64::from(limit.min(1_000)))
         .fetch_all(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;

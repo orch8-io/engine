@@ -889,6 +889,7 @@ pub(super) async fn execute_step_block(
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
+            persist_permanent_error(storage.as_ref(), instance_id, &step_def.id, attempt, &e).await;
             // Keep the sentinel on permanent failure — the handler already
             // executed (side effects may have occurred). If the user later
             // triggers a DLQ retry, the sentinel ensures this step is
@@ -924,6 +925,40 @@ pub(super) async fn execute_step_block(
 
             Ok(StepOutcome::Failed)
         }
+    }
+}
+
+async fn persist_permanent_error(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+    block_id: &orch8_types::ids::BlockId,
+    attempt: u32,
+    error: &EngineError,
+) {
+    let output = serde_json::json!({
+        "__error__": true,
+        "retryable": false,
+        "message": error.to_string(),
+    });
+    let output_size = serde_json::to_vec(&output)
+        .map_or(0, |value| u32::try_from(value.len()).unwrap_or(u32::MAX));
+    let marker = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        block_id: block_id.clone(),
+        output,
+        output_ref: Some("__error__".into()),
+        output_size,
+        attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(persist_error) = storage.save_block_output(&marker).await {
+        tracing::warn!(
+            %instance_id,
+            %block_id,
+            error = %persist_error,
+            "failed to persist permanent step error evidence"
+        );
     }
 }
 

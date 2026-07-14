@@ -8,7 +8,7 @@
 //! unlocked only by a verified successful sample or an explicit
 //! `force: true` override, and is always bounded and audited.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -19,13 +19,23 @@ use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use orch8_types::dlq::{DlqGroup, DlqGroupRetryRequest, DlqGroupRetryResponse, DlqRetryMode};
-use orch8_types::failure::{FailureEnvelope, FingerprintScope, envelope_from_message, fingerprint};
+use orch8_types::continuity_advanced::{
+    ExtractedTestFixture, FaultInjection, FaultKind, FaultPoint, GeneratedScenario, IncidentCaseId,
+};
+use orch8_types::dlq::{
+    DlqGroup, DlqGroupRetryRequest, DlqGroupRetryResponse, DlqIncidentReproduction, DlqRetryMode,
+    ReproductionStatus,
+};
+use orch8_types::failure::{
+    ErrorClass, FailureEnvelope, FingerprintScope, envelope_from_message, fingerprint,
+};
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::redaction::RedactionPolicy;
 use orch8_types::sequence::SequenceDefinition;
+use orch8_types::worker::{WorkerTask, WorkerTaskState};
+use orch8_types::worker_filter::WorkerTaskFilter;
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -46,6 +56,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/instances/dlq/groups/{fingerprint}/retry",
             post(retry_group),
+        )
+        .route(
+            "/instances/dlq/groups/{fingerprint}/reproductions",
+            get(list_reproductions).post(reproduce_group),
         )
 }
 
@@ -80,6 +94,245 @@ pub(crate) async fn list_groups(
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
     let failures = collect_failures(&state, scoped.as_ref(), q.sequence_id).await?;
     Ok(Json(build_groups(failures)))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReproduceGroupRequest {
+    tenant_id: TenantId,
+    #[serde(default)]
+    allowlisted_fields: Vec<String>,
+    #[serde(default = "default_reproduction_scenarios")]
+    max_scenarios: usize,
+    #[serde(default)]
+    seed: u64,
+}
+
+const fn default_reproduction_scenarios() -> usize {
+    32
+}
+
+#[derive(Debug, Deserialize)]
+struct ReproductionsQuery {
+    tenant_id: String,
+}
+
+async fn list_reproductions(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(fingerprint_hash): Path<String>,
+    Query(query): Query<ReproductionsQuery>,
+) -> Result<Json<Vec<DlqIncidentReproduction>>, ApiError> {
+    validate_fingerprint(&fingerprint_hash)?;
+    let tenant_id = TenantId::new(&query.tenant_id).map_err(ApiError::InvalidArgument)?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &tenant_id, "incident reproduction")?;
+    state
+        .storage
+        .list_incident_reproductions(&tenant_id, &fingerprint_hash, 100)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_storage(error, "incident reproductions"))
+}
+
+async fn reproduce_group(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(fingerprint_hash): Path<String>,
+    Json(request): Json<ReproduceGroupRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    validate_fingerprint(&fingerprint_hash)?;
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &request.tenant_id)?;
+    if request.allowlisted_fields.len() > 256 || !(1..=64).contains(&request.max_scenarios) {
+        return Err(ApiError::InvalidArgument(
+            "reproduction requires 1..=64 scenarios and at most 256 allowlisted fields".into(),
+        ));
+    }
+    let failures = collect_failures(&state, Some(&tenant_id), None).await?;
+    let source = failures
+        .iter()
+        .filter(|failure| fingerprint(&failure.scope, &failure.envelope).hash == fingerprint_hash)
+        .max_by_key(|failure| failure.instance.updated_at)
+        .ok_or_else(|| ApiError::NotFound("DLQ fingerprint".into()))?;
+
+    let (fixture, mut missing_evidence) =
+        extract_reproduction_fixture(&state, &tenant_id, source, request.allowlisted_fields)
+            .await?;
+    let target_fault = fault_for_failure(source.envelope.error_class);
+    let (scenario, attempts) = derive_reproduction_scenario(
+        source,
+        fixture.as_ref(),
+        target_fault.as_ref(),
+        request.max_scenarios,
+        request.seed,
+    );
+    let status = if fixture.as_ref().is_none_or(|fixture| !fixture.complete) {
+        ReproductionStatus::InsufficientEvidence
+    } else if scenario.is_some() {
+        ReproductionStatus::Reproduced
+    } else {
+        ReproductionStatus::NotReproduced
+    };
+    if target_fault.is_none() && status != ReproductionStatus::InsufficientEvidence {
+        missing_evidence.push("supported_fault_profile".into());
+    } else if scenario.is_none() && status == ReproductionStatus::NotReproduced {
+        missing_evidence.push("matching_failure_schedule".into());
+    }
+    missing_evidence.sort();
+    missing_evidence.dedup();
+    let reproduction = DlqIncidentReproduction {
+        id: IncidentCaseId::new(),
+        tenant_id,
+        fingerprint: fingerprint_hash,
+        source_instance_id: source.instance.id,
+        stable_failure_code: source.envelope.error_code.clone(),
+        status,
+        scenario,
+        fixture,
+        missing_evidence,
+        attempts,
+        suggested_remediation: remediation_for_failure(&source.envelope),
+        created_at: Utc::now(),
+    };
+    state
+        .storage
+        .save_incident_reproduction(&reproduction)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "incident reproduction"))?;
+    Ok((StatusCode::CREATED, Json(reproduction)))
+}
+
+fn derive_reproduction_scenario(
+    source: &InstanceFailure,
+    fixture: Option<&ExtractedTestFixture>,
+    target_fault: Option<&FaultInjection>,
+    max_scenarios: usize,
+    seed: u64,
+) -> (Option<GeneratedScenario>, u32) {
+    let Some(fault) = target_fault.filter(|_| fixture.is_some_and(|fixture| fixture.complete))
+    else {
+        return (None, 0);
+    };
+    let events = [
+        source.envelope.block_id.clone(),
+        source.envelope.handler.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let Some(candidate) = orch8_engine::continuity_advanced::generate_scenarios(
+        &events,
+        std::slice::from_ref(fault),
+        max_scenarios,
+        seed,
+    )
+    .ok()
+    .and_then(|candidates| candidates.into_iter().next()) else {
+        return (None, 0);
+    };
+    let minimized =
+        orch8_engine::continuity_advanced::minimize_reproducing_scenario(candidate, |candidate| {
+            candidate.faults.iter().any(|item| {
+                item.kind == fault.kind
+                    && fault_reproduces_code(item.kind, &source.envelope.error_code)
+            })
+        });
+    (minimized.scenario, minimized.attempts)
+}
+
+async fn extract_reproduction_fixture(
+    state: &AppState,
+    tenant_id: &TenantId,
+    source: &InstanceFailure,
+    allowlisted_fields: Vec<String>,
+) -> Result<(Option<ExtractedTestFixture>, Vec<String>), ApiError> {
+    let Some(execution) = state
+        .storage
+        .get_continuity_execution_by_instance(tenant_id, source.instance.id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+    else {
+        return Ok((None, vec!["continuity_execution".into()]));
+    };
+    let Some(checkpoint_id) = crate::continuity::latest_continuity_checkpoint_id(
+        state,
+        tenant_id,
+        execution.continuity_id,
+    )
+    .await?
+    else {
+        return Ok((None, vec!["continuity_checkpoint".into()]));
+    };
+    let fixture = crate::continuity::extract_test_fixture_data(
+        state,
+        tenant_id,
+        execution.continuity_id,
+        checkpoint_id,
+        allowlisted_fields,
+    )
+    .await?;
+    let missing = fixture.missing_evidence.clone();
+    Ok((Some(fixture), missing))
+}
+
+fn fault_for_failure(class: ErrorClass) -> Option<FaultInjection> {
+    let (point, kind) = match class {
+        ErrorClass::Worker => (FaultPoint::Dispatch, FaultKind::WorkerDeath),
+        ErrorClass::Credential => (FaultPoint::ExternalCall, FaultKind::ExpiredGrant),
+        ErrorClass::Policy => (FaultPoint::Approval, FaultKind::DelayedApproval),
+        ErrorClass::ExternalDependency => (FaultPoint::ExternalCall, FaultKind::ProviderOutage),
+        ErrorClass::Timeout => (FaultPoint::StorageBeforeWrite, FaultKind::DatabaseTimeout),
+        ErrorClass::Cancelled => (FaultPoint::DeviceSync, FaultKind::OfflineDevice),
+        ErrorClass::Internal => (FaultPoint::OwnershipClaim, FaultKind::StaleOwner),
+        ErrorClass::Application | ErrorClass::Configuration => return None,
+    };
+    Some(FaultInjection {
+        point,
+        kind,
+        occurrence: 1,
+    })
+}
+
+fn fault_reproduces_code(kind: FaultKind, code: &str) -> bool {
+    match kind {
+        FaultKind::WorkerDeath => code == "NO_WORKER",
+        FaultKind::DatabaseTimeout | FaultKind::DelayedApproval => code == "TIMEOUT",
+        FaultKind::DuplicateDelivery | FaultKind::StaleOwner => {
+            matches!(code, "CONFLICT" | "INVARIANT_VIOLATION")
+        }
+        FaultKind::OfflineDevice => code == "CANCELLED",
+        FaultKind::CorruptCapsule => code == "CAPSULE_INVALID",
+        FaultKind::ExpiredGrant => code == "CREDENTIAL",
+        FaultKind::ProviderOutage => matches!(code, "TRANSPORT" | "HTTP_STATUS" | "TIMEOUT"),
+    }
+}
+
+fn remediation_for_failure(envelope: &FailureEnvelope) -> Vec<String> {
+    vec![
+        match envelope.error_class {
+            ErrorClass::Worker => "verify worker compatibility and lease health",
+            ErrorClass::Credential => "rotate or restore the referenced credential",
+            ErrorClass::Policy => "review the denying policy evidence before retry",
+            ErrorClass::ExternalDependency | ErrorClass::Timeout => {
+                "verify provider health and idempotency before retry"
+            }
+            ErrorClass::Cancelled => "confirm cancellation intent before rescheduling",
+            ErrorClass::Internal => {
+                "retain the minimized fixture and escalate the invariant failure"
+            }
+            ErrorClass::Application => "fix the application handler using the sanitized fixture",
+            ErrorClass::Configuration => "correct configuration and run the attached contract",
+        }
+        .into(),
+    ]
+}
+
+fn validate_fingerprint(value: &str) -> Result<(), ApiError> {
+    if value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidArgument(
+            "fingerprint must be a 16-character hexadecimal identifier".into(),
+        ))
+    }
 }
 
 /// Fetch the newest failed instances and derive a failure envelope for
@@ -121,10 +374,36 @@ async fn collect_failures(
         .map(|s| (*s.id.as_uuid(), s))
         .collect();
 
+    let worker_failures = state
+        .storage
+        .list_worker_tasks(
+            &WorkerTaskFilter {
+                tenant_id: tenant.cloned(),
+                states: Some(vec![WorkerTaskState::Failed]),
+                ..WorkerTaskFilter::default()
+            },
+            &Pagination {
+                offset: 0,
+                limit: GROUP_SCAN_LIMIT,
+                sort_ascending: false,
+            },
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker tasks"))?
+        .into_iter()
+        .fold(
+            HashMap::<InstanceId, WorkerTask>::new(),
+            |mut tasks, task| {
+                tasks.entry(task.instance_id).or_insert(task);
+                tasks
+            },
+        );
+
     let mut failures = Vec::with_capacity(instances.len());
     for instance in instances {
         let seq = sequences.get(instance.sequence_id.as_uuid());
-        let envelope = derive_envelope(state, &instance, seq).await?;
+        let envelope =
+            derive_envelope(state, &instance, seq, worker_failures.get(&instance.id)).await?;
         let scope = FingerprintScope {
             sequence_id: instance.sequence_id.as_uuid().to_string(),
             sequence_version: seq.map_or(0, |s| i64::from(s.version)),
@@ -147,6 +426,7 @@ async fn derive_envelope(
     state: &AppState,
     instance: &TaskInstance,
     seq: Option<&SequenceDefinition>,
+    worker_failure: Option<&WorkerTask>,
 ) -> Result<FailureEnvelope, ApiError> {
     let outputs = state
         .storage
@@ -186,18 +466,34 @@ async fn derive_envelope(
         }
     }
 
-    let (block_id, message) = match best {
-        Some((_, block, message)) => (Some(block), message),
-        None => (
-            None,
-            "instance failed with no recorded step error".to_string(),
+    let (block_id, message, worker_handler) = match best {
+        Some((_, block, message)) => (Some(block), message, None),
+        None => worker_failure.map_or_else(
+            || {
+                (
+                    None,
+                    "instance failed with no recorded step error".to_string(),
+                    None,
+                )
+            },
+            |task| {
+                (
+                    Some(task.block_id.as_str().to_owned()),
+                    task.error_message
+                        .clone()
+                        .unwrap_or_else(|| "worker task failed without an error message".into()),
+                    Some(task.handler_name.clone()),
+                )
+            },
         ),
     };
 
     let mut envelope = envelope_from_message(&message, false, instance.updated_at);
     if let Some(block) = &block_id {
         envelope = envelope.with_block(block.clone());
-        if let Some(seq) = seq
+        if let Some(handler) = worker_handler {
+            envelope = envelope.with_handler(handler);
+        } else if let Some(seq) = seq
             && let Some(step) =
                 crate::approvals::find_step_by_id(seq, &orch8_types::ids::BlockId::new(block))
         {
@@ -423,4 +719,29 @@ async fn retry_one(state: &AppState, id: InstanceId) -> Result<(), ApiError> {
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fault_profiles_only_claim_compatible_stable_codes() {
+        assert!(fault_reproduces_code(FaultKind::DatabaseTimeout, "TIMEOUT"));
+        assert!(fault_reproduces_code(
+            FaultKind::ProviderOutage,
+            "TRANSPORT"
+        ));
+        assert!(!fault_reproduces_code(
+            FaultKind::DelayedApproval,
+            "BUDGET_EXCEEDED"
+        ));
+        assert!(fault_for_failure(ErrorClass::Configuration).is_none());
+    }
+
+    #[test]
+    fn reproduction_fingerprints_are_strict_sha256_hex() {
+        assert!(validate_fingerprint(&"a".repeat(16)).is_ok());
+        assert!(validate_fingerprint("../../other-tenant").is_err());
+    }
 }

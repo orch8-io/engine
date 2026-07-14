@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use crate::continuity_advanced::{ExtractedTestFixture, GeneratedScenario, IncidentCaseId};
 use crate::failure::ErrorClass;
+use crate::ids::{InstanceId, TenantId};
 
 /// One root-cause group of failed instances.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -77,6 +79,31 @@ pub struct DlqGroupRetryResponse {
     pub retried: Vec<Uuid>,
     /// Instances skipped (no longer failed / no longer in the group).
     pub skipped: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReproductionStatus {
+    Reproduced,
+    NotReproduced,
+    InsufficientEvidence,
+}
+
+/// Durable regression evidence attached to one stable DLQ fingerprint.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DlqIncidentReproduction {
+    pub id: IncidentCaseId,
+    pub tenant_id: TenantId,
+    pub fingerprint: String,
+    pub source_instance_id: InstanceId,
+    pub stable_failure_code: String,
+    pub status: ReproductionStatus,
+    pub scenario: Option<GeneratedScenario>,
+    pub fixture: Option<ExtractedTestFixture>,
+    pub missing_evidence: Vec<String>,
+    pub attempts: u32,
+    pub suggested_remediation: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[cfg(test)]
