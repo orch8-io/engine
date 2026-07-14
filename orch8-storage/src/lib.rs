@@ -2555,6 +2555,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<InstanceId, StorageError>;
 
+    /// Verify that an imported instance was created from the given capsule for
+    /// the destination runtime. Import records are immutable.
+    async fn is_capsule_import_instance(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError>;
+
     async fn upsert_runtime_capabilities(
         &self,
         tenant_id: &TenantId,

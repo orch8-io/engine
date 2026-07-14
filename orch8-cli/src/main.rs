@@ -329,10 +329,10 @@ async fn main() -> Result<()> {
         Commands::Health => commands::health::run(&client, base).await?,
         Commands::Instance(cmd) => commands::instance::run(&client, base, cmd, format).await?,
         Commands::Execution(cmd) => {
-            commands::continuity::run_execution(&client, base, cmd, format).await?
+            commands::continuity::run_execution(&client, base, cmd, format).await?;
         }
         Commands::Runtime(cmd) => {
-            commands::continuity::run_runtime(&client, base, cmd, format).await?
+            commands::continuity::run_runtime(&client, base, cmd, format).await?;
         }
         Commands::Sequence(cmd) => commands::sequence::run(&client, base, cmd, format).await?,
         Commands::Cron(cmd) => commands::cron::run(&client, base, cmd, format).await?,

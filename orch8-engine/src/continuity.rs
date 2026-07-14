@@ -154,6 +154,8 @@ pub enum ContinuityServiceError {
     ExecutionIdentityChanged,
     #[error("accepted execution must increment the epoch and assign the destination owner")]
     InvalidOwnershipClaim,
+    #[error("destination instance was not imported from this handoff capsule")]
+    UnboundDestinationInstance,
     #[error("handoff or ownership compare-and-swap lost")]
     StaleClaim,
     #[error(transparent)]
@@ -244,6 +246,20 @@ pub async fn accept_handoff(
         || accepted_execution.owner_runtime_id != expected_handoff.destination_runtime_id
     {
         return Err(ContinuityServiceError::InvalidOwnershipClaim);
+    }
+    let Some(capsule_id) = expected_handoff.capsule_id else {
+        return Err(ContinuityServiceError::UnboundDestinationInstance);
+    };
+    if !storage
+        .is_capsule_import_instance(
+            &expected_handoff.tenant_id,
+            capsule_id,
+            expected_handoff.destination_runtime_id,
+            accepted_execution.current_instance_id,
+        )
+        .await?
+    {
+        return Err(ContinuityServiceError::UnboundDestinationInstance);
     }
     let accepted = storage
         .accept_handoff(

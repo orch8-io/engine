@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 use crate::{OutputFormat, print_response};
 
+const MAX_CONTINUITY_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Subcommand)]
 pub enum ExecutionCmd {
     /// Preview compatibility, policy, and effect risks before handoff.
@@ -22,7 +24,7 @@ pub enum ExecutionCmd {
         tenant_id: String,
         #[arg(long)]
         to: Uuid,
-        /// JSON file containing CapsuleRequirements.
+        /// JSON file containing `CapsuleRequirements`.
         #[arg(long)]
         requirements: Option<PathBuf>,
     },
@@ -101,6 +103,70 @@ pub enum ExecutionCmd {
         #[arg(long)]
         expected_head: Option<String>,
     },
+    /// List checkpoint boundaries for time-travel inspection.
+    Checkpoints {
+        continuity_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Run an effect-free what-if scenario from a checkpoint request file.
+    WhatIf {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// Extract a sanitized regression fixture from production evidence.
+    ExtractTest {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// Evaluate configured invariants for an execution.
+    EvaluateInvariants {
+        continuity_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Create a sequence invariant from a JSON request.
+    CreateInvariant { request: PathBuf },
+    /// Reserve multidimensional execution budget from a JSON request.
+    ReserveBudget {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// List durable evaluation evidence.
+    Evaluations {
+        continuity_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Append durable evaluation evidence from a JSON request.
+    AppendEvaluation {
+        continuity_id: Uuid,
+        request: PathBuf,
+    },
+    /// Compile a live-migration plan from a JSON request.
+    MigrationPlan { request: PathBuf },
+    /// Generate bounded fault/state-space scenarios from a JSON request.
+    GenerateScenarios { request: PathBuf },
+    /// Minimize an incident reproduction from a JSON request.
+    ReproduceIncident { request: PathBuf },
+    /// Select a provider under quality, locality, latency, and cost policy.
+    ChooseProvider { request: PathBuf },
+    /// Generate evidence-backed workflow optimization recommendations.
+    RecommendOptimizations { request: PathBuf },
+    /// Evaluate a continuous-quality promotion gate.
+    EvaluationGate { request: PathBuf },
+    /// Produce fail-closed residency evidence.
+    EvaluateResidency { request: PathBuf },
+    /// Minimize confidential disclosure according to an allowlist.
+    MinimizeDisclosure { request: PathBuf },
+    /// Verify a signed federation envelope.
+    VerifyFederation { request: PathBuf },
+    /// Claim a destination-bound device delegation.
+    ClaimDelegation { request: PathBuf },
+    /// Create a durable human-attention task.
+    CreateAttention { request: PathBuf },
+    /// Assign an attention task using capability-aware scheduling.
+    AssignAttention { task_id: Uuid, request: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -109,7 +175,7 @@ pub enum RuntimeCmd {
     Register {
         #[arg(long)]
         tenant_id: String,
-        /// JSON file containing RuntimeCapabilities.
+        /// JSON file containing `RuntimeCapabilities`.
         capabilities: PathBuf,
     },
     /// List active runtime capability advertisements.
@@ -121,15 +187,28 @@ pub enum RuntimeCmd {
 
 fn read_json(path: Option<&Path>) -> Result<Value> {
     match path {
-        Some(path) => serde_json::from_slice(&std::fs::read(path)?)
+        Some(path) => serde_json::from_slice(&read_bounded_file(path)?)
             .with_context(|| format!("parse JSON from {}", path.display())),
         None => Ok(json!({})),
     }
 }
 
 fn read_capsule(path: &Path) -> Result<SignedCapsuleManifest> {
-    serde_json::from_slice(&std::fs::read(path)?)
+    serde_json::from_slice(&read_bounded_file(path)?)
         .with_context(|| format!("parse signed capsule from {}", path.display()))
+}
+
+fn read_bounded_file(path: &Path) -> Result<Vec<u8>> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("inspect {}", path.display()))?;
+    if metadata.len() > MAX_CONTINUITY_REQUEST_BYTES {
+        bail!(
+            "{} exceeds the {} MiB continuity request limit",
+            path.display(),
+            MAX_CONTINUITY_REQUEST_BYTES / (1024 * 1024)
+        );
+    }
+    std::fs::read(path).with_context(|| format!("read {}", path.display()))
 }
 
 async fn response_json(response: reqwest::Response, action: &str) -> Result<Value> {
@@ -141,14 +220,26 @@ async fn response_json(response: reqwest::Response, action: &str) -> Result<Valu
     Ok(body)
 }
 
-fn print_json_value(value: &Value, format: OutputFormat) -> Result<()> {
-    match format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
-        OutputFormat::Table => println!("{}", serde_json::to_string_pretty(value)?),
-    }
+fn print_json_value(value: &Value, _format: OutputFormat) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
+async fn post_json_file(
+    client: &Client,
+    url: String,
+    request: &Path,
+    format: OutputFormat,
+) -> Result<()> {
+    let response = client
+        .post(url)
+        .json(&read_json(Some(request))?)
+        .send()
+        .await?;
+    print_response(response, format).await
+}
+
+#[allow(clippy::too_many_lines)] // CLI dispatch keeps command-to-endpoint mappings auditable
 pub async fn run_execution(
     client: &Client,
     base: &str,
@@ -347,6 +438,210 @@ pub async fn run_execution(
                 .await?;
             print_response(response, format).await
         }
+        ExecutionCmd::Checkpoints {
+            continuity_id,
+            tenant_id,
+        } => {
+            let response = client
+                .get(format!(
+                    "{base}/continuity/executions/{continuity_id}/checkpoints"
+                ))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::WhatIf {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/what-if"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ExtractTest {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/test-fixture"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::EvaluateInvariants {
+            continuity_id,
+            tenant_id,
+        } => {
+            let response = client
+                .post(format!(
+                    "{base}/continuity/executions/{continuity_id}/invariants/evaluate"
+                ))
+                .json(&json!({"tenant_id": tenant_id}))
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::CreateInvariant { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/invariants"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ReserveBudget {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/budget-reservations"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::Evaluations {
+            continuity_id,
+            tenant_id,
+        } => {
+            let response = client
+                .get(format!(
+                    "{base}/continuity/executions/{continuity_id}/evaluations"
+                ))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::AppendEvaluation {
+            continuity_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/executions/{continuity_id}/evaluations"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::MigrationPlan { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/migrations/plan"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::GenerateScenarios { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/scenarios/generate"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ReproduceIncident { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/scenarios/reproduce"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ChooseProvider { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/providers/choose"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::RecommendOptimizations { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/optimizations/recommend"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::EvaluationGate { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/evaluations/gate"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::EvaluateResidency { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/residency/evaluate"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::MinimizeDisclosure { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/disclosure/minimize"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::VerifyFederation { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/federation/verify"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ClaimDelegation { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/delegations/claim"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::CreateAttention { request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/attention"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::AssignAttention { task_id, request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/attention/{task_id}/assign"),
+                &request,
+                format,
+            )
+            .await
+        }
     }
 }
 
@@ -379,5 +674,34 @@ pub async fn run_runtime(
                 .await?;
             print_response(response, format).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    use super::*;
+
+    #[test]
+    fn continuity_request_files_are_size_bounded() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_len(MAX_CONTINUITY_REQUEST_BYTES + 1)
+            .unwrap();
+
+        let error = read_bounded_file(file.path()).unwrap_err();
+        assert!(error.to_string().contains("continuity request limit"));
+    }
+
+    #[test]
+    fn bounded_json_files_are_decoded() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(br#"{"tenant_id":"tenant-a"}"#).unwrap();
+
+        assert_eq!(
+            read_json(Some(file.path())).unwrap(),
+            json!({"tenant_id": "tenant-a"})
+        );
     }
 }

@@ -6,12 +6,13 @@ use orch8_engine::capsule::{
     CapsuleExportRequest, CapsuleImportRequest, CapsuleServiceError, export_paused_capsule,
     verify_and_import_paused_capsule,
 };
+use orch8_engine::continuity::ContinuityServiceError;
 use orch8_storage::artifacts::ObjectArtifactStore;
 use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::continuity::{
-    CapsuleRequirements, ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState,
-    RuntimeId,
+    CapsuleRequirements, ContinuityExecution, ContinuityId, ExecutionEpoch, ExecutionHandoff,
+    HandoffId, HandoffState, OwnershipState, RuntimeId,
 };
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::ids::BlockId;
@@ -137,6 +138,64 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         redelivered_payload.instance.sequence_id,
         payload.instance.sequence_id
     );
+
+    let mut transferring = continuity.clone();
+    transferring.state = OwnershipState::Transferring;
+    destination
+        .create_continuity_execution(&transferring)
+        .await
+        .unwrap();
+    let exported = ExecutionHandoff {
+        id: HandoffId::new(),
+        continuity_id: continuity.continuity_id,
+        tenant_id: instance.tenant_id.clone(),
+        source_runtime_id: source_runtime,
+        destination_runtime_id: destination_runtime,
+        expected_epoch: ExecutionEpoch::initial(),
+        state: HandoffState::Exported,
+        capsule_id: Some(signed.manifest.capsule_id),
+        preview_sha256: "a".repeat(64),
+        version: 2,
+        failure_code: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    destination.create_handoff(&exported).await.unwrap();
+    let mut accepted_handoff = exported.clone();
+    accepted_handoff.state = HandoffState::Accepted;
+    accepted_handoff.version += 1;
+    let mut unrelated = mk_instance_with_ctx(sequence.id, json!({"unrelated": true}));
+    unrelated.state = InstanceState::Paused;
+    destination.create_instance(&unrelated).await.unwrap();
+    let mut substituted_execution = transferring.clone();
+    substituted_execution.current_instance_id = unrelated.id;
+    substituted_execution.owner_runtime_id = destination_runtime;
+    substituted_execution.epoch = ExecutionEpoch::initial().checked_next().unwrap();
+    substituted_execution.state = OwnershipState::Owned;
+    let substitution = orch8_engine::continuity::accept_handoff(
+        destination.as_ref(),
+        &exported,
+        &accepted_handoff,
+        &transferring,
+        &substituted_execution,
+    )
+    .await;
+    assert!(matches!(
+        substitution,
+        Err(ContinuityServiceError::UnboundDestinationInstance)
+    ));
+
+    let mut accepted_execution = substituted_execution;
+    accepted_execution.current_instance_id = imported.id;
+    orch8_engine::continuity::accept_handoff(
+        destination.as_ref(),
+        &exported,
+        &accepted_handoff,
+        &transferring,
+        &accepted_execution,
+    )
+    .await
+    .unwrap();
 
     let wrong_destination = verify_and_import_paused_capsule(
         destination.as_ref(),

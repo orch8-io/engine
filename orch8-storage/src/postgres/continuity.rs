@@ -472,6 +472,28 @@ impl crate::ContinuityStore for PostgresStorage {
         Ok(instance.id)
     }
 
+    async fn is_capsule_import_instance(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM capsule_imports
+             WHERE tenant_id=$1 AND capsule_id=$2 AND destination_runtime_id=$3
+               AND instance_id=$4)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(capsule_id.into_uuid())
+        .bind(destination_runtime_id.into_uuid())
+        .bind(instance_id.into_uuid())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(exists)
+    }
+
     async fn upsert_runtime_capabilities(
         &self,
         tenant_id: &TenantId,
