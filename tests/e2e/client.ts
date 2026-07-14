@@ -280,13 +280,6 @@ export class Orch8Client {
     );
   }
 
-  async resolveContinuityEffect(
-    effectId: string,
-    req: Record<string, unknown>,
-  ): Promise<ApiResponse> {
-    return this.#post(`/continuity/effects/${effectId}/resolve`, req);
-  }
-
   async listDlqGroups(tenantId: string): Promise<ApiResponse[]> {
     return this.#get(`/instances/dlq/groups${toQuery({ tenant_id: tenantId })}`);
   }
@@ -509,27 +502,6 @@ export class Orch8Client {
 
   async decideAttentionTask(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post(`/continuity/attention/${id}/decide`, req);
-  }
-
-  async listContinuityCheckpoints(
-    continuityId: string,
-    tenantId: string,
-  ): Promise<ApiResponse[]> {
-    return this.#get(
-      `/continuity/executions/${continuityId}/checkpoints${toQuery({ tenant_id: tenantId })}`,
-    );
-  }
-
-  async getContinuityCheckpoint(
-    continuityId: string,
-    checkpointId: string,
-    tenantId: string,
-  ): Promise<ApiResponse> {
-    return this.#get(
-      `/continuity/executions/${continuityId}/checkpoints/${checkpointId}${toQuery({
-        tenant_id: tenantId,
-      })}`,
-    );
   }
 
   async runContinuityWhatIf(
