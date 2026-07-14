@@ -285,6 +285,30 @@ async function waitForWorkerTask(
   throw new Error(`Timeout waiting for worker task for ${handler}`);
 }
 
+/** Poll a continuity execution's effect receipts until the (single) effect
+ * reaches `state`. Node-completion side effects (like EffectGuard::commit
+ * advancing an effect to `committed` once a worker-dispatched handler
+ * succeeds) land asynchronously relative to the HTTP response that queued
+ * them, so a single read is not enough to know the transition has landed. */
+async function waitForEffectState(
+  continuityId: string,
+  tenantId: string,
+  state: string,
+  timeoutMs = 10_000,
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  let last: any;
+  while (Date.now() < deadline) {
+    const effects = await client.listContinuityEffects(continuityId, tenantId);
+    last = effects[0];
+    if (last && last.state === state) return last;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timeout waiting for effect on continuity ${continuityId} to reach '${state}'. Current state: ${last?.state}`,
+  );
+}
+
 /** Build a two-step sequence (arm -> worker-dispatched charge) whose "charge"
  * step carries a compensation rule; drives to a `dispatched` effect. */
 async function compensableExecution(namePrefix: string) {
@@ -1321,6 +1345,131 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       );
       assert.ok(detail.previous_checkpoint_id, "the migration checkpoint must chain to a predecessor");
     });
+
+    it("a 'move' transform relocates the field (source path no longer present, destination now holds it) in the migrated checkpoint's context_snapshot", async () => {
+      const tenantId = tid("int-ckpt-transform-move");
+      const { execution, sequence } = await pausedContinuityFixture(
+        tenantId,
+        "int-ckpt-transform-move",
+        [],
+        { field: "move-me" },
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+        transforms: [
+          {
+            version: 1,
+            transform: "move",
+            from_path: "context_snapshot.field",
+            to_path: "context_snapshot.relocated",
+          },
+        ],
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId, approved: true });
+      const finalInstance = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      const instanceDetail = await client.getInstance(finalInstance.current_instance_id);
+      assert.equal((instanceDetail as any).context.data.field, undefined, "the source field must no longer exist after a move");
+      assert.equal((instanceDetail as any).context.data.relocated, "move-me");
+    });
+
+    it("a 'drop' transform removes the field entirely with no destination path required", async () => {
+      const tenantId = tid("int-ckpt-transform-drop");
+      const { execution, sequence } = await pausedContinuityFixture(
+        tenantId,
+        "int-ckpt-transform-drop",
+        [],
+        { field: "drop-me", keep: "still-here" },
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+        transforms: [
+          {
+            version: 1,
+            transform: "drop",
+            from_path: "context_snapshot.field",
+            to_path: "",
+          },
+        ],
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId, approved: true });
+      const finalInstance = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      const instanceDetail = await client.getInstance(finalInstance.current_instance_id);
+      assert.equal((instanceDetail as any).context.data.field, undefined);
+      assert.equal((instanceDetail as any).context.data.keep, "still-here", "untouched sibling fields must survive a drop");
+    });
+
+    it("a migration plan whose transforms target the SAME destination path twice is rejected as invalid, before any apply is attempted", async () => {
+      const tenantId = tid("int-ckpt-transform-dup-dest");
+      const { execution, sequence } = await pausedContinuityFixture(
+        tenantId,
+        "int-ckpt-transform-dup-dest",
+        [],
+        { a: "1", b: "2" },
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      await rejects(
+        client.planContinuityMigration({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          to_sequence_id: createdTarget.id,
+          to_version: target.version,
+          transforms: [
+            { version: 1, transform: "copy", from_path: "context_snapshot.a", to_path: "context_snapshot.merged" },
+            { version: 1, transform: "copy", from_path: "context_snapshot.b", to_path: "context_snapshot.merged" },
+          ],
+        }),
+        400,
+        "two transforms writing to the identical destination path must be rejected as invalid",
+      );
+    });
+
+    it("a migration plan whose transform references a source path that does not exist in the checkpoint is rejected at PLAN time (transforms are dry-run during validate_migration_history, not deferred to apply)", async () => {
+      // plan_live_migration's validate_migration_history calls
+      // apply_state_transforms eagerly (orch8-api/src/continuity.rs
+      // ~4152-4156) to compute the target contract-test input — an absent
+      // source path fails right there and maps to InvalidArgument (400),
+      // before a plan record is ever persisted. apply_live_migration reruns
+      // the same transforms again later (~4487-4491) but the plan attempt
+      // never gets that far here.
+      const tenantId = tid("int-ckpt-transform-missing-src");
+      const { execution, sequence } = await pausedContinuityFixture(
+        tenantId,
+        "int-ckpt-transform-missing-src",
+        [],
+        { present: "yes" },
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      await rejects(
+        client.planContinuityMigration({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          to_sequence_id: createdTarget.id,
+          to_version: target.version,
+          transforms: [
+            {
+              version: 1,
+              transform: "copy",
+              from_path: "context_snapshot.does_not_exist",
+              to_path: "context_snapshot.wont_be_set",
+            },
+          ],
+        }),
+        400,
+        "a transform whose source path is absent from the actual checkpoint must fail during planning, not silently no-op",
+      );
+    });
   });
 
   describe("A. budget reservation lifecycle interacts correctly with attention tasks on the same execution", () => {
@@ -1645,6 +1794,107 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
   });
 
+  describe("A. compensation completion under every verification policy", () => {
+    /** A single-effect compensable execution whose compensation handler
+     * carries the given verification policy. */
+    async function policyCompensableExecution(namePrefix: string, policy: string) {
+      const tenantId = tid(namePrefix);
+      const handler = `${namePrefix}_h_${uuid().slice(0, 8)}`;
+      const sequence = testSequence(
+        namePrefix,
+        [
+          step("arm", "human_review", {}, {
+            wait_for_input: { prompt: "go?", choices: [{ label: "Continue", value: "continue" }] },
+          }),
+          step("charge", handler, { amount: 5 }, {
+            compensation: { handler: "release_charge", verification: policy },
+          }),
+        ],
+        { tenantId },
+      );
+      const created = await client.createSequence(sequence);
+      const instance = await client.createInstance({
+        sequence_id: created.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      await client.waitForState(instance.id, "waiting");
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      await client.sendSignal(instance.id, { custom: "human_input:arm" } as unknown as string, { value: "continue" });
+      const task = await waitForWorkerTask(handler, `${namePrefix}-worker`);
+      await client.completeWorkerTask(task.id, `${namePrefix}-worker`, { ok: true });
+      // completeWorkerTask only guarantees the completion request was
+      // accepted; the server's EffectGuard::commit (triggered by the
+      // handler succeeding) advances the effect receipt to `committed`
+      // asynchronously as part of node-completion processing. Racing a
+      // single read-then-resolve against that landing produces a
+      // nondeterministic 409 ("invalid effect transition from Committed to
+      // Committed") when the auto-commit lands between the read and the
+      // write. Poll until the auto-commit has actually landed instead of
+      // reading once and conditionally issuing a redundant manual resolve.
+      const effect = await waitForEffectState(execution.continuity_id, tenantId, "committed");
+      return { tenantId, execution, effect };
+    }
+
+    it("handler_result policy: completing a step with no provider_receipt still succeeds outright (Succeeded, not VerificationPending)", async () => {
+      const { tenantId, execution } = await policyCompensableExecution("int-comp-policy-handler", "handler_result");
+      const run = await client.createContinuityCompensation(execution.continuity_id, { tenant_id: tenantId });
+      const claimed = await client.claimContinuityCompensation(run.id, { tenant_id: tenantId, worker_id: "w" });
+      const completed = await client.completeContinuityCompensation(run.id, claimed.plan.effect_id, {
+        tenant_id: tenantId,
+        worker_id: "w",
+      });
+      assert.equal(completed.state, "completed");
+      const effects = await client.listContinuityEffects(execution.continuity_id, tenantId);
+      assert.equal(effects[0]!.state, "compensated");
+    });
+
+    it("provider_receipt policy: completing without a provider_receipt is rejected as invalid; supplying one completes it outright", async () => {
+      const { tenantId, execution } = await policyCompensableExecution("int-comp-policy-receipt", "provider_receipt");
+      const run = await client.createContinuityCompensation(execution.continuity_id, { tenant_id: tenantId });
+      const claimed = await client.claimContinuityCompensation(run.id, { tenant_id: tenantId, worker_id: "w" });
+      await rejects(
+        client.completeContinuityCompensation(run.id, claimed.plan.effect_id, { tenant_id: tenantId, worker_id: "w" }),
+        400,
+        "provider_receipt verification requires a provider_receipt on completion",
+      );
+      const completed = await client.completeContinuityCompensation(run.id, claimed.plan.effect_id, {
+        tenant_id: tenantId,
+        worker_id: "w",
+        provider_receipt: `receipt-${uuid().slice(0, 8)}`,
+      });
+      assert.equal(completed.state, "completed");
+      const effects = await client.listContinuityEffects(execution.continuity_id, tenantId);
+      assert.equal(effects[0]!.state, "compensated");
+    });
+
+    it("manual policy: completing the step lands it in VerificationPending, and the effect is NOT compensated until verify_compensation_step approves it", async () => {
+      const { tenantId, execution } = await policyCompensableExecution("int-comp-policy-manual", "manual");
+      const run = await client.createContinuityCompensation(execution.continuity_id, { tenant_id: tenantId });
+      const claimed = await client.claimContinuityCompensation(run.id, { tenant_id: tenantId, worker_id: "w" });
+      const completed = await client.completeContinuityCompensation(run.id, claimed.plan.effect_id, {
+        tenant_id: tenantId,
+        worker_id: "w",
+      });
+      const step = completed.steps.find((s: any) => s.plan.effect_id === claimed.plan.effect_id);
+      assert.equal(step.state, "verification_pending");
+      const effectsBeforeVerify = await client.listContinuityEffects(execution.continuity_id, tenantId);
+      assert.equal(effectsBeforeVerify[0]!.state, "committed", "manual policy must not auto-compensate on completion alone");
+      const verified = await client.verifyContinuityCompensation(run.id, claimed.plan.effect_id, {
+        tenant_id: tenantId,
+        approved: true,
+        evidence: "operator confirmed externally",
+      });
+      assert.equal(verified.state, "completed");
+      const effectsAfterVerify = await client.listContinuityEffects(execution.continuity_id, tenantId);
+      assert.equal(effectsAfterVerify[0]!.state, "compensated");
+    });
+  });
+
   describe("A. invariant evaluation is re-run correctly against the post-migration sequence", () => {
     it("a terminal_state_in invariant registered on the target sequence fails migration planning (Pin), matching that it would also fail post-migration", async () => {
       // A terminal_state_in invariant is evaluated as part of historical
@@ -1712,6 +1962,115 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       const stored = await client.listContinuityInvariantResults(execution.continuity_id, tenantId);
       assert.ok(stored.some((r: any) => r.invariant_id === invariant.id));
     });
+
+    it("a budget_within_limits invariant always evaluates to 'unknown' via evaluate_invariants, regardless of real budget reservations — budget_breached evidence is never wired up", async () => {
+      // evaluate_invariants (orch8-api/src/continuity.rs ~2281-2286) builds
+      // its InvariantEvidence with `budget_breached: None` UNCONDITIONALLY —
+      // it never consults actual budget reservations/usage, even when the
+      // instance has a real configured budget and outstanding reservations.
+      // orch8-engine's budget_within_limits() maps None to EvidenceStatus::
+      // Unknown always (see continuity_advanced.rs budget_within_limits).
+      // Net effect: a budget_within_limits invariant can NEVER report pass
+      // or fail through this endpoint today — it is permanently vacuous.
+      // This test pins that actual (surprising) behavior rather than the
+      // intended one.
+      const tenantId = tid("int-inv-budget");
+      const seq = testSequence("int-inv-budget", [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        budget: { max_attention_units: 100 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const invariant = await client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: createdSeq.id,
+        sequence_version: seq.version,
+        name: "budget-ok",
+        rule: { type: "budget_within_limits" },
+      });
+      await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: {
+          cost_microunits: 0,
+          wall_time_ms: 0,
+          external_calls: 0,
+          bytes_transferred: 0,
+          energy_millijoules: 0,
+          attention_units: 10,
+        },
+        estimation_version: "int-v1",
+      });
+      const results = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      const matched = results.find((r: any) => r.invariant_id === invariant.id);
+      assert.ok(matched, "budget_within_limits must be evaluated alongside any other registered invariant");
+      assert.equal(matched.status, "unknown", "documents that budget evidence is never actually supplied");
+      const stored = await client.listContinuityInvariantResults(execution.continuity_id, tenantId);
+      assert.ok(stored.some((r: any) => r.invariant_id === invariant.id && r.status === "unknown"));
+    });
+
+    it("an effect_at_most_once invariant registered for a handler kind that never dispatched vacuously passes, and re-evaluating with IDENTICAL evidence is deduplicated at storage (not appended a second time)", async () => {
+      const tenantId = tid("int-inv-at-most-once");
+      const { execution, sequence } = await setupExecution(tenantId);
+      const invariant = await client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: sequence.id,
+        sequence_version: sequence.version,
+        name: "at-most-once-charge",
+        rule: { type: "effect_at_most_once", kind: "custom" },
+      });
+      const firstResults = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      const secondResults = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      assert.equal(firstResults.find((r: any) => r.invariant_id === invariant.id)?.status, "pass");
+      assert.equal(secondResults.find((r: any) => r.invariant_id === invariant.id)?.status, "pass");
+      // append_invariant_result uses `INSERT OR IGNORE` keyed on a
+      // dedupe_key derived from (invariant_id, continuity_id, epoch,
+      // evidence_sha256) — see orch8-storage/src/sqlite/evidence.rs
+      // append_invariant_result. Since no effects were ever dispatched, both
+      // evaluate calls produce byte-identical evidence, so the second
+      // append is silently ignored: exactly ONE result row is stored, not
+      // two, even though evaluate_invariants was called twice.
+      const stored = await client.listContinuityInvariantResults(execution.continuity_id, tenantId);
+      const forThisInvariant = stored.filter((r: any) => r.invariant_id === invariant.id);
+      assert.equal(forThisInvariant.length, 1, "identical re-evaluation evidence is deduplicated, not appended again");
+    });
+
+    it("an output_path_present invariant reports 'unknown' (not 'fail') for a made-up path never produced by the block, matching the invariant module's non-committal contract for absent evidence", async () => {
+      // output_path_present maps "path absent" to EvidenceStatus::Unknown,
+      // not Fail (see orch8-engine/src/continuity_advanced.rs
+      // output_path_present: `if present { Pass } else { Unknown }`) — there
+      // is no hard-fail branch for this rule at all.
+      const tenantId = tid("int-inv-output-path");
+      const sequence = testSequence(tenantId, [step("s1", "noop")], { tenantId });
+      const createdSeq = await client.createSequence(sequence);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const invariant = await client.createContinuityInvariant({
+        tenant_id: tenantId,
+        sequence_id: createdSeq.id,
+        sequence_version: sequence.version,
+        name: "output-present",
+        rule: { type: "output_path_present", block_id: "s1", path: "some.nonexistent.path" },
+      });
+      await client.waitForState(instance.id, "completed");
+      const results = await client.evaluateContinuityInvariants(execution.continuity_id, { tenant_id: tenantId });
+      const matched = results.find((r: any) => r.invariant_id === invariant.id);
+      assert.equal(matched.status, "unknown", "an absent output path is 'unknown', never a hard 'fail'");
+    });
   });
 
   describe("A. handoff requirements compatibility interacts with residency region policy", () => {
@@ -1719,6 +2078,14 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       { sourceRegion: "br-south", destRegion: "br-south", allowed: ["br-south"], expectAllowed: true },
       { sourceRegion: "br-south", destRegion: "us-east", allowed: ["br-south"], expectAllowed: false },
       { sourceRegion: "eu-west", destRegion: "eu-west", allowed: ["eu-west", "br-south"], expectAllowed: true },
+      { sourceRegion: "us-east", destRegion: "us-east", allowed: ["br-south"], expectAllowed: false },
+      { sourceRegion: "ap-south", destRegion: "ap-south", allowed: ["ap-south", "eu-west", "us-east"], expectAllowed: true },
+      // An EMPTY allowed_regions list disables the region check entirely
+      // (orch8-engine/src/continuity_advanced.rs evaluate_residency guards
+      // every region-denial branch on `!allowed_regions.is_empty()`), so an
+      // internal-classification destination always passes regardless of
+      // region when no allowlist is configured.
+      { sourceRegion: "br-south", destRegion: "br-south", allowed: [], expectAllowed: true },
     ];
 
     for (const { sourceRegion, destRegion, allowed, expectAllowed } of regionPairs) {
@@ -1789,6 +2156,893 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
           requirements: { handlers: ["noop"] },
         }),
         404,
+      );
+    });
+  });
+
+  describe("A. negative/conflict branches not yet exercised", () => {
+    it("BUG: create_handoff has no guard against a second concurrent pending handoff for the same execution", async () => {
+      // create_handoff (orch8-api/src/continuity.rs ~844-933) validates the
+      // placement decision, preview hash, and epoch, but never checks for an
+      // existing non-terminal (Requested/Exported) handoff on the same
+      // continuity_id before creating a new one. build_handoff_preview also
+      // does not consult existing handoffs. So two independent handoffs can
+      // both be Requested simultaneously for one execution — a genuine gap:
+      // only the LATER accept would eventually win via the epoch/ownership
+      // checks elsewhere, but both handoffs sit in "requested" indefinitely
+      // and a caller has no signal that one is already in flight. This test
+      // pins the ACTUAL (buggy) behavior rather than the desired one; when
+      // this gap is closed, replace `.equal("requested")` below with a
+      // `rejects(..., 409)` assertion on the second create_handoff call.
+      const tenantId = tid("int-hoff-double-pending");
+      const { execution } = await setupExecution(tenantId);
+      const destA = uuid();
+      const destB = uuid();
+      const reqA = await authorizedHandoffRequest(tenantId, execution.continuity_id, destA);
+      const first = await client.createHandoff(reqA);
+      assert.equal(first.state, "requested");
+      const reqB = await authorizedHandoffRequest(tenantId, execution.continuity_id, destB);
+      const second = await client.createHandoff(reqB);
+      assert.equal(
+        second.state,
+        "requested",
+        "documents the bug: a second concurrent handoff is currently accepted, not rejected",
+      );
+      assert.notEqual(first.id, second.id);
+      const stillFirst = await client.getHandoff(first.id, tenantId);
+      assert.equal(stillFirst.state, "requested", "the first handoff is not implicitly cancelled either");
+    });
+
+    it("applying a migration without ever calling plan first 404s (no plan id exists to apply)", async () => {
+      const tenantId = tid("int-mig-noplan");
+      await rejects(
+        client.applyContinuityMigration(uuid(), { tenant_id: tenantId }),
+        404,
+        "apply against a nonexistent migration plan id must 404",
+      );
+    });
+
+    it("rolling back a migration without ever applying it is rejected (nothing to roll back)", async () => {
+      const tenantId = tid("int-mig-rb-noapply");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-mig-rb-noapply");
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await rejects(
+        client.rollbackContinuityMigration(plan.id, { tenant_id: tenantId }),
+        409,
+        "a plan that was never applied cannot be rolled back",
+      );
+    });
+
+    it("attempting compensation on an execution with no committed effects yet is rejected", async () => {
+      const setup = await compensableExecution("int-comp-uncommitted");
+      // The dispatched effect exists but has NOT been resolved to committed
+      // yet, so there is nothing eligible to compensate.
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "dispatched");
+      await rejects(
+        client.createContinuityCompensation(setup.execution.continuity_id, {
+          tenant_id: setup.tenantId,
+        }),
+        409,
+        "compensation requires at least one committed effect",
+      );
+    });
+
+    it("resuming an already-resumed handoff a second time is rejected", async () => {
+      const setup = await resumedHandoff("int-hoff-resume-twice");
+      await rejects(
+        client.resumeHandoff(setup.handoff.id, { tenant_id: setup.tenantId }),
+        409,
+        "a handoff already in Resumed state cannot be resumed again",
+      );
+      const stillResumed = await client.getHandoff(setup.handoff.id, setup.tenantId);
+      assert.equal(stillResumed.state, "resumed");
+    });
+
+    it("revoking a grant after it has already been consumed is rejected and does not un-consume it", async () => {
+      const tenantId = tid("int-grant-revoke-consumed");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime);
+      const grant = await client.issueContinuationGrant({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destRuntime,
+        allowed_actions: ["accept"],
+        ttl_seconds: 60,
+      });
+      const consumed = await client.consumeContinuationGrant({
+        tenant_id: tenantId,
+        action: "accept",
+        token: grant.token,
+        signed_grant: grant.signed_grant,
+      });
+      assert.equal(consumed.state, "consumed");
+      // Attempting to consume the very same token again (a "double-spend")
+      // must be rejected, and must not somehow revert the first consumption.
+      await rejects(
+        client.consumeContinuationGrant({
+          tenant_id: tenantId,
+          action: "accept",
+          token: grant.token,
+          signed_grant: grant.signed_grant,
+        }),
+        409,
+        "a grant already consumed cannot be consumed again",
+      );
+    });
+
+    it("what-if simulation against an execution that is mid-migration (plan created, not yet applied) still runs read-only against the pre-migration state", async () => {
+      const tenantId = tid("int-whatif-midmig");
+      const { execution, sequence, checkpointId } = await pausedContinuityFixture(
+        tenantId,
+        "int-whatif-midmig",
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      // Plan a migration but deliberately do not apply it yet.
+      await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      const beforeExecution = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      const result = await client.runContinuityWhatIf(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+      });
+      assert.ok(result, "what-if must still run normally while a plan is pending but unapplied");
+      const afterExecution = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      assert.deepEqual(afterExecution, beforeExecution, "an unapplied plan must not affect what-if read-only guarantees");
+    });
+
+    it("a federation envelope for an execution that has already been handed off (owner changed) is still verifiable against the CURRENT epoch, not the stale one", async () => {
+      // Use the module-level federation peer/tenant fixture for a clean
+      // envelope verify against an execution whose epoch has already moved
+      // due to a completed handoff. export_handoff requires the source
+      // instance to be paused/durably waiting, so build via
+      // pausedContinuityFixture (not the bare running setupExecution).
+      const { execution, runtimeId } = await pausedContinuityFixture(
+        federationTenantId,
+        "int-fed-after-handoff",
+      );
+      const destRuntime = uuid();
+      await registerRuntime(federationTenantId, destRuntime, { handlers: ["human_review"] });
+      const req = await authorizedHandoffRequest(
+        federationTenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: federationTenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      const destInstance = uuid();
+      const imported = await client.importContinuityCapsule({
+        tenant_id: federationTenantId,
+        destination_runtime_id: destRuntime,
+        destination_instance_id: destInstance,
+        expected_epoch: 0,
+        capsule: exported.capsule,
+        payload_base64: exported.payload_base64,
+      });
+      await client.acceptHandoff(handoff.id, {
+        tenant_id: federationTenantId,
+        destination_instance_id: imported.instance_id,
+      });
+      const postHandoffExecution = await client.getContinuityExecution(
+        execution.continuity_id,
+        federationTenantId,
+      );
+      assert.notEqual(postHandoffExecution.epoch, execution.epoch);
+      assert.ok(runtimeId, "source runtime id retained for reference");
+
+      const payload = Buffer.from(`payload-${uuid()}`);
+      const staleUnsigned = {
+        id: uuid(),
+        peer_id: federationPeerId,
+        tenant_id: federationTenantId,
+        continuity_id: execution.continuity_id,
+        epoch: execution.epoch, // stale: pre-handoff epoch
+        destination_runtime_id: destRuntime,
+        payload_sha256: createHash("sha256").update(payload).digest("hex"),
+        issued_at: new Date(Date.now() - 100).toISOString(),
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+        signature: "",
+      };
+      const staleSignature = signEnvelope(staleUnsigned);
+      // verify_federation compares execution.epoch against the envelope's
+      // stamped epoch and rejects a mismatch with 409 (see
+      // orch8-api/src/continuity.rs verify_federation: `if execution.epoch
+      // != body.envelope.epoch`) — it never returns a soft `accepted: false`.
+      await rejects(
+        client.verifyFederationEnvelope({
+          tenant_id: federationTenantId,
+          envelope: { ...staleUnsigned, signature: staleSignature },
+          payload_base64: payload.toString("base64"),
+        }),
+        409,
+        "a stale-epoch federation envelope must be rejected, not silently accepted",
+      );
+
+      const freshUnsigned = { ...staleUnsigned, id: uuid(), epoch: postHandoffExecution.epoch };
+      const freshSignature = signEnvelope(freshUnsigned);
+      const freshResult = await client.verifyFederationEnvelope({
+        tenant_id: federationTenantId,
+        envelope: { ...freshUnsigned, signature: freshSignature },
+        payload_base64: payload.toString("base64"),
+      });
+      assert.equal(freshResult.valid, true, "an envelope stamped with the current epoch must verify");
+    });
+
+    it("importing the same capsule twice under the same destination runtime is idempotent: both calls resolve to the SAME instance id, no duplicate instance is created", async () => {
+      // storage.import_capsule_instance uses `INSERT OR IGNORE` keyed on
+      // (tenant_id, capsule_id, destination_runtime_id) and, on conflict,
+      // looks up and returns the ALREADY-imported instance id rather than
+      // erroring (see orch8-storage/src/sqlite/continuity.rs
+      // import_capsule_instance: rows_affected()==0 branch). This is
+      // deliberate transfer-retry idempotency, not a bug — this test pins
+      // that contract precisely rather than assuming a 409.
+      const tenantId = tid("int-capsule-reimport-same-id");
+      const { execution } = await pausedContinuityFixture(
+        tenantId,
+        "int-capsule-reimport-same-id",
+        [],
+        { fixture: "reimport" },
+      );
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      const destInstanceId = uuid();
+      const imported = await client.importContinuityCapsule({
+        tenant_id: tenantId,
+        destination_runtime_id: destRuntime,
+        destination_instance_id: destInstanceId,
+        expected_epoch: 0,
+        capsule: exported.capsule,
+        payload_base64: exported.payload_base64,
+      });
+      assert.ok(imported.instance_id);
+      const reimported = await client.importContinuityCapsule({
+        tenant_id: tenantId,
+        destination_runtime_id: destRuntime,
+        destination_instance_id: destInstanceId,
+        expected_epoch: 0,
+        capsule: exported.capsule,
+        payload_base64: exported.payload_base64,
+      });
+      assert.equal(
+        reimported.instance_id,
+        imported.instance_id,
+        "a repeated import for the same capsule+destination must resolve to the original instance id",
+      );
+    });
+  });
+
+  describe("A. secondary field assertions: timestamps, attribution, sequence numbers", () => {
+    it("provenance entries carry strictly non-decreasing created_at timestamps across a multi-step chain", async () => {
+      const tenantId = tid("int-prov-monotonic");
+      const { execution, runtimeId } = await setupExecution(tenantId);
+      for (const operation of ["handler_dispatch", "logging"]) {
+        await client.evaluateContinuityResidency({
+          tenant_id: tenantId,
+          continuity_id: execution.continuity_id,
+          classification: "internal",
+          operation,
+          destination_runtime_id: runtimeId,
+        });
+      }
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      assert.ok(provenance.length >= 3, "execution_created + 2 residency evaluations");
+      let previousTimestamp = 0;
+      for (const entry of provenance) {
+        const timestamp = new Date((entry as any).created_at).getTime();
+        assert.ok(
+          timestamp >= previousTimestamp,
+          `provenance entries must be non-decreasing in created_at: ${(entry as any).kind}`,
+        );
+        previousTimestamp = timestamp;
+      }
+    });
+
+    it("a resumed handoff's execution records owner_runtime_id equal to the destination runtime, never the source", async () => {
+      const setup = await resumedHandoff("int-attrib-owner");
+      const execution = await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(execution.owner_runtime_id, setup.destinationRuntimeId);
+      assert.notEqual(execution.owner_runtime_id, setup.sourceRuntimeId);
+    });
+
+    it("stream frames carry strictly increasing sequence numbers matching append order, with no gaps after zero retractions", async () => {
+      const tenantId = tid("int-frame-seq");
+      const { execution } = await setupExecution(tenantId);
+      const stream = await client.createContinuityStream({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        ttl_seconds: 60,
+      });
+      for (let i = 0; i < 5; i++) {
+        await client.appendContinuityFrame(stream.stream_id, {
+          tenant_id: tenantId,
+          sequence: i,
+          checkpoint_sha256: String(i).repeat(64).slice(0, 64),
+          payload: { i },
+        });
+      }
+      const frames = await client.listContinuityFrames(stream.stream_id, tenantId);
+      assert.deepEqual(
+        frames.map((f: any) => f.sequence),
+        [0, 1, 2, 3, 4],
+      );
+    });
+
+    it("a compensation run's completed_at timestamp is set only once the run reaches 'completed', never earlier", async () => {
+      const setup = await committedCompensableExecution("int-comp-completed-at");
+      const created = await client.createContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      assert.equal((created as any).completed_at ?? null, null, "a freshly created run has no completed_at yet");
+      const claimed = await client.claimContinuityCompensation(created.id, {
+        tenant_id: setup.tenantId,
+        worker_id: "completed-at-worker",
+      });
+      assert.equal((claimed as any).completed_at ?? null, null, "a claimed-but-unfinished run still has no completed_at");
+      const completed = await client.completeContinuityCompensation(created.id, claimed.plan.effect_id, {
+        tenant_id: setup.tenantId,
+        worker_id: "completed-at-worker",
+      });
+      assert.equal(completed.state, "completed");
+      assert.ok((completed as any).completed_at, "completed run must carry a completed_at timestamp");
+    });
+
+    it("effect receipts carry the dispatching runtime's execution continuity_id, never a foreign one, across two sibling executions", async () => {
+      const setup1 = await compensableExecution("int-effect-attrib-1");
+      const setup2 = await compensableExecution("int-effect-attrib-2");
+      const effects1 = await client.listContinuityEffects(setup1.execution.continuity_id, setup1.tenantId);
+      const effects2 = await client.listContinuityEffects(setup2.execution.continuity_id, setup2.tenantId);
+      assert.equal(effects1[0]!.continuity_id, setup1.execution.continuity_id);
+      assert.equal(effects2[0]!.continuity_id, setup2.execution.continuity_id);
+      assert.notEqual(effects1[0]!.id, effects2[0]!.id);
+    });
+
+    it("continuity locations record a distinct epoch per row and are sorted by epoch ascending", async () => {
+      const tenantId = tid("int-locations-epoch-order");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-locations-epoch-order");
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      const locations = await client.listContinuityLocations(execution.continuity_id, tenantId);
+      const epochs = locations.map((l: any) => l.epoch);
+      const sorted = [...epochs].sort((a, b) => a - b);
+      assert.deepEqual(epochs, sorted, "locations must be returned sorted by epoch ascending");
+      assert.equal(new Set(epochs).size, epochs.length, "each location row must carry a distinct epoch");
+    });
+  });
+
+  describe("A. repeat key scenarios under different starting conditions", () => {
+    it("a migration applied on an execution that already has TWO prior checkpoints (not just one) still migrates cleanly and preserves both", async () => {
+      const tenantId = tid("int-mig-multi-ckpt");
+      const { execution, sequence, instance } = await pausedContinuityFixture(
+        tenantId,
+        "int-mig-multi-ckpt",
+        [],
+        { round: 1 },
+      );
+      // Save a second checkpoint before migrating.
+      await client.saveCheckpoint(instance.id, {
+        safe_boundary: "gate",
+        context_snapshot: { round: 2 },
+      });
+      const beforeCheckpoints = await client.listContinuityCheckpoints(execution.continuity_id, tenantId);
+      assert.ok(beforeCheckpoints.length >= 2, "fixture must have at least two checkpoints before migration");
+
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      const applied = await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      assert.equal(applied.state, "applied");
+      const afterCheckpoints = await client.listContinuityCheckpoints(execution.continuity_id, tenantId);
+      const distinctAfter = new Set(afterCheckpoints.map((c: any) => c.checkpoint_id));
+      const distinctBefore = new Set(beforeCheckpoints.map((c: any) => c.checkpoint_id));
+      for (const id of distinctBefore) {
+        assert.ok(distinctAfter.has(id), "every pre-migration checkpoint must survive the migration");
+      }
+    });
+
+    it("an execution spanning THREE epochs of history (two migrations) reports all three epochs in locations and provenance still verifies", async () => {
+      const tenantId = tid("int-mig-triple-epoch");
+      const { execution, sequence } = await pausedContinuityFixture(tenantId, "int-mig-triple-epoch");
+      let currentSequence = sequence;
+      let currentExecutionId = execution.continuity_id;
+      const seenEpochs: number[] = [execution.epoch];
+      for (let round = 0; round < 2; round++) {
+        const target = sameShapeTarget(currentSequence);
+        const createdTarget = await client.createSequence(target);
+        const plan = await client.planContinuityMigration({
+          tenant_id: tenantId,
+          continuity_id: currentExecutionId,
+          to_sequence_id: createdTarget.id,
+          to_version: target.version,
+        });
+        await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+        const afterExecution = await client.getContinuityExecution(currentExecutionId, tenantId);
+        seenEpochs.push(afterExecution.epoch);
+        currentSequence = { ...target };
+      }
+      const locations = await client.listContinuityLocations(currentExecutionId, tenantId);
+      const epochsInLocations = new Set(locations.map((l: any) => l.epoch));
+      for (const epoch of seenEpochs) {
+        assert.ok(epochsInLocations.has(epoch), `epoch ${epoch} must be represented in locations`);
+      }
+      const verification = await client.verifyContinuityProvenance(currentExecutionId, tenantId);
+      assert.equal(verification.valid, true, "provenance must still verify across three epochs of migration history");
+    });
+
+    it("running compensation a second time on an execution whose first compensation round already completed (all effects compensated) is rejected — nothing left to compensate", async () => {
+      const setup = await committedCompensableExecution("int-comp-second-round");
+      await completeCompensationRun(setup.execution.continuity_id, setup.tenantId);
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects[0]!.state, "compensated");
+      await rejects(
+        client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId }),
+        409,
+        "an execution with zero committed (non-compensated) effects has nothing left to compensate",
+      );
+    });
+
+    it("planning a migration AFTER a prior compensation round has already completed is permanently Pinned, even with explicit approval — dispatched effect history is never eligible for automatic migration", async () => {
+      const setup = await committedCompensableExecution("int-comp-then-migrate");
+      await completeCompensationRun(setup.execution.continuity_id, setup.tenantId);
+      // plan_live_migration requires both a paused/durably-waiting instance
+      // AND at least one persisted checkpoint (get_latest_checkpoint). The
+      // compensable-execution fixture drives the instance through its worker
+      // dispatch but never itself saves a checkpoint, so one must be saved
+      // here first — matching the same precondition pausedContinuityFixture
+      // establishes for every other migration test in this file.
+      await client.waitForState(setup.instance.id, "waiting");
+      await client.saveCheckpoint(setup.instance.id, {
+        safe_boundary: "post-compensation",
+        context_snapshot: {},
+      });
+      const target = sameShapeTarget(setup.createdSequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: setup.tenantId,
+        continuity_id: setup.execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      // Unlike the paused-fixture migration tests elsewhere in this file
+      // (whose executions never dispatched any effect), an execution that
+      // dispatched and later compensated an effect replays with residual
+      // effect history that pins the plan — MigrationDisposition::Pin can
+      // NEVER be applied, not even with approved:true (apply_live_migration
+      // matches Pin/Incompatible to an unconditional Conflict regardless of
+      // the approved flag). This is the correct, safety-preserving contract:
+      // an execution with real side-effect history is not eligible for
+      // automatic replay-based migration.
+      assert.equal(plan.disposition, "pin");
+      await rejects(
+        client.applyContinuityMigration(plan.id, { tenant_id: setup.tenantId, approved: true }),
+        409,
+        "a Pinned migration plan can never be applied, even with explicit approval",
+      );
+      const effectsAfterAttempt = await client.listContinuityEffects(
+        setup.execution.continuity_id,
+        setup.tenantId,
+      );
+      assert.equal(effectsAfterAttempt[0]!.state, "compensated", "a rejected apply attempt must not disturb existing effect state");
+    });
+
+    it("releasing a budget reservation after a migration bumped the execution epoch is rejected (reservation now belongs to a stale epoch)", async () => {
+      const tenantId = tid("int-budget-stale-epoch");
+      const seq = testSequence(
+        "int-budget-stale-epoch",
+        [
+          step("gate", "human_review", {}, {
+            wait_for_input: {
+              prompt: "continue?",
+              choices: [{ label: "go", value: "go" }],
+            },
+          }),
+        ],
+        { tenantId },
+      );
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+        budget: { max_attention_units: 100 },
+      });
+      await client.waitForState(instance.id, "waiting");
+      await client.saveCheckpoint(instance.id, {
+        safe_boundary: "gate",
+        context_snapshot: {},
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const reservation = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: {
+          cost_microunits: 0,
+          wall_time_ms: 0,
+          external_calls: 0,
+          bytes_transferred: 0,
+          energy_millijoules: 0,
+          attention_units: 5,
+        },
+        estimation_version: "int-v1",
+      });
+      const target = sameShapeTarget({ ...seq, id: createdSeq.id });
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      await rejects(
+        client.releaseContinuityBudget(execution.continuity_id, reservation.id, { tenant_id: tenantId }),
+        409,
+        "a reservation created under a pre-migration epoch is stale once the execution's epoch advances",
+      );
+    });
+  });
+
+  describe("A. placement decision + test-fixture extraction interact correctly with checkpoints", () => {
+    it("choose_placement persists a decision usable later by preview_handoff's own internal placement pass, without double-writing provenance", async () => {
+      const tenantId = tid("int-placement-preview");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { handlers: ["noop"], regions: ["br-south"] });
+      const decision = await client.choosePlacement(execution.continuity_id, {
+        tenant_id: tenantId,
+        requirements: { handlers: ["noop"] },
+        classification: "internal",
+      });
+      assert.equal(decision.selected_runtime_id, destRuntime);
+      // choose_placement is a standalone advisory call — it must NOT append
+      // to the execution's provenance chain (only build_handoff_preview's
+      // caller, handoff_preview, persists a placement_decision separately
+      // and neither appends provenance either; only actually creating and
+      // running a handoff does).
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      assert.ok(!provenance.some((e: any) => e.kind === "provider_selected" || e.kind === "placement_selected"));
+    });
+
+    it("choose_placement against an execution with a runtime EXCLUDED via requirements returns no selected_runtime_id, not an error", async () => {
+      const tenantId = tid("int-placement-none");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { handlers: ["other_handler_only"] });
+      const decision = await client.choosePlacement(execution.continuity_id, {
+        tenant_id: tenantId,
+        requirements: { handlers: ["noop"] },
+        classification: "internal",
+      });
+      assert.equal(decision.selected_runtime_id ?? null, null);
+    });
+
+    it("extract_test_fixture on a migration-created checkpoint returns only allowlisted context fields, redacted, matching the boundary reported by get_continuity_checkpoint", async () => {
+      const tenantId = tid("int-fixture-mig-ckpt");
+      const { execution, sequence } = await pausedContinuityFixture(
+        tenantId,
+        "int-fixture-mig-ckpt",
+        [],
+        { keep_me: "visible", drop_me: "not-allowlisted" },
+      );
+      const target = sameShapeTarget(sequence);
+      const createdTarget = await client.createSequence(target);
+      const plan = await client.planContinuityMigration({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        to_sequence_id: createdTarget.id,
+        to_version: target.version,
+      });
+      await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
+      const checkpoints = await client.listContinuityCheckpoints(execution.continuity_id, tenantId);
+      const migrationCheckpointId = checkpoints[checkpoints.length - 1]!.checkpoint_id;
+      const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: migrationCheckpointId,
+        allowlisted_fields: ["keep_me"],
+      });
+      assert.deepEqual(Object.keys((fixture as any).sanitized_context), ["keep_me"]);
+      assert.equal((fixture as any).sanitized_context.keep_me, "visible");
+    });
+
+    it("extract_test_fixture with an empty allowlist returns an empty sanitized_context, never the full unfiltered context", async () => {
+      const tenantId = tid("int-fixture-empty-allowlist");
+      const { execution, checkpointId } = await pausedContinuityFixture(
+        tenantId,
+        "int-fixture-empty-allowlist",
+        [],
+        { secret: "should-not-leak" },
+      );
+      const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: checkpointId,
+        allowlisted_fields: [],
+      });
+      assert.deepEqual((fixture as any).sanitized_context, {});
+    });
+  });
+
+  describe("A. what-if against a checkpoint that has since been superseded by a newer checkpoint still targets the ORIGINAL boundary, not the latest", () => {
+    it("running what-if with an explicit older checkpoint_id after a newer checkpoint was saved still replays from the older boundary, not silently upgraded to latest", async () => {
+      const tenantId = tid("int-whatif-older-ckpt");
+      const { execution, instance, checkpointId: firstCheckpointId } = await pausedContinuityFixture(
+        tenantId,
+        "int-whatif-older-ckpt",
+        [],
+        { version: "first" },
+      );
+      await client.saveCheckpoint(instance.id, {
+        safe_boundary: "gate",
+        context_snapshot: { version: "second" },
+      });
+      const checkpoints = await client.listContinuityCheckpoints(execution.continuity_id, tenantId);
+      assert.ok(checkpoints.length >= 2, "fixture must have produced a second checkpoint");
+      const result = await client.runContinuityWhatIf(execution.continuity_id, {
+        tenant_id: tenantId,
+        checkpoint_id: firstCheckpointId,
+      });
+      assert.ok(result, "what-if must still resolve successfully against the explicitly-requested older checkpoint");
+      // The real instance/execution remain untouched regardless of which
+      // checkpoint was targeted.
+      const stillSameEpoch = await client.getContinuityExecution(execution.continuity_id, tenantId);
+      assert.equal(stillSameEpoch.epoch, execution.epoch);
+    });
+  });
+
+  describe("A. compensation preview reflects LIFO ordering even before any compensation run is created", () => {
+    it("preview_compensation on a two-effect execution returns the same LIFO order create_compensation_run will later use, without creating a run itself", async () => {
+      const tenantId = tid("int-comp-preview-lifo-noside");
+      const firstHandler = `int-comp-preview-lifo_first_${uuid().slice(0, 8)}`;
+      const secondHandler = `int-comp-preview-lifo_second_${uuid().slice(0, 8)}`;
+      const sequence = testSequence(
+        "int-comp-preview-lifo-noside",
+        [
+          step("arm", "human_review", {}, {
+            wait_for_input: { prompt: "go?", choices: [{ label: "Continue", value: "continue" }] },
+          }),
+          step("first", firstHandler, {}, {
+            compensation: { handler: "undo_first", verification: "handler_result" },
+          }),
+          step("second", secondHandler, {}, {
+            compensation: { handler: "undo_second", verification: "handler_result" },
+          }),
+        ],
+        { tenantId },
+      );
+      const created = await client.createSequence(sequence);
+      const instance = await client.createInstance({
+        sequence_id: created.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      await client.waitForState(instance.id, "waiting");
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      await client.sendSignal(instance.id, { custom: "human_input:arm" } as unknown as string, { value: "continue" });
+      const firstTask = await waitForWorkerTask(firstHandler, "int-comp-preview-lifo-w1");
+      await client.completeWorkerTask(firstTask.id, "int-comp-preview-lifo-w1", { ok: true });
+      const secondTask = await waitForWorkerTask(secondHandler, "int-comp-preview-lifo-w2");
+      await client.completeWorkerTask(secondTask.id, "int-comp-preview-lifo-w2", { ok: true });
+      const effects = await client.listContinuityEffects(execution.continuity_id, tenantId);
+      assert.equal(effects.length, 2, "setup: two dispatched effects");
+      for (const effect of effects) {
+        if (effect.state !== "committed") {
+          await client.resolveContinuityEffect(effect.id, {
+            tenant_id: tenantId,
+            state: "committed",
+            provider_receipt_id: `receipt-${uuid().slice(0, 8)}`,
+          });
+        }
+      }
+      const preview = await client.previewContinuityCompensation(execution.continuity_id, { tenant_id: tenantId });
+      assert.equal(preview.steps[0]!.effect_block_id, "second");
+      assert.equal(preview.steps[1]!.effect_block_id, "first");
+      // Preview must not itself create a run — a subsequent list of
+      // compensation state should show nothing running yet, confirmed
+      // indirectly by create_compensation_run succeeding cleanly right after.
+      const run = await client.createContinuityCompensation(execution.continuity_id, { tenant_id: tenantId });
+      assert.equal(run.state, "planned", "a freshly created run is planned until its first step is claimed");
+      assert.equal(run.steps[0]!.plan.effect_block_id, "second");
+    });
+  });
+
+  describe("A. disclosure minimization composed with residency evaluation on payload destined for the same handoff", () => {
+    it("an internal-classification payload is minimized to the allowlist while a public-classification payload passes through whole, then residency-checked for the SAME destination runtime independently", async () => {
+      const tenantId = tid("int-disclosure-residency");
+      const { execution } = await setupExecution(tenantId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { regions: ["br-south"] });
+      // minimize_disclosure short-circuits to the WHOLE payload for public
+      // classification (orch8-engine/src/continuity_advanced.rs
+      // minimize_disclosure: `if classification == Public { return
+      // disclosed: payload.clone() }`) — the allowlist only takes effect for
+      // non-public classifications (internal here; confidential/restricted
+      // are rejected outright by the handler).
+      const publicResult = await client.minimizeContinuityDisclosure({
+        classification: "public",
+        payload: { public_field: "ok", private_field: "secret" },
+        allowed_top_level_fields: ["public_field"],
+      });
+      assert.deepEqual(
+        Object.keys((publicResult as any).disclosed).sort(),
+        ["private_field", "public_field"],
+        "public classification bypasses the allowlist entirely",
+      );
+      assert.deepEqual((publicResult as any).withheld_sha256, []);
+
+      const internalResult = await client.minimizeContinuityDisclosure({
+        classification: "internal",
+        payload: { public_field: "ok", private_field: "secret" },
+        allowed_top_level_fields: ["public_field"],
+      });
+      assert.deepEqual(Object.keys((internalResult as any).disclosed), ["public_field"]);
+      assert.equal((internalResult as any).withheld_sha256.length, 1, "the withheld field must be tracked by hash");
+
+      const residency = await client.evaluateContinuityResidency({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        classification: "public",
+        operation: "handler_dispatch",
+        destination_runtime_id: destRuntime,
+        allowed_regions: ["br-south"],
+      });
+      assert.equal(residency.outcome, "pass");
+      // Only the residency call touches this execution's provenance chain —
+      // disclosure minimization, being payload-shape-only with no
+      // continuity_id in its request body, never does (see the module-level
+      // federation test above for the same assertion in isolation).
+      const provenance = await client.listContinuityProvenance(execution.continuity_id, tenantId);
+      const kinds = provenance.map((e: any) => e.kind);
+      assert.ok(kinds.includes("residency_evaluated"));
+      assert.ok(!kinds.includes("disclosure_minimized"));
+    });
+  });
+
+  describe("A. more handoff export edge cases", () => {
+    it("exporting a handoff with requirements that don't byte-for-byte match the original placement decision is rejected — export re-validates against the SAME placement evidence, it does not accept a looser superset", async () => {
+      // export_handoff compares `authorized.requirements != body.requirements`
+      // against the placement decision saved at create_handoff time (see
+      // orch8-api/src/continuity.rs export_handoff ~1087-1094) — even a
+      // strict superset of the original requirements is rejected, not just a
+      // narrower or conflicting one. Export is not an independent
+      // capability re-check; it's a strict replay-and-compare against the
+      // SAME placement evidence create_handoff authorized.
+      const tenantId = tid("int-hoff-export-diff-reqs");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-export-diff-reqs");
+      const destRuntime = uuid();
+      await registerRuntime(tenantId, destRuntime, { handlers: ["human_review", "noop"] });
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      await rejects(
+        client.exportHandoff(handoff.id, {
+          tenant_id: tenantId,
+          requirements: { handlers: ["human_review", "noop"] },
+          expires_in_seconds: 60,
+        }),
+        409,
+        "export must reject requirements that differ at all from the original placement decision, even a superset",
+      );
+      // Exporting with the EXACT original requirements still succeeds
+      // afterward — the rejected attempt must not have poisoned the handoff.
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: { handlers: ["human_review"] },
+        expires_in_seconds: 60,
+      });
+      assert.equal(exported.handoff.state, "exported");
+    });
+
+    it("export_handoff against a handoff already in Exported state is rejected (export is not idempotent/re-callable)", async () => {
+      const tenantId = tid("int-hoff-export-twice");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-export-twice");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      const exported = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      assert.equal(exported.handoff.state, "exported");
+      await rejects(
+        client.exportHandoff(handoff.id, {
+          tenant_id: tenantId,
+          requirements: req.requirements,
+          expires_in_seconds: 60,
+        }),
+        409,
+        "a handoff already exported cannot be exported a second time",
+      );
+    });
+
+    it("accept_handoff with a destination_instance_id that was never produced by import_capsule for this handoff is rejected", async () => {
+      const tenantId = tid("int-hoff-accept-wrong-instance");
+      const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-accept-wrong-instance");
+      const destRuntime = uuid();
+      const req = await authorizedHandoffRequest(
+        tenantId,
+        execution.continuity_id,
+        destRuntime,
+        { handlers: ["human_review"] },
+      );
+      const handoff = await client.createHandoff(req);
+      await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      // A completely unrelated instance (never imported via this handoff's
+      // capsule) is substituted as the accept target.
+      const unrelatedSeq = await client.createSequence(
+        testSequence("int-hoff-accept-wrong-instance-unrelated", [step("s1", "noop")], { tenantId }),
+      );
+      const unrelatedInstance = await client.createInstance({
+        sequence_id: unrelatedSeq.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      await rejects(
+        client.acceptHandoff(handoff.id, {
+          tenant_id: tenantId,
+          destination_instance_id: unrelatedInstance.id,
+        }),
+        409,
+        "accept must refuse a destination instance that was not produced by this handoff's own capsule import",
       );
     });
   });
@@ -2299,6 +3553,477 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
           await rejects(client.listContinuityFrames(streamsByTenant[other]!.streamId, t), 404);
         }
       }
+    });
+
+    // ------------------------------------------------------------------
+    // Additional resource types and nested/child-resource isolation checks
+    // not covered by the table above: budget reservation reconcile/release,
+    // handoff preview, evaluation scores, compensation step transitions,
+    // invariant evaluation, and attention-task assignment leaking across a
+    // second, differently-shaped fixture. Each of these exercises a
+    // DISTINCT tenant-scoping code path (its own storage lookup), so parent-
+    // level isolation elsewhere does not guarantee these pass.
+    // ------------------------------------------------------------------
+
+    it("budget reservation reconcile: tenant B cannot reconcile a reservation that belongs to tenant A's execution", async () => {
+      const tenantC = tid("iso-budget-reconcile-a");
+      const seq = testSequence("iso-budget-reconcile", [step("s1", "noop")], { tenantId: tenantC });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantC,
+        namespace: "default",
+        budget: { max_attention_units: 100 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantC,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const reservation = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantC,
+        requested: {
+          cost_microunits: 0,
+          wall_time_ms: 0,
+          external_calls: 0,
+          bytes_transferred: 0,
+          energy_millijoules: 0,
+          attention_units: 5,
+        },
+        estimation_version: "iso-v1",
+      });
+      await rejects(
+        client.reconcileContinuityBudget(execution.continuity_id, reservation.id, {
+          tenant_id: tenantB,
+          actual: {
+            cost_microunits: 0,
+            wall_time_ms: 0,
+            external_calls: 0,
+            bytes_transferred: 0,
+            energy_millijoules: 0,
+            attention_units: 3,
+          },
+        }),
+        404,
+      );
+      // The real tenant can still reconcile it afterward — the cross-tenant
+      // attempt must not have poisoned or partially consumed the reservation.
+      const reconciled = await client.reconcileContinuityBudget(execution.continuity_id, reservation.id, {
+        tenant_id: tenantC,
+        actual: {
+          cost_microunits: 0,
+          wall_time_ms: 0,
+          external_calls: 0,
+          bytes_transferred: 0,
+          energy_millijoules: 0,
+          attention_units: 3,
+        },
+      });
+      assert.equal(reconciled.state, "reconciled");
+    });
+
+    it("budget reservation release: tenant B cannot release a reservation that belongs to tenant A's execution", async () => {
+      const tenantC = tid("iso-budget-release-a");
+      const seq = testSequence("iso-budget-release", [step("s1", "noop")], { tenantId: tenantC });
+      const createdSeq = await client.createSequence(seq);
+      const instance = await client.createInstance({
+        sequence_id: createdSeq.id,
+        tenant_id: tenantC,
+        namespace: "default",
+        budget: { max_attention_units: 100 },
+      });
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantC,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
+      const reservation = await client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantC,
+        requested: {
+          cost_microunits: 0,
+          wall_time_ms: 0,
+          external_calls: 0,
+          bytes_transferred: 0,
+          energy_millijoules: 0,
+          attention_units: 5,
+        },
+        estimation_version: "iso-v1",
+      });
+      await rejects(
+        client.releaseContinuityBudget(execution.continuity_id, reservation.id, { tenant_id: tenantB }),
+        404,
+      );
+    });
+
+    it("handoff preview: tenant B cannot preview a handoff for tenant A's execution (404, not a wrong-tenant preview)", async () => {
+      await rejects(
+        client.previewHandoff(fixtureA.execution.continuity_id, {
+          tenant_id: tenantB,
+          destination_runtime_id: uuid(),
+          requirements: { handlers: ["noop"] },
+        }),
+        404,
+      );
+    });
+
+    it("evaluation scores: tenant B's evaluation list for tenant A's continuity_id is empty, not tenant A's scores (same vacuous-list contract as list_effects/list_provenance)", async () => {
+      const tenantForEval = tid("iso-eval-a");
+      const { execution } = await setupExecution(tenantForEval);
+      await client.appendContinuityEvaluation(execution.continuity_id, {
+        tenant_id: tenantForEval,
+        evaluator: "iso-judge",
+        score_millipoints: 700,
+        sample_size: 5,
+        evidence_sha256: createHash("sha256").update("iso-ev").digest("hex"),
+      });
+      const scoresUnderReal = await client.listContinuityEvaluations(execution.continuity_id, tenantForEval);
+      assert.equal(scoresUnderReal.length, 1);
+      const scoresUnderB = await client.listContinuityEvaluations(execution.continuity_id, tenantB);
+      assert.deepEqual(scoresUnderB, []);
+    });
+
+    it("invariant evaluation: tenant B cannot evaluate invariants against tenant A's execution", async () => {
+      await rejects(
+        client.evaluateContinuityInvariants(fixtureA.execution.continuity_id, { tenant_id: tenantB }),
+        404,
+      );
+    });
+
+    it("compensation steps: tenant B cannot complete, fail, or verify a compensation step belonging to tenant A's run", async () => {
+      await rejects(
+        client.completeContinuityCompensation(
+          fixtureA.compensationRun.id,
+          fixtureA.firstEffectId,
+          { tenant_id: tenantB, worker_id: "intruder" },
+        ),
+        404,
+      );
+      await rejects(
+        client.failContinuityCompensation(
+          fixtureA.compensationRun.id,
+          fixtureA.firstEffectId,
+          { tenant_id: tenantB, worker_id: "intruder", error: "x" },
+        ),
+        404,
+      );
+      await rejects(
+        client.verifyContinuityCompensation(
+          fixtureA.compensationRun.id,
+          fixtureA.firstEffectId,
+          { tenant_id: tenantB, approved: true, evidence: "x" },
+        ),
+        404,
+      );
+    });
+
+    it("what-if runs: a second, unrelated tenant's list of its OWN execution's what-if runs never contains tenant A's runs, even after both tenants exercise what-if independently", async () => {
+      // There is no standalone get-what-if-run-by-id endpoint; the resource
+      // is only reachable via list_what_if_runs (already covered for the
+      // direct-404 case in the table above). This test instead confirms the
+      // list-scoping itself: two tenants each running what-if against their
+      // own paused execution must never see each other's recorded runs when
+      // listing by their OWN (real, valid-for-them) continuity_id.
+      const runsUnderA = await client.listContinuityWhatIfRuns(fixtureA.paused.execution.continuity_id, tenantA);
+      assert.ok(runsUnderA.length >= 1, "sanity: tenant A does have at least one what-if run recorded");
+      const tenantD = tid("iso-whatif-d");
+      const pausedD = await pausedContinuityFixture(tenantD, `iso-whatif-${tenantD}`);
+      await client.runContinuityWhatIf(pausedD.execution.continuity_id, {
+        tenant_id: tenantD,
+        checkpoint_id: pausedD.checkpointId,
+      });
+      const runsUnderD = await client.listContinuityWhatIfRuns(pausedD.execution.continuity_id, tenantD);
+      assert.equal(runsUnderD.length, 1, "tenant D's list must contain only its own single run");
+      // WhatIfRunRecord nests the scenario id at `.scenario.id`, not a
+      // top-level `.id` — each run's scenario carries its own tenant_id too.
+      const aScenarioIds = new Set(runsUnderA.map((r: any) => r.scenario.id));
+      for (const run of runsUnderD) {
+        assert.equal(run.scenario.tenant_id, tenantD);
+        assert.ok(
+          !aScenarioIds.has(run.scenario.id),
+          "tenant D's scenario id must not appear in tenant A's list (and vice versa)",
+        );
+      }
+    });
+
+    it("checkpoints: a checkpoint id that is valid for tenant A 404s when looked up under a tenant that has never run any continuity execution at all", async () => {
+      const neverUsedTenant = tid("iso-neverused");
+      await rejects(
+        client.getContinuityCheckpoint(
+          fixtureA.paused.execution.continuity_id,
+          fixtureA.paused.checkpointId,
+          neverUsedTenant,
+        ),
+        404,
+      );
+    });
+
+    it("stream frames nested under a stream: a frame appended under tenant A is invisible when the SAME stream_id is queried by list under a completely different, freshly-minted tenant", async () => {
+      const brandNewTenant = tid("iso-brand-new");
+      await rejects(client.listContinuityFrames(fixtureA.stream.stream_id, brandNewTenant), 404);
+    });
+
+    it("attention task decide: a decision payload correctly shaped for tenant A's reviewer is still rejected under tenant B even when the reviewer_id string happens to match", async () => {
+      const tenantForTask = tid("iso-attn-decide-a");
+      const { execution } = await setupExecution(tenantForTask);
+      const task = await client.createAttentionTask({
+        tenant_id: tenantForTask,
+        continuity_id: execution.continuity_id,
+        required_skills: ["iso-decide"],
+        classification: "internal",
+        priority: 1,
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        estimated_attention_units: 1,
+      });
+      const reviewerId = uuid();
+      const assigned = await client.assignAttentionTask(task.id, {
+        tenant_id: tenantForTask,
+        reviewers: [
+          {
+            reviewer_id: reviewerId,
+            tenant_ids: [tenantForTask],
+            skills: ["iso-decide"],
+            region: "br-south",
+            trust: "registered",
+            available_attention_units: 10,
+          },
+        ],
+        lease_seconds: 60,
+      });
+      assert.equal(assigned.state, "assigned");
+      await rejects(
+        client.decideAttentionTask(task.id, {
+          tenant_id: tenantB,
+          reviewer_id: reviewerId,
+          decision_sha256: createHash("sha256").update("x").digest("hex"),
+        }),
+        404,
+        "even a byte-for-byte matching reviewer_id string cannot decide a foreign tenant's task",
+      );
+    });
+
+    it("migration plan: a fresh tenant with zero executions still gets 404 (not 401/403) when probing an arbitrary but real migration plan id", async () => {
+      const brandNewTenant = tid("iso-mig-brand-new");
+      await rejects(client.getContinuityMigration(fixtureA.migrationPlan.id, brandNewTenant), 404);
+    });
+
+    it("runtime registration: two tenants registering a runtime with the SAME runtime_id string never merge into one record — each tenant sees only its own", async () => {
+      const tenantE = tid("iso-runtime-e");
+      const tenantF = tid("iso-runtime-f");
+      const sharedRuntimeId = uuid();
+      await registerRuntime(tenantE, sharedRuntimeId, { regions: ["br-south"] });
+      await registerRuntime(tenantF, sharedRuntimeId, { regions: ["us-east"] });
+      const listE = await client.listRuntimes(tenantE);
+      const listF = await client.listRuntimes(tenantF);
+      const runtimeInE = listE.find((r: any) => r.runtime_id === sharedRuntimeId);
+      const runtimeInF = listF.find((r: any) => r.runtime_id === sharedRuntimeId);
+      assert.ok(runtimeInE, "tenant E must see its own registration");
+      assert.ok(runtimeInF, "tenant F must see its own registration");
+      assert.deepEqual(runtimeInE.regions, ["br-south"]);
+      assert.deepEqual(runtimeInF.regions, ["us-east"]);
+    });
+
+    // ------------------------------------------------------------------
+    // Table-driven sweep, second pass: nested/child resources probed under
+    // a tenant that has NEVER created ANY continuity resource at all (not
+    // even a sibling of the same type), to rule out any accidental
+    // fallback-to-global-default behavior distinct from the "wrong but
+    // real tenant" cases above.
+    // ------------------------------------------------------------------
+    for (const descriptor of [
+      "handoff (get_handoff)",
+      "streams (list_stream_frames)",
+      "checkpoints (list_continuity_checkpoints)",
+      "compensation run (get_compensation_run)",
+      "migration plan (get_live_migration)",
+      "what-if runs (list_what_if_runs)",
+    ]) {
+      it(`never-used tenant sweep: ${descriptor} 404s for a tenant that has created zero continuity resources`, async () => {
+        const neverUsedTenant = tid("iso-zero-resources");
+        const probes: Record<string, () => Promise<unknown>> = {
+          "handoff (get_handoff)": () => client.getHandoff(fixtureA.handoff.id, neverUsedTenant),
+          "streams (list_stream_frames)": () =>
+            client.listContinuityFrames(fixtureA.stream.stream_id, neverUsedTenant),
+          "checkpoints (list_continuity_checkpoints)": () =>
+            client.listContinuityCheckpoints(fixtureA.paused.execution.continuity_id, neverUsedTenant),
+          "compensation run (get_compensation_run)": () =>
+            client.getContinuityCompensation(fixtureA.compensationRun.id, neverUsedTenant),
+          "migration plan (get_live_migration)": () =>
+            client.getContinuityMigration(fixtureA.migrationPlan.id, neverUsedTenant),
+          "what-if runs (list_what_if_runs)": () =>
+            client.listContinuityWhatIfRuns(fixtureA.paused.execution.continuity_id, neverUsedTenant),
+        };
+        await rejects(probes[descriptor]!(), 404, `resource: ${descriptor}`);
+      });
+    }
+
+    it("stream creation under tenant B against tenant A's continuity_id is refused at create-time (the child resource can never even be minted under the wrong tenant)", async () => {
+      await rejects(
+        client.createContinuityStream({
+          tenant_id: tenantB,
+          continuity_id: fixtureA.execution.continuity_id,
+          ttl_seconds: 60,
+        }),
+        404,
+      );
+    });
+
+    it("invariant creation under tenant B against tenant A's sequence_id is refused at create-time (sequence ownership is checked before the invariant row is ever written)", async () => {
+      await rejects(
+        client.createContinuityInvariant({
+          tenant_id: tenantB,
+          sequence_id: fixtureA.paused.sequence.id,
+          sequence_version: fixtureA.paused.sequence.version,
+          name: "cross-tenant-invariant",
+          rule: { type: "no_unknown_effects" },
+        }),
+        404,
+      );
+    });
+
+    it("attention task creation under tenant B against tenant A's continuity_id is refused at create-time", async () => {
+      await rejects(
+        client.createAttentionTask({
+          tenant_id: tenantB,
+          continuity_id: fixtureA.execution.continuity_id,
+          required_skills: ["cross-tenant"],
+          classification: "internal",
+          priority: 1,
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+          estimated_attention_units: 1,
+        }),
+        404,
+      );
+    });
+
+    it("handoff creation under tenant B against tenant A's continuity_id + a tenant-A-authorized placement_decision_id is refused (the placement decision itself is tenant-scoped)", async () => {
+      const destRuntime = uuid();
+      await registerRuntime(tenantA, destRuntime);
+      const preview = await client.previewHandoff(fixtureA.execution.continuity_id, {
+        tenant_id: tenantA,
+        destination_runtime_id: destRuntime,
+        requirements: { handlers: ["noop"] },
+      });
+      await rejects(
+        client.createHandoff({
+          tenant_id: tenantB,
+          continuity_id: fixtureA.execution.continuity_id,
+          destination_runtime_id: destRuntime,
+          requirements: { handlers: ["noop"] },
+          placement_decision_id: preview.placement_decision.id,
+          preview_sha256: preview.preview_sha256,
+        }),
+        404,
+        "the placement decision was authorized for tenant A; tenant B cannot claim it as its own",
+      );
+    });
+
+    it("migration planning under tenant B against tenant A's continuity_id is refused at create-time, before any checkpoint/instance-state check runs", async () => {
+      const target = sameShapeTarget(fixtureA.paused.sequence);
+      const createdTarget = await client.createSequence(target);
+      await rejects(
+        client.planContinuityMigration({
+          tenant_id: tenantB,
+          continuity_id: fixtureA.paused.execution.continuity_id,
+          to_sequence_id: createdTarget.id,
+          to_version: target.version,
+        }),
+        404,
+      );
+    });
+
+    it("budget reservation creation under tenant B against tenant A's continuity_id is refused at create-time", async () => {
+      await rejects(
+        client.reserveContinuityBudget(fixtureA.execution.continuity_id, {
+          tenant_id: tenantB,
+          requested: {
+            cost_microunits: 0,
+            wall_time_ms: 0,
+            external_calls: 0,
+            bytes_transferred: 0,
+            energy_millijoules: 0,
+            attention_units: 1,
+          },
+          estimation_version: "iso-v1",
+        }),
+        404,
+      );
+    });
+
+    it("compensation run creation under tenant B against tenant A's compensable continuity_id is refused at create-time", async () => {
+      await rejects(
+        client.createContinuityCompensation(fixtureA.compSetup.execution.continuity_id, {
+          tenant_id: tenantB,
+        }),
+        404,
+      );
+    });
+
+    it("device delegation claim under tenant B using tenant A's grant is refused even with a structurally valid signed_grant shape (delegation.tenant_id mismatch is caught before grant verification)", async () => {
+      const tenantForDeleg = tid("iso-deleg-a");
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantForDeleg);
+      await registerRuntime(tenantForDeleg, sourceRuntimeId);
+      const destRuntime = uuid();
+      await registerRuntime(tenantForDeleg, destRuntime);
+      const subSeq = await client.createSequence(
+        testSequence("iso-deleg-sub", [step("s1", "noop")], { tenantId: tenantForDeleg }),
+      );
+      const grant = await client.issueContinuationGrant({
+        tenant_id: tenantForDeleg,
+        continuity_id: execution.continuity_id,
+        destination_runtime_id: destRuntime,
+        allowed_actions: ["accept"],
+        ttl_seconds: 60,
+      });
+      const delegation = {
+        id: uuid(),
+        tenant_id: tenantB,
+        parent_continuity_id: execution.continuity_id,
+        parent_epoch: execution.epoch,
+        source_runtime_id: sourceRuntimeId,
+        destination_runtime_id: destRuntime,
+        sub_sequence_id: subSeq.id,
+        grant_id: grant.signed_grant.grant.id,
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+      };
+      await rejects(
+        client.claimDeviceDelegation({
+          tenant_id: tenantB,
+          delegation,
+          signed_grant: grant.signed_grant,
+          token: grant.token,
+        }),
+        404,
+        "delegation.tenant_id must match the enforced request tenant, independent of grant validity",
+      );
+    });
+
+    it("federation envelope verification for tenantB against an execution that actually belongs to federationTenantId 404s (execution ownership is checked, independent of the peer's allowed_tenants policy)", async () => {
+      const { execution } = await setupExecution(federationTenantId);
+      const destRuntime = uuid();
+      await registerRuntime(federationTenantId, destRuntime);
+      const payload = Buffer.from(`payload-${uuid()}`);
+      const unsigned = {
+        id: uuid(),
+        peer_id: federationPeerId,
+        tenant_id: tenantB,
+        continuity_id: execution.continuity_id,
+        epoch: execution.epoch,
+        destination_runtime_id: destRuntime,
+        payload_sha256: createHash("sha256").update(payload).digest("hex"),
+        issued_at: new Date(Date.now() - 100).toISOString(),
+        expires_at: new Date(Date.now() + 30_000).toISOString(),
+        signature: "",
+      };
+      const signature = signEnvelope(unsigned);
+      await rejects(
+        client.verifyFederationEnvelope({
+          tenant_id: tenantB,
+          envelope: { ...unsigned, signature },
+          payload_base64: payload.toString("base64"),
+        }),
+        404,
+        "get_continuity_execution under tenantB for federationTenantId's continuity_id must 404 before the peer/allowed_tenants check is ever reached",
+      );
     });
   });
 });
