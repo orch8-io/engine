@@ -53,6 +53,18 @@ export class Orch8Client {
     return this.#post("/sequences", seq);
   }
 
+  async compileSequenceDataflow(seq: SequenceDef): Promise<ApiResponse> {
+    return this.#post("/sequences/dataflow", seq);
+  }
+
+  async getSequenceDataflow(id: string): Promise<ApiResponse> {
+    return this.#get(`/sequences/${id}/dataflow`);
+  }
+
+  async getSequencePreflight(id: string): Promise<ApiResponse> {
+    return this.#get(`/sequences/${id}/preflight`);
+  }
+
   async getSequence(id: string): Promise<SequenceDef> {
     return this.#get<SequenceDef>(`/sequences/${id}`);
   }

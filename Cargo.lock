@@ -3077,6 +3077,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "utoipa",
  "uuid",
  "wasmtime",
  "wat",

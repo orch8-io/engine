@@ -31,6 +31,8 @@ use utoipa::OpenApi;
         // Preflight
         crate::preflight::preflight_draft,
         crate::preflight::preflight_stored,
+        crate::dataflow::compile_draft,
+        crate::dataflow::compile_stored,
         // Instances
         crate::instances::create_instance,
         crate::instances::list_instances,
@@ -177,6 +179,11 @@ use utoipa::OpenApi;
         orch8_types::preflight::PreflightReport,
         orch8_types::preflight::PreflightCheck,
         orch8_types::preflight::PreflightStatus,
+        orch8_engine::dataflow::DataflowSeverity,
+        orch8_engine::dataflow::DataflowFinding,
+        orch8_engine::dataflow::DataflowReport,
+        orch8_engine::dataflow::GeneratedDataflowTypes,
+        crate::dataflow::DataflowResponse,
         orch8_types::diagnosis::InstanceDiagnosisReport,
         orch8_types::diagnosis::Diagnosis,
         orch8_types::diagnosis::DiagnosisCategory,

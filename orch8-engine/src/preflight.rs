@@ -160,6 +160,7 @@ pub fn run_preflight(
         check_lint(seq, now),
         check_input_schema(seq, now),
         check_output_schemas(seq, now),
+        check_typed_dataflow(seq, now),
         check_when_guards(seq, now),
         check_handlers(seq, &refs, inventory, now),
         check_plugins(&refs, inventory, now),
@@ -168,6 +169,51 @@ pub fn run_preflight(
         check_sub_sequences(seq, &refs, inventory, now),
     ];
     PreflightReport::new(seq.name.clone(), i64::from(seq.version), checks, now)
+}
+
+fn check_typed_dataflow(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
+    let report = crate::dataflow::compile(seq);
+    if report.findings.is_empty() {
+        return PreflightCheck::pass(
+            "typed_dataflow_compatible",
+            format!(
+                "{} typed reference(s) are compatible",
+                report.references_checked
+            ),
+        );
+    }
+    let findings: Vec<_> = report
+        .findings
+        .iter()
+        .map(|finding| {
+            let severity = match finding.severity {
+                crate::dataflow::DataflowSeverity::Warning => FindingSeverity::Warning,
+                crate::dataflow::DataflowSeverity::Error => FindingSeverity::Error,
+            };
+            Finding::new(
+                finding.code.clone(),
+                severity,
+                format!(
+                    "producer/reference '{}' -> consumer '{}': {}",
+                    finding.reference, finding.consumer, finding.summary
+                ),
+                Confidence::Certain,
+                now,
+            )
+            .with_resource(ResourceRef::new("block", finding.consumer.clone()))
+        })
+        .collect();
+    let status = if report.is_compatible() {
+        PreflightStatus::Warning
+    } else {
+        PreflightStatus::Fail
+    };
+    PreflightCheck::with_status(
+        "typed_dataflow_compatible",
+        status,
+        format!("{} typed dataflow finding(s)", findings.len()),
+        findings,
+    )
 }
 
 fn unknown(id: &str, what: &str) -> PreflightCheck {
@@ -1282,6 +1328,21 @@ mod tests {
         let c = check(&report, "input_schema_valid");
         assert_eq!(c.status, PreflightStatus::Fail);
         assert!(c.findings[0].summary.contains("string"));
+    }
+
+    #[test]
+    fn incompatible_typed_dataflow_fails_preflight_with_chain() {
+        let s = seq(json!([
+            {"type":"step","id":"consumer","handler":"noop","params":{
+                "value":"{{ outputs.missing.id }}"
+            }}
+        ]));
+        let report = run_preflight(&s, &full_inventory(), t0());
+        let check = check(&report, "typed_dataflow_compatible");
+        assert_eq!(check.status, PreflightStatus::Fail);
+        assert_eq!(check.findings[0].code, "MISSING_PRODUCER");
+        assert!(check.findings[0].summary.contains("outputs.missing.id"));
+        assert!(check.findings[0].summary.contains("consumer 'consumer'"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod cluster;
 pub mod continuity;
 pub mod credentials;
 pub mod cron;
+pub mod dataflow;
 pub mod diagnosis;
 pub mod dlq_groups;
 pub mod error;
@@ -203,6 +204,7 @@ fn api_routes() -> Router<AppState> {
         .merge(sessions::routes())
         .merge(cluster::routes())
         .merge(continuity::routes())
+        .merge(dataflow::routes())
         .merge(triggers::routes())
         .merge(plugins::routes())
         .merge(credentials::routes())

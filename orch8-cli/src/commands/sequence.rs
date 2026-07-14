@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use reqwest::Client;
 use uuid::Uuid;
@@ -55,6 +55,36 @@ pub enum SequenceCmd {
         #[arg(long, short)]
         file: Option<PathBuf>,
     },
+    /// Compile typed producer/consumer references and generate deterministic
+    /// TypeScript, Python, and canonical schema artifacts.
+    Dataflow {
+        /// Stored sequence id to compile.
+        #[arg(long, conflicts_with = "file")]
+        id: Option<Uuid>,
+        /// Local draft definition to compile instead of a stored sequence.
+        #[arg(long, short)]
+        file: Option<PathBuf>,
+        /// Atomically write types.ts, types.py, schema.json, and report.json.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+}
+
+fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file beside {}", path.display()))?;
+    file.write_all(contents)?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replace {}", path.display()))?;
+    Ok(())
 }
 
 /// The content fields that define a sequence's behavior — everything except
@@ -317,8 +347,98 @@ pub async fn run(
                 std::process::exit(1);
             }
         }
+        SequenceCmd::Dataflow { id, file, out_dir } => {
+            let resp = match (id, file) {
+                (Some(id), None) => {
+                    client
+                        .get(format!("{base}/sequences/{id}/dataflow"))
+                        .send()
+                        .await?
+                }
+                (None, Some(file)) => {
+                    let content = std::fs::read_to_string(&file)
+                        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", file.display()))?;
+                    let body: serde_json::Value = serde_json::from_str(&content)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", file.display()))?;
+                    client
+                        .post(format!("{base}/sequences/dataflow"))
+                        .json(&body)
+                        .send()
+                        .await?
+                }
+                _ => anyhow::bail!("pass exactly one of --id or --file"),
+            };
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!("dataflow request failed ({status}): {body}");
+            }
+            let result: serde_json::Value = resp.json().await?;
+            let report: orch8_engine::dataflow::DataflowReport = serde_json::from_value(
+                result
+                    .get("report")
+                    .cloned()
+                    .context("dataflow response omitted report")?,
+            )
+            .context("invalid dataflow report returned by server")?;
+            let generated: orch8_engine::dataflow::GeneratedDataflowTypes = serde_json::from_value(
+                result
+                    .get("generated")
+                    .cloned()
+                    .context("dataflow response omitted generated artifacts")?,
+            )
+            .context("invalid generated dataflow artifacts returned by server")?;
+            if let Some(directory) = out_dir {
+                std::fs::create_dir_all(&directory).with_context(|| {
+                    format!("create dataflow output directory {}", directory.display())
+                })?;
+                atomic_write(&directory.join("types.ts"), generated.typescript.as_bytes())?;
+                atomic_write(&directory.join("types.py"), generated.python.as_bytes())?;
+                atomic_write(
+                    &directory.join("schema.json"),
+                    serde_json::to_string_pretty(&generated.schema)?.as_bytes(),
+                )?;
+                atomic_write(
+                    &directory.join("report.json"),
+                    serde_json::to_string_pretty(&report)?.as_bytes(),
+                )?;
+                println!(
+                    "generated typed dataflow artifacts in {}",
+                    directory.display()
+                );
+            }
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => print_dataflow_report(&report, &generated),
+            }
+            if !report.is_compatible() {
+                anyhow::bail!("typed dataflow is incompatible");
+            }
+        }
     }
     Ok(())
+}
+
+fn print_dataflow_report(
+    report: &orch8_engine::dataflow::DataflowReport,
+    generated: &orch8_engine::dataflow::GeneratedDataflowTypes,
+) {
+    println!(
+        "typed dataflow — {} reference(s), generator {}",
+        report.references_checked, generated.generator_version
+    );
+    for finding in &report.findings {
+        println!(
+            "  [{}] {} -> {}: {}",
+            match finding.severity {
+                orch8_engine::dataflow::DataflowSeverity::Warning => "warning",
+                orch8_engine::dataflow::DataflowSeverity::Error => "error",
+            },
+            finding.reference,
+            finding.consumer,
+            finding.summary
+        );
+    }
 }
 
 /// Render a preflight report for humans: one line per check, findings
