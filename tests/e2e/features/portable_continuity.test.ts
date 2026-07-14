@@ -1,6 +1,7 @@
 /** E2E: portable continuity identity, capabilities, preview, and handoff request. */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
@@ -8,6 +9,7 @@ import type { ServerHandle } from "../harness.ts";
 import type { WorkerTask } from "../types.ts";
 
 const client = new Orch8Client();
+const artifactDir = `/tmp/o8-continuity-e2e-${uuid().slice(0, 8)}`;
 
 async function waitForWorkerTask(
   handler: string,
@@ -30,6 +32,8 @@ describe("Portable Continuity", () => {
     server = await startServer({
       env: {
         ORCH8_ENCRYPTION_KEY: "42".repeat(32),
+        ORCH8_ARTIFACT_BACKEND: "local",
+        ORCH8_ARTIFACT_PATH: artifactDir,
         ORCH8_LOG_LEVEL: "error",
       },
     });
@@ -37,6 +41,11 @@ describe("Portable Continuity", () => {
 
   after(async () => {
     await stopServer(server);
+    try {
+      rmSync(artifactDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup must not hide test failures.
+    }
   });
 
   it("creates a tenant-scoped identity and a preview-bound handoff request", async () => {
@@ -305,6 +314,150 @@ describe("Portable Continuity", () => {
         return true;
       },
     );
+  });
+
+  it("returns an ordered runtime and epoch location history", async () => {
+    const tenantId = `continuity-locations-${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      "portable-locations",
+      [
+        step("handoff", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Continue on another runtime?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+      ],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const sourceInstance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(sourceInstance.id, "waiting");
+    await client.saveCheckpoint(sourceInstance.id, {
+      safe_boundary: "handoff",
+      context_snapshot: { order_id: "location-order" },
+    });
+
+    const sourceRuntimeId = uuid();
+    const destinationRuntimeId = uuid();
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: sourceInstance.id,
+      runtime_id: sourceRuntimeId,
+    });
+    const initialLocations = await client.listContinuityLocations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(
+      initialLocations.map((location) => ({
+        epoch: location.epoch,
+        runtime_id: location.runtime_id,
+        instance_id: location.instance_id,
+      })),
+      [
+        {
+          epoch: 0,
+          runtime_id: sourceRuntimeId,
+          instance_id: sourceInstance.id,
+        },
+      ],
+    );
+
+    const now = Date.now();
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: {
+        runtime_id: destinationRuntimeId,
+        kind: "mobile",
+        trust: "registered",
+        handlers: ["human_review"],
+        offline_capable: true,
+        observed_at: new Date(now).toISOString(),
+        expires_at: new Date(now + 60_000).toISOString(),
+      },
+    });
+    const preview = await client.previewHandoff(execution.continuity_id, {
+      tenant_id: tenantId,
+      destination_runtime_id: destinationRuntimeId,
+      requirements: { handlers: ["human_review"] },
+    });
+    const handoff = await client.createHandoff({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      destination_runtime_id: destinationRuntimeId,
+      requirements: { handlers: ["human_review"] },
+      preview_sha256: preview.preview_sha256,
+    });
+    const exported = await client.exportHandoff(handoff.id, {
+      tenant_id: tenantId,
+      requirements: { handlers: ["human_review"] },
+      expires_in_seconds: 60,
+    });
+    const imported = await client.importContinuityCapsule({
+      tenant_id: tenantId,
+      destination_runtime_id: destinationRuntimeId,
+      expected_epoch: 0,
+      capsule: exported.capsule,
+    });
+    const redelivered = await client.importContinuityCapsule({
+      tenant_id: tenantId,
+      destination_runtime_id: destinationRuntimeId,
+      expected_epoch: 0,
+      capsule: exported.capsule,
+    });
+    assert.equal(redelivered.instance_id, imported.instance_id);
+
+    const accepted = await client.acceptHandoff(handoff.id, {
+      tenant_id: tenantId,
+      destination_instance_id: imported.instance_id,
+    });
+    assert.equal(accepted.execution.epoch, 1);
+    const locations = await client.listContinuityLocations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(
+      locations.map((location) => ({
+        epoch: location.epoch,
+        runtime_id: location.runtime_id,
+        instance_id: location.instance_id,
+        handoff_id: location.handoff_id,
+      })),
+      [
+        {
+          epoch: 0,
+          runtime_id: sourceRuntimeId,
+          instance_id: sourceInstance.id,
+          handoff_id: null,
+        },
+        {
+          epoch: 1,
+          runtime_id: destinationRuntimeId,
+          instance_id: imported.instance_id,
+          handoff_id: handoff.id,
+        },
+      ],
+    );
+    await assert.rejects(
+      () =>
+        client.listContinuityLocations(
+          execution.continuity_id,
+          `${tenantId}-other`,
+        ),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 404);
+        return true;
+      },
+    );
+    const resumed = await client.resumeHandoff(handoff.id, {
+      tenant_id: tenantId,
+    });
+    assert.equal(resumed.state, "resumed");
   });
 
   it("fails preview when a required capability is missing", async () => {

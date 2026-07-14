@@ -2485,6 +2485,13 @@ pub trait ContinuityStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError>;
 
+    async fn list_continuity_locations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
+
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,

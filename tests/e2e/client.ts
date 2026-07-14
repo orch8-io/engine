@@ -158,6 +158,15 @@ export class Orch8Client {
     return this.#get(`/continuity/executions/${id}${toQuery({ tenant_id: tenantId })}`);
   }
 
+  async listContinuityLocations(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/locations${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
   async registerRuntime(req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post("/runtimes/register", req);
   }
@@ -179,6 +188,22 @@ export class Orch8Client {
 
   async getHandoff(id: string, tenantId: string): Promise<ApiResponse> {
     return this.#get(`/continuity/handoffs/${id}${toQuery({ tenant_id: tenantId })}`);
+  }
+
+  async exportHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/export`, req);
+  }
+
+  async importContinuityCapsule(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/capsules/import", req);
+  }
+
+  async acceptHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/accept`, req);
+  }
+
+  async resumeHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/resume`, req);
   }
 
   async listContinuityEffects(

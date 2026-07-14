@@ -510,6 +510,7 @@ passthrough_impl! {
         async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn get_continuity_execution_by_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
+        async fn list_continuity_locations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
         async fn cas_continuity_owner(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId, expected_epoch: orch8_types::continuity::ExecutionEpoch, expected_owner: orch8_types::continuity::RuntimeId, next: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
         async fn create_handoff(&self, handoff: &orch8_types::continuity::ExecutionHandoff) -> Result<(), StorageError>;
         async fn get_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId) -> Result<Option<orch8_types::continuity::ExecutionHandoff>, StorageError>;

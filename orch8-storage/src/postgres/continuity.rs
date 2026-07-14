@@ -5,9 +5,10 @@ use sqlx::Row;
 
 use orch8_types::continuity::{
     CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
-    ContinuityExecution, ContinuityId, ContinuityStream, EffectId, EffectReceipt, EffectState,
-    ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState, PlacementDecision,
-    PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId, StreamFrame, StreamId,
+    ContinuityExecution, ContinuityId, ContinuityLocation, ContinuityStream, EffectId,
+    EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState,
+    PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId,
+    StreamFrame, StreamId,
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
@@ -41,6 +42,20 @@ impl crate::ContinuityStore for PostgresStorage {
         &self,
         execution: &ContinuityExecution,
     ) -> Result<(), StorageError> {
+        let location = ContinuityLocation {
+            continuity_id: execution.continuity_id,
+            tenant_id: execution.tenant_id.clone(),
+            epoch: execution.epoch,
+            runtime_id: execution.owner_runtime_id,
+            instance_id: execution.current_instance_id,
+            handoff_id: None,
+            entered_at: execution.updated_at,
+        };
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
         sqlx::query(
             "INSERT INTO continuity_executions
              (continuity_id, tenant_id, epoch, owner_runtime_id, state, record, updated_at)
@@ -53,9 +68,29 @@ impl crate::ContinuityStore for PostgresStorage {
         .bind(state_name(execution.state)?)
         .bind(encode(execution)?)
         .bind(execution.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO continuity_locations
+             (tenant_id, continuity_id, epoch, runtime_id, instance_id, handoff_id, record, entered_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(execution.tenant_id.as_str())
+        .bind(execution.continuity_id.into_uuid())
+        .bind(to_i64(execution.epoch.get(), "location epoch")?)
+        .bind(execution.owner_runtime_id.into_uuid())
+        .bind(execution.current_instance_id.into_uuid())
+        .bind(Option::<uuid::Uuid>::None)
+        .bind(encode(&location)?)
+        .bind(execution.updated_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
     }
 
@@ -92,6 +127,28 @@ impl crate::ContinuityStore for PostgresStorage {
         row.map(|row| decode(row.get("record"))).transpose()
     }
 
+    async fn list_continuity_locations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<ContinuityLocation>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM continuity_locations
+             WHERE tenant_id = $1 AND continuity_id = $2
+             ORDER BY epoch ASC LIMIT $3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.into_uuid())
+        .bind(i64::from(limit.min(10_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,
@@ -100,6 +157,11 @@ impl crate::ContinuityStore for PostgresStorage {
         expected_owner: RuntimeId,
         next: &ContinuityExecution,
     ) -> Result<bool, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
         let result = sqlx::query(
             "UPDATE continuity_executions
              SET epoch = $1, owner_runtime_id = $2, state = $3, record = $4, updated_at = $5
@@ -115,10 +177,48 @@ impl crate::ContinuityStore for PostgresStorage {
         .bind(id.into_uuid())
         .bind(to_i64(expected_epoch.get(), "expected epoch")?)
         .bind(expected_owner.into_uuid())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
-        Ok(result.rows_affected() == 1)
+        if result.rows_affected() != 1 {
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(false);
+        }
+        if next.epoch > expected_epoch {
+            let location = ContinuityLocation {
+                continuity_id: next.continuity_id,
+                tenant_id: next.tenant_id.clone(),
+                epoch: next.epoch,
+                runtime_id: next.owner_runtime_id,
+                instance_id: next.current_instance_id,
+                handoff_id: None,
+                entered_at: next.updated_at,
+            };
+            sqlx::query(
+                "INSERT INTO continuity_locations
+                 (tenant_id, continuity_id, epoch, runtime_id, instance_id, handoff_id, record, entered_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(tenant_id.as_str())
+            .bind(next.continuity_id.into_uuid())
+            .bind(to_i64(next.epoch.get(), "location epoch")?)
+            .bind(next.owner_runtime_id.into_uuid())
+            .bind(next.current_instance_id.into_uuid())
+            .bind(Option::<uuid::Uuid>::None)
+            .bind(encode(&location)?)
+            .bind(next.updated_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(true)
     }
 
     async fn create_handoff(&self, handoff: &ExecutionHandoff) -> Result<(), StorageError> {
@@ -249,6 +349,31 @@ impl crate::ContinuityStore for PostgresStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
             return Ok(false);
         }
+        let location = ContinuityLocation {
+            continuity_id: accepted_execution.continuity_id,
+            tenant_id: accepted_execution.tenant_id.clone(),
+            epoch: accepted_execution.epoch,
+            runtime_id: accepted_execution.owner_runtime_id,
+            instance_id: accepted_execution.current_instance_id,
+            handoff_id: Some(accepted_handoff.id),
+            entered_at: accepted_execution.updated_at,
+        };
+        sqlx::query(
+            "INSERT INTO continuity_locations
+             (tenant_id, continuity_id, epoch, runtime_id, instance_id, handoff_id, record, entered_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(accepted_execution.continuity_id.into_uuid())
+        .bind(to_i64(accepted_execution.epoch.get(), "location epoch")?)
+        .bind(accepted_execution.owner_runtime_id.into_uuid())
+        .bind(accepted_execution.current_instance_id.into_uuid())
+        .bind(accepted_handoff.id.into_uuid())
+        .bind(encode(&location)?)
+        .bind(accepted_execution.updated_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
         transaction
             .commit()
             .await

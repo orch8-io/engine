@@ -29,6 +29,20 @@ an operator-approved repair.
 SQLite schema version 27 applies the same invariant to newly initialized
 databases.
 
+## Upgrade to migration 062
+
+Migration `062_continuity_locations.sql` creates the immutable owner-per-epoch
+location ledger. It backfills the current owner, instance, and epoch for every
+existing continuity execution. Historical locations that predate the migration
+cannot be reconstructed safely from timestamps, so the backfilled row is the
+earliest cryptographically unambiguous boundary for an upgraded installation.
+Every later ownership claim is recorded atomically with the owner change.
+
+Query the ordered path with
+`GET /continuity/executions/{continuity_id}/locations?tenant_id=...`. Epoch—not
+wall-clock time—is authoritative if timestamps from different runtimes disagree.
+SQLite schema version 28 creates the same ledger for embedded runtimes.
+
 ## Unknown external effects
 
 An effect receipt enters `unknown` when dispatch was durable but the engine did
@@ -58,4 +72,3 @@ enqueued. Only the worker that currently owns the claimed task may settle it.
 The complete callback commits the receipt before completing the task; the fail
 callback marks it unknown before applying task retry handling. Repeated
 callbacks are idempotent, but callbacks from another worker are rejected.
-

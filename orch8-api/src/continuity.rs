@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/continuity/executions", post(create_execution))
         .route("/continuity/executions/{id}", get(get_execution))
+        .route("/continuity/executions/{id}/locations", get(list_locations))
         .route(
             "/continuity/executions/{id}/handoff-preview",
             post(handoff_preview),
@@ -377,6 +378,32 @@ async fn get_execution(
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound(format!("continuity execution {id}")))?;
     Ok(Json(execution))
+}
+
+async fn list_locations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<Vec<orch8_types::continuity::ContinuityLocation>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let locations = state
+        .storage
+        .list_continuity_locations(&tenant_id, id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity locations"))?;
+    if locations.is_empty() {
+        let exists = state
+            .storage
+            .get_continuity_execution(&tenant_id, id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+            .is_some();
+        if !exists {
+            return Err(ApiError::NotFound(format!("continuity execution {id}")));
+        }
+    }
+    Ok(Json(locations))
 }
 
 #[derive(Debug, Deserialize)]

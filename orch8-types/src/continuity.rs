@@ -178,6 +178,21 @@ pub struct RuntimeCapabilities {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Immutable record of one runtime-local owner for an execution epoch.
+///
+/// Ordered records form the portable execution's physical location history;
+/// callers never need to infer ownership changes from wall-clock timestamps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ContinuityLocation {
+    pub continuity_id: ContinuityId,
+    pub tenant_id: TenantId,
+    pub epoch: ExecutionEpoch,
+    pub runtime_id: RuntimeId,
+    pub instance_id: InstanceId,
+    pub handoff_id: Option<HandoffId>,
+    pub entered_at: DateTime<Utc>,
+}
+
 /// Requirements that must be satisfied before accepting a capsule.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CapsuleRequirements {

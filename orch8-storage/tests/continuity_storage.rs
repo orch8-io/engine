@@ -85,6 +85,13 @@ async fn ownership_cas_allows_only_one_epoch_winner() {
             .unwrap(),
         Some(execution.clone())
     );
+    let initial_locations = storage
+        .list_continuity_locations(&tenant, continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(initial_locations.len(), 1);
+    assert_eq!(initial_locations[0].epoch, ExecutionEpoch::initial());
+    assert_eq!(initial_locations[0].runtime_id, source);
 
     let destination = RuntimeId::new();
     let mut next = execution.clone();
@@ -104,6 +111,23 @@ async fn ownership_cas_allows_only_one_epoch_winner() {
             .await
             .unwrap(),
         "stale owners must not win a second claim"
+    );
+    let locations = storage
+        .list_continuity_locations(&tenant, continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 2);
+    assert_eq!(locations[1].epoch, next.epoch);
+    assert_eq!(locations[1].runtime_id, destination);
+    assert_eq!(locations[1].instance_id, next.current_instance_id);
+    assert!(locations[1].handoff_id.is_none());
+    assert!(
+        storage
+            .list_continuity_locations(&TenantId::new("tenant-b").unwrap(), continuity_id, 10,)
+            .await
+            .unwrap()
+            .is_empty(),
+        "location history must be tenant scoped"
     );
     assert!(
         storage
