@@ -222,12 +222,61 @@ export class Orch8Client {
     return this.#post(`/continuity/handoffs/${id}/resume`, req);
   }
 
+  async rejectHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/reject`, req);
+  }
+
+  async revokeHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/revoke`, req);
+  }
+
   async listContinuityEffects(
     continuityId: string,
     tenantId: string,
   ): Promise<ApiResponse[]> {
     return this.#get(
       `/continuity/executions/${continuityId}/effects${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  async resolveContinuityEffect(
+    effectId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/effects/${effectId}/resolve`, req);
+  }
+
+  async listContinuityInvariants(
+    tenantId: string,
+    sequenceId: string,
+    sequenceVersion: number,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/invariants${toQuery({
+        tenant_id: tenantId,
+        sequence_id: sequenceId,
+        sequence_version: sequenceVersion,
+      })}`,
+    );
+  }
+
+  async listContinuityCheckpoints(
+    continuityId: string,
+    tenantId: string,
+    limit?: number,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/checkpoints${toQuery({ tenant_id: tenantId, limit })}`,
+    );
+  }
+
+  async getContinuityCheckpoint(
+    continuityId: string,
+    checkpointId: string,
+    tenantId: string,
+  ): Promise<ApiResponse> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/checkpoints/${checkpointId}${toQuery({ tenant_id: tenantId })}`,
     );
   }
 
@@ -444,6 +493,10 @@ export class Orch8Client {
     req: Record<string, unknown>,
   ): Promise<ApiResponse> {
     return this.#post("/continuity/evaluations/stored-gate", req);
+  }
+
+  async evaluateContinuityGate(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/evaluations/gate", req);
   }
 
   async createAttentionTask(req: Record<string, unknown>): Promise<ApiResponse> {
