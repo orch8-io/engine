@@ -614,6 +614,17 @@ export class Orch8Client {
     );
   }
 
+  async failContinuityCompensation(
+    id: string,
+    effectId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/compensations/${id}/steps/${effectId}/fail`,
+      req,
+    );
+  }
+
   async extractContinuityTestFixture(
     continuityId: string,
     req: Record<string, unknown>,
