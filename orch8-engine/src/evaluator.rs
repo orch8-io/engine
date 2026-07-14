@@ -860,6 +860,14 @@ fn may_mutate_instance(block: &BlockDefinition) -> bool {
             | BlockDefinition::ForEach(_)
             | BlockDefinition::TryCatch(_)
             | BlockDefinition::Loop(_)
+            // Saga rollback injects `_error` into context.data via
+            // `merge_context_data` (see `handlers::saga::execute_saga`)
+            // before activating a compensation step in the same dispatch.
+            // Without this, `ctx.instance_stale` never flips, so the
+            // in-memory instance snapshot reused for the rest of this
+            // `evaluate()` call is missing `_error` when compensation
+            // steps (or any later step) resolve their templates.
+            | BlockDefinition::Saga(_)
     )
 }
 
