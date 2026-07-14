@@ -100,6 +100,9 @@ pub struct AppState {
     /// Stable capsule signing and destination payload keys. Absent in
     /// explicitly insecure local mode, where export/import stays disabled.
     pub continuity_crypto: Option<Arc<ContinuityCrypto>>,
+    /// Enables bounded fault/state-space lab endpoints. Kept off in
+    /// production unless an operator explicitly opts in.
+    pub continuity_lab_enabled: bool,
 }
 
 #[derive(Clone)]

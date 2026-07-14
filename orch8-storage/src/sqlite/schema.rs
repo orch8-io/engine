@@ -815,6 +815,88 @@ CREATE INDEX IF NOT EXISTS idx_continuity_stream_resume
 CREATE INDEX IF NOT EXISTS idx_continuity_stream_expiry
     ON continuity_stream_frames(expires_at);
 
+CREATE TABLE IF NOT EXISTS workflow_invariants (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    sequence_id TEXT NOT NULL,
+    sequence_version INTEGER,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_invariants_scope
+    ON workflow_invariants(tenant_id, sequence_id, sequence_version)
+    WHERE enabled = 1;
+
+CREATE TABLE IF NOT EXISTS invariant_results (
+    id TEXT PRIMARY KEY,
+    invariant_id TEXT NOT NULL REFERENCES workflow_invariants(id),
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch >= 0),
+    status TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    record TEXT NOT NULL,
+    evaluated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, dedupe_key),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_invariant_results_execution
+    ON invariant_results(tenant_id, continuity_id, epoch, evaluated_at DESC);
+
+CREATE TABLE IF NOT EXISTS evaluation_scores (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    deferred INTEGER NOT NULL CHECK(deferred IN (0, 1)),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(tenant_id, dedupe_key),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_scores_execution
+    ON evaluation_scores(tenant_id, continuity_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS attention_tasks (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    assignee TEXT,
+    lease_expires_at TEXT,
+    deadline TEXT NOT NULL,
+    record TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_attention_tasks_pending
+    ON attention_tasks(tenant_id, deadline, id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_attention_tasks_lease
+    ON attention_tasks(lease_expires_at) WHERE state = 'assigned';
+
+CREATE TABLE IF NOT EXISTS budget_reservations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch >= 0),
+    state TEXT NOT NULL,
+    cost_microunits INTEGER NOT NULL CHECK(cost_microunits >= 0),
+    wall_time_ms INTEGER NOT NULL CHECK(wall_time_ms >= 0),
+    external_calls INTEGER NOT NULL CHECK(external_calls >= 0),
+    bytes_transferred INTEGER NOT NULL CHECK(bytes_transferred >= 0),
+    energy_millijoules INTEGER NOT NULL CHECK(energy_millijoules >= 0),
+    attention_units INTEGER NOT NULL CHECK(attention_units >= 0),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_budget_reservations_active
+    ON budget_reservations(tenant_id, continuity_id, epoch) WHERE state = 'reserved';
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -828,4 +910,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 24;
+pub(super) const SCHEMA_VERSION: i64 = 25;

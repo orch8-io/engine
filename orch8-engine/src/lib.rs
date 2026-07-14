@@ -3,6 +3,7 @@ pub mod capsule;
 pub mod circuit_breaker;
 pub mod compensation;
 pub mod continuity;
+pub mod continuity_advanced;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;

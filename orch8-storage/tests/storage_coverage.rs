@@ -2111,6 +2111,7 @@ async fn t91_budget_column_round_trips() {
         max_output_tokens: None,
         max_total_tokens: Some(5_000),
         max_steps: Some(7),
+        ..Default::default()
     });
     s.create_instance(&inst).await.unwrap();
 

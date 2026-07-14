@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use orch8_storage::StorageBackend;
 use orch8_types::continuity::{
     CapsuleRequirements, ContinuityExecution, ExecutionHandoff, HandoffState, ProvenanceEntry,
@@ -325,6 +327,18 @@ pub fn build_provenance_entry(
     }
 }
 
+#[must_use]
+pub fn sign_provenance_entry(
+    mut entry: ProvenanceEntry,
+    signing_key_id: impl Into<String>,
+    signing_key: &SigningKey,
+) -> ProvenanceEntry {
+    entry.signing_key_id = Some(signing_key_id.into());
+    entry.signature =
+        Some(BASE64.encode(signing_key.sign(entry.entry_sha256.as_bytes()).to_bytes()));
+    entry
+}
+
 fn provenance_hash(
     continuity_id: orch8_types::continuity::ContinuityId,
     epoch: orch8_types::continuity::ExecutionEpoch,
@@ -408,6 +422,77 @@ pub fn verify_provenance_chain(
     }
 }
 
+#[must_use]
+pub fn verify_provenance_chain_with_keys(
+    entries: &[ProvenanceEntry],
+    expected_head: Option<&str>,
+    trusted_keys: &std::collections::BTreeMap<String, String>,
+) -> ProvenanceVerification {
+    let chain = verify_provenance_chain(entries, expected_head);
+    if !chain.valid {
+        return chain;
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        let (Some(key_id), Some(signature)) = (&entry.signing_key_id, &entry.signature) else {
+            if entry.signing_key_id.is_some() || entry.signature.is_some() {
+                return invalid_signature_report(entries, index, "PROVENANCE_SIGNATURE_INCOMPLETE");
+            }
+            continue;
+        };
+        let Some(public_key) = trusted_keys.get(key_id) else {
+            return invalid_signature_report(entries, index, "PROVENANCE_SIGNING_KEY_UNTRUSTED");
+        };
+        let key_bytes: [u8; 32] = match BASE64
+            .decode(public_key)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+        {
+            Some(bytes) => bytes,
+            None => {
+                return invalid_signature_report(entries, index, "PROVENANCE_PUBLIC_KEY_INVALID");
+            }
+        };
+        let signature_bytes: [u8; 64] = match BASE64
+            .decode(signature)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+        {
+            Some(bytes) => bytes,
+            None => {
+                return invalid_signature_report(entries, index, "PROVENANCE_SIGNATURE_INVALID");
+            }
+        };
+        let verified = VerifyingKey::from_bytes(&key_bytes).is_ok_and(|key| {
+            key.verify(
+                entry.entry_sha256.as_bytes(),
+                &Signature::from_bytes(&signature_bytes),
+            )
+            .is_ok()
+        });
+        if !verified {
+            return invalid_signature_report(entries, index, "PROVENANCE_SIGNATURE_INVALID");
+        }
+    }
+    chain
+}
+
+fn invalid_signature_report(
+    entries: &[ProvenanceEntry],
+    index: usize,
+    code: &'static str,
+) -> ProvenanceVerification {
+    ProvenanceVerification {
+        valid: false,
+        entries_checked: index,
+        first_invalid_index: Some(index),
+        code: Some(code),
+        head_sha256: index
+            .checked_sub(1)
+            .and_then(|previous| entries.get(previous))
+            .map(|entry| entry.entry_sha256.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +557,42 @@ mod tests {
         let invalid = verify_provenance_chain(&[first, second], None);
         assert_eq!(invalid.first_invalid_index, Some(1));
         assert_eq!(invalid.code, Some("PROVENANCE_HASH_MISMATCH"));
+    }
+
+    #[test]
+    fn provenance_boundary_signature_requires_the_trusted_key() {
+        let execution = ContinuityExecution {
+            continuity_id: orch8_types::continuity::ContinuityId::new(),
+            tenant_id: orch8_types::ids::TenantId::new("tenant-a").unwrap(),
+            current_instance_id: orch8_types::ids::InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: orch8_types::continuity::ExecutionEpoch::initial(),
+            state: orch8_types::continuity::OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let entry = sign_provenance_entry(
+            build_provenance_entry(
+                &execution,
+                "handoff_accept",
+                "a".repeat(64),
+                None,
+                Utc::now(),
+            ),
+            "key-1",
+            &key,
+        );
+        let trusted = std::collections::BTreeMap::from([(
+            "key-1".into(),
+            BASE64.encode(key.verifying_key().to_bytes()),
+        )]);
+        assert!(
+            verify_provenance_chain_with_keys(std::slice::from_ref(&entry), None, &trusted).valid
+        );
+        assert_eq!(
+            verify_provenance_chain_with_keys(&[entry], None, &std::collections::BTreeMap::new())
+                .code,
+            Some("PROVENANCE_SIGNING_KEY_UNTRUSTED")
+        );
     }
 }

@@ -24,7 +24,15 @@ use orch8_types::continuity::{
     LocalityPolicy, OwnershipState, PlacementDecision, RuntimeCapabilities, RuntimeId,
     RuntimeTrustLevel, StreamFrame, StreamFrameState, StreamId,
 };
-use orch8_types::ids::{InstanceId, TenantId};
+use orch8_types::continuity_advanced::{
+    AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
+    CheckpointBoundary, DeviceDelegation, EvaluationId, EvaluationScore, ExtractedTestFixture,
+    FaultInjection, FaultKind, FederationEnvelope, FederationPeer, ForkEffectMode,
+    GeneratedScenario, InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan,
+    MigrationDisposition, MigrationPlanId, ProviderCandidate, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioId, StateTransform, WhatIfScenario, WorkflowInvariant,
+};
+use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -75,6 +83,49 @@ pub fn routes() -> Router<AppState> {
             "/continuity/streams/{id}/retract",
             post(retract_stream_frames),
         )
+        .route(
+            "/continuity/invariants",
+            get(list_invariants).post(create_invariant),
+        )
+        .route(
+            "/continuity/executions/{id}/invariants/evaluate",
+            post(evaluate_invariants),
+        )
+        .route(
+            "/continuity/executions/{id}/evaluations",
+            get(list_evaluations).post(append_evaluation),
+        )
+        .route(
+            "/continuity/executions/{id}/budget-reservations",
+            post(reserve_execution_budget),
+        )
+        .route("/continuity/attention", post(create_attention_task))
+        .route(
+            "/continuity/attention/{id}/assign",
+            post(assign_attention_task),
+        )
+        .route(
+            "/continuity/executions/{id}/checkpoints",
+            get(list_continuity_checkpoints),
+        )
+        .route("/continuity/executions/{id}/what-if", post(run_what_if))
+        .route(
+            "/continuity/executions/{id}/test-fixture",
+            post(extract_test_fixture),
+        )
+        .route("/continuity/migrations/plan", post(plan_live_migration))
+        .route("/continuity/scenarios/generate", post(generate_scenarios))
+        .route("/continuity/scenarios/reproduce", post(reproduce_incident))
+        .route("/continuity/providers/choose", post(choose_provider))
+        .route(
+            "/continuity/optimizations/recommend",
+            post(recommend_optimizations),
+        )
+        .route("/continuity/evaluations/gate", post(evaluate_gate))
+        .route("/continuity/residency/evaluate", post(evaluate_residency))
+        .route("/continuity/disclosure/minimize", post(minimize_disclosure))
+        .route("/continuity/federation/verify", post(verify_federation))
+        .route("/continuity/delegations/claim", post(claim_delegation))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1066,10 +1117,23 @@ async fn verify_provenance(
         .list_provenance(&tenant_id, id, 10_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "provenance"))?;
-    Ok(Json(orch8_engine::continuity::verify_provenance_chain(
-        &entries,
-        query.expected_head.as_deref(),
-    )))
+    let trusted_keys =
+        state
+            .continuity_crypto
+            .as_ref()
+            .map_or_else(std::collections::BTreeMap::new, |crypto| {
+                std::collections::BTreeMap::from([(
+                    crypto.signing_key_id.clone(),
+                    BASE64.encode(crypto.signing_key.verifying_key().to_bytes()),
+                )])
+            });
+    Ok(Json(
+        orch8_engine::continuity::verify_provenance_chain_with_keys(
+            &entries,
+            query.expected_head.as_deref(),
+            &trusted_keys,
+        ),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1318,4 +1382,1155 @@ async fn retract_stream_frames(
         .await
         .map_err(|error| ApiError::from_storage(error, "stream frames"))?;
     Ok(Json(RetractStreamResponse { retracted }))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateInvariantRequest {
+    tenant_id: TenantId,
+    sequence_id: SequenceId,
+    sequence_version: Option<i32>,
+    name: String,
+    rule: InvariantRule,
+    #[serde(default)]
+    commit_guard: bool,
+}
+
+async fn create_invariant(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<CreateInvariantRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.name.is_empty() || body.name.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "invariant name must contain between 1 and 128 bytes".into(),
+        ));
+    }
+    let sequence = state
+        .storage
+        .get_sequence(body.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &sequence.tenant_id, "sequence")?;
+    if sequence.tenant_id != tenant_id {
+        return Err(ApiError::NotFound("sequence".into()));
+    }
+    if let InvariantRule::TerminalStateIn { states } = &body.rule
+        && (states.is_empty() || states.len() > 16)
+    {
+        return Err(ApiError::InvalidArgument(
+            "terminal-state invariants require between 1 and 16 states".into(),
+        ));
+    }
+    let invariant = WorkflowInvariant {
+        id: InvariantId::new(),
+        tenant_id,
+        sequence_id: body.sequence_id,
+        sequence_version: body.sequence_version,
+        name: body.name,
+        rule: body.rule,
+        commit_guard: body.commit_guard,
+        enabled: true,
+        created_at: Utc::now(),
+    };
+    state
+        .storage
+        .create_workflow_invariant(&invariant)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "workflow invariant"))?;
+    Ok((StatusCode::CREATED, Json(invariant)))
+}
+
+#[derive(Debug, Deserialize)]
+struct InvariantQuery {
+    tenant_id: String,
+    sequence_id: SequenceId,
+    sequence_version: i32,
+    limit: Option<u32>,
+}
+
+async fn list_invariants(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Query(query): Query<InvariantQuery>,
+) -> Result<Json<Vec<WorkflowInvariant>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let invariants = state
+        .storage
+        .list_workflow_invariants(
+            &tenant_id,
+            query.sequence_id,
+            query.sequence_version,
+            query.limit.unwrap_or(1_000).min(10_000),
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "workflow invariants"))?;
+    Ok(Json(invariants))
+}
+
+#[derive(Debug, Deserialize)]
+struct EvaluateInvariantsRequest {
+    tenant_id: TenantId,
+}
+
+async fn evaluate_invariants(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<EvaluateInvariantsRequest>,
+) -> Result<Json<Vec<InvariantResult>>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let instance = state
+        .storage
+        .get_instance(execution.current_instance_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
+        .ok_or_else(|| ApiError::NotFound("instance".into()))?;
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    let (invariants, receipts, outputs) = tokio::try_join!(
+        state
+            .storage
+            .list_workflow_invariants(&tenant_id, sequence.id, sequence.version, 10_000,),
+        state.storage.list_effect_receipts(&tenant_id, id, 10_000),
+        state.storage.get_all_outputs(instance.id),
+    )
+    .map_err(|error| ApiError::from_storage(error, "invariant evidence"))?;
+    let output_paths = collect_output_paths(&outputs);
+    let terminal = instance
+        .state
+        .is_terminal()
+        .then(|| instance.state.to_string());
+    let evidence = orch8_engine::continuity_advanced::InvariantEvidence {
+        receipts: &receipts,
+        terminal_state: terminal.as_deref(),
+        budget_breached: None,
+        output_paths: &output_paths,
+    };
+    let now = Utc::now();
+    let mut results = Vec::with_capacity(invariants.len());
+    for invariant in invariants {
+        let result = orch8_engine::continuity_advanced::evaluate_invariant(
+            &invariant,
+            id,
+            execution.epoch,
+            &evidence,
+            now,
+        );
+        state
+            .storage
+            .append_invariant_result(&tenant_id, &result)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "invariant result"))?;
+        results.push(result);
+    }
+    Ok(Json(results))
+}
+
+fn collect_output_paths(
+    outputs: &[orch8_types::output::BlockOutput],
+) -> std::collections::BTreeSet<(orch8_types::ids::BlockId, String)> {
+    let mut paths = std::collections::BTreeSet::new();
+    for output in outputs.iter().take(10_000) {
+        collect_json_paths(&output.block_id, &output.output, "", 0, &mut paths);
+    }
+    paths
+}
+
+fn collect_json_paths(
+    block_id: &orch8_types::ids::BlockId,
+    value: &serde_json::Value,
+    prefix: &str,
+    depth: u8,
+    paths: &mut std::collections::BTreeSet<(orch8_types::ids::BlockId, String)>,
+) {
+    if depth >= 16 || paths.len() >= 100_000 {
+        return;
+    }
+    if !prefix.is_empty() {
+        paths.insert((block_id.clone(), prefix.to_owned()));
+    }
+    if let Some(object) = value.as_object() {
+        for (key, child) in object.iter().take(1_000) {
+            let next = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            collect_json_paths(block_id, child, &next, depth + 1, paths);
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AppendEvaluationRequest {
+    tenant_id: TenantId,
+    evaluator: String,
+    score_millipoints: i64,
+    sample_size: u64,
+    #[serde(default)]
+    deferred: bool,
+    evidence_sha256: String,
+}
+
+async fn append_evaluation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<AppendEvaluationRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.evaluator.is_empty() || body.evaluator.len() > 128 || body.sample_size == 0 {
+        return Err(ApiError::InvalidArgument(
+            "evaluation requires a bounded evaluator name and positive sample_size".into(),
+        ));
+    }
+    validate_sha256(&body.evidence_sha256, "evidence_sha256")?;
+    if state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .is_none()
+    {
+        return Err(ApiError::NotFound("continuity execution".into()));
+    }
+    let dedupe_key = hex_sha256(
+        format!(
+            "{}:{id}:{}:{}",
+            tenant_id.as_str(),
+            body.evaluator,
+            body.evidence_sha256
+        )
+        .as_bytes(),
+    );
+    let score = EvaluationScore {
+        id: EvaluationId::new(),
+        tenant_id,
+        continuity_id: id,
+        evaluator: body.evaluator,
+        score_millipoints: body.score_millipoints,
+        sample_size: body.sample_size,
+        deferred: body.deferred,
+        dedupe_key,
+        evidence_sha256: body.evidence_sha256,
+        created_at: Utc::now(),
+    };
+    let inserted = state
+        .storage
+        .append_evaluation_score(&score)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "evaluation score"))?;
+    if !inserted {
+        return Err(ApiError::Conflict("evaluation was already recorded".into()));
+    }
+    Ok((StatusCode::CREATED, Json(score)))
+}
+
+async fn list_evaluations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<Vec<EvaluationScore>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let scores = state
+        .storage
+        .list_evaluation_scores(&tenant_id, id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "evaluation scores"))?;
+    Ok(Json(scores))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReserveBudgetRequest {
+    tenant_id: TenantId,
+    requested: orch8_types::instance::BudgetUsage,
+    estimation_version: String,
+}
+
+async fn reserve_execution_budget(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<ReserveBudgetRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.estimation_version.is_empty() || body.estimation_version.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "estimation_version must contain between 1 and 128 bytes".into(),
+        ));
+    }
+    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
+    let budget = instance.budget.ok_or_else(|| {
+        ApiError::Conflict("execution has no configured multidimensional budget".into())
+    })?;
+    let reservation = BudgetReservation {
+        id: BudgetReservationId::new(),
+        tenant_id,
+        continuity_id: id,
+        epoch: execution.epoch,
+        requested: body.requested,
+        actual: None,
+        estimation_version: body.estimation_version,
+        state: ReservationState::Reserved,
+        created_at: Utc::now(),
+    };
+    let reserved = state
+        .storage
+        .reserve_budget(&reservation, &budget)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "budget reservation"))?;
+    if !reserved {
+        return Err(ApiError::Conflict(
+            "budget reservation is stale, negative, or exceeds a hard limit".into(),
+        ));
+    }
+    Ok((StatusCode::CREATED, Json(reservation)))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAttentionRequest {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    required_skills: Vec<String>,
+    classification: DataClassification,
+    #[serde(default)]
+    allowed_regions: Vec<String>,
+    priority: u8,
+    deadline: chrono::DateTime<Utc>,
+    estimated_attention_units: i64,
+}
+
+async fn create_attention_task(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<CreateAttentionRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let now = Utc::now();
+    if body.required_skills.is_empty()
+        || body.required_skills.len() > 32
+        || body.priority > 3
+        || body.estimated_attention_units <= 0
+        || body.deadline <= now
+        || body.deadline > now + Duration::days(30)
+    {
+        return Err(ApiError::InvalidArgument(
+            "attention task has invalid skills, priority, units, or deadline".into(),
+        ));
+    }
+    if state
+        .storage
+        .get_continuity_execution(&tenant_id, body.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .is_none()
+    {
+        return Err(ApiError::NotFound("continuity execution".into()));
+    }
+    let task = AttentionTask {
+        id: AttentionTaskId::new(),
+        tenant_id,
+        continuity_id: body.continuity_id,
+        required_skills: body.required_skills,
+        classification: body.classification,
+        allowed_regions: body.allowed_regions,
+        priority: body.priority,
+        deadline: body.deadline,
+        estimated_attention_units: body.estimated_attention_units,
+        state: AttentionState::Pending,
+        assignee: None,
+        lease_expires_at: None,
+    };
+    state
+        .storage
+        .create_attention_task(&task)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "attention task"))?;
+    Ok((StatusCode::CREATED, Json(task)))
+}
+
+#[derive(Debug, Deserialize)]
+struct AssignAttentionRequest {
+    tenant_id: TenantId,
+    reviewers: Vec<ReviewerCapabilities>,
+    lease_seconds: i64,
+}
+
+async fn assign_attention_task(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<AttentionTaskId>,
+    Json(body): Json<AssignAttentionRequest>,
+) -> Result<Json<AttentionTask>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.reviewers.len() > 1_000 || !(1..=86_400).contains(&body.lease_seconds) {
+        return Err(ApiError::InvalidArgument(
+            "attention assignment has too many reviewers or an invalid lease".into(),
+        ));
+    }
+    let task = state
+        .storage
+        .get_attention_task(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "attention task"))?
+        .ok_or_else(|| ApiError::NotFound("attention task".into()))?;
+    let mut assigned = task.clone();
+    if orch8_engine::continuity_advanced::assign_attention_task(
+        &mut assigned,
+        &body.reviewers,
+        Utc::now(),
+        body.lease_seconds,
+    )
+    .is_none()
+    {
+        return Err(ApiError::Conflict(
+            "no eligible reviewer is available".into(),
+        ));
+    }
+    let claimed = state
+        .storage
+        .claim_attention_task(&tenant_id, &task, &assigned, Utc::now())
+        .await
+        .map_err(|error| ApiError::from_storage(error, "attention task"))?;
+    if !claimed {
+        return Err(ApiError::Conflict(
+            "attention task was assigned concurrently".into(),
+        ));
+    }
+    Ok(Json(assigned))
+}
+
+fn validate_sha256(value: &str, field: &str) -> Result<(), ApiError> {
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(ApiError::InvalidArgument(format!(
+            "{field} must be a 64-character hexadecimal digest"
+        )))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ContinuityCheckpointQuery {
+    tenant_id: String,
+    limit: Option<u32>,
+}
+
+async fn list_continuity_checkpoints(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<ContinuityCheckpointQuery>,
+) -> Result<Json<Vec<CheckpointBoundary>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    let checkpoints = state
+        .storage
+        .list_checkpoints(instance.id, query.limit.unwrap_or(1_000).min(10_000))
+        .await
+        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?;
+    checkpoints
+        .into_iter()
+        .map(|checkpoint| checkpoint_boundary(&execution, &sequence, &checkpoint))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Json)
+}
+
+async fn continuity_instance(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+) -> Result<(ContinuityExecution, orch8_types::instance::TaskInstance), ApiError> {
+    let execution = state
+        .storage
+        .get_continuity_execution(tenant_id, continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let instance = state
+        .storage
+        .get_instance(execution.current_instance_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
+        .ok_or_else(|| ApiError::NotFound("instance".into()))?;
+    if &instance.tenant_id != tenant_id {
+        return Err(ApiError::NotFound("instance".into()));
+    }
+    Ok((execution, instance))
+}
+
+fn checkpoint_boundary(
+    execution: &ContinuityExecution,
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    checkpoint: &orch8_types::checkpoint::Checkpoint,
+) -> Result<CheckpointBoundary, ApiError> {
+    let block = checkpoint
+        .checkpoint_data
+        .get("safe_boundary")
+        .or_else(|| checkpoint.checkpoint_data.get("block_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown_boundary");
+    let canonical = orch8_publisher::manifest::canonical_json(&checkpoint.checkpoint_data)
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(CheckpointBoundary {
+        instance_id: checkpoint.instance_id,
+        continuity_id: execution.continuity_id,
+        epoch: execution.epoch,
+        sequence_id: sequence.id,
+        sequence_version: sequence.version,
+        block_id: orch8_types::ids::BlockId::new(block),
+        checkpoint_sha256: hex_sha256(canonical.as_bytes()),
+        // Historical provenance heads were not stored on legacy checkpoints;
+        // absence stays explicit instead of attaching the current head.
+        provenance_head: None,
+        created_at: checkpoint.created_at,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct WhatIfRequest {
+    tenant_id: TenantId,
+    checkpoint_id: uuid::Uuid,
+    #[serde(default)]
+    context_patch: serde_json::Value,
+    #[serde(default)]
+    output_overrides: serde_json::Value,
+    #[serde(default)]
+    handler_mocks: serde_json::Value,
+    target_sequence_version: Option<i32>,
+    max_ticks: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct WhatIfResponse {
+    scenario: WhatIfScenario,
+    report: orch8_types::contract::CaseReport,
+}
+
+#[allow(clippy::too_many_lines)] // assembles one bounded, effect-free simulation from durable evidence
+async fn run_what_if(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<WhatIfRequest>,
+) -> Result<Json<WhatIfResponse>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
+    let source_sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    let sequence = if let Some(version) = body.target_sequence_version {
+        state
+            .storage
+            .get_sequence_by_name(
+                &tenant_id,
+                &source_sequence.namespace,
+                &source_sequence.name,
+                Some(version),
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "target sequence"))?
+            .ok_or_else(|| ApiError::NotFound("target sequence version".into()))?
+    } else {
+        source_sequence
+    };
+    let checkpoint = state
+        .storage
+        .list_checkpoints(instance.id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?
+        .into_iter()
+        .find(|checkpoint| checkpoint.id == body.checkpoint_id)
+        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))?;
+    let boundary = checkpoint_boundary(&execution, &sequence, &checkpoint)?;
+    let mut input = checkpoint
+        .checkpoint_data
+        .get("context_snapshot")
+        .cloned()
+        .unwrap_or_else(|| instance.context.data.clone());
+    merge_object_patch(&mut input, &body.context_patch)?;
+    let recorded = state
+        .storage
+        .get_all_outputs(instance.id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "outputs"))?
+        .into_iter()
+        .filter(|output| output.created_at <= checkpoint.created_at)
+        .map(|output| (output.block_id.as_str().to_owned(), output.output))
+        .collect::<std::collections::HashMap<_, _>>();
+    let overrides = body.output_overrides.as_object().ok_or_else(|| {
+        ApiError::InvalidArgument("output_overrides must be a JSON object".into())
+    })?;
+    let explicit_mocks = body
+        .handler_mocks
+        .as_object()
+        .ok_or_else(|| ApiError::InvalidArgument("handler_mocks must be a JSON object".into()))?;
+    if overrides.len() > 1_000 || explicit_mocks.len() > 1_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "what-if overrides exceed 1000 entries".into(),
+        ));
+    }
+    let mocks = sequence_step_blocks(&sequence)
+        .into_iter()
+        .map(|block| {
+            let output = explicit_mocks
+                .get(&block)
+                .or_else(|| overrides.get(&block))
+                .cloned()
+                .or_else(|| recorded.get(&block).cloned())
+                .unwrap_or_else(|| serde_json::json!({}));
+            orch8_types::contract::MockDef {
+                handler: None,
+                block: Some(block),
+                policy: orch8_types::contract::MockPolicy::Success { output },
+            }
+        })
+        .collect();
+    let max_ticks = body.max_ticks.unwrap_or(5_000).min(10_000);
+    let case = orch8_types::contract::ContractCase {
+        name: "continuity-what-if".into(),
+        description: Some("effect-free continuity simulation".into()),
+        input,
+        config: None,
+        mocks,
+        signals: Vec::new(),
+        expect: orch8_types::contract::Expectations::default(),
+        max_logical_duration_ms: Some(86_400_000),
+        max_ticks: Some(max_ticks),
+    };
+    let report = orch8::contract::run_case(
+        &sequence,
+        orch8_types::contract::UnmockedHandlerPolicy::Fail,
+        &case,
+        &orch8::contract::RunOptions::default(),
+    )
+    .await
+    .map_err(|error| ApiError::Internal(format!("what-if simulation failed: {error}")))?;
+    let scenario = WhatIfScenario {
+        id: ScenarioId::new(),
+        tenant_id,
+        source: boundary,
+        context_patch: body.context_patch,
+        output_overrides: body.output_overrides,
+        handler_mocks: body.handler_mocks,
+        target_sequence_version: body.target_sequence_version,
+        effect_mode: ForkEffectMode::Blocked,
+        virtual_time: true,
+        retain_full_evidence: false,
+    };
+    Ok(Json(WhatIfResponse { scenario, report }))
+}
+
+fn merge_object_patch(
+    target: &mut serde_json::Value,
+    patch: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let patch = patch
+        .as_object()
+        .ok_or_else(|| ApiError::InvalidArgument("context_patch must be a JSON object".into()))?;
+    if patch.len() > 1_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "context_patch exceeds 1000 top-level entries".into(),
+        ));
+    }
+    let target = target
+        .as_object_mut()
+        .ok_or_else(|| ApiError::Conflict("checkpoint context is not an object".into()))?;
+    for (key, value) in patch {
+        target.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
+
+fn sequence_step_blocks(sequence: &orch8_types::sequence::SequenceDefinition) -> Vec<String> {
+    fn walk(value: &serde_json::Value, blocks: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let (Some(id), Some(_)) = (
+                    object.get("id").and_then(serde_json::Value::as_str),
+                    object.get("handler").and_then(serde_json::Value::as_str),
+                ) && !blocks.iter().any(|candidate| candidate == id)
+                {
+                    blocks.push(id.to_owned());
+                }
+                for child in object.values() {
+                    walk(child, blocks);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    walk(child, blocks);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut blocks = Vec::new();
+    if let Ok(value) = serde_json::to_value(sequence) {
+        walk(&value, &mut blocks);
+    }
+    blocks
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractFixtureRequest {
+    tenant_id: TenantId,
+    checkpoint_id: uuid::Uuid,
+    #[serde(default)]
+    allowlisted_fields: Vec<String>,
+}
+
+async fn extract_test_fixture(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Json(body): Json<ExtractFixtureRequest>,
+) -> Result<Json<ExtractedTestFixture>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.allowlisted_fields.len() > 256 {
+        return Err(ApiError::PayloadTooLarge(
+            "test fixture allowlist exceeds 256 fields".into(),
+        ));
+    }
+    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
+    let sequence = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "sequence"))?
+        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    let checkpoint = state
+        .storage
+        .list_checkpoints(instance.id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?
+        .into_iter()
+        .find(|checkpoint| checkpoint.id == body.checkpoint_id)
+        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))?;
+    let source = checkpoint_boundary(&execution, &sequence, &checkpoint)?;
+    let context = checkpoint
+        .checkpoint_data
+        .get("context_snapshot")
+        .cloned()
+        .unwrap_or_else(|| instance.context.data.clone());
+    let allowlist: std::collections::BTreeSet<_> = body.allowlisted_fields.into_iter().collect();
+    let selected = context.as_object().map_or_else(
+        || serde_json::json!({}),
+        |object| {
+            serde_json::Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| allowlist.contains(*key))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        },
+    );
+    let sanitized_context = orch8_types::redaction::RedactionPolicy::default().redacted(&selected);
+    let receipts = state
+        .storage
+        .list_effect_receipts(&tenant_id, id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
+    let receipt_mocks: Vec<_> = receipts
+        .iter()
+        .map(|receipt| receipt.request_sha256.clone())
+        .collect();
+    let mut missing_evidence = Vec::new();
+    if checkpoint.checkpoint_data.get("context_snapshot").is_none() {
+        missing_evidence.push("checkpoint.context_snapshot".into());
+    }
+    if receipts
+        .iter()
+        .any(|receipt| receipt.state == EffectState::Unknown)
+    {
+        missing_evidence.push("resolved_effect_receipt".into());
+    }
+    let stable_material = orch8_publisher::manifest::canonical_json(&serde_json::json!({
+        "source": source,
+        "context": sanitized_context,
+        "receipts": receipt_mocks,
+        "missing": missing_evidence,
+    }))
+    .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(Json(ExtractedTestFixture {
+        source,
+        stable_id: hex_sha256(stable_material.as_bytes()),
+        sanitized_context,
+        receipt_mocks,
+        complete: missing_evidence.is_empty(),
+        missing_evidence,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct MigrationPlanRequest {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    to_sequence_id: SequenceId,
+    to_version: i32,
+    #[serde(default)]
+    typed_finding_codes: Vec<String>,
+    #[serde(default)]
+    transforms: Vec<StateTransform>,
+    historical_validation_passed: Option<bool>,
+}
+
+async fn plan_live_migration(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<MigrationPlanRequest>,
+) -> Result<Json<LiveMigrationPlan>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.typed_finding_codes.len() > 1_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "migration findings exceed 1000 entries".into(),
+        ));
+    }
+    let (_, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    let source = state
+        .storage
+        .get_sequence(instance.sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "source sequence"))?
+        .ok_or_else(|| ApiError::NotFound("source sequence".into()))?;
+    let target = state
+        .storage
+        .get_sequence(body.to_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "target sequence"))?
+        .ok_or_else(|| ApiError::NotFound("target sequence".into()))?;
+    if target.tenant_id != tenant_id || target.version != body.to_version {
+        return Err(ApiError::NotFound("target sequence".into()));
+    }
+    let seed = LiveMigrationPlan {
+        id: MigrationPlanId::new(),
+        tenant_id,
+        continuity_id: body.continuity_id,
+        from_sequence_id: source.id,
+        from_version: source.version,
+        to_sequence_id: target.id,
+        to_version: target.version,
+        disposition: MigrationDisposition::Pin,
+        transforms: Vec::new(),
+        finding_codes: Vec::new(),
+        rollback_capsule_required: true,
+        created_at: Utc::now(),
+    };
+    orch8_engine::continuity_advanced::compile_migration_plan(
+        seed,
+        &body.typed_finding_codes,
+        body.transforms,
+        body.historical_validation_passed,
+    )
+    .map(Json)
+    .map_err(|error| ApiError::InvalidArgument(error.to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+struct GenerateScenariosRequest {
+    #[serde(default)]
+    events: Vec<String>,
+    #[serde(default)]
+    faults: Vec<FaultInjection>,
+    max_scenarios: usize,
+    seed: u64,
+}
+
+async fn generate_scenarios(
+    State(state): State<AppState>,
+    Json(body): Json<GenerateScenariosRequest>,
+) -> Result<Json<Vec<GeneratedScenario>>, ApiError> {
+    if !state.continuity_lab_enabled {
+        return Err(ApiError::Unavailable(
+            "continuity fault laboratory is disabled".into(),
+        ));
+    }
+    orch8_engine::continuity_advanced::generate_scenarios(
+        &body.events,
+        &body.faults,
+        body.max_scenarios,
+        body.seed,
+    )
+    .map(Json)
+    .map_err(|error| ApiError::InvalidArgument(error.to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReproduceIncidentRequest {
+    scenario: GeneratedScenario,
+    required_fault_kind: FaultKind,
+}
+
+async fn reproduce_incident(
+    State(state): State<AppState>,
+    Json(body): Json<ReproduceIncidentRequest>,
+) -> Result<Json<orch8_types::continuity_advanced::IncidentReproduction>, ApiError> {
+    if !state.continuity_lab_enabled {
+        return Err(ApiError::Unavailable(
+            "continuity fault laboratory is disabled".into(),
+        ));
+    }
+    Ok(Json(
+        orch8_engine::continuity_advanced::minimize_reproducing_scenario(
+            body.scenario,
+            |candidate| {
+                candidate
+                    .faults
+                    .iter()
+                    .any(|fault| fault.kind == body.required_fault_kind)
+            },
+        ),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ChooseProviderRequest {
+    candidates: Vec<ProviderCandidate>,
+    #[serde(default)]
+    allowed_regions: std::collections::BTreeSet<String>,
+    max_price_microunits: Option<i64>,
+    max_latency_ms: Option<u64>,
+    minimum_quality_millipoints: Option<i64>,
+    #[serde(default)]
+    require_idempotency: bool,
+    cohort_key: String,
+}
+
+async fn choose_provider(
+    Json(body): Json<ChooseProviderRequest>,
+) -> Result<Json<orch8_types::continuity_advanced::ProviderDecision>, ApiError> {
+    if body.candidates.len() > 1_000 || body.cohort_key.len() > 256 {
+        return Err(ApiError::PayloadTooLarge(
+            "provider candidates or cohort key exceed bounded limits".into(),
+        ));
+    }
+    Ok(Json(orch8_engine::continuity_advanced::choose_provider(
+        &body.candidates,
+        &orch8_engine::continuity_advanced::ProviderRequirements {
+            allowed_regions: body.allowed_regions,
+            max_price_microunits: body.max_price_microunits,
+            max_latency_ms: body.max_latency_ms,
+            minimum_quality_millipoints: body.minimum_quality_millipoints,
+            require_idempotency: body.require_idempotency,
+        },
+        &body.cohort_key,
+        Utc::now(),
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+struct OptimizationRequest {
+    serial_work_millipoints: u16,
+    retry_rate_millipoints: u16,
+    average_payload_bytes: u64,
+    average_cost_microunits: i64,
+    dead_branch_count: u32,
+    base_scenario: WhatIfScenario,
+}
+
+async fn recommend_optimizations(
+    Json(body): Json<OptimizationRequest>,
+) -> Json<Vec<orch8_types::continuity_advanced::OptimizationRecommendation>> {
+    Json(orch8_engine::continuity_advanced::recommend_optimizations(
+        orch8_engine::continuity_advanced::WorkflowAggregate {
+            serial_work_millipoints: body.serial_work_millipoints,
+            retry_rate_millipoints: body.retry_rate_millipoints,
+            average_payload_bytes: body.average_payload_bytes,
+            average_cost_microunits: body.average_cost_microunits,
+            dead_branch_count: body.dead_branch_count,
+        },
+        &body.base_scenario,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct EvaluationGateRequest {
+    baseline_scores: Vec<i64>,
+    candidate_scores: Vec<i64>,
+    minimum_samples: usize,
+    maximum_regression_millipoints: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct EvaluationGateResponse {
+    status: orch8_types::continuity_advanced::EvidenceStatus,
+}
+
+async fn evaluate_gate(
+    Json(body): Json<EvaluationGateRequest>,
+) -> Result<Json<EvaluationGateResponse>, ApiError> {
+    if body.baseline_scores.len() > 100_000 || body.candidate_scores.len() > 100_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "evaluation samples exceed 100000 values".into(),
+        ));
+    }
+    Ok(Json(EvaluationGateResponse {
+        status: orch8_engine::continuity_advanced::evaluation_gate(
+            &body.baseline_scores,
+            &body.candidate_scores,
+            body.minimum_samples,
+            body.maximum_regression_millipoints,
+        ),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResidencyRequest {
+    classification: DataClassification,
+    operation: String,
+    source_region: Option<String>,
+    destination_region: Option<String>,
+    #[serde(default)]
+    allowed_regions: std::collections::BTreeSet<String>,
+    destination_trust: Option<RuntimeTrustLevel>,
+}
+
+async fn evaluate_residency(Json(body): Json<ResidencyRequest>) -> Json<ResidencyEvidence> {
+    Json(orch8_engine::continuity_advanced::evaluate_residency(
+        body.classification,
+        body.operation,
+        body.source_region,
+        body.destination_region,
+        &body.allowed_regions,
+        body.destination_trust,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct MinimizeDisclosureRequest {
+    classification: DataClassification,
+    payload: serde_json::Value,
+    #[serde(default)]
+    allowed_top_level_fields: std::collections::BTreeSet<String>,
+}
+
+async fn minimize_disclosure(
+    Json(body): Json<MinimizeDisclosureRequest>,
+) -> Result<Json<orch8_types::continuity_advanced::DisclosureResult>, ApiError> {
+    if body.allowed_top_level_fields.len() > 256 {
+        return Err(ApiError::PayloadTooLarge(
+            "disclosure allowlist exceeds 256 fields".into(),
+        ));
+    }
+    Ok(Json(
+        orch8_engine::continuity_advanced::minimize_disclosure(
+            &body.payload,
+            &body.allowed_top_level_fields,
+            body.classification,
+        ),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyFederationRequest {
+    peer: FederationPeer,
+    envelope: FederationEnvelope,
+    payload_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VerifyFederationResponse {
+    valid: bool,
+}
+
+async fn verify_federation(
+    Json(body): Json<VerifyFederationRequest>,
+) -> Result<Json<VerifyFederationResponse>, ApiError> {
+    if body.payload_base64.len() > 16 * 1024 * 1024 {
+        return Err(ApiError::PayloadTooLarge(
+            "federation payload exceeds the encoded 16 MiB limit".into(),
+        ));
+    }
+    let payload = BASE64
+        .decode(body.payload_base64)
+        .map_err(|_| ApiError::InvalidArgument("payload_base64 is invalid".into()))?;
+    orch8_engine::continuity_advanced::verify_federation_envelope(
+        &body.peer,
+        &body.envelope,
+        &payload,
+        Utc::now(),
+    )
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(Json(VerifyFederationResponse { valid: true }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimDelegationRequest {
+    tenant_id: TenantId,
+    delegation: DeviceDelegation,
+    signed_grant: SignedContinuationGrant,
+    token: String,
+}
+
+async fn claim_delegation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<ClaimDelegationRequest>,
+) -> Result<Json<DeviceDelegation>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.delegation.tenant_id != tenant_id {
+        return Err(ApiError::NotFound("delegation".into()));
+    }
+    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
+        ApiError::Unavailable(
+            "device delegation is disabled without a configured engine encryption key".into(),
+        )
+    })?;
+    let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
+    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key])
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let now = Utc::now();
+    orch8_engine::continuity_advanced::validate_device_delegation(
+        &body.delegation,
+        &body.signed_grant.grant,
+        now,
+    )
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let token = BASE64
+        .decode(&body.token)
+        .map_err(|_| ApiError::InvalidArgument("delegation token is not valid base64".into()))?;
+    if token.len() != 32 {
+        return Err(ApiError::InvalidArgument(
+            "delegation token must decode to 32 bytes".into(),
+        ));
+    }
+    let consumed = state
+        .storage
+        .consume_continuation_grant(
+            &tenant_id,
+            body.signed_grant.grant.id,
+            &hex_sha256(&token),
+            now,
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuation grant"))?;
+    if !consumed {
+        return Err(ApiError::Conflict(
+            "delegation grant is expired, revoked, invalid, or already consumed".into(),
+        ));
+    }
+    Ok(Json(body.delegation))
 }

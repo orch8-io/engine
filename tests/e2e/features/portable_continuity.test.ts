@@ -185,6 +185,92 @@ describe("Portable Continuity", () => {
       "retracted",
     );
 
+    await client.createContinuityInvariant({
+      tenant_id: tenantId,
+      sequence_id: createdSequence.id,
+      sequence_version: createdSequence.version,
+      name: "no unresolved effects",
+      rule: { type: "no_unknown_effects" },
+    });
+    const invariantResults = await client.evaluateContinuityInvariants(
+      execution.continuity_id,
+      { tenant_id: tenantId },
+    );
+    assert.equal(invariantResults[0].status, "pass");
+
+    const evaluation = {
+      tenant_id: tenantId,
+      evaluator: "e2e-quality",
+      score_millipoints: 900,
+      sample_size: 1,
+      deferred: false,
+      evidence_sha256: "c".repeat(64),
+    };
+    await client.appendContinuityEvaluation(execution.continuity_id, evaluation);
+    await assert.rejects(
+      () => client.appendContinuityEvaluation(execution.continuity_id, evaluation),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+
+    const attention = await client.createAttentionTask({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      required_skills: ["fraud"],
+      classification: "confidential",
+      allowed_regions: ["br-south"],
+      priority: 2,
+      deadline: new Date(Date.now() + 60_000).toISOString(),
+      estimated_attention_units: 2,
+    });
+    const assigned = await client.assignAttentionTask(attention.id, {
+      tenant_id: tenantId,
+      lease_seconds: 60,
+      reviewers: [
+        {
+          reviewer_id: "reviewer-a",
+          tenant_ids: [tenantId],
+          skills: ["fraud"],
+          region: "br-south",
+          trust: "signed",
+          available_attention_units: 10,
+        },
+      ],
+    });
+    assert.equal(assigned.assignee, "reviewer-a");
+
+    const checkpoint = await client.saveCheckpoint(instance.id, {
+      safe_boundary: "work",
+      context_snapshot: {
+        order_id: "order-1",
+        password: "must-not-leak",
+      },
+    });
+    const boundaries = await client.listContinuityCheckpoints(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(boundaries[0].block_id, "work");
+    const whatIf = await client.runContinuityWhatIf(execution.continuity_id, {
+      tenant_id: tenantId,
+      checkpoint_id: checkpoint.id,
+      context_patch: { alternate: true },
+      output_overrides: {},
+      handler_mocks: { work: { simulated: true } },
+      max_ticks: 100,
+    });
+    assert.equal(whatIf.scenario.virtual_time, true);
+    assert.equal(whatIf.scenario.effect_mode, "blocked");
+    const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
+      tenant_id: tenantId,
+      checkpoint_id: checkpoint.id,
+      allowlisted_fields: ["order_id", "password"],
+    });
+    assert.equal(fixture.sanitized_context.order_id, "order-1");
+    assert.equal(fixture.sanitized_context.password, "[REDACTED]");
+
     await assert.rejects(
       () => client.getContinuityExecution(execution.continuity_id, `${tenantId}-other`),
       (error: unknown) => {

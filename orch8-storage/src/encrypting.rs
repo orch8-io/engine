@@ -540,6 +540,31 @@ passthrough_impl! {
     }
 }
 
+passthrough_impl! {
+    impl crate::InvariantStore for EncryptingStorage {
+        async fn create_workflow_invariant(&self, invariant: &orch8_types::continuity_advanced::WorkflowInvariant) -> Result<(), StorageError>;
+        async fn list_workflow_invariants(&self, tenant_id: &orch8_types::ids::TenantId, sequence_id: orch8_types::ids::SequenceId, sequence_version: i32, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError>;
+        async fn append_invariant_result(&self, tenant_id: &orch8_types::ids::TenantId, result: &orch8_types::continuity_advanced::InvariantResult) -> Result<bool, StorageError>;
+        async fn list_invariant_results(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::InvariantResult>, StorageError>;
+    }
+}
+
+passthrough_impl! {
+    impl crate::EvaluationStore for EncryptingStorage {
+        async fn append_evaluation_score(&self, score: &orch8_types::continuity_advanced::EvaluationScore) -> Result<bool, StorageError>;
+        async fn list_evaluation_scores(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::EvaluationScore>, StorageError>;
+    }
+}
+
+passthrough_impl! {
+    impl crate::AttentionStore for EncryptingStorage {
+        async fn create_attention_task(&self, task: &orch8_types::continuity_advanced::AttentionTask) -> Result<(), StorageError>;
+        async fn get_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::AttentionTaskId) -> Result<Option<orch8_types::continuity_advanced::AttentionTask>, StorageError>;
+        async fn claim_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, expected: &orch8_types::continuity_advanced::AttentionTask, assigned: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn reserve_budget(&self, reservation: &orch8_types::continuity_advanced::BudgetReservation, budget: &orch8_types::instance::Budget) -> Result<bool, StorageError>;
+    }
+}
+
 // ============================================================================
 // Sub-trait 2: InstanceStore -- encryption on create/get/update context paths
 // ============================================================================

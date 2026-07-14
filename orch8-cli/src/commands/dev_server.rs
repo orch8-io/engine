@@ -72,6 +72,7 @@ impl DevServer {
             // command; report ready unconditionally.
             engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             continuity_crypto: None,
+            continuity_lab_enabled: false,
         };
 
         let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());

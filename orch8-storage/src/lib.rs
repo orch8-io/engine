@@ -20,6 +20,10 @@ use orch8_types::continuity::{
     ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState, PlacementDecision,
     PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities, RuntimeId, StreamFrame, StreamId,
 };
+use orch8_types::continuity_advanced::{
+    AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, InvariantResult,
+    WorkflowInvariant,
+};
 use orch8_types::cron::CronSchedule;
 pub use orch8_types::dedupe::DedupeScope;
 use orch8_types::error::StorageError;
@@ -2657,6 +2661,82 @@ pub trait ContinuityStore: Send + Sync + 'static {
 }
 
 // ============================================================================
+// Sub-traits 13-15: Continuity evidence and policy stores
+// ============================================================================
+
+#[async_trait]
+pub trait InvariantStore: Send + Sync + 'static {
+    async fn create_workflow_invariant(
+        &self,
+        invariant: &WorkflowInvariant,
+    ) -> Result<(), StorageError>;
+
+    async fn list_workflow_invariants(
+        &self,
+        tenant_id: &TenantId,
+        sequence_id: SequenceId,
+        sequence_version: i32,
+        limit: u32,
+    ) -> Result<Vec<WorkflowInvariant>, StorageError>;
+
+    /// Append a deduplicated result. Returns false when the same evidence was
+    /// already evaluated for this tenant.
+    async fn append_invariant_result(
+        &self,
+        tenant_id: &TenantId,
+        result: &InvariantResult,
+    ) -> Result<bool, StorageError>;
+
+    async fn list_invariant_results(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<InvariantResult>, StorageError>;
+}
+
+#[async_trait]
+pub trait EvaluationStore: Send + Sync + 'static {
+    /// Append a direct or deferred score exactly once by tenant/dedupe key.
+    async fn append_evaluation_score(&self, score: &EvaluationScore) -> Result<bool, StorageError>;
+
+    async fn list_evaluation_scores(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<EvaluationScore>, StorageError>;
+}
+
+#[async_trait]
+pub trait AttentionStore: Send + Sync + 'static {
+    async fn create_attention_task(&self, task: &AttentionTask) -> Result<(), StorageError>;
+
+    async fn get_attention_task(
+        &self,
+        tenant_id: &TenantId,
+        id: AttentionTaskId,
+    ) -> Result<Option<AttentionTask>, StorageError>;
+
+    async fn claim_attention_task(
+        &self,
+        tenant_id: &TenantId,
+        expected: &AttentionTask,
+        assigned: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically reserve all dimensions against the execution's currently
+    /// active reservations. Returns false for stale epochs or hard-limit
+    /// exhaustion.
+    async fn reserve_budget(
+        &self,
+        reservation: &BudgetReservation,
+        budget: &orch8_types::instance::Budget,
+    ) -> Result<bool, StorageError>;
+}
+
+// ============================================================================
 // StorageBackend supertrait
 // ============================================================================
 
@@ -2682,6 +2762,9 @@ pub trait StorageBackend:
     + ResourceStore
     + MobileSyncStore
     + ContinuityStore
+    + InvariantStore
+    + EvaluationStore
+    + AttentionStore
     + Send
     + Sync
     + 'static
@@ -2703,6 +2786,9 @@ impl<T> StorageBackend for T where
         + ResourceStore
         + MobileSyncStore
         + ContinuityStore
+        + InvariantStore
+        + EvaluationStore
+        + AttentionStore
         + Send
         + Sync
         + 'static

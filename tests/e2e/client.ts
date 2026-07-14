@@ -227,6 +227,55 @@ export class Orch8Client {
     return this.#post(`/continuity/streams/${streamId}/retract`, req);
   }
 
+  async createContinuityInvariant(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/invariants", req);
+  }
+
+  async evaluateContinuityInvariants(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse[]> {
+    return this.#post(`/continuity/executions/${continuityId}/invariants/evaluate`, req);
+  }
+
+  async appendContinuityEvaluation(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/evaluations`, req);
+  }
+
+  async createAttentionTask(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/attention", req);
+  }
+
+  async assignAttentionTask(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/attention/${id}/assign`, req);
+  }
+
+  async listContinuityCheckpoints(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/checkpoints${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  async runContinuityWhatIf(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/what-if`, req);
+  }
+
+  async extractContinuityTestFixture(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/test-fixture`, req);
+  }
+
   async getAuditLog(id: string): Promise<ApiResponse[]> {
     return this.#get<ApiResponse[]>(`/instances/${id}/audit`);
   }

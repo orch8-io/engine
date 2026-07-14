@@ -297,6 +297,8 @@ fn build_app_state(
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
         continuity_crypto,
+        continuity_lab_enabled: std::env::var("ORCH8_CONTINUITY_LAB_ENABLED")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes")),
     }
 }
 

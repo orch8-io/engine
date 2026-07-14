@@ -9,6 +9,7 @@ pub mod cluster;
 pub mod config;
 pub mod context;
 pub mod continuity;
+pub mod continuity_advanced;
 pub mod contract;
 pub mod credential;
 pub mod cron;

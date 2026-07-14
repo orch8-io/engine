@@ -195,6 +195,35 @@ pub struct Budget {
     /// Max executed steps (`context.runtime.total_steps_executed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_steps: Option<i64>,
+    /// Maximum monetary spend in millionths of the configured currency unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_microunits: Option<i64>,
+    /// Maximum elapsed execution time in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wall_time_ms: Option<i64>,
+    /// Maximum number of calls crossing an external-effect boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_external_calls: Option<i64>,
+    /// Maximum bytes transferred across runtime boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes_transferred: Option<i64>,
+    /// Maximum estimated energy consumption in millijoules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_energy_millijoules: Option<i64>,
+    /// Maximum human-attention units reserved by the execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attention_units: Option<i64>,
+}
+
+/// Observed or reserved non-token budget dimensions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BudgetUsage {
+    pub cost_microunits: i64,
+    pub wall_time_ms: i64,
+    pub external_calls: i64,
+    pub bytes_transferred: i64,
+    pub energy_millijoules: i64,
+    pub attention_units: i64,
 }
 
 impl Budget {
@@ -231,6 +260,52 @@ impl Budget {
             // Negative limits are nonsensical and would otherwise report a
             // breach for every non-negative actual value. Treat them as
             // unconfigured.
+            cap.filter(|&limit_value| limit_value >= 0 && actual > limit_value)
+                .map(|limit_value| BudgetBreach {
+                    limit,
+                    limit_value,
+                    actual,
+                })
+        })
+    }
+
+    /// Return the first breached extended dimension. Negative caps remain
+    /// disabled for backwards compatibility with the original budget model.
+    #[must_use]
+    pub fn first_extended_breach(&self, usage: BudgetUsage) -> Option<BudgetBreach> {
+        let checks = [
+            (
+                "max_cost_microunits",
+                self.max_cost_microunits,
+                usage.cost_microunits,
+            ),
+            (
+                "max_wall_time_ms",
+                self.max_wall_time_ms,
+                usage.wall_time_ms,
+            ),
+            (
+                "max_external_calls",
+                self.max_external_calls,
+                usage.external_calls,
+            ),
+            (
+                "max_bytes_transferred",
+                self.max_bytes_transferred,
+                usage.bytes_transferred,
+            ),
+            (
+                "max_energy_millijoules",
+                self.max_energy_millijoules,
+                usage.energy_millijoules,
+            ),
+            (
+                "max_attention_units",
+                self.max_attention_units,
+                usage.attention_units,
+            ),
+        ];
+        checks.into_iter().find_map(|(limit, cap, actual)| {
             cap.filter(|&limit_value| limit_value >= 0 && actual > limit_value)
                 .map(|limit_value| BudgetBreach {
                     limit,
@@ -428,6 +503,7 @@ mod tests {
             max_output_tokens: None,
             max_total_tokens: Some(5_000),
             max_steps: Some(10),
+            ..Budget::default()
         };
         let json = serde_json::to_string(&budget).unwrap();
         let back: Budget = serde_json::from_str(&json).unwrap();
@@ -495,6 +571,7 @@ mod tests {
             max_output_tokens: Some(100),
             max_total_tokens: Some(200),
             max_steps: Some(5),
+            ..Budget::default()
         };
         assert_eq!(budget.first_breach(100, 100, 5), None);
     }
@@ -554,6 +631,7 @@ mod tests {
             max_output_tokens: Some(-1),
             max_total_tokens: Some(-1),
             max_steps: Some(-1),
+            ..Budget::default()
         };
         assert_eq!(budget.first_breach(100, 100, 100), None);
     }

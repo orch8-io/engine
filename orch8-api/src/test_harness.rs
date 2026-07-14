@@ -88,6 +88,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
             crate::ContinuityCrypto::from_master_key(&"11".repeat(32))
                 .expect("test continuity key is valid"),
         )),
+        continuity_lab_enabled: false,
     };
 
     // Attach auth + tenant middleware. API-key auth is disabled for the

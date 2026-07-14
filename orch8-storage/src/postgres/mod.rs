@@ -11,6 +11,7 @@ mod continuity;
 mod credentials;
 mod cron;
 mod events;
+mod evidence;
 mod execution_tree;
 mod externalized;
 mod instances;
