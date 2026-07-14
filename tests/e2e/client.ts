@@ -309,6 +309,10 @@ export class Orch8Client {
     );
   }
 
+  async chooseContinuityProvider(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/providers/choose", req);
+  }
+
   async verifyContinuityProvenance(
     continuityId: string,
     tenantId: string,

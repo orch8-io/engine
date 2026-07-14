@@ -707,6 +707,12 @@ pub struct ProviderRequirements {
     pub max_latency_ms: Option<u64>,
     pub minimum_quality_millipoints: Option<i64>,
     pub require_idempotency: bool,
+    /// Provider that may already have observed this operation.
+    pub prior_provider: Option<String>,
+    /// Whether replaying the operation at another provider is intrinsically safe.
+    pub operation_idempotent: bool,
+    /// Explicit effect-policy authorization for cross-provider replay.
+    pub effect_policy_approved: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -807,6 +813,13 @@ pub fn choose_provider(
     now: DateTime<Utc>,
 ) -> ProviderDecision {
     let mut findings = Vec::new();
+    let failover_blocked = requirements.prior_provider.as_ref().is_some_and(|prior| {
+        !requirements.operation_idempotent
+            && !requirements.effect_policy_approved
+            && candidates
+                .iter()
+                .any(|candidate| &candidate.provider != prior)
+    });
     let mut eligible: Vec<_> = candidates
         .iter()
         .filter(|candidate| {
@@ -823,6 +836,11 @@ pub fn choose_provider(
                     .minimum_quality_millipoints
                     .is_none_or(|minimum| candidate.quality_millipoints >= minimum)
                 && (!requirements.require_idempotency || candidate.supports_idempotency)
+                && requirements.prior_provider.as_ref().is_none_or(|prior| {
+                    &candidate.provider == prior
+                        || requirements.operation_idempotent
+                        || requirements.effect_policy_approved
+                })
         })
         .cloned()
         .collect();
@@ -836,6 +854,9 @@ pub fn choose_provider(
         findings.push("NO_ELIGIBLE_PROVIDER".into());
     } else {
         findings.push("PROVIDER_POLICY_SATISFIED".into());
+    }
+    if failover_blocked {
+        findings.push("NON_IDEMPOTENT_FAILOVER_BLOCKED".into());
     }
     ProviderDecision {
         id: ProviderDecisionId::new(),
@@ -1430,11 +1451,41 @@ mod tests {
                 max_latency_ms: Some(100),
                 minimum_quality_millipoints: Some(800),
                 require_idempotency: true,
+                prior_provider: None,
+                operation_idempotent: true,
+                effect_policy_approved: false,
             },
             "tenant:release:cohort",
             now,
         );
         assert_eq!(decision.selected.unwrap().provider, "a");
+        let mut retry_candidates = candidates.clone();
+        retry_candidates[0].breaker_open = true;
+        retry_candidates.push(ProviderCandidate {
+            provider: "b".into(),
+            ..candidates[0].clone()
+        });
+        let blocked = choose_provider(
+            &retry_candidates,
+            &ProviderRequirements {
+                allowed_regions: BTreeSet::new(),
+                max_price_microunits: None,
+                max_latency_ms: None,
+                minimum_quality_millipoints: None,
+                require_idempotency: false,
+                prior_provider: Some("a".into()),
+                operation_idempotent: false,
+                effect_policy_approved: false,
+            },
+            "stable-operation",
+            now,
+        );
+        assert!(blocked.selected.is_none());
+        assert!(
+            blocked
+                .finding_codes
+                .contains(&"NON_IDEMPOTENT_FAILOVER_BLOCKED".into())
+        );
         assert_eq!(
             evaluation_gate(&[900], &[950], 2, 0),
             EvidenceStatus::Inconclusive

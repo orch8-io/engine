@@ -5193,21 +5193,64 @@ struct ChooseProviderRequest {
     minimum_quality_millipoints: Option<i64>,
     #[serde(default)]
     require_idempotency: bool,
+    prior_provider: Option<String>,
+    #[serde(default)]
+    operation_idempotent: bool,
+    #[serde(default)]
+    effect_policy_approved: bool,
     cohort_key: String,
 }
 
 async fn choose_provider(
     State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<ChooseProviderRequest>,
 ) -> Result<Json<orch8_types::continuity_advanced::ProviderDecision>, ApiError> {
-    if body.candidates.len() > 1_000 || body.cohort_key.len() > 256 {
+    if body.candidates.len() > 1_000
+        || body.allowed_regions.len() > 256
+        || body.cohort_key.is_empty()
+        || body.cohort_key.len() > 256
+    {
         return Err(ApiError::PayloadTooLarge(
-            "provider candidates or cohort key exceed bounded limits".into(),
+            "provider candidates, regions, or cohort key exceed bounded limits".into(),
         ));
     }
     if body.tenant_id.is_some() != body.continuity_id.is_some() {
         return Err(ApiError::InvalidArgument(
             "tenant_id and continuity_id must be supplied together".into(),
+        ));
+    }
+    if let Some(tenant_id) = &body.tenant_id {
+        crate::auth::enforce_tenant_create(&tenant_ctx, tenant_id)?;
+    }
+    if body.candidates.iter().any(|candidate| {
+        candidate.provider.is_empty()
+            || candidate.provider.len() > 128
+            || candidate.model.is_empty()
+            || candidate.model.len() > 256
+            || candidate.region.is_empty()
+            || candidate.region.len() > 128
+            || candidate.pricing_version.is_empty()
+            || candidate.pricing_version.len() > 128
+            || candidate.price_microunits < 0
+            || candidate.quality_millipoints < 0
+            || candidate.quality_millipoints > 1_000
+    }) {
+        return Err(ApiError::InvalidArgument(
+            "provider candidates contain invalid identity, pricing, region, or quality data".into(),
+        ));
+    }
+    if body.max_price_microunits.is_some_and(|value| value < 0)
+        || body
+            .minimum_quality_millipoints
+            .is_some_and(|value| !(0..=1_000).contains(&value))
+        || body
+            .prior_provider
+            .as_ref()
+            .is_some_and(|provider| provider.is_empty() || provider.len() > 128)
+    {
+        return Err(ApiError::InvalidArgument(
+            "provider requirements contain invalid bounds".into(),
         ));
     }
     let decision = orch8_engine::continuity_advanced::choose_provider(
@@ -5218,6 +5261,9 @@ async fn choose_provider(
             max_latency_ms: body.max_latency_ms,
             minimum_quality_millipoints: body.minimum_quality_millipoints,
             require_idempotency: body.require_idempotency,
+            prior_provider: body.prior_provider,
+            operation_idempotent: body.operation_idempotent,
+            effect_policy_approved: body.effect_policy_approved,
         },
         &body.cohort_key,
         Utc::now(),

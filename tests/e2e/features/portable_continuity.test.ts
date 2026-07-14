@@ -1756,6 +1756,79 @@ describe("Portable Continuity", () => {
     );
   });
 
+  it("blocks unsafe provider failover and records policy-approved routing", async () => {
+    const tenantId = `continuity-router-${uuid().slice(0, 8)}`;
+    const created = await client.createSequence(testSequence(
+      `router-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const candidates = [
+      {
+        provider: "provider-a",
+        model: "agent-large",
+        region: "br-south",
+        price_microunits: 40,
+        expected_latency_ms: 100,
+        quality_millipoints: 950,
+        breaker_open: true,
+        supports_idempotency: true,
+        pricing_version: "prices-2026-07",
+      },
+      {
+        provider: "provider-b",
+        model: "agent-medium",
+        region: "br-south",
+        price_microunits: 20,
+        expected_latency_ms: 80,
+        quality_millipoints: 900,
+        breaker_open: false,
+        supports_idempotency: true,
+        pricing_version: "prices-2026-07",
+      },
+    ];
+    const request = {
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      candidates,
+      allowed_regions: ["br-south"],
+      max_price_microunits: 50,
+      max_latency_ms: 200,
+      minimum_quality_millipoints: 850,
+      require_idempotency: true,
+      prior_provider: "provider-a",
+      operation_idempotent: false,
+      effect_policy_approved: false,
+      cohort_key: "tenant:release:operation-1",
+    };
+    const blocked = await client.chooseContinuityProvider(request);
+    assert.equal(blocked.selected, null);
+    assert.ok(blocked.finding_codes.includes("NON_IDEMPOTENT_FAILOVER_BLOCKED"));
+    const approved = await client.chooseContinuityProvider({
+      ...request,
+      effect_policy_approved: true,
+    });
+    assert.equal(approved.selected.provider, "provider-b");
+    assert.equal(approved.selected.pricing_version, "prices-2026-07");
+    assert.equal(approved.cohort, blocked.cohort);
+    const provenance = await client.listContinuityProvenance(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.ok(provenance.some((entry) => entry.kind === "provider_selected"));
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

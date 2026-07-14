@@ -18,6 +18,16 @@ orch8 execution budget-reservations "$CONTINUITY_ID" --tenant-id "$TENANT_ID"
 
 Actual reconciled usage remains cumulative for later reservations. A release contributes zero usage. Requests must include all six usage dimensions and a versioned estimation table identifier; negative usage fails closed.
 
+## Route providers without replaying unsafe effects
+
+Provider choices filter breaker state, region, price, latency, quality, and idempotency before scoring. Retry requests should include `prior_provider` and `operation_idempotent`. If the prior provider may already have observed a non-idempotent operation, the router stays on that provider or returns no eligible provider; cross-provider replay requires `effect_policy_approved: true` from the effect-resolution workflow.
+
+```bash
+orch8 execution choose-provider provider-request.json
+```
+
+Tenant-linked requests must include both `tenant_id` and `continuity_id`. The selected provider, model, pricing version, stable cohort, and policy findings are appended to execution provenance without recording prompts or provider payloads.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.
