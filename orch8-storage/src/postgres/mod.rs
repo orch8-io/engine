@@ -7,6 +7,7 @@ mod audit;
 mod checkpoints;
 mod circuit_breakers;
 mod cluster;
+mod continuity;
 mod credentials;
 mod cron;
 mod events;

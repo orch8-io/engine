@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS task_instances (
     parent_instance_id TEXT,
     budget TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    UNIQUE (tenant_id, continuity_id)
 );
 
 CREATE TABLE IF NOT EXISTS execution_tree (
@@ -99,7 +100,9 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     next_fire_at TEXT,
     last_triggered_at TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
 );
 
 CREATE TABLE IF NOT EXISTS worker_tasks (
@@ -668,6 +671,83 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_waits_block
 CREATE INDEX IF NOT EXISTS idx_event_waits_correlation
     ON event_waits(tenant_id, correlation_key, status);
 
+CREATE TABLE IF NOT EXISTS continuity_executions (
+    continuity_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    owner_runtime_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    record TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_continuity_executions_tenant
+    ON continuity_executions(tenant_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS execution_handoffs (
+    id TEXT PRIMARY KEY,
+    continuity_id TEXT NOT NULL REFERENCES continuity_executions(continuity_id),
+    tenant_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 0),
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_handoffs_continuity
+    ON execution_handoffs(tenant_id, continuity_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS execution_capsules (
+    id TEXT PRIMARY KEY,
+    continuity_id TEXT NOT NULL REFERENCES continuity_executions(continuity_id),
+    tenant_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    manifest TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_capabilities (
+    tenant_id TEXT NOT NULL,
+    runtime_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    record TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, runtime_id)
+);
+CREATE INDEX IF NOT EXISTS idx_runtime_capabilities_live
+    ON runtime_capabilities(tenant_id, expires_at DESC);
+
+CREATE TABLE IF NOT EXISTS effect_receipts (
+    id TEXT PRIMARY KEY,
+    continuity_id TEXT NOT NULL REFERENCES continuity_executions(continuity_id),
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_effect_receipts_continuity
+    ON effect_receipts(tenant_id, continuity_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS provenance_entries (
+    id TEXT PRIMARY KEY,
+    continuity_id TEXT NOT NULL REFERENCES continuity_executions(continuity_id),
+    tenant_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    entry_sha256 TEXT NOT NULL,
+    previous_sha256 TEXT,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (tenant_id, continuity_id, entry_sha256),
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provenance_entries_chain
+    ON provenance_entries(tenant_id, continuity_id, epoch, created_at, id);
+
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
 -- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
@@ -681,4 +761,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 22;
+pub(super) const SCHEMA_VERSION: i64 = 23;

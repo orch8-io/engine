@@ -8,6 +8,7 @@ pub mod clock;
 pub mod cluster;
 pub mod config;
 pub mod context;
+pub mod continuity;
 pub mod contract;
 pub mod credential;
 pub mod cron;

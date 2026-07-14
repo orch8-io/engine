@@ -505,6 +505,28 @@ passthrough_impl! {
     }
 }
 
+passthrough_impl! {
+    impl crate::ContinuityStore for EncryptingStorage {
+        async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
+        async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
+        async fn cas_continuity_owner(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId, expected_epoch: orch8_types::continuity::ExecutionEpoch, expected_owner: orch8_types::continuity::RuntimeId, next: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn create_handoff(&self, handoff: &orch8_types::continuity::ExecutionHandoff) -> Result<(), StorageError>;
+        async fn get_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId) -> Result<Option<orch8_types::continuity::ExecutionHandoff>, StorageError>;
+        async fn cas_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId, expected_state: orch8_types::continuity::HandoffState, expected_version: u64, next: &orch8_types::continuity::ExecutionHandoff) -> Result<bool, StorageError>;
+        async fn accept_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, accepted_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, accepted_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn save_capsule_manifest(&self, manifest: &orch8_types::continuity::CapsuleManifest) -> Result<(), StorageError>;
+        async fn get_capsule_manifest(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::CapsuleId) -> Result<Option<orch8_types::continuity::CapsuleManifest>, StorageError>;
+        async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;
+        async fn list_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, observed_after: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::RuntimeCapabilities>, StorageError>;
+        async fn create_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<(), StorageError>;
+        async fn get_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
+        async fn cas_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId, expected_state: orch8_types::continuity::EffectState, next: &orch8_types::continuity::EffectReceipt) -> Result<bool, StorageError>;
+        async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
+        async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
+        async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
+    }
+}
+
 // ============================================================================
 // Sub-trait 2: InstanceStore -- encryption on create/get/update context paths
 // ============================================================================

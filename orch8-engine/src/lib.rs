@@ -1,7 +1,9 @@
 pub mod ap_poll;
 pub mod circuit_breaker;
+pub mod continuity;
 pub mod credentials;
 pub mod cron;
+pub mod dataflow;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
 /// engine users can write `orch8_engine::clock::ManualClock`.
 pub mod clock {

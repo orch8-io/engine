@@ -14,6 +14,11 @@ use uuid::Uuid;
 
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::circuit_breaker::CircuitBreakerState;
+use orch8_types::continuity::{
+    CapsuleId, CapsuleManifest, ContinuityExecution, ContinuityId, EffectId, EffectReceipt,
+    EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId, HandoffState, ProvenanceEntry,
+    RuntimeCapabilities, RuntimeId,
+};
 use orch8_types::cron::CronSchedule;
 pub use orch8_types::dedupe::DedupeScope;
 use orch8_types::error::StorageError;
@@ -2451,6 +2456,116 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 }
 
 // ============================================================================
+// Sub-trait 12: ContinuityStore
+// ============================================================================
+
+/// Durable portable-execution state. Compare-and-swap methods are the only
+/// supported way to advance ownership, handoff, and effect state.
+#[async_trait]
+pub trait ContinuityStore: Send + Sync + 'static {
+    async fn create_continuity_execution(
+        &self,
+        execution: &ContinuityExecution,
+    ) -> Result<(), StorageError>;
+
+    async fn get_continuity_execution(
+        &self,
+        tenant_id: &TenantId,
+        id: ContinuityId,
+    ) -> Result<Option<ContinuityExecution>, StorageError>;
+
+    async fn cas_continuity_owner(
+        &self,
+        tenant_id: &TenantId,
+        id: ContinuityId,
+        expected_epoch: ExecutionEpoch,
+        expected_owner: RuntimeId,
+        next: &ContinuityExecution,
+    ) -> Result<bool, StorageError>;
+
+    async fn create_handoff(&self, handoff: &ExecutionHandoff) -> Result<(), StorageError>;
+
+    async fn get_handoff(
+        &self,
+        tenant_id: &TenantId,
+        id: HandoffId,
+    ) -> Result<Option<ExecutionHandoff>, StorageError>;
+
+    async fn cas_handoff(
+        &self,
+        tenant_id: &TenantId,
+        id: HandoffId,
+        expected_state: HandoffState,
+        expected_version: u64,
+        next: &ExecutionHandoff,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically accept a handoff and transfer execution ownership. Returns
+    /// false when either the handoff CAS token or ownership epoch is stale.
+    async fn accept_handoff(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        accepted_handoff: &ExecutionHandoff,
+        expected_execution: &ContinuityExecution,
+        accepted_execution: &ContinuityExecution,
+    ) -> Result<bool, StorageError>;
+
+    async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError>;
+
+    async fn get_capsule_manifest(
+        &self,
+        tenant_id: &TenantId,
+        id: CapsuleId,
+    ) -> Result<Option<CapsuleManifest>, StorageError>;
+
+    async fn upsert_runtime_capabilities(
+        &self,
+        tenant_id: &TenantId,
+        capabilities: &RuntimeCapabilities,
+    ) -> Result<(), StorageError>;
+
+    async fn list_runtime_capabilities(
+        &self,
+        tenant_id: &TenantId,
+        observed_after: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<RuntimeCapabilities>, StorageError>;
+
+    async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
+
+    async fn get_effect_receipt(
+        &self,
+        tenant_id: &TenantId,
+        id: EffectId,
+    ) -> Result<Option<EffectReceipt>, StorageError>;
+
+    async fn cas_effect_receipt(
+        &self,
+        tenant_id: &TenantId,
+        id: EffectId,
+        expected_state: EffectState,
+        next: &EffectReceipt,
+    ) -> Result<bool, StorageError>;
+
+    async fn list_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
+
+    async fn list_provenance(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<ProvenanceEntry>, StorageError>;
+}
+
+// ============================================================================
 // StorageBackend supertrait
 // ============================================================================
 
@@ -2475,6 +2590,7 @@ pub trait StorageBackend:
     + TelemetryStore
     + ResourceStore
     + MobileSyncStore
+    + ContinuityStore
     + Send
     + Sync
     + 'static
@@ -2495,6 +2611,7 @@ impl<T> StorageBackend for T where
         + TelemetryStore
         + ResourceStore
         + MobileSyncStore
+        + ContinuityStore
         + Send
         + Sync
         + 'static

@@ -148,6 +148,39 @@ export class Orch8Client {
     return this.#get(`/instances/${id}/tree`);
   }
 
+  // --- Portable continuity ---
+
+  async createContinuityExecution(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/executions", req);
+  }
+
+  async getContinuityExecution(id: string, tenantId: string): Promise<ApiResponse> {
+    return this.#get(`/continuity/executions/${id}${toQuery({ tenant_id: tenantId })}`);
+  }
+
+  async registerRuntime(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/runtimes/register", req);
+  }
+
+  async listRuntimes(tenantId: string): Promise<ApiResponse[]> {
+    return this.#get(`/runtimes${toQuery({ tenant_id: tenantId })}`);
+  }
+
+  async previewHandoff(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/handoff-preview`, req);
+  }
+
+  async createHandoff(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/handoffs", req);
+  }
+
+  async getHandoff(id: string, tenantId: string): Promise<ApiResponse> {
+    return this.#get(`/continuity/handoffs/${id}${toQuery({ tenant_id: tenantId })}`);
+  }
+
   async getAuditLog(id: string): Promise<ApiResponse[]> {
     return this.#get<ApiResponse[]>(`/instances/${id}/audit`);
   }
