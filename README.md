@@ -16,29 +16,39 @@ Orch8 keeps the execution model — state-snapshot durability, retries, replay-o
 
 Unlike every other workflow engine, Orch8 also runs natively on mobile devices (iOS and Android) via Rust + UniFFI. Workflows execute offline-first on-device, sync status to the server when connected, and support human-in-the-loop approvals via push notifications. No other orchestration engine can do this.
 
+Portable Continuity takes that further: a running execution can hand off between server and device — or between two servers, or across a federation boundary — mid-flight, with cryptographic ownership transfer, tamper-evident provenance, and at-most-once effect tracking that survives the move. Nothing else in this space lets a workflow physically relocate while it's running.
+
 ## Features
 
-**Workflow Primitives** — Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split
+**Workflow Primitives** — Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split, Saga (sequential steps with LIFO compensating rollback on failure)
+
+**Conditional Execution** — per-step `when` guards (skip a step based on context/prior outputs, no handler invocation), conditional retry policies (`retry_if` expression evaluated against the failure, `non_retryable_codes` denylist — both layer on top of `max_attempts`/backoff)
 
 **Scheduling** — Relative delays, business-days-only with holiday awareness, timezone-per-instance, jitter, send windows, cron triggers with configurable tick interval
 
 **Rate Limiting** — Per-resource sliding window with deferred scheduling (not rejection), resource pools with weighted rotation, daily caps, and warmup ramps
 
-**Reliability** — Crash recovery via state snapshots, configurable retry with exponential backoff, dead letter queue, idempotency keys, circuit breakers with fallback handler routing and persistent state
+**Reliability** — Crash recovery via state snapshots, configurable retry with exponential backoff, dead letter queue with root-cause fingerprinting and automatic incident reproduction, idempotency keys, circuit breakers with fallback handler routing and persistent state, block output schemas (JSON Schema-gated handler output)
 
 **Concurrency** — Per-entity key control, priority queues (Low/Normal/High/Critical), bulk create/pause/resume/cancel, batch instance creation (up to 10k)
 
 **Multi-tenancy** — Tenant-scoped queries, per-tenant rate limits, per-tenant circuit breakers, tenant isolation middleware, per-tenant noisy-neighbor protection
 
-**Extensibility** — External workers (any language via REST polling), gRPC sidecar plugins, WASM plugins, webhook events, workflow interceptors, emit-event with deduplication
+**Extensibility** — External workers (any language via REST polling), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, signed workflow/connector packages
 
-**Observability** — Prometheus metrics, structured JSON logging, audit log, execution tree visualization, Grafana dashboard template
+**Observability** — Prometheus metrics, structured JSON logging, audit log, execution tree visualization, Grafana dashboard template, visual execution workbench (unified timeline, run comparison, fork preview), template debugger and resolution inspector, stuck-instance doctor with ranked diagnostics
+
+**Release Safety** — semantic diff between sequence versions, historical validation against recorded runs, canary routing with automatic rollback gates, workflow contracts (declarative scenario tests with virtual time), sequence preflight readiness checks
 
 **AI Agent Support** — Unified `llm_call` handler covering all major providers (OpenAI, Anthropic, Gemini + 7 more), dynamic step injection (self_modify), human-in-the-loop with timeout/escalation, SSE streaming, query-instance handler for cross-workflow coordination
 
 **Mobile** — Native iOS and Android SDK via Rust + UniFFI, offline-first execution, battery-aware sync intervals, server-side visibility into mobile workflows, human-in-the-loop approvals via silent push notifications (APNs/FCM), single bidirectional sync endpoint
 
-**Security** — AES-256-GCM encryption at rest for context and credentials, OAuth2 credential refresh, API key authentication, CORS configuration
+**Portable Continuity** — cryptographically-signed capsule handoff lets a running execution move between server, device, and back mid-flight with exactly-once ownership transfer, tamper-evident provenance chains, effect-receipt tracking (at-most-once side effects across retries and handoffs), capability-aware placement routing, live migration between sequence versions with rollback, comparative what-if simulation from a checkpoint, and fail-closed residency/federation controls for regulated data. See [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) and [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md).
+
+**Typed Dataflow** — a bounded compiler analyzes `data.*`/`outputs.*`/`state.*`/`config.*` references across a sequence and generates matching, byte-stable TypeScript and Python bindings plus a canonical schema; missing producers and closed-schema violations fail preflight with the exact reference chain. See [Typed Dataflow](docs/TYPED_DATAFLOW.md).
+
+**Security** — AES-256-GCM encryption at rest for context and credentials, OAuth2 credential refresh, API key authentication, CORS configuration, HMAC-signed webhooks with nonce replay protection
 
 ## Install
 
@@ -177,27 +187,33 @@ Configuration via `orch8.toml`, environment variables (`ORCH8_*`), or both (env 
 | `ORCH8_LOG_JSON` | `false` | JSON-formatted log output |
 | `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers) |
 | `ORCH8_API_KEY` | — | Set to require API key auth |
+| `ORCH8_CONTINUITY_LAB_ENABLED` | `false` | Enable the deterministic fault-injection lab (`orch8 execution run-fault-lab`) |
+| `ORCH8_FEDERATION_PEERS` | — | Bounded, unique HTTPS trust roots for continuity federation envelope verification |
 
 See [Configuration Reference](docs/CONFIGURATION.md) for the full list.
 
 ## API Surface
 
-68 documented REST endpoints covering:
+229 documented REST endpoints covering:
 
-- **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup
-- **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ
+- **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup, preflight readiness, template inspection, dataflow bindings
+- **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ, diagnosis, workbench (timeline/compare/fork-preview)
+- **Releases** — semantic diff, historical validation, canary routing, gate evaluation, promote/pause/rollback
 - **Signals** — send pause/resume/cancel/context signals to running instances
+- **Events** — ingest for `wait_for_event` correlation, producer-id deduplication
 - **Workers** — task polling, completion, failure, heartbeat, stats, queue-based routing
 - **Cron** — CRUD with expression validation, enable/disable, trigger history
-- **Triggers** — webhook and event-driven instance creation
+- **Triggers** — webhook (HMAC-signed) and event-driven instance creation
 - **Sessions** — stateful multi-instance coordination
 - **Pools** — resource pool management with weighted allocation
 - **Credentials** — encrypted credential vault with OAuth2 refresh
 - **Circuit Breakers** — per-tenant/handler state, manual reset
 - **Plugins** — WASM and gRPC plugin registration
 - **Approvals** — human-in-the-loop approval inbox
+- **Debug** — raw template resolution with provenance trace
 - **Mobile** — device registration, sync, approvals, commands
 - **Cluster** — node listing, heartbeat, drain
+- **Continuity** — execution/checkpoint lifecycle, handoffs, capsule export/import, provenance, invariants, evaluations, budgets, migrations, what-if simulation, fault lab, DLQ reproduction, provider routing, attention leases, residency/federation
 - **Health** — liveness, readiness, Prometheus metrics
 
 ## Development
@@ -227,27 +243,30 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**4,347 tests** across two layers:
+**~7,700 tests** across two layers:
 
 | Layer | Tests | Scope |
 |-------|-------|-------|
-| **Rust unit + integration** | 3,148 | Storage backends, evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery |
-| **TypeScript E2E** | 1,199 | 202 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync |
+| **Rust unit + integration** | 6,840 | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
+| **TypeScript E2E** | 861 | 217 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if), typed dataflow |
 
 **Coverage by feature area:**
 
 | Area | Test suites |
 |------|-------------|
-| Blocks | Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split |
+| Blocks | Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split, Saga |
+| Conditional execution | `when` step guards, `retry_if` / `non_retryable_codes` conditional retry |
 | Handlers | Built-in handlers, external worker dispatch, LLM call, query-instance |
 | Features | Rate limiting, resource pools, circuit breakers, encryption, credentials, multi-tenancy |
 | Signals | Pause/resume/cancel, context update, terminal guards |
 | Scheduling | Cron CRUD, business days, timezone/DST, jitter, send windows, SLA timers |
 | Mixing | Complex sequences combining multiple block types and features |
-| Resilience | Crash recovery, retry, DLQ, idempotency, checkpoint/restore |
-| Security | API key auth, CORS, encryption at rest, tenant isolation |
-| Templating | Context expressions, dynamic params, conditional logic |
-| Observability | Prometheus metrics, audit log, health endpoints, SSE streaming |
+| Resilience | Crash recovery, retry, DLQ fingerprinting + auto-reproduction, idempotency, checkpoint/restore |
+| Release safety | Semantic diff, historical validation, canary gates, workflow contracts, preflight |
+| Security | API key auth, CORS, encryption at rest, tenant isolation, webhook HMAC + replay protection |
+| Templating | Context expressions, dynamic params, conditional logic, dataflow type-checking |
+| Observability | Prometheus metrics, audit log, health endpoints, SSE streaming, workbench |
+| Portable Continuity | Ownership handoff/CAS races, capsule encryption + signing, provenance chain tamper detection, effect-receipt at-most-once, live migration + rollback, what-if simulation, fault-lab scenario shrinking, federation/residency, human attention leases |
 
 ## Project Structure
 
@@ -264,8 +283,8 @@ engine/
   orch8-storage/      Storage trait + Postgres + SQLite impls
   orch8-types/        Shared domain types and config
   proto/              Protobuf service definitions
-  migrations/         41 SQL migrations (Postgres schema)
-  tests/e2e/          202 TypeScript E2E test files (1,199 test cases)
+  migrations/         68 SQL migrations (Postgres schema; SQLite bundled schema v34)
+  tests/e2e/          217 TypeScript E2E test files (861 test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
@@ -287,6 +306,9 @@ engine/
 - [Webhooks](docs/WEBHOOKS.md) — event schema and delivery semantics
 - [Externalized State](docs/EXTERNALIZATION.md) — how oversized payloads are offloaded
 - [Mobile SDK](docs/MOBILE_SDK.md) — UniFFI bindings, iOS/Android setup, offline-first execution
+- [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) — portable execution handoff, capsules, migrations, upgrade/recovery guidance
+- [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md) — checkpoint time-travel, what-if simulation, production-to-test extraction
+- [Typed Dataflow](docs/TYPED_DATAFLOW.md) — the `data.*`/`outputs.*` reference compiler and generated SDK bindings
 - [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents
 - [Changelog](CHANGELOG.md)
 
@@ -318,10 +340,10 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 
 ## Status & Limitations
 
-Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 4,347 tests covering core paths. Honest about what it isn't yet:
+Pre-1.0. This is the public release of an engine that has been running my own production for several months, with ~7,700 tests covering core paths. Honest about what it isn't yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
-- **No replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet. Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
+- **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
 - **Workflow versioning is younger.** Sequence definitions are versioned, but the migration ergonomics for in-flight instances aren't as polished as Temporal's `GetVersion` / patch system.
 - **SDK depth varies.** TypeScript SDK has both authoring + worker support; Go and Python SDKs are worker-focused for now.
 - **API is stable but evolving.** Pre-1.0 means breaking changes are possible; we'll mark them in releases and keep them minimal.
