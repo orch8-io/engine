@@ -281,12 +281,15 @@ async fn filter_by_concurrency(
     // during the `binary_search` filtering phase, improving hot path performance.
     excluded.dedup();
 
-    Ok(candidates
-        .into_iter()
-        .enumerate()
-        .filter(|(idx, _)| excluded.binary_search(idx).is_err())
-        .map(|(_, inst)| inst)
-        .collect())
+    let mut idx = 0;
+    let mut candidates = candidates;
+    candidates.retain(|_| {
+        let keep = excluded.binary_search(&idx).is_err();
+        idx += 1;
+        keep
+    });
+
+    Ok(candidates)
 }
 
 pub(super) async fn update_state(

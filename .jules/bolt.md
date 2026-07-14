@@ -71,6 +71,10 @@
 **Learning:** In the `check_termination` function within `orch8-engine/src/evaluator.rs`, the original code collected `.iter().filter(|n| n.parent_id.is_none())` into a `Vec` and then iterated over it three times with `.all()` and `.any()` checks. Allocating a `Vec` inside a hot evaluation loop is unnecessary and negatively impacts performance.
 **Action:** When performing aggregate checks on filtered elements in a hot path, prefer single-pass evaluation loops using boolean accumulators over collecting elements into an intermediate `Vec`. Ensure edge-case handling (like `.all()` returning `true` on an empty iterator) is strictly replicated in the rewritten logic.
 
+## 2025-10-31 - [Zero-Allocation In-Place Vector Filtering with Original Indices]
+**Learning:** In hot paths (like `filter_by_concurrency_pg`), filtering elements from a `Vec` into a new `Vec` via `into_iter().enumerate().filter(...).collect()` forces unnecessary reallocation of the underlying buffer.
+**Action:** When filtering a vector that you already own on a hot path and need the original index, always use `.retain()` with an external mutable counter variable instead of collecting into a new vector to avoid unnecessary memory allocations.
+
 ## 2025-11-01 - [Avoid Cloning Strings for Reference Passing]
 **Learning:** In the activepieces integration of the scheduler hot loop (`orch8-engine/src/scheduler.rs`), a `String` field (`step.handler`) was being cloned into a new local variable merely to pass its reference (`&handler_name`) to a downstream handler function. This caused an unnecessary heap allocation on an execution hot path.
 **Action:** When calling functions that require string references (`&str`), always pass a reference directly from the source struct (`&step.handler`) rather than cloning the `String` first.
