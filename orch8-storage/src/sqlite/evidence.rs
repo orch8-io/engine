@@ -271,6 +271,56 @@ impl crate::AttentionStore for SqliteStorage {
         Ok(updated.rows_affected() == 1)
     }
 
+    async fn reassign_expired_attention_task(
+        &self,
+        expected: &AttentionTask,
+        assigned: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let now = now.to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE attention_tasks SET assignee=?, lease_expires_at=?, record=?
+             WHERE tenant_id=? AND id=? AND state='assigned'
+               AND assignee=? AND lease_expires_at<=? AND deadline>?",
+        )
+        .bind(&assigned.assignee)
+        .bind(assigned.lease_expires_at.map(|value| value.to_rfc3339()))
+        .bind(encode(assigned)?)
+        .bind(expected.tenant_id.as_str())
+        .bind(expected.id.to_string())
+        .bind(&expected.assignee)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn decide_attention_task(
+        &self,
+        expected: &AttentionTask,
+        decided: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let now = now.to_rfc3339();
+        let updated = sqlx::query(
+            "UPDATE attention_tasks SET state='decided', record=?
+             WHERE tenant_id=? AND id=? AND state='assigned'
+               AND assignee=? AND lease_expires_at>? AND deadline>?",
+        )
+        .bind(encode(decided)?)
+        .bind(expected.tenant_id.as_str())
+        .bind(expected.id.to_string())
+        .bind(&expected.assignee)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn reserve_budget(
         &self,
         reservation: &BudgetReservation,

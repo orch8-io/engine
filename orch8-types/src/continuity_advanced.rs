@@ -607,6 +607,12 @@ pub struct AttentionTask {
     pub state: AttentionState,
     pub assignee: Option<String>,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub budget_reservation_id: Option<BudgetReservationId>,
+    #[serde(default)]
+    pub decision_sha256: Option<String>,
+    #[serde(default)]
+    pub decided_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

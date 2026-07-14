@@ -789,6 +789,8 @@ passthrough_impl! {
         async fn create_attention_task(&self, task: &orch8_types::continuity_advanced::AttentionTask) -> Result<(), StorageError>;
         async fn get_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::AttentionTaskId) -> Result<Option<orch8_types::continuity_advanced::AttentionTask>, StorageError>;
         async fn claim_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, expected: &orch8_types::continuity_advanced::AttentionTask, assigned: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn reassign_expired_attention_task(&self, expected: &orch8_types::continuity_advanced::AttentionTask, assigned: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn decide_attention_task(&self, expected: &orch8_types::continuity_advanced::AttentionTask, decided: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn reserve_budget(&self, reservation: &orch8_types::continuity_advanced::BudgetReservation, budget: &orch8_types::instance::Budget) -> Result<bool, StorageError>;
         async fn get_budget_reservation(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::BudgetReservationId) -> Result<Option<orch8_types::continuity_advanced::BudgetReservation>, StorageError>;
         async fn list_budget_reservations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::BudgetReservation>, StorageError>;

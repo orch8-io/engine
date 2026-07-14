@@ -2002,6 +2002,106 @@ describe("Portable Continuity", () => {
     );
   });
 
+  it("reassigns expired attention leases and settles one hashed decision", async () => {
+    const tenantId = `continuity-attention-${uuid().slice(0, 8)}`;
+    const created = await client.createSequence(testSequence(
+      `attention-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+      budget: { max_attention_units: 2 },
+    });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const task = await client.createAttentionTask({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      required_skills: ["fraud"],
+      classification: "confidential",
+      allowed_regions: ["br-south"],
+      priority: 2,
+      deadline: new Date(Date.now() + 60_000).toISOString(),
+      estimated_attention_units: 2,
+    });
+    assert.ok(!("payload" in task));
+    await assert.rejects(
+      () => client.createAttentionTask({
+        tenant_id: tenantId,
+        continuity_id: execution.continuity_id,
+        required_skills: ["fraud"],
+        classification: "confidential",
+        allowed_regions: ["br-south"],
+        priority: 2,
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+        estimated_attention_units: 1,
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+    await client.assignAttentionTask(task.id, {
+      tenant_id: tenantId,
+      lease_seconds: 1,
+      reviewers: [{
+        reviewer_id: "reviewer-a",
+        tenant_ids: [tenantId],
+        skills: ["fraud"],
+        region: "br-south",
+        trust: "signed",
+        available_attention_units: 2,
+      }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    const reassigned = await client.assignAttentionTask(task.id, {
+      tenant_id: tenantId,
+      lease_seconds: 60,
+      reviewers: [{
+        reviewer_id: "reviewer-b",
+        tenant_ids: [tenantId],
+        skills: ["fraud"],
+        region: "br-south",
+        trust: "signed",
+        available_attention_units: 2,
+      }],
+    });
+    assert.equal(reassigned.assignee, "reviewer-b");
+    const decisionSha256 = createHash("sha256")
+      .update("approve-with-secret-comment-not-uploaded")
+      .digest("hex");
+    const decisions = await Promise.allSettled([
+      client.decideAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewer_id: "reviewer-b",
+        decision_sha256: decisionSha256,
+      }),
+      client.decideAttentionTask(task.id, {
+        tenant_id: tenantId,
+        reviewer_id: "reviewer-b",
+        decision_sha256: decisionSha256,
+      }),
+    ]);
+    assert.equal(decisions.filter((result) => result.status === "fulfilled").length, 1);
+    const decided = decisions.find((result) => result.status === "fulfilled")!;
+    assert.equal(decided.value.state, "decided");
+    assert.equal(decided.value.decision_sha256, decisionSha256);
+    assert.ok(!JSON.stringify(decided.value).includes("secret-comment"));
+    const reservations = await client.listContinuityBudgetReservations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(reservations[0].state, "reconciled");
+    assert.equal(reservations[0].actual.attention_units, 2);
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

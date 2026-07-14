@@ -275,6 +275,52 @@ impl crate::AttentionStore for PostgresStorage {
         Ok(updated.rows_affected() == 1)
     }
 
+    async fn reassign_expired_attention_task(
+        &self,
+        expected: &AttentionTask,
+        assigned: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let updated = sqlx::query(
+            "UPDATE attention_tasks SET assignee=$1, lease_expires_at=$2, record=$3
+             WHERE tenant_id=$4 AND id=$5 AND state='assigned'
+               AND assignee=$6 AND lease_expires_at<=$7 AND deadline>$7",
+        )
+        .bind(&assigned.assignee)
+        .bind(assigned.lease_expires_at)
+        .bind(encode(assigned)?)
+        .bind(expected.tenant_id.as_str())
+        .bind(expected.id.into_uuid())
+        .bind(&expected.assignee)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    async fn decide_attention_task(
+        &self,
+        expected: &AttentionTask,
+        decided: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let updated = sqlx::query(
+            "UPDATE attention_tasks SET state='decided', record=$1
+             WHERE tenant_id=$2 AND id=$3 AND state='assigned'
+               AND assignee=$4 AND lease_expires_at>$5 AND deadline>$5",
+        )
+        .bind(encode(decided)?)
+        .bind(expected.tenant_id.as_str())
+        .bind(expected.id.into_uuid())
+        .bind(&expected.assignee)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn reserve_budget(
         &self,
         reservation: &BudgetReservation,

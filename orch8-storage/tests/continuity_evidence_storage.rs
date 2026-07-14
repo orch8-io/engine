@@ -133,6 +133,9 @@ async fn attention_claim_is_single_winner() {
         state: AttentionState::Pending,
         assignee: None,
         lease_expires_at: None,
+        budget_reservation_id: None,
+        decision_sha256: None,
+        decided_at: None,
     };
     storage.create_attention_task(&task).await.unwrap();
     let mut assigned = task.clone();
@@ -153,7 +156,43 @@ async fn attention_claim_is_single_winner() {
     );
     assert_eq!(
         storage.get_attention_task(&tenant, task.id).await.unwrap(),
-        Some(assigned)
+        Some(assigned.clone())
+    );
+    let mut reassigned = assigned.clone();
+    reassigned.assignee = Some("reviewer-b".into());
+    reassigned.lease_expires_at = Some(now + Duration::minutes(3));
+    let after_expiry = now + Duration::seconds(61);
+    assert!(
+        storage
+            .reassign_expired_attention_task(&assigned, &reassigned, after_expiry)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .reassign_expired_attention_task(&assigned, &reassigned, after_expiry)
+            .await
+            .unwrap()
+    );
+    let mut decided = reassigned.clone();
+    decided.state = AttentionState::Decided;
+    decided.decision_sha256 = Some("a".repeat(64));
+    decided.decided_at = Some(now + Duration::minutes(2));
+    assert!(
+        storage
+            .decide_attention_task(&reassigned, &decided, now + Duration::minutes(2))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .decide_attention_task(&reassigned, &decided, now + Duration::minutes(2))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage.get_attention_task(&tenant, task.id).await.unwrap(),
+        Some(decided)
     );
 }
 

@@ -50,6 +50,18 @@ orch8 execution accept-optimization "$RECOMMENDATION_ID" acceptance.json
 
 Acceptance verifies that the recommendation was actually issued and was not edited, then rechecks current invariants. A deterministic draft sequence and draft release are created with the recommendation evidence and experiment attached. Repeating the same acceptance returns those same resources. The draft deliberately clones the source workflow: an operator or authoring tool must apply and validate the proposed edit before release validation or canary promotion.
 
+## Route and settle human attention safely
+
+Creating an attention task reserves `estimated_attention_units` from the linked execution budget. The durable task stores only skills, classification, locality, priority, deadline, and assignment state—review contents remain in the authorized application boundary.
+
+```bash
+orch8 execution create-attention attention.json
+orch8 execution assign-attention "$TASK_ID" reviewers.json
+orch8 execution decide-attention "$TASK_ID" decision-hash.json
+```
+
+An assignment is a lease. After expiry, another eligible reviewer can claim it through a compare-and-set transition; before expiry, reassignment fails. The active reviewer submits a SHA-256 decision digest rather than contents. One concurrent decision wins, the attention reservation reconciles to actual units, and provenance records the payload-free boundary.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.

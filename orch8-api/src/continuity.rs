@@ -133,6 +133,10 @@ pub fn routes() -> Router<AppState> {
             post(assign_attention_task),
         )
         .route(
+            "/continuity/attention/{id}/decide",
+            post(decide_attention_task),
+        )
+        .route(
             "/continuity/executions/{id}/checkpoints",
             get(list_continuity_checkpoints),
         )
@@ -2618,17 +2622,41 @@ async fn create_attention_task(
             "attention task has invalid skills, priority, units, or deadline".into(),
         ));
     }
-    if state
-        .storage
-        .get_continuity_execution(&tenant_id, body.continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
-        .is_none()
-    {
-        return Err(ApiError::NotFound("continuity execution".into()));
+    let (execution, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    let task_id = AttentionTaskId::new();
+    let mut budget_reservation = instance.budget.as_ref().map(|budget| {
+        (
+            budget,
+            BudgetReservation {
+                id: BudgetReservationId::from_uuid(task_id.into_uuid()),
+                tenant_id: tenant_id.clone(),
+                continuity_id: body.continuity_id,
+                epoch: execution.epoch,
+                requested: orch8_types::instance::BudgetUsage {
+                    attention_units: body.estimated_attention_units,
+                    ..orch8_types::instance::BudgetUsage::default()
+                },
+                actual: None,
+                estimation_version: "attention-task-v1".into(),
+                state: ReservationState::Reserved,
+                created_at: now,
+            },
+        )
+    });
+    if let Some((budget, reservation)) = &budget_reservation {
+        let reserved = state
+            .storage
+            .reserve_budget(reservation, budget)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "attention budget"))?;
+        if !reserved {
+            return Err(ApiError::Conflict(
+                "attention task exceeds the remaining execution budget".into(),
+            ));
+        }
     }
     let task = AttentionTask {
-        id: AttentionTaskId::new(),
+        id: task_id,
         tenant_id,
         continuity_id: body.continuity_id,
         required_skills: body.required_skills,
@@ -2640,12 +2668,32 @@ async fn create_attention_task(
         state: AttentionState::Pending,
         assignee: None,
         lease_expires_at: None,
+        budget_reservation_id: budget_reservation
+            .as_ref()
+            .map(|(_, reservation)| reservation.id),
+        decision_sha256: None,
+        decided_at: None,
     };
-    state
-        .storage
-        .create_attention_task(&task)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "attention task"))?;
+    if let Err(create_error) = state.storage.create_attention_task(&task).await {
+        if let Some((_, reservation)) = &mut budget_reservation {
+            reservation.state = ReservationState::Released;
+            match state.storage.settle_budget_reservation(reservation).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    task_id = %task_id,
+                    reservation_id = %reservation.id,
+                    "attention task create failed and its budget reservation was already settled"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    task_id = %task_id,
+                    reservation_id = %reservation.id,
+                    "attention task create failed and budget release also failed"
+                ),
+            }
+        }
+        return Err(ApiError::from_storage(create_error, "attention task"));
+    }
     Ok((StatusCode::CREATED, Json(task)))
 }
 
@@ -2674,11 +2722,19 @@ async fn assign_attention_task(
         .await
         .map_err(|error| ApiError::from_storage(error, "attention task"))?
         .ok_or_else(|| ApiError::NotFound("attention task".into()))?;
+    let now = Utc::now();
+    let expired_assignment = task.state == AttentionState::Assigned
+        && task.lease_expires_at.is_some_and(|expires| expires <= now);
     let mut assigned = task.clone();
+    if expired_assignment {
+        assigned.state = AttentionState::Pending;
+        assigned.assignee = None;
+        assigned.lease_expires_at = None;
+    }
     if orch8_engine::continuity_advanced::assign_attention_task(
         &mut assigned,
         &body.reviewers,
-        Utc::now(),
+        now,
         body.lease_seconds,
     )
     .is_none()
@@ -2687,11 +2743,18 @@ async fn assign_attention_task(
             "no eligible reviewer is available".into(),
         ));
     }
-    let claimed = state
-        .storage
-        .claim_attention_task(&tenant_id, &task, &assigned, Utc::now())
-        .await
-        .map_err(|error| ApiError::from_storage(error, "attention task"))?;
+    let claimed = if expired_assignment {
+        state
+            .storage
+            .reassign_expired_attention_task(&task, &assigned, now)
+            .await
+    } else {
+        state
+            .storage
+            .claim_attention_task(&tenant_id, &task, &assigned, now)
+            .await
+    }
+    .map_err(|error| ApiError::from_storage(error, "attention task"))?;
     if !claimed {
         return Err(ApiError::Conflict(
             "attention task was assigned concurrently".into(),
@@ -2712,6 +2775,115 @@ async fn assign_attention_task(
     )
     .await?;
     Ok(Json(assigned))
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideAttentionRequest {
+    tenant_id: TenantId,
+    reviewer_id: String,
+    decision_sha256: String,
+}
+
+async fn decide_attention_task(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<AttentionTaskId>,
+    Json(body): Json<DecideAttentionRequest>,
+) -> Result<Json<AttentionTask>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    if body.reviewer_id.is_empty() || body.reviewer_id.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "reviewer_id must contain between 1 and 128 bytes".into(),
+        ));
+    }
+    validate_sha256(&body.decision_sha256, "decision_sha256")?;
+    let task = state
+        .storage
+        .get_attention_task(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "attention task"))?
+        .ok_or_else(|| ApiError::NotFound("attention task".into()))?;
+    if task.state != AttentionState::Assigned
+        || task.assignee.as_deref() != Some(body.reviewer_id.as_str())
+    {
+        return Err(ApiError::Conflict(
+            "attention task is not leased to this reviewer".into(),
+        ));
+    }
+    let now = Utc::now();
+    let mut decided = task.clone();
+    decided.state = AttentionState::Decided;
+    decided.decision_sha256 = Some(body.decision_sha256);
+    decided.decided_at = Some(now);
+    let settled = state
+        .storage
+        .decide_attention_task(&task, &decided, now)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "attention decision"))?;
+    if !settled {
+        return Err(ApiError::Conflict(
+            "attention lease expired or the task was decided concurrently".into(),
+        ));
+    }
+    if let Some(reservation_id) = decided.budget_reservation_id {
+        reconcile_attention_budget(&state, &tenant_id, id, reservation_id).await;
+    }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, decided.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "human_decision",
+        "human review decision hash recorded",
+        &decided,
+    )
+    .await?;
+    Ok(Json(decided))
+}
+
+async fn reconcile_attention_budget(
+    state: &AppState,
+    tenant_id: &TenantId,
+    task_id: AttentionTaskId,
+    reservation_id: BudgetReservationId,
+) {
+    let mut reservation = match state
+        .storage
+        .get_budget_reservation(tenant_id, reservation_id)
+        .await
+    {
+        Ok(Some(reservation)) if reservation.state == ReservationState::Reserved => reservation,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(%error, %task_id, %reservation_id, "attention budget lookup failed");
+            return;
+        }
+    };
+    let actual = reservation.requested;
+    if let Err(error) =
+        orch8_engine::continuity_advanced::reconcile_budget(&mut reservation, actual)
+    {
+        tracing::warn!(%error, %task_id, %reservation_id, "attention budget reconciliation was invalid");
+        return;
+    }
+    match state.storage.settle_budget_reservation(&reservation).await {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            %task_id,
+            %reservation_id,
+            "attention budget was settled concurrently"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            %task_id,
+            %reservation_id,
+            "attention budget settlement failed"
+        ),
+    }
 }
 
 fn validate_sha256(value: &str, field: &str) -> Result<(), ApiError> {

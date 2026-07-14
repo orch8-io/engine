@@ -251,6 +251,8 @@ pub enum ExecutionCmd {
     CreateAttention { request: PathBuf },
     /// Assign an attention task using capability-aware scheduling.
     AssignAttention { task_id: Uuid, request: PathBuf },
+    /// Record a payload-free decision hash under the active reviewer lease.
+    DecideAttention { task_id: Uuid, request: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -921,6 +923,15 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/attention/{task_id}/assign"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::DecideAttention { task_id, request } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/attention/{task_id}/decide"),
                 &request,
                 format,
             )

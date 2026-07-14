@@ -438,6 +438,10 @@ export class Orch8Client {
     return this.#post(`/continuity/attention/${id}/assign`, req);
   }
 
+  async decideAttentionTask(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/attention/${id}/decide`, req);
+  }
+
   async listContinuityCheckpoints(
     continuityId: string,
     tenantId: string,

@@ -2877,6 +2877,20 @@ pub trait AttentionStore: Send + Sync + 'static {
         now: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
 
+    async fn reassign_expired_attention_task(
+        &self,
+        expected: &AttentionTask,
+        assigned: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    async fn decide_attention_task(
+        &self,
+        expected: &AttentionTask,
+        decided: &AttentionTask,
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
     /// Atomically reserve all dimensions against the execution's currently
     /// active reservations. Returns false for stale epochs or hard-limit
     /// exhaustion.
