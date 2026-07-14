@@ -690,6 +690,11 @@ pub fn reconcile_budget(
     if reservation.state != ReservationState::Reserved {
         return Err(AdvancedContinuityError::ReservationInactive);
     }
+    if usage_has_negative(actual) {
+        return Err(AdvancedContinuityError::BudgetDenied(
+            "negative_actual_usage",
+        ));
+    }
     reservation.actual = Some(actual);
     reservation.state = ReservationState::Reconciled;
     Ok(sub_usage(reservation.requested, actual))
@@ -1387,6 +1392,19 @@ mod tests {
                 }
             ),
             Err(AdvancedContinuityError::BudgetDenied("max_cost_microunits"))
+        );
+        reservation.state = ReservationState::Reserved;
+        assert_eq!(
+            reconcile_budget(
+                &mut reservation,
+                BudgetUsage {
+                    cost_microunits: -1,
+                    ..BudgetUsage::default()
+                }
+            ),
+            Err(AdvancedContinuityError::BudgetDenied(
+                "negative_actual_usage"
+            ))
         );
     }
 

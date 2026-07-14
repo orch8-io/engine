@@ -5,8 +5,8 @@ use sqlx::Row;
 
 use orch8_types::continuity::ContinuityId;
 use orch8_types::continuity_advanced::{
-    AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, InvariantResult,
-    WhatIfRunRecord, WorkflowInvariant,
+    AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId, EvaluationScore,
+    InvariantResult, ReservationState, WhatIfRunRecord, WorkflowInvariant,
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{SequenceId, TenantId};
@@ -313,7 +313,8 @@ impl crate::AttentionStore for SqliteStorage {
                     COALESCE(SUM(energy_millijoules),0) energy,
                     COALESCE(SUM(attention_units),0) attention
              FROM budget_reservations
-             WHERE tenant_id=? AND continuity_id=? AND epoch=? AND state='reserved'",
+             WHERE tenant_id=? AND continuity_id=? AND epoch=?
+               AND state IN ('reserved', 'reconciled')",
         )
         .bind(reservation.tenant_id.as_str())
         .bind(reservation.continuity_id.to_string())
@@ -369,6 +370,82 @@ impl crate::AttentionStore for SqliteStorage {
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(true)
+    }
+
+    async fn get_budget_reservation(
+        &self,
+        tenant_id: &TenantId,
+        id: BudgetReservationId,
+    ) -> Result<Option<BudgetReservation>, StorageError> {
+        let row = sqlx::query("SELECT record FROM budget_reservations WHERE tenant_id=? AND id=?")
+            .bind(tenant_id.as_str())
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(&row.get::<String, _>("record")))
+            .transpose()
+    }
+
+    async fn list_budget_reservations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<BudgetReservation>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM budget_reservations
+             WHERE tenant_id=? AND continuity_id=?
+             ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.to_string())
+        .bind(i64::from(limit.min(1_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(&row.get::<String, _>("record")))
+            .collect()
+    }
+
+    async fn settle_budget_reservation(
+        &self,
+        reservation: &BudgetReservation,
+    ) -> Result<bool, StorageError> {
+        let usage = match reservation.state {
+            ReservationState::Reconciled => reservation.actual.ok_or_else(|| {
+                StorageError::Query("reconciled reservation requires actual usage".into())
+            })?,
+            ReservationState::Released => BudgetUsage::default(),
+            ReservationState::Reserved => return Ok(false),
+        };
+        if usage_values(usage).iter().any(|value| *value < 0) {
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "UPDATE budget_reservations
+             SET state=?, cost_microunits=?, wall_time_ms=?, external_calls=?,
+                 bytes_transferred=?, energy_millijoules=?, attention_units=?, record=?
+             WHERE tenant_id=? AND id=? AND continuity_id=? AND epoch=?
+               AND state='reserved'",
+        )
+        .bind(state_name(reservation.state)?)
+        .bind(usage.cost_microunits)
+        .bind(usage.wall_time_ms)
+        .bind(usage.external_calls)
+        .bind(usage.bytes_transferred)
+        .bind(usage.energy_millijoules)
+        .bind(usage.attention_units)
+        .bind(encode(reservation)?)
+        .bind(reservation.tenant_id.as_str())
+        .bind(reservation.id.to_string())
+        .bind(reservation.continuity_id.to_string())
+        .bind(i64::try_from(reservation.epoch.get()).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
     }
 }
 

@@ -269,6 +269,46 @@ export class Orch8Client {
     );
   }
 
+  async reserveContinuityBudget(
+    continuityId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/executions/${continuityId}/budget-reservations`, req);
+  }
+
+  async listContinuityBudgetReservations(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/budget-reservations${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
+  async reconcileContinuityBudget(
+    continuityId: string,
+    reservationId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/executions/${continuityId}/budget-reservations/${reservationId}/reconcile`,
+      req,
+    );
+  }
+
+  async releaseContinuityBudget(
+    continuityId: string,
+    reservationId: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(
+      `/continuity/executions/${continuityId}/budget-reservations/${reservationId}/release`,
+      req,
+    );
+  }
+
   async verifyContinuityProvenance(
     continuityId: string,
     tenantId: string,

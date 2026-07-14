@@ -114,7 +114,15 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/continuity/executions/{id}/budget-reservations",
-            post(reserve_execution_budget),
+            get(list_execution_budget_reservations).post(reserve_execution_budget),
+        )
+        .route(
+            "/continuity/executions/{id}/budget-reservations/{reservation_id}/reconcile",
+            post(reconcile_execution_budget),
+        )
+        .route(
+            "/continuity/executions/{id}/budget-reservations/{reservation_id}/release",
+            post(release_execution_budget),
         )
         .route("/continuity/attention", post(create_attention_task))
         .route(
@@ -2462,6 +2470,103 @@ async fn reserve_execution_budget(
         ));
     }
     Ok((StatusCode::CREATED, Json(reservation)))
+}
+
+async fn list_execution_budget_reservations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<Vec<BudgetReservation>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    continuity_instance(&state, &tenant_id, id).await?;
+    state
+        .storage
+        .list_budget_reservations(&tenant_id, id, 1_000)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::from_storage(error, "budget reservations"))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReconcileBudgetRequest {
+    tenant_id: TenantId,
+    actual: orch8_types::instance::BudgetUsage,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseBudgetRequest {
+    tenant_id: TenantId,
+}
+
+async fn reconcile_execution_budget(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, reservation_id)): Path<(ContinuityId, BudgetReservationId)>,
+    Json(body): Json<ReconcileBudgetRequest>,
+) -> Result<Json<BudgetReservation>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let mut reservation = active_budget_reservation(&state, &tenant_id, id, reservation_id).await?;
+    orch8_engine::continuity_advanced::reconcile_budget(&mut reservation, body.actual)
+        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    settle_budget_reservation(&state, &reservation).await?;
+    Ok(Json(reservation))
+}
+
+async fn release_execution_budget(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, reservation_id)): Path<(ContinuityId, BudgetReservationId)>,
+    Json(body): Json<ReleaseBudgetRequest>,
+) -> Result<Json<BudgetReservation>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let mut reservation = active_budget_reservation(&state, &tenant_id, id, reservation_id).await?;
+    reservation.state = ReservationState::Released;
+    settle_budget_reservation(&state, &reservation).await?;
+    Ok(Json(reservation))
+}
+
+async fn active_budget_reservation(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+    reservation_id: BudgetReservationId,
+) -> Result<BudgetReservation, ApiError> {
+    let (execution, _) = continuity_instance(state, tenant_id, continuity_id).await?;
+    let reservation = state
+        .storage
+        .get_budget_reservation(tenant_id, reservation_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "budget reservation"))?
+        .ok_or_else(|| ApiError::NotFound("budget reservation".into()))?;
+    if reservation.continuity_id != continuity_id || reservation.epoch != execution.epoch {
+        return Err(ApiError::Conflict(
+            "budget reservation belongs to a stale execution epoch".into(),
+        ));
+    }
+    if reservation.state != ReservationState::Reserved {
+        return Err(ApiError::Conflict(
+            "budget reservation was already settled".into(),
+        ));
+    }
+    Ok(reservation)
+}
+
+async fn settle_budget_reservation(
+    state: &AppState,
+    reservation: &BudgetReservation,
+) -> Result<(), ApiError> {
+    let settled = state
+        .storage
+        .settle_budget_reservation(reservation)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "budget reservation"))?;
+    if !settled {
+        return Err(ApiError::Conflict(
+            "budget reservation was settled concurrently".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

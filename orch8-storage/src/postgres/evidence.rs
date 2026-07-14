@@ -5,8 +5,8 @@ use sqlx::Row;
 
 use orch8_types::continuity::ContinuityId;
 use orch8_types::continuity_advanced::{
-    AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, InvariantResult,
-    WhatIfRunRecord, WorkflowInvariant,
+    AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId, EvaluationScore,
+    InvariantResult, ReservationState, WhatIfRunRecord, WorkflowInvariant,
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{SequenceId, TenantId};
@@ -310,14 +310,15 @@ impl crate::AttentionStore for PostgresStorage {
             return Ok(false);
         }
         let row = sqlx::query(
-            "SELECT COALESCE(SUM(cost_microunits),0) cost,
-                    COALESCE(SUM(wall_time_ms),0) wall,
-                    COALESCE(SUM(external_calls),0) calls,
-                    COALESCE(SUM(bytes_transferred),0) bytes,
-                    COALESCE(SUM(energy_millijoules),0) energy,
-                    COALESCE(SUM(attention_units),0) attention
+            "SELECT COALESCE(SUM(cost_microunits),0)::BIGINT cost,
+                    COALESCE(SUM(wall_time_ms),0)::BIGINT wall,
+                    COALESCE(SUM(external_calls),0)::BIGINT calls,
+                    COALESCE(SUM(bytes_transferred),0)::BIGINT bytes,
+                    COALESCE(SUM(energy_millijoules),0)::BIGINT energy,
+                    COALESCE(SUM(attention_units),0)::BIGINT attention
              FROM budget_reservations
-             WHERE tenant_id=$1 AND continuity_id=$2 AND epoch=$3 AND state='reserved'",
+             WHERE tenant_id=$1 AND continuity_id=$2 AND epoch=$3
+               AND state IN ('reserved', 'reconciled')",
         )
         .bind(reservation.tenant_id.as_str())
         .bind(reservation.continuity_id.into_uuid())
@@ -325,14 +326,7 @@ impl crate::AttentionStore for PostgresStorage {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
-        let active = BudgetUsage {
-            cost_microunits: row.get("cost"),
-            wall_time_ms: row.get("wall"),
-            external_calls: row.get("calls"),
-            bytes_transferred: row.get("bytes"),
-            energy_millijoules: row.get("energy"),
-            attention_units: row.get("attention"),
-        };
+        let active = decode_budget_usage(&row)?;
         if budget
             .first_extended_breach(add_usage(active, usage))
             .is_some()
@@ -374,6 +368,82 @@ impl crate::AttentionStore for PostgresStorage {
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(true)
     }
+
+    async fn get_budget_reservation(
+        &self,
+        tenant_id: &TenantId,
+        id: BudgetReservationId,
+    ) -> Result<Option<BudgetReservation>, StorageError> {
+        let row =
+            sqlx::query("SELECT record FROM budget_reservations WHERE tenant_id=$1 AND id=$2")
+                .bind(tenant_id.as_str())
+                .bind(id.into_uuid())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn list_budget_reservations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<BudgetReservation>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM budget_reservations
+             WHERE tenant_id=$1 AND continuity_id=$2
+             ORDER BY created_at DESC, id DESC LIMIT $3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.into_uuid())
+        .bind(i64::from(limit.min(1_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
+    async fn settle_budget_reservation(
+        &self,
+        reservation: &BudgetReservation,
+    ) -> Result<bool, StorageError> {
+        let usage = match reservation.state {
+            ReservationState::Reconciled => reservation.actual.ok_or_else(|| {
+                StorageError::Query("reconciled reservation requires actual usage".into())
+            })?,
+            ReservationState::Released => BudgetUsage::default(),
+            ReservationState::Reserved => return Ok(false),
+        };
+        if usage_values(usage).iter().any(|value| *value < 0) {
+            return Ok(false);
+        }
+        let result = sqlx::query(
+            "UPDATE budget_reservations
+             SET state=$1, cost_microunits=$2, wall_time_ms=$3, external_calls=$4,
+                 bytes_transferred=$5, energy_millijoules=$6, attention_units=$7, record=$8
+             WHERE tenant_id=$9 AND id=$10 AND continuity_id=$11 AND epoch=$12
+               AND state='reserved'",
+        )
+        .bind(state_name(reservation.state)?)
+        .bind(usage.cost_microunits)
+        .bind(usage.wall_time_ms)
+        .bind(usage.external_calls)
+        .bind(usage.bytes_transferred)
+        .bind(usage.energy_millijoules)
+        .bind(usage.attention_units)
+        .bind(encode(reservation)?)
+        .bind(reservation.tenant_id.as_str())
+        .bind(reservation.id.into_uuid())
+        .bind(reservation.continuity_id.into_uuid())
+        .bind(i64::try_from(reservation.epoch.get()).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
+    }
 }
 
 fn usage_values(usage: BudgetUsage) -> [i64; 6] {
@@ -385,6 +455,21 @@ fn usage_values(usage: BudgetUsage) -> [i64; 6] {
         usage.energy_millijoules,
         usage.attention_units,
     ]
+}
+
+fn decode_budget_usage(row: &sqlx::postgres::PgRow) -> Result<BudgetUsage, StorageError> {
+    let get = |column| {
+        row.try_get(column)
+            .map_err(|error| StorageError::Query(error.to_string()))
+    };
+    Ok(BudgetUsage {
+        cost_microunits: get("cost")?,
+        wall_time_ms: get("wall")?,
+        external_calls: get("calls")?,
+        bytes_transferred: get("bytes")?,
+        energy_millijoules: get("energy")?,
+        attention_units: get("attention")?,
+    })
 }
 
 fn add_usage(left: BudgetUsage, right: BudgetUsage) -> BudgetUsage {

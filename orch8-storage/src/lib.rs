@@ -2885,6 +2885,26 @@ pub trait AttentionStore: Send + Sync + 'static {
         reservation: &BudgetReservation,
         budget: &orch8_types::instance::Budget,
     ) -> Result<bool, StorageError>;
+
+    async fn get_budget_reservation(
+        &self,
+        tenant_id: &TenantId,
+        id: orch8_types::continuity_advanced::BudgetReservationId,
+    ) -> Result<Option<BudgetReservation>, StorageError>;
+
+    async fn list_budget_reservations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<BudgetReservation>, StorageError>;
+
+    /// Atomically transitions an active reservation to reconciled or released.
+    /// Returns false when another caller already settled it or its epoch changed.
+    async fn settle_budget_reservation(
+        &self,
+        reservation: &BudgetReservation,
+    ) -> Result<bool, StorageError>;
 }
 
 // ============================================================================

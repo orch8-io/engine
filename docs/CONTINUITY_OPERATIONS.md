@@ -1,5 +1,23 @@
 # Portable Continuity Operations
 
+## Reserve and settle multidimensional budgets
+
+Reserve estimated usage before dispatch so concurrent workers cannot pass a check-then-act race:
+
+```bash
+orch8 execution reserve-budget "$CONTINUITY_ID" reserve.json
+```
+
+After dispatch, reconcile the reservation with actual usage. If dispatch never happened, release it instead. Both operations are compare-and-set transitions: only one caller can settle a reservation, and a reservation from an older execution epoch is rejected.
+
+```bash
+orch8 execution reconcile-budget "$CONTINUITY_ID" "$RESERVATION_ID" actual.json
+orch8 execution release-budget "$CONTINUITY_ID" "$RESERVATION_ID" tenant.json
+orch8 execution budget-reservations "$CONTINUITY_ID" --tenant-id "$TENANT_ID"
+```
+
+Actual reconciled usage remains cumulative for later reservations. A release contributes zero usage. Requests must include all six usage dimensions and a versioned estimation table identifier; negative usage fails closed.
+
 This guide covers the operator actions that require judgment when portable
 continuity is enabled. The engine fails closed when it cannot prove whether an
 external effect happened.

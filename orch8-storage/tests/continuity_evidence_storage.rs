@@ -115,7 +115,7 @@ async fn invariant_and_evaluation_evidence_is_deduplicated() {
 }
 
 #[tokio::test]
-async fn attention_claim_is_single_winner_and_budget_reservation_persists() {
+async fn attention_claim_is_single_winner() {
     let (storage, tenant, continuity_id, _) = setup().await;
     let now = Utc::now();
     let task = AttentionTask {
@@ -153,7 +153,12 @@ async fn attention_claim_is_single_winner_and_budget_reservation_persists() {
         storage.get_attention_task(&tenant, task.id).await.unwrap(),
         Some(assigned)
     );
+}
 
+#[tokio::test]
+async fn budget_settlement_is_single_winner_and_actual_usage_remains_cumulative() {
+    let (storage, tenant, continuity_id, _) = setup().await;
+    let now = Utc::now();
     let budget = orch8_types::instance::Budget {
         max_cost_microunits: Some(100),
         ..Default::default()
@@ -164,7 +169,7 @@ async fn attention_claim_is_single_winner_and_budget_reservation_persists() {
         continuity_id,
         epoch: ExecutionEpoch::initial(),
         requested: BudgetUsage {
-            cost_microunits: 10,
+            cost_microunits: 70,
             attention_units: 2,
             ..BudgetUsage::default()
         },
@@ -174,10 +179,54 @@ async fn attention_claim_is_single_winner_and_budget_reservation_persists() {
         created_at: now,
     };
     assert!(storage.reserve_budget(&reservation, &budget).await.unwrap());
-    reservation.id = BudgetReservationId::new();
-    reservation.requested.cost_microunits = 91;
+    let first_id = reservation.id;
+    let mut competing = reservation.clone();
+    competing.id = BudgetReservationId::new();
+    competing.requested.cost_microunits = 31;
     assert!(
-        !storage.reserve_budget(&reservation, &budget).await.unwrap(),
+        !storage.reserve_budget(&competing, &budget).await.unwrap(),
         "active reservations must be summed under one database write lock"
+    );
+    reservation.state = ReservationState::Reconciled;
+    reservation.actual = Some(BudgetUsage {
+        cost_microunits: 60,
+        attention_units: 2,
+        ..BudgetUsage::default()
+    });
+    assert!(
+        storage
+            .settle_budget_reservation(&reservation)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !storage
+            .settle_budget_reservation(&reservation)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage
+            .get_budget_reservation(&tenant, first_id)
+            .await
+            .unwrap(),
+        Some(reservation.clone())
+    );
+    competing.id = BudgetReservationId::new();
+    competing.requested.cost_microunits = 41;
+    assert!(
+        !storage.reserve_budget(&competing, &budget).await.unwrap(),
+        "reconciled actual usage must remain part of the cumulative budget"
+    );
+    competing.id = BudgetReservationId::new();
+    competing.requested.cost_microunits = 40;
+    assert!(storage.reserve_budget(&competing, &budget).await.unwrap());
+    assert_eq!(
+        storage
+            .list_budget_reservations(&tenant, continuity_id, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
     );
 }

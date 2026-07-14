@@ -1669,6 +1669,93 @@ describe("Portable Continuity", () => {
     assert.equal(attached[0]!.id, reproduction.id);
   });
 
+  it("reconciles budget usage atomically and keeps actual spend cumulative", async () => {
+    const tenantId = `continuity-budget-${uuid().slice(0, 8)}`;
+    const created = await client.createSequence(testSequence(
+      `budget-${uuid().slice(0, 8)}`,
+      [step("work", "noop")],
+      { tenantId },
+    ));
+    const instance = await client.createInstance({
+      sequence_id: created.id,
+      tenant_id: tenantId,
+      namespace: "default",
+      next_fire_at: new Date(Date.now() + 60_000).toISOString(),
+      budget: { max_cost_microunits: 100 },
+    });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const usage = (cost: number) => ({
+      cost_microunits: cost,
+      wall_time_ms: 0,
+      external_calls: 0,
+      bytes_transferred: 0,
+      energy_millijoules: 0,
+      attention_units: 0,
+    });
+    const first = await client.reserveContinuityBudget(execution.continuity_id, {
+      tenant_id: tenantId,
+      requested: usage(70),
+      estimation_version: "prices-2026-07",
+    });
+    const reconciled = await client.reconcileContinuityBudget(
+      execution.continuity_id,
+      first.id,
+      { tenant_id: tenantId, actual: usage(60) },
+    );
+    assert.equal(reconciled.state, "reconciled");
+    assert.equal(reconciled.actual.cost_microunits, 60);
+    await assert.rejects(
+      () => client.reserveContinuityBudget(execution.continuity_id, {
+        tenant_id: tenantId,
+        requested: usage(50),
+        estimation_version: "prices-2026-07",
+      }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+    );
+    const releasable = await client.reserveContinuityBudget(execution.continuity_id, {
+      tenant_id: tenantId,
+      requested: usage(40),
+      estimation_version: "prices-2026-07",
+    });
+    const released = await client.releaseContinuityBudget(
+      execution.continuity_id,
+      releasable.id,
+      { tenant_id: tenantId },
+    );
+    assert.equal(released.state, "released");
+    const concurrent = await client.reserveContinuityBudget(execution.continuity_id, {
+      tenant_id: tenantId,
+      requested: usage(40),
+      estimation_version: "prices-2026-07",
+    });
+    const settlements = await Promise.allSettled([
+      client.reconcileContinuityBudget(execution.continuity_id, concurrent.id, {
+        tenant_id: tenantId,
+        actual: usage(40),
+      }),
+      client.reconcileContinuityBudget(execution.continuity_id, concurrent.id, {
+        tenant_id: tenantId,
+        actual: usage(40),
+      }),
+    ]);
+    assert.equal(settlements.filter((result) => result.status === "fulfilled").length, 1);
+    const reservations = await client.listContinuityBudgetReservations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(
+      reservations.map((reservation) => reservation.state).sort(),
+      ["reconciled", "reconciled", "released"],
+    );
+  });
+
   it("rejects self-asserted elevated runtime trust", async () => {
     const tenantId = `continuity-security-${uuid().slice(0, 8)}`;
     const runtimeId = uuid();

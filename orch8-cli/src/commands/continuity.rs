@@ -137,6 +137,24 @@ pub enum ExecutionCmd {
         continuity_id: Uuid,
         request: PathBuf,
     },
+    /// List durable reservations and their settlement state.
+    BudgetReservations {
+        continuity_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Reconcile a reservation with actual usage from a JSON request.
+    ReconcileBudget {
+        continuity_id: Uuid,
+        reservation_id: Uuid,
+        request: PathBuf,
+    },
+    /// Release an unused reservation using a JSON tenant request.
+    ReleaseBudget {
+        continuity_id: Uuid,
+        reservation_id: Uuid,
+        request: PathBuf,
+    },
     /// List durable evaluation evidence.
     Evaluations {
         continuity_id: Uuid,
@@ -575,6 +593,49 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/executions/{continuity_id}/budget-reservations"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::BudgetReservations {
+            continuity_id,
+            tenant_id,
+        } => {
+            let response = client
+                .get(format!(
+                    "{base}/continuity/executions/{continuity_id}/budget-reservations"
+                ))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::ReconcileBudget {
+            continuity_id,
+            reservation_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!(
+                    "{base}/continuity/executions/{continuity_id}/budget-reservations/{reservation_id}/reconcile"
+                ),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::ReleaseBudget {
+            continuity_id,
+            reservation_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!(
+                    "{base}/continuity/executions/{continuity_id}/budget-reservations/{reservation_id}/release"
+                ),
                 &request,
                 format,
             )
