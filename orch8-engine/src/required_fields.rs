@@ -128,6 +128,14 @@ fn visit_blocks(blocks: &[BlockDefinition], out: &mut HashMap<BlockId, Option<Ve
                 }
             }
             BlockDefinition::CancellationScope(cs) => visit_blocks(&cs.blocks, out),
+            BlockDefinition::Saga(saga) => {
+                for step in &saga.steps {
+                    visit_blocks(std::slice::from_ref(step.action.as_ref()), out);
+                    if let Some(comp) = &step.compensation {
+                        visit_blocks(std::slice::from_ref(comp.as_ref()), out);
+                    }
+                }
+            }
         }
     }
 }

@@ -346,6 +346,22 @@ fn walk_blocks<'a>(
                 found
             }
             BlockDefinition::CancellationScope(cs) => walk_blocks(&cs.blocks, block_id),
+            BlockDefinition::Saga(saga) => {
+                let mut found = None;
+                for step in &saga.steps {
+                    found = walk_blocks(std::slice::from_ref(step.action.as_ref()), block_id);
+                    if found.is_some() {
+                        break;
+                    }
+                    if let Some(comp) = &step.compensation {
+                        found = walk_blocks(std::slice::from_ref(comp.as_ref()), block_id);
+                        if found.is_some() {
+                            break;
+                        }
+                    }
+                }
+                found
+            }
         };
         if let Some(step) = hit {
             return Some(step);

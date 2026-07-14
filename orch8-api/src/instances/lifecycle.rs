@@ -846,6 +846,15 @@ pub(super) fn collect_block_ids(block: &BlockDefinition, out: &mut Vec<BlockId>)
             out.push(cs.id.clone());
             collect_list(&cs.blocks, out);
         }
+        BlockDefinition::Saga(sg) => {
+            out.push(sg.id.clone());
+            for step in &sg.steps {
+                collect_list(std::slice::from_ref(step.action.as_ref()), out);
+                if let Some(comp) = &step.compensation {
+                    collect_list(std::slice::from_ref(comp.as_ref()), out);
+                }
+            }
+        }
     }
 }
 
@@ -862,6 +871,7 @@ pub(super) fn top_level_block_id(block: &BlockDefinition) -> &BlockId {
         BlockDefinition::SubSequence(s) => &s.id,
         BlockDefinition::ABSplit(ab) => &ab.id,
         BlockDefinition::CancellationScope(cs) => &cs.id,
+        BlockDefinition::Saga(sg) => &sg.id,
     }
 }
 

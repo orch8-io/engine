@@ -914,6 +914,15 @@ fn flatten_blocks(blocks: &[BlockDefinition]) -> Vec<(BlockId, String, Option<St
                 out.push((cs.id.clone(), "cancellation_scope".into(), None));
                 out.extend(flatten_blocks(&cs.blocks));
             }
+            BlockDefinition::Saga(saga) => {
+                out.push((saga.id.clone(), "saga".into(), None));
+                for step in &saga.steps {
+                    out.extend(flatten_blocks(std::slice::from_ref(step.action.as_ref())));
+                    if let Some(comp) = &step.compensation {
+                        out.extend(flatten_blocks(std::slice::from_ref(comp.as_ref())));
+                    }
+                }
+            }
         }
     }
     out

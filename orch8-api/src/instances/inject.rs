@@ -63,6 +63,7 @@ fn block_def_id(def: &orch8_types::sequence::BlockDefinition) -> String {
         BlockDefinition::SubSequence(s) => s.id.as_str().to_owned(),
         BlockDefinition::ABSplit(a) => a.id.as_str().to_owned(),
         BlockDefinition::CancellationScope(cs) => cs.id.as_str().to_owned(),
+        BlockDefinition::Saga(sg) => sg.id.as_str().to_owned(),
     }
 }
 

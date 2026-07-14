@@ -203,6 +203,17 @@ pub(super) async fn dispatch_block(
             )
             .await
         }
+        BlockDefinition::Saga(saga_def) => {
+            crate::handlers::saga::execute_saga(
+                storage.as_ref(),
+                handlers,
+                instance,
+                node,
+                saga_def,
+                tree,
+            )
+            .await
+        }
         BlockDefinition::SubSequence(ss_def) => {
             // Sub-sequence: create a child instance and wait for it to complete.
             // Check if child already exists for this block.

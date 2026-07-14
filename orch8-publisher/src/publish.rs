@@ -235,6 +235,14 @@ fn collect_required_handlers(blocks: &[BlockDefinition], out: &mut Vec<String>) 
             BlockDefinition::CancellationScope(cs) => {
                 collect_required_handlers(&cs.blocks, out);
             }
+            BlockDefinition::Saga(saga) => {
+                for step in &saga.steps {
+                    collect_required_handlers(std::slice::from_ref(step.action.as_ref()), out);
+                    if let Some(comp) = &step.compensation {
+                        collect_required_handlers(std::slice::from_ref(comp.as_ref()), out);
+                    }
+                }
+            }
             // SubSequence dispatches another sequence by name, not a handler,
             // and that sequence carries its own required_handlers.
             BlockDefinition::SubSequence(_) => {}

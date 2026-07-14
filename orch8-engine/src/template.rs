@@ -827,6 +827,14 @@ fn validate_block_templates(block: &BlockDefinition, warnings: &mut Vec<Template
                 validate_block_templates(b, warnings);
             }
         }
+        BlockDefinition::Saga(saga) => {
+            for step in &saga.steps {
+                validate_block_templates(&step.action, warnings);
+                if let Some(comp) = &step.compensation {
+                    validate_block_templates(comp, warnings);
+                }
+            }
+        }
     }
 }
 

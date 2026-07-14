@@ -626,6 +626,14 @@ fn validate_output_schemas_in_blocks(blocks: &[BlockDefinition]) -> Result<(), A
             BlockDefinition::CancellationScope(cs) => {
                 validate_output_schemas_in_blocks(&cs.blocks)?;
             }
+            BlockDefinition::Saga(sg) => {
+                for step in &sg.steps {
+                    validate_output_schemas_in_blocks(std::slice::from_ref(step.action.as_ref()))?;
+                    if let Some(comp) = &step.compensation {
+                        validate_output_schemas_in_blocks(std::slice::from_ref(comp.as_ref()))?;
+                    }
+                }
+            }
         }
     }
     Ok(())

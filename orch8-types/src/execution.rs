@@ -68,6 +68,7 @@ pub enum BlockType {
     SubSequence,
     ABSplit,
     CancellationScope,
+    Saga,
 }
 
 impl FromStr for BlockType {
@@ -85,6 +86,7 @@ impl FromStr for BlockType {
             "sub_sequence" => Ok(Self::SubSequence),
             "ab_split" => Ok(Self::ABSplit),
             "cancellation_scope" => Ok(Self::CancellationScope),
+            "saga" => Ok(Self::Saga),
             other => Err(format!("unknown block type: {other}")),
         }
     }
@@ -103,6 +105,7 @@ impl std::fmt::Display for BlockType {
             Self::SubSequence => "sub_sequence",
             Self::ABSplit => "ab_split",
             Self::CancellationScope => "cancellation_scope",
+            Self::Saga => "saga",
         };
         f.write_str(s)
     }

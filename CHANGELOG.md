@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Saga Block Type**: a new `Saga` composite block that runs steps sequentially with compensating actions. If a step's action fails, already-completed steps' compensations run in strict reverse (LIFO) order, best-effort. The saga node always fails after rollback — a rolled-back saga is never silently absorbed. Error context is injected before compensation begins. Supports arbitrary nesting of block types within action and compensation slots.
+
 - **Conditional Step Guard (`when`)**: steps can now declare a `when` expression that is evaluated against the current context (`data.*`) and prior step outputs (`outputs.*`) before the step runs. If the expression evaluates to a falsy value, the step is marked `Skipped` and execution continues to the next block — no handler invocation, no output recorded. Works in both the tree evaluator and flat scheduler execution paths. Preflight checks warn on empty `when` expressions. Release diff detects `when` guard changes as `Behavioral` severity.
 
 - **Block Output Schemas**: steps can now declare an `output_schema` (JSON Schema) that gates handler output at runtime. Conforming output proceeds normally; non-conforming output is a permanent, non-retryable failure — the output is never persisted, so downstream `{{outputs.*}}` references never see invalid data. Validation runs in all three execution paths (flat scheduler, tree evaluator, plugin dispatch). Preflight checks validate that declared output schemas are well-formed JSON Schema objects. Release diff detects output-schema changes as `Behavioral` severity. API-level validation rejects sequences whose steps carry syntactically invalid output schemas at create time.

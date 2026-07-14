@@ -150,6 +150,9 @@ pub enum BlockDefinition {
     /// Cancellation scope: child blocks cannot be cancelled by external cancel signals.
     /// Provides subtree-level non-cancellability (Temporal-style structured concurrency).
     CancellationScope(Box<CancellationScopeDef>),
+    /// Saga: sequential steps with compensating actions, rolled back in
+    /// reverse order if any step's action fails.
+    Saga(Box<SagaDef>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -559,6 +562,34 @@ const fn default_max_iterations() -> u32 {
     1000
 }
 
+/// A saga: a sequence of steps that each carry an optional compensating
+/// action. If any step's action fails, the compensations for every
+/// already-completed step run in reverse order (LIFO) — the classic saga
+/// pattern for distributed transactions without two-phase commit.
+///
+/// Compensation failures are recorded but do not stop the rollback: every
+/// completed step's compensation gets a chance to run, best-effort. The
+/// saga node itself always fails once compensation finishes (whether or
+/// not every compensation succeeded) — the original action failure is
+/// never silently absorbed.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SagaDef {
+    pub id: BlockId,
+    pub steps: Vec<SagaStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SagaStep {
+    pub id: BlockId,
+    /// The forward action for this saga step.
+    pub action: Box<BlockDefinition>,
+    /// Compensating action run (in reverse order across all completed
+    /// steps) if a later step's action fails. `None` means this step has
+    /// no compensation — it is skipped during rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compensation: Option<Box<BlockDefinition>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ForEachDef {
     pub id: BlockId,
@@ -809,6 +840,14 @@ fn collect_handler_names(block: &BlockDefinition, names: &mut Vec<String>) {
         BlockDefinition::CancellationScope(cs) => {
             for b in &cs.blocks {
                 collect_handler_names(b, names);
+            }
+        }
+        BlockDefinition::Saga(saga) => {
+            for step in &saga.steps {
+                collect_handler_names(&step.action, names);
+                if let Some(comp) = &step.compensation {
+                    collect_handler_names(comp, names);
+                }
             }
         }
     }
@@ -1142,6 +1181,25 @@ fn validate_block(
                 ));
             }
             validate_children(&cs.blocks, seen, child_depth)
+        }
+
+        BlockDefinition::Saga(saga) => {
+            check_id(&saga.id, seen)?;
+            // An empty saga is a valid no-op (flagged by lint, not rejected
+            // here) — consistent with the e2e/unit-test contract that it
+            // completes immediately rather than failing sequence creation.
+            for step in &saga.steps {
+                check_id(&step.id, seen)?;
+                validate_children(
+                    std::slice::from_ref(step.action.as_ref()),
+                    seen,
+                    child_depth,
+                )?;
+                if let Some(comp) = &step.compensation {
+                    validate_children(std::slice::from_ref(comp.as_ref()), seen, child_depth)?;
+                }
+            }
+            Ok(())
         }
     }
 }

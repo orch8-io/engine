@@ -305,6 +305,21 @@ fn find_step_block<'a>(
                     return Some(step);
                 }
             }
+            BlockDefinition::Saga(def) => {
+                for step in &def.steps {
+                    if let Some(found) =
+                        find_step_block(std::slice::from_ref(step.action.as_ref()), block_id)
+                    {
+                        return Some(found);
+                    }
+                    if let Some(comp) = &step.compensation
+                        && let Some(found) =
+                            find_step_block(std::slice::from_ref(comp.as_ref()), block_id)
+                    {
+                        return Some(found);
+                    }
+                }
+            }
             BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
         }
     }

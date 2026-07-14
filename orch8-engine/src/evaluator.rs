@@ -278,6 +278,26 @@ fn build_nodes(
             BlockDefinition::CancellationScope(cs) => {
                 build_nodes(instance_id, Some(node_id), None, &cs.blocks, out);
             }
+            BlockDefinition::Saga(sg) => {
+                for (i, step) in sg.steps.iter().enumerate() {
+                    build_nodes(
+                        instance_id,
+                        Some(node_id),
+                        Some(i * 2),
+                        std::slice::from_ref(&*step.action),
+                        out,
+                    );
+                    if let Some(comp) = &step.compensation {
+                        build_nodes(
+                            instance_id,
+                            Some(node_id),
+                            Some(i * 2 + 1),
+                            std::slice::from_ref(&**comp),
+                            out,
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -323,6 +343,14 @@ fn collect_body_block_ids<'a>(blocks: &'a [BlockDefinition], out: &mut Vec<&'a B
                 }
             }
             BlockDefinition::CancellationScope(cs) => collect_body_block_ids(&cs.blocks, out),
+            BlockDefinition::Saga(sg) => {
+                for step in &sg.steps {
+                    collect_body_block_ids(std::slice::from_ref(&*step.action), out);
+                    if let Some(comp) = &step.compensation {
+                        collect_body_block_ids(std::slice::from_ref(&**comp), out);
+                    }
+                }
+            }
         }
     }
 }
@@ -386,6 +414,7 @@ fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
         BlockDefinition::SubSequence(ss) => (&ss.id, BlockType::SubSequence),
         BlockDefinition::ABSplit(ab) => (&ab.id, BlockType::ABSplit),
         BlockDefinition::CancellationScope(cs) => (&cs.id, BlockType::CancellationScope),
+        BlockDefinition::Saga(sg) => (&sg.id, BlockType::Saga),
     }
 }
 
@@ -1033,6 +1062,7 @@ pub fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDef
                 BlockDefinition::SubSequence(ss) => &ss.id,
                 BlockDefinition::ABSplit(ab) => &ab.id,
                 BlockDefinition::CancellationScope(cs) => &cs.id,
+                BlockDefinition::Saga(sg) => &sg.id,
             };
             map.insert(id, block);
             match block {
@@ -1070,6 +1100,14 @@ pub fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDef
                     }
                 }
                 BlockDefinition::CancellationScope(cs) => walk(&cs.blocks, map),
+                BlockDefinition::Saga(sg) => {
+                    for step in &sg.steps {
+                        walk(std::slice::from_ref(&*step.action), map);
+                        if let Some(comp) = &step.compensation {
+                            walk(std::slice::from_ref(&**comp), map);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1096,6 +1134,7 @@ pub fn find_block<'a>(
             BlockDefinition::SubSequence(ss) => &ss.id,
             BlockDefinition::ABSplit(ab) => &ab.id,
             BlockDefinition::CancellationScope(cs) => &cs.id,
+            BlockDefinition::Saga(sg) => &sg.id,
         };
         if id == target_id {
             return Some(block);
@@ -1147,6 +1186,20 @@ pub fn find_block<'a>(
                 None
             }
             BlockDefinition::CancellationScope(cs) => Some(&cs.blocks),
+            BlockDefinition::Saga(sg) => {
+                for step in &sg.steps {
+                    if let Some(found) = find_block(std::slice::from_ref(&*step.action), target_id)
+                    {
+                        return Some(found);
+                    }
+                    if let Some(comp) = &step.compensation
+                        && let Some(found) = find_block(std::slice::from_ref(&**comp), target_id)
+                    {
+                        return Some(found);
+                    }
+                }
+                None
+            }
         };
         if let Some(children) = children
             && let Some(found) = find_block(children, target_id)

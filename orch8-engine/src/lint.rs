@@ -91,6 +91,14 @@ fn lint_event_waits(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>)
                     }
                 }
                 BlockDefinition::CancellationScope(c) => walk(&c.blocks, warnings),
+                BlockDefinition::Saga(sg) => {
+                    for step in &sg.steps {
+                        walk(std::slice::from_ref(step.action.as_ref()), warnings);
+                        if let Some(comp) = &step.compensation {
+                            walk(std::slice::from_ref(comp.as_ref()), warnings);
+                        }
+                    }
+                }
                 BlockDefinition::SubSequence(_) => {}
             }
         }
@@ -154,6 +162,15 @@ fn collect_all_block_ids(blocks: &[BlockDefinition], ids: &mut HashSet<String>) 
                 ids.insert(cs.id.as_str().to_owned());
                 collect_all_block_ids(&cs.blocks, ids);
             }
+            BlockDefinition::Saga(sg) => {
+                ids.insert(sg.id.as_str().to_owned());
+                for step in &sg.steps {
+                    collect_all_block_ids(std::slice::from_ref(&*step.action), ids);
+                    if let Some(comp) = &step.compensation {
+                        collect_all_block_ids(std::slice::from_ref(&**comp), ids);
+                    }
+                }
+            }
         }
     }
 }
@@ -180,6 +197,20 @@ fn lint_block(block: &BlockDefinition, all_ids: &HashSet<String>, warnings: &mut
         BlockDefinition::SubSequence(_) => {}
         BlockDefinition::ABSplit(ab) => lint_ab_split(ab, all_ids, warnings),
         BlockDefinition::CancellationScope(cs) => lint_blocks(&cs.blocks, all_ids, warnings),
+        BlockDefinition::Saga(sg) => {
+            if sg.steps.is_empty() {
+                warnings.push(LintWarning {
+                    block_id: sg.id.as_str().to_owned(),
+                    message: "saga has no steps (will be a no-op)".into(),
+                });
+            }
+            for step in &sg.steps {
+                lint_blocks(std::slice::from_ref(&*step.action), all_ids, warnings);
+                if let Some(comp) = &step.compensation {
+                    lint_blocks(std::slice::from_ref(&**comp), all_ids, warnings);
+                }
+            }
+        }
     }
 }
 
@@ -618,6 +649,14 @@ fn lint_output_refs_in_block(
                 lint_output_refs_in_block(b, all_ids, warnings);
             }
         }
+        BlockDefinition::Saga(saga) => {
+            for step in &saga.steps {
+                lint_output_refs_in_block(&step.action, all_ids, warnings);
+                if let Some(comp) = &step.compensation {
+                    lint_output_refs_in_block(comp, all_ids, warnings);
+                }
+            }
+        }
     }
 }
 
@@ -886,6 +925,7 @@ fn block_id_of(block: &BlockDefinition) -> String {
         BlockDefinition::SubSequence(s) => s.id.as_str().to_owned(),
         BlockDefinition::ABSplit(ab) => ab.id.as_str().to_owned(),
         BlockDefinition::CancellationScope(cs) => cs.id.as_str().to_owned(),
+        BlockDefinition::Saga(saga) => saga.id.as_str().to_owned(),
     }
 }
 
