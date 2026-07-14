@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore};
+use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore, LiveMigrationTransition};
+use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
     ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
@@ -11,7 +12,8 @@ use orch8_types::continuity::{
     StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::{
-    CheckpointBoundary, ForkEffectMode, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+    CheckpointBoundary, ForkEffectMode, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
+    MigrationDisposition, MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -376,6 +378,252 @@ async fn what_if_summaries_are_durable_and_tenant_scoped() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one transaction scenario verifies apply and rollback atomically
+async fn live_migration_transition_atomically_advances_and_rolls_back() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant_id = tenant("tenant-migration");
+    let source_sequence = SequenceId::new();
+    let target_sequence = SequenceId::new();
+    let instance_id = InstanceId::new();
+    let continuity_id = ContinuityId::new();
+    let runtime_id = RuntimeId::new();
+    let now = Utc::now();
+    let source_context = ExecutionContext {
+        data: serde_json::json!({"profile": {"name": "Ada"}}),
+        ..ExecutionContext::default()
+    };
+    storage
+        .create_instance(&TaskInstance {
+            id: instance_id,
+            sequence_id: source_sequence,
+            tenant_id: tenant_id.clone(),
+            namespace: Namespace::new("default"),
+            state: InstanceState::Waiting,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: source_context.clone(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let execution = ContinuityExecution {
+        continuity_id,
+        tenant_id: tenant_id.clone(),
+        current_instance_id: instance_id,
+        owner_runtime_id: runtime_id,
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Owned,
+        updated_at: now,
+    };
+    storage
+        .create_continuity_execution(&execution)
+        .await
+        .unwrap();
+    let source_checkpoint = Checkpoint {
+        id: uuid::Uuid::now_v7(),
+        instance_id,
+        checkpoint_data: serde_json::json!({"context_snapshot": source_context.data}),
+        created_at: now,
+    };
+    let record = LiveMigrationRecord {
+        plan: LiveMigrationPlan {
+            id: MigrationPlanId::new(),
+            tenant_id: tenant_id.clone(),
+            continuity_id,
+            from_sequence_id: source_sequence,
+            from_version: 1,
+            to_sequence_id: target_sequence,
+            to_version: 2,
+            disposition: MigrationDisposition::Automatic,
+            transforms: Vec::new(),
+            finding_codes: Vec::new(),
+            rollback_capsule_required: true,
+            created_at: now,
+        },
+        expected_epoch: execution.epoch,
+        source_checkpoint: source_checkpoint.clone(),
+        source_context: serde_json::to_value(&source_context).unwrap(),
+        source_state: InstanceState::Waiting,
+        rollback_capsule: None,
+        state: LiveMigrationState::Planned,
+        applied_epoch: None,
+        rollback_expires_at: now + Duration::hours(1),
+        applied_at: None,
+        rolled_back_at: None,
+    };
+    storage.save_live_migration(&record).await.unwrap();
+    let mut applied_execution = execution.clone();
+    applied_execution.epoch = execution.epoch.checked_next().unwrap();
+    applied_execution.updated_at = now + Duration::seconds(1);
+    let mut applied_record = record.clone();
+    applied_record.state = LiveMigrationState::Applied;
+    applied_record.applied_epoch = Some(applied_execution.epoch);
+    applied_record.applied_at = Some(applied_execution.updated_at);
+    let mut target_context = source_context.clone();
+    target_context.data["migrated"] = serde_json::json!(true);
+    assert!(
+        storage
+            .commit_live_migration_transition(LiveMigrationTransition {
+                tenant_id: &tenant_id,
+                expected_record: &record,
+                next_record: &applied_record,
+                expected_execution: &execution,
+                next_execution: &applied_execution,
+                expected_instance_state: InstanceState::Waiting,
+                next_instance_state: InstanceState::Paused,
+                next_sequence_id: target_sequence,
+                next_context: &target_context,
+                checkpoint: &Checkpoint {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id,
+                    checkpoint_data: serde_json::json!({"context_snapshot": target_context.data}),
+                    created_at: applied_execution.updated_at,
+                },
+                forbid_effects_epoch: None,
+            })
+            .await
+            .unwrap()
+    );
+    let applied_instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(applied_instance.sequence_id, target_sequence);
+    assert_eq!(applied_instance.state, InstanceState::Paused);
+    assert_eq!(applied_instance.context.data["migrated"], true);
+
+    let mut rolled_execution = applied_execution.clone();
+    rolled_execution.epoch = applied_execution.epoch.checked_next().unwrap();
+    rolled_execution.updated_at = now + Duration::seconds(2);
+    let mut rolled_record = applied_record.clone();
+    rolled_record.state = LiveMigrationState::RolledBack;
+    rolled_record.rolled_back_at = Some(rolled_execution.updated_at);
+    let mut target_effect = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: tenant_id.clone(),
+        continuity_id,
+        epoch: applied_execution.epoch,
+        instance_id,
+        block_id: BlockId::new("v2-only-effect"),
+        kind: EffectKind::Http,
+        state: EffectState::Dispatched,
+        destination_fingerprint: "provider:v2".into(),
+        idempotency_key: Some("migration-effect".into()),
+        request_sha256: "b".repeat(64),
+        provider_receipt_id: None,
+        attempt: 1,
+        created_at: applied_execution.updated_at,
+        updated_at: applied_execution.updated_at,
+    };
+    storage.create_effect_receipt(&target_effect).await.unwrap();
+    assert!(
+        !storage
+            .commit_live_migration_transition(LiveMigrationTransition {
+                tenant_id: &tenant_id,
+                expected_record: &applied_record,
+                next_record: &rolled_record,
+                expected_execution: &applied_execution,
+                next_execution: &rolled_execution,
+                expected_instance_state: InstanceState::Paused,
+                next_instance_state: InstanceState::Waiting,
+                next_sequence_id: source_sequence,
+                next_context: &source_context,
+                checkpoint: &Checkpoint {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id,
+                    checkpoint_data: source_checkpoint.checkpoint_data.clone(),
+                    created_at: rolled_execution.updated_at,
+                },
+                forbid_effects_epoch: Some(applied_execution.epoch),
+            })
+            .await
+            .unwrap(),
+        "provider-visible target effects must block rollback"
+    );
+    let mut unknown = target_effect.clone();
+    unknown
+        .transition(EffectState::Unknown, now + Duration::seconds(3))
+        .unwrap();
+    assert!(
+        storage
+            .cas_effect_receipt(
+                &tenant_id,
+                target_effect.id,
+                EffectState::Dispatched,
+                &unknown,
+            )
+            .await
+            .unwrap()
+    );
+    target_effect = unknown;
+    target_effect
+        .transition(EffectState::Compensated, now + Duration::seconds(4))
+        .unwrap();
+    assert!(
+        storage
+            .cas_effect_receipt(
+                &tenant_id,
+                target_effect.id,
+                EffectState::Unknown,
+                &target_effect,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage
+            .commit_live_migration_transition(LiveMigrationTransition {
+                tenant_id: &tenant_id,
+                expected_record: &applied_record,
+                next_record: &rolled_record,
+                expected_execution: &applied_execution,
+                next_execution: &rolled_execution,
+                expected_instance_state: InstanceState::Paused,
+                next_instance_state: InstanceState::Waiting,
+                next_sequence_id: source_sequence,
+                next_context: &source_context,
+                checkpoint: &Checkpoint {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id,
+                    checkpoint_data: source_checkpoint.checkpoint_data,
+                    created_at: rolled_execution.updated_at,
+                },
+                forbid_effects_epoch: Some(applied_execution.epoch),
+            })
+            .await
+            .unwrap()
+    );
+    let restored = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(restored.sequence_id, source_sequence);
+    assert_eq!(restored.state, InstanceState::Waiting);
+    assert_eq!(restored.context.data, source_context.data);
+    assert_eq!(
+        storage
+            .get_continuity_execution(&tenant_id, continuity_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .epoch,
+        rolled_execution.epoch
+    );
+    assert_eq!(
+        storage
+            .get_live_migration(&tenant_id, record.plan.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        LiveMigrationState::RolledBack
     );
 }
 

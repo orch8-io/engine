@@ -32,7 +32,8 @@ use orch8_types::continuity_advanced::{
     CheckpointBoundary, DeviceDelegation, EvaluationId, EvaluationScore, ExtractedEffectMock,
     ExtractedTestFixture, FaultInjection, FaultKind, FederationEnvelope, FederationPeer,
     ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
-    LiveMigrationPlan, MigrationDisposition, MigrationPlanId, ProviderCandidate, ReservationState,
+    LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
+    MigrationPlanId, MigrationRollbackCapsule, ProviderCandidate, ReservationState,
     ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfRunRecord,
     WhatIfScenario, WorkflowInvariant,
 };
@@ -135,6 +136,15 @@ pub fn routes() -> Router<AppState> {
             post(extract_test_fixture),
         )
         .route("/continuity/migrations/plan", post(plan_live_migration))
+        .route("/continuity/migrations/{id}", get(get_live_migration))
+        .route(
+            "/continuity/migrations/{id}/apply",
+            post(apply_live_migration),
+        )
+        .route(
+            "/continuity/migrations/{id}/rollback",
+            post(rollback_live_migration),
+        )
         .route("/continuity/scenarios/generate", post(generate_scenarios))
         .route("/continuity/scenarios/reproduce", post(reproduce_incident))
         .route("/continuity/providers/choose", post(choose_provider))
@@ -3551,24 +3561,170 @@ struct MigrationPlanRequest {
     to_sequence_id: SequenceId,
     to_version: i32,
     #[serde(default)]
-    typed_finding_codes: Vec<String>,
-    #[serde(default)]
     transforms: Vec<StateTransform>,
-    historical_validation_passed: Option<bool>,
+    rollback_retention_seconds: Option<u32>,
 }
 
+struct MigrationValidationInput<'a> {
+    tenant_id: &'a TenantId,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
+    instance: &'a orch8_types::instance::TaskInstance,
+    checkpoint: &'a orch8_types::checkpoint::Checkpoint,
+    source: &'a orch8_types::sequence::SequenceDefinition,
+    target: &'a orch8_types::sequence::SequenceDefinition,
+    completed: &'a [orch8_types::output::BlockOutput],
+    transforms: &'a [StateTransform],
+}
+
+#[allow(clippy::too_many_lines)] // keeps replay and invariant evidence in one auditable validation pass
+async fn validate_migration_history(
+    state: &AppState,
+    input: MigrationValidationInput<'_>,
+) -> Result<bool, ApiError> {
+    let initial_outputs = input
+        .completed
+        .iter()
+        .filter(|output| output.created_at <= input.checkpoint.created_at)
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let recorded_outputs = input
+        .completed
+        .iter()
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let source_input = input
+        .checkpoint
+        .checkpoint_data
+        .get("context_snapshot")
+        .cloned()
+        .unwrap_or_else(|| input.instance.context.data.clone());
+    let transformed = orch8_engine::continuity_advanced::apply_state_transforms(
+        &input.checkpoint.checkpoint_data,
+        input.transforms,
+    )
+    .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    let target_input = transformed
+        .get("context_snapshot")
+        .cloned()
+        .unwrap_or_else(|| source_input.clone());
+    let case = |name: &str,
+                sequence: &orch8_types::sequence::SequenceDefinition,
+                input_value,
+                initial| orch8_types::contract::ContractCase {
+        name: name.into(),
+        description: Some("server-derived historical migration validation".into()),
+        input: input_value,
+        initial_outputs: initial,
+        config: Some(input.instance.context.config.clone()),
+        mocks: scenario_mocks(sequence, &recorded_outputs),
+        signals: Vec::new(),
+        expect: orch8_types::contract::Expectations::default(),
+        max_logical_duration_ms: Some(86_400_000),
+        max_ticks: Some(5_000),
+    };
+    let baseline_case = case(
+        "migration-baseline",
+        input.source,
+        source_input,
+        initial_outputs.clone(),
+    );
+    let candidate_case = case(
+        "migration-candidate",
+        input.target,
+        target_input,
+        initial_outputs,
+    );
+    let options = orch8::contract::RunOptions::default();
+    let (baseline_report, candidate_report) = tokio::try_join!(
+        orch8::contract::run_case(
+            input.source,
+            orch8_types::contract::UnmockedHandlerPolicy::Fail,
+            &baseline_case,
+            &options,
+        ),
+        orch8::contract::run_case(
+            input.target,
+            orch8_types::contract::UnmockedHandlerPolicy::Fail,
+            &candidate_case,
+            &options,
+        ),
+    )
+    .map_err(|error| ApiError::Internal(format!("migration validation failed: {error}")))?;
+    let (source_invariants, target_invariants) = tokio::try_join!(
+        state.storage.list_workflow_invariants(
+            input.tenant_id,
+            input.source.id,
+            input.source.version,
+            10_000,
+        ),
+        state.storage.list_workflow_invariants(
+            input.tenant_id,
+            input.target.id,
+            input.target.version,
+            10_000,
+        ),
+    )
+    .map_err(|error| ApiError::from_storage(error, "migration invariants"))?;
+    let invariant_passed =
+        source_invariants
+            .into_iter()
+            .chain(target_invariants)
+            .all(|invariant| {
+                let report = if invariant.sequence_id == input.source.id {
+                    &baseline_report
+                } else {
+                    &candidate_report
+                };
+                evaluate_what_if_invariants(
+                    vec![invariant],
+                    input.continuity_id,
+                    input.epoch,
+                    report,
+                    &recorded_outputs,
+                )
+                .first()
+                .is_some_and(|outcome| {
+                    outcome.status == orch8_types::continuity_advanced::EvidenceStatus::Pass
+                })
+            });
+    let replay_passed = baseline_report.final_state == candidate_report.final_state
+        && baseline_report.executed_blocks == candidate_report.executed_blocks
+        && !matches!(
+            candidate_report.final_state.as_str(),
+            "failed" | "cancelled"
+        )
+        && !candidate_report.failures.iter().any(|failure| {
+            failure.contains("without a mock") || failure.contains("no recorded output")
+        });
+    Ok(replay_passed && invariant_passed)
+}
+
+#[allow(clippy::too_many_lines)] // planning is a fail-closed sequence of durable evidence checks
 async fn plan_live_migration(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<MigrationPlanRequest>,
 ) -> Result<Json<LiveMigrationPlan>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    if body.typed_finding_codes.len() > 1_000 {
-        return Err(ApiError::PayloadTooLarge(
-            "migration findings exceed 1000 entries".into(),
+    let (execution, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    if !matches!(
+        instance.state,
+        orch8_types::instance::InstanceState::Waiting
+            | orch8_types::instance::InstanceState::Paused
+    ) {
+        return Err(ApiError::Conflict(
+            "migration planning requires a paused or durably waiting instance".into(),
         ));
     }
-    let (_, instance) = continuity_instance(&state, &tenant_id, body.continuity_id).await?;
+    let source_checkpoint = state
+        .storage
+        .get_latest_checkpoint(instance.id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration checkpoint"))?
+        .ok_or_else(|| ApiError::Conflict("migration requires a durable checkpoint".into()))?;
     let source = state
         .storage
         .get_sequence(instance.sequence_id)
@@ -3584,6 +3740,60 @@ async fn plan_live_migration(
     if target.tenant_id != tenant_id || target.version != body.to_version {
         return Err(ApiError::NotFound("target sequence".into()));
     }
+    let semantic_diff = orch8_engine::release_diff::semantic_diff(&source, &target);
+    let mut finding_codes: Vec<String> = semantic_diff
+        .entries
+        .iter()
+        .map(|entry| {
+            let category = entry.category.to_ascii_uppercase();
+            match entry.severity {
+                orch8_types::release::DiffSeverity::Incompatible => {
+                    format!("INCOMPATIBLE:{category}")
+                }
+                orch8_types::release::DiffSeverity::SideEffectRisk => {
+                    format!("SIDE_EFFECT_RISK:{category}")
+                }
+                _ => category,
+            }
+        })
+        .collect();
+    let target_blocks: std::collections::BTreeSet<_> =
+        sequence_step_blocks(&target).into_iter().collect();
+    let completed = state
+        .storage
+        .get_all_outputs(instance.id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "checkpoint compatibility"))?;
+    finding_codes.extend(
+        completed
+            .iter()
+            .filter(|output| !output.block_id.as_str().starts_with('_'))
+            .filter(|output| !target_blocks.contains(output.block_id.as_str()))
+            .map(|output| format!("CHECKPOINT_OUTPUT_REMOVED:{}", output.block_id.as_str())),
+    );
+    finding_codes.sort();
+    finding_codes.dedup();
+    let historical_validation_passed = validate_migration_history(
+        &state,
+        MigrationValidationInput {
+            tenant_id: &tenant_id,
+            continuity_id: body.continuity_id,
+            epoch: execution.epoch,
+            instance: &instance,
+            checkpoint: &source_checkpoint,
+            source: &source,
+            target: &target,
+            completed: &completed,
+            transforms: &body.transforms,
+        },
+    )
+    .await?;
+    finding_codes.push(if historical_validation_passed {
+        "HISTORICAL_REPLAY_PASS".into()
+    } else {
+        "HISTORICAL_REPLAY_FAIL".into()
+    });
+    finding_codes.sort();
     let seed = LiveMigrationPlan {
         id: MigrationPlanId::new(),
         tenant_id,
@@ -3598,14 +3808,286 @@ async fn plan_live_migration(
         rollback_capsule_required: true,
         created_at: Utc::now(),
     };
-    orch8_engine::continuity_advanced::compile_migration_plan(
+    let plan = orch8_engine::continuity_advanced::compile_migration_plan(
         seed,
-        &body.typed_finding_codes,
+        &finding_codes,
         body.transforms,
-        body.historical_validation_passed,
+        Some(historical_validation_passed),
     )
-    .map(Json)
-    .map_err(|error| ApiError::InvalidArgument(error.to_string()))
+    .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    let retention = body
+        .rollback_retention_seconds
+        .unwrap_or(86_400)
+        .clamp(60, 30 * 86_400);
+    let record = LiveMigrationRecord {
+        plan: plan.clone(),
+        expected_epoch: execution.epoch,
+        source_checkpoint,
+        source_context: serde_json::to_value(&instance.context)
+            .map_err(|error| ApiError::Internal(error.to_string()))?,
+        source_state: instance.state,
+        rollback_capsule: None,
+        state: LiveMigrationState::Planned,
+        applied_epoch: None,
+        rollback_expires_at: Utc::now() + Duration::seconds(i64::from(retention)),
+        applied_at: None,
+        rolled_back_at: None,
+    };
+    state
+        .storage
+        .save_live_migration(&record)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration plan"))?;
+    Ok(Json(plan))
+}
+
+async fn get_live_migration(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<MigrationPlanId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<LiveMigrationRecord>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let record = state
+        .storage
+        .get_live_migration(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration plan"))?
+        .ok_or_else(|| ApiError::NotFound("migration plan".into()))?;
+    Ok(Json(record))
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplyMigrationRequest {
+    tenant_id: TenantId,
+    #[serde(default)]
+    approved: bool,
+}
+
+#[allow(clippy::too_many_lines)] // explicit phases mirror the ownership-safe migration protocol
+async fn apply_live_migration(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<MigrationPlanId>,
+    Json(body): Json<ApplyMigrationRequest>,
+) -> Result<Json<LiveMigrationRecord>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let record = state
+        .storage
+        .get_live_migration(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration plan"))?
+        .ok_or_else(|| ApiError::NotFound("migration plan".into()))?;
+    if record.state != LiveMigrationState::Planned {
+        return Err(ApiError::Conflict(
+            "migration plan is no longer pending".into(),
+        ));
+    }
+    match record.plan.disposition {
+        MigrationDisposition::Automatic => {}
+        MigrationDisposition::ApprovalRequired if body.approved => {}
+        MigrationDisposition::ApprovalRequired => {
+            return Err(ApiError::Conflict(
+                "migration plan requires explicit approval".into(),
+            ));
+        }
+        MigrationDisposition::Pin | MigrationDisposition::Incompatible => {
+            return Err(ApiError::Conflict(
+                "migration disposition does not permit apply".into(),
+            ));
+        }
+    }
+    let (execution, instance) =
+        continuity_instance(&state, &tenant_id, record.plan.continuity_id).await?;
+    if execution.epoch != record.expected_epoch
+        || instance.sequence_id != record.plan.from_sequence_id
+        || instance.state != record.source_state
+    {
+        return Err(ApiError::Conflict(
+            "migration source changed after planning".into(),
+        ));
+    }
+    let target = state
+        .storage
+        .get_sequence(record.plan.to_sequence_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "target sequence"))?
+        .ok_or_else(|| ApiError::NotFound("target sequence".into()))?;
+    if target.tenant_id != tenant_id || target.version != record.plan.to_version {
+        return Err(ApiError::Conflict("target sequence changed".into()));
+    }
+    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
+        ApiError::Unavailable(
+            "live migration is disabled without a configured engine encryption key".into(),
+        )
+    })?;
+    let signed_capsule = orch8_engine::capsule::export_paused_capsule(
+        state.storage.as_ref(),
+        orch8_engine::capsule::CapsuleExportRequest {
+            continuity: execution.clone(),
+            destination_runtime_id: None,
+            requirements: CapsuleRequirements::default(),
+            expires_at: record.rollback_expires_at,
+            signing_key_id: crypto.signing_key_id.clone(),
+            encryption_key_id: crypto.encryption_key_id.clone(),
+        },
+        &crypto.signing_key,
+        &crypto.payload_encryptor,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(format!("rollback capsule export failed: {error}")))?;
+    let transformed = orch8_engine::continuity_advanced::apply_state_transforms(
+        &record.source_checkpoint.checkpoint_data,
+        &record.plan.transforms,
+    )
+    .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    let mut next_context = instance.context.clone();
+    if let Some(context) = transformed.get("context_snapshot") {
+        next_context.data = context.clone();
+    }
+    let now = Utc::now();
+    let mut next_execution = execution.clone();
+    next_execution.epoch = execution
+        .epoch
+        .checked_next()
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    next_execution.updated_at = now;
+    let mut next_record = record.clone();
+    next_record.state = LiveMigrationState::Applied;
+    next_record.applied_epoch = Some(next_execution.epoch);
+    next_record.applied_at = Some(now);
+    next_record.rollback_capsule = Some(MigrationRollbackCapsule {
+        capsule_id: signed_capsule.manifest.capsule_id,
+        payload_artifact: signed_capsule.manifest.payload_artifact,
+        manifest_sha256: signed_capsule.manifest_sha256,
+        public_key: signed_capsule.public_key,
+        signature: signed_capsule.signature,
+    });
+    let checkpoint = orch8_types::checkpoint::Checkpoint {
+        id: uuid::Uuid::now_v7(),
+        instance_id: instance.id,
+        checkpoint_data: transformed,
+        created_at: now,
+    };
+    let applied = state
+        .storage
+        .commit_live_migration_transition(orch8_storage::LiveMigrationTransition {
+            tenant_id: &tenant_id,
+            expected_record: &record,
+            next_record: &next_record,
+            expected_execution: &execution,
+            next_execution: &next_execution,
+            expected_instance_state: instance.state,
+            next_instance_state: orch8_types::instance::InstanceState::Paused,
+            next_sequence_id: target.id,
+            next_context: &next_context,
+            checkpoint: &checkpoint,
+            forbid_effects_epoch: None,
+        })
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration apply"))?;
+    if !applied {
+        return Err(ApiError::Conflict(
+            "migration apply lost a concurrent compare-and-swap".into(),
+        ));
+    }
+    Ok(Json(next_record))
+}
+
+#[derive(Debug, Deserialize)]
+struct RollbackMigrationRequest {
+    tenant_id: TenantId,
+}
+
+async fn rollback_live_migration(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<MigrationPlanId>,
+    Json(body): Json<RollbackMigrationRequest>,
+) -> Result<Json<LiveMigrationRecord>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let record = state
+        .storage
+        .get_live_migration(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration plan"))?
+        .ok_or_else(|| ApiError::NotFound("migration plan".into()))?;
+    if record.state != LiveMigrationState::Applied || record.rollback_expires_at <= Utc::now() {
+        return Err(ApiError::Conflict(
+            "migration is not inside its active rollback window".into(),
+        ));
+    }
+    let rollback_capsule = record.rollback_capsule.as_ref().ok_or_else(|| {
+        ApiError::Conflict("migration has no retained pre-migration capsule".into())
+    })?;
+    let capsule_payload = state
+        .storage
+        .get_artifact(&rollback_capsule.payload_artifact.key)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "rollback capsule"))?
+        .ok_or_else(|| ApiError::Conflict("rollback capsule artifact is unavailable".into()))?;
+    if capsule_payload.len() as u64 != rollback_capsule.payload_artifact.bytes
+        || hex_sha256(&capsule_payload) != rollback_capsule.payload_artifact.sha256
+    {
+        return Err(ApiError::Conflict(
+            "rollback capsule artifact failed integrity verification".into(),
+        ));
+    }
+    let applied_epoch = record
+        .applied_epoch
+        .ok_or_else(|| ApiError::Conflict("migration has no applied epoch".into()))?;
+    let (execution, instance) =
+        continuity_instance(&state, &tenant_id, record.plan.continuity_id).await?;
+    if execution.epoch != applied_epoch
+        || instance.sequence_id != record.plan.to_sequence_id
+        || instance.state != orch8_types::instance::InstanceState::Paused
+    {
+        return Err(ApiError::Conflict(
+            "migration target changed or resumed before rollback".into(),
+        ));
+    }
+    let source_context: orch8_types::context::ExecutionContext =
+        serde_json::from_value(record.source_context.clone())
+            .map_err(|error| ApiError::Internal(format!("invalid rollback context: {error}")))?;
+    let now = Utc::now();
+    let mut next_execution = execution.clone();
+    next_execution.epoch = execution
+        .epoch
+        .checked_next()
+        .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    next_execution.updated_at = now;
+    let mut next_record = record.clone();
+    next_record.state = LiveMigrationState::RolledBack;
+    next_record.rolled_back_at = Some(now);
+    let checkpoint = orch8_types::checkpoint::Checkpoint {
+        id: uuid::Uuid::now_v7(),
+        instance_id: instance.id,
+        checkpoint_data: record.source_checkpoint.checkpoint_data.clone(),
+        created_at: now,
+    };
+    let rolled_back = state
+        .storage
+        .commit_live_migration_transition(orch8_storage::LiveMigrationTransition {
+            tenant_id: &tenant_id,
+            expected_record: &record,
+            next_record: &next_record,
+            expected_execution: &execution,
+            next_execution: &next_execution,
+            expected_instance_state: instance.state,
+            next_instance_state: record.source_state,
+            next_sequence_id: record.plan.from_sequence_id,
+            next_context: &source_context,
+            checkpoint: &checkpoint,
+            forbid_effects_epoch: Some(applied_epoch),
+        })
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration rollback"))?;
+    if !rolled_back {
+        return Err(ApiError::Conflict(
+            "rollback was rejected by stale state or committed target effects".into(),
+        ));
+    }
+    Ok(Json(next_record))
 }
 
 #[derive(Debug, Deserialize)]

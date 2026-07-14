@@ -869,6 +869,114 @@ describe("Portable Continuity", () => {
     );
   });
 
+  it("atomically applies and rolls back a validated live migration", async () => {
+    const tenantId = `continuity-migration-${uuid().slice(0, 8)}`;
+    const v1 = testSequence(
+      "portable-live-migration",
+      [
+        step("review", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Hold at the migration boundary?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+      ],
+      { tenantId },
+    );
+    const createdV1 = await client.createSequence(v1);
+    const v2 = {
+      ...v1,
+      id: uuid(),
+      version: 2,
+      blocks: [
+        ...v1.blocks,
+        step("after_migration", "noop", {}, {
+          when: "data.profile.display_name != null",
+        }),
+      ],
+      created_at: new Date().toISOString(),
+    };
+    const createdV2 = await client.createSequence(v2);
+    const instance = await client.createInstance({
+      sequence_id: createdV1.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    await assert.rejects(
+      () => client.migrateInstance(instance.id, createdV2.id),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 409);
+        return true;
+      },
+      "the legacy hot-rebind endpoint must not bypass continuity migration safety",
+    );
+    await client.saveCheckpoint(instance.id, {
+      safe_boundary: "review",
+      context_snapshot: { profile: { name: "Ada" } },
+    });
+
+    const plan = await client.planContinuityMigration({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      to_sequence_id: createdV2.id,
+      to_version: 2,
+      rollback_retention_seconds: 3600,
+      transforms: [{
+        version: 1,
+        from_path: "context_snapshot.profile.name",
+        to_path: "context_snapshot.profile.display_name",
+        transform: "copy",
+      }],
+    });
+    assert.equal(plan.disposition, "approval_required");
+    assert.equal(plan.rollback_capsule_required, true);
+    assert.ok(plan.finding_codes.includes("BLOCK_ADDED"));
+
+    const applied = await client.applyContinuityMigration(plan.id, {
+      tenant_id: tenantId,
+      approved: true,
+    });
+    assert.equal(applied.state, "applied");
+    assert.equal(applied.applied_epoch, 1);
+    assert.ok(applied.rollback_capsule);
+    assert.equal(applied.rollback_capsule.capsule_id.length, 36);
+    assert.equal(applied.rollback_capsule.payload_artifact.sha256.length, 64);
+    assert.equal(applied.rollback_capsule.manifest_sha256.length, 64);
+    const migrated = await client.getInstance(instance.id);
+    assert.equal(migrated.sequence_id, createdV2.id);
+    assert.equal(migrated.state, "paused");
+    const migratedData = migrated.context?.data as {
+      profile?: { name?: string; display_name?: string };
+    };
+    assert.equal(migratedData.profile?.name, "Ada");
+    assert.equal(migratedData.profile?.display_name, "Ada");
+    assert.equal((await client.getContinuityMigration(plan.id, tenantId)).state, "applied");
+
+    const rolledBack = await client.rollbackContinuityMigration(plan.id, {
+      tenant_id: tenantId,
+    });
+    assert.equal(rolledBack.state, "rolled_back");
+    const restored = await client.getInstance(instance.id);
+    assert.equal(restored.sequence_id, createdV1.id);
+    assert.equal(restored.state, "waiting");
+    const restoredData = restored.context?.data as
+      | { profile?: unknown }
+      | null
+      | undefined;
+    assert.equal(restoredData?.profile, undefined);
+    const locations = await client.listContinuityLocations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(locations.map((location) => location.epoch), [0, 1, 2]);
+  });
+
   it("fails preview when a required capability is missing", async () => {
     const tenantId = `continuity-gap-${uuid().slice(0, 8)}`;
     const sequence = testSequence("portable-gap", [step("work", "noop")], {

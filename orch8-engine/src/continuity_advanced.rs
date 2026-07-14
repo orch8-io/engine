@@ -37,6 +37,8 @@ pub enum AdvancedContinuityError {
     ScenarioTooLarge,
     #[error("migration transform set exceeds the bounded limit")]
     TooManyTransforms,
+    #[error("migration transform is invalid: {0}")]
+    InvalidTransform(String),
     #[error("budget reservation is negative or exceeds a configured hard limit: {0}")]
     BudgetDenied(&'static str),
     #[error("reservation is no longer active")]
@@ -243,11 +245,12 @@ pub fn compile_migration_plan(
     if transforms.len() > MAX_MIGRATION_TRANSFORMS {
         return Err(AdvancedContinuityError::TooManyTransforms);
     }
+    validate_state_transforms(&transforms)?;
     let incompatible = typed_findings.iter().any(|code| {
         matches!(
             code.as_str(),
             "MISSING_PRODUCER" | "SCHEMA_PATH_MISSING" | "INCOMPATIBLE_COERCION"
-        )
+        ) || code.starts_with("INCOMPATIBLE:")
     });
     plan.id = MigrationPlanId::new();
     plan.transforms = transforms;
@@ -263,6 +266,134 @@ pub fn compile_migration_plan(
         MigrationDisposition::ApprovalRequired
     };
     Ok(plan)
+}
+
+fn transform_path(path: &str) -> Result<Vec<&str>, AdvancedContinuityError> {
+    if path.is_empty() || path.len() > 1_024 {
+        return Err(AdvancedContinuityError::InvalidTransform(
+            "paths must contain 1..=1024 bytes".into(),
+        ));
+    }
+    let segments: Vec<_> = path.split('.').collect();
+    if segments.len() > 32
+        || segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.len() > 128)
+    {
+        return Err(AdvancedContinuityError::InvalidTransform(
+            "paths must contain 1..=32 non-empty segments of at most 128 bytes".into(),
+        ));
+    }
+    Ok(segments)
+}
+
+pub fn validate_state_transforms(
+    transforms: &[StateTransform],
+) -> Result<(), AdvancedContinuityError> {
+    if transforms.len() > MAX_MIGRATION_TRANSFORMS {
+        return Err(AdvancedContinuityError::TooManyTransforms);
+    }
+    let mut destinations = std::collections::BTreeSet::new();
+    for transform in transforms {
+        if transform.version != 1 {
+            return Err(AdvancedContinuityError::InvalidTransform(format!(
+                "unsupported transform version {}",
+                transform.version
+            )));
+        }
+        transform_path(&transform.from_path)?;
+        match transform.transform.as_str() {
+            "copy" | "move" => {
+                transform_path(&transform.to_path)?;
+                if !destinations.insert(transform.to_path.as_str()) {
+                    return Err(AdvancedContinuityError::InvalidTransform(format!(
+                        "duplicate destination path {}",
+                        transform.to_path
+                    )));
+                }
+            }
+            "drop" if transform.to_path.is_empty() => {}
+            operation => {
+                return Err(AdvancedContinuityError::InvalidTransform(format!(
+                    "unsupported operation {operation}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn take_path(value: &mut serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
+    let (last, parents) = path.split_last()?;
+    let mut current = value;
+    for segment in parents {
+        current = current.as_object_mut()?.get_mut(*segment)?;
+    }
+    current.as_object_mut()?.remove(*last)
+}
+
+fn get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    path.iter()
+        .try_fold(value, |current, segment| current.as_object()?.get(*segment))
+}
+
+fn set_path(
+    value: &mut serde_json::Value,
+    path: &[&str],
+    replacement: serde_json::Value,
+) -> Result<(), AdvancedContinuityError> {
+    let (last, parents) = path.split_last().ok_or_else(|| {
+        AdvancedContinuityError::InvalidTransform("destination path is empty".into())
+    })?;
+    let mut current = value;
+    for segment in parents {
+        if current.is_null() {
+            *current = serde_json::json!({});
+        }
+        let object = current.as_object_mut().ok_or_else(|| {
+            AdvancedContinuityError::InvalidTransform(format!(
+                "destination parent {segment} is not an object"
+            ))
+        })?;
+        current = object
+            .entry((*segment).to_owned())
+            .or_insert(serde_json::Value::Null);
+    }
+    if current.is_null() {
+        *current = serde_json::json!({});
+    }
+    let object = current.as_object_mut().ok_or_else(|| {
+        AdvancedContinuityError::InvalidTransform("destination parent is not an object".into())
+    })?;
+    object.insert((*last).to_owned(), replacement);
+    Ok(())
+}
+
+pub fn apply_state_transforms(
+    source: &serde_json::Value,
+    transforms: &[StateTransform],
+) -> Result<serde_json::Value, AdvancedContinuityError> {
+    validate_state_transforms(transforms)?;
+    let mut result = source.clone();
+    for transform in transforms {
+        let from = transform_path(&transform.from_path)?;
+        let replacement = match transform.transform.as_str() {
+            "copy" => get_path(&result, &from).cloned(),
+            "move" | "drop" => take_path(&mut result, &from),
+            _ => unreachable!("validated operation"),
+        }
+        .ok_or_else(|| {
+            AdvancedContinuityError::InvalidTransform(format!(
+                "source path {} does not exist",
+                transform.from_path
+            ))
+        })?;
+        if transform.transform != "drop" {
+            let to = transform_path(&transform.to_path)?;
+            set_path(&mut result, &to, replacement)?;
+        }
+    }
+    Ok(result)
 }
 
 pub fn generate_scenarios(
@@ -809,6 +940,113 @@ mod tests {
     use orch8_types::ids::TenantId;
 
     use super::*;
+
+    #[test]
+    fn versioned_state_transforms_are_pure_and_deterministic() {
+        let source = serde_json::json!({
+            "profile": {"name": "Ada", "legacy_id": 7},
+            "keep": true
+        });
+        let transforms = vec![
+            StateTransform {
+                version: 1,
+                from_path: "profile.name".into(),
+                to_path: "identity.display_name".into(),
+                transform: "copy".into(),
+            },
+            StateTransform {
+                version: 1,
+                from_path: "profile.legacy_id".into(),
+                to_path: "identity.id".into(),
+                transform: "move".into(),
+            },
+        ];
+
+        let first = apply_state_transforms(&source, &transforms).unwrap();
+        let second = apply_state_transforms(&source, &transforms).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(source["profile"]["legacy_id"], 7, "source is immutable");
+        assert_eq!(first["identity"]["display_name"], "Ada");
+        assert_eq!(first["identity"]["id"], 7);
+        assert!(first["profile"].get("legacy_id").is_none());
+        assert_eq!(first["keep"], true);
+    }
+
+    #[test]
+    fn state_transforms_reject_unknown_versions_operations_and_destinations() {
+        let invalid = [
+            StateTransform {
+                version: 2,
+                from_path: "a".into(),
+                to_path: "b".into(),
+                transform: "copy".into(),
+            },
+            StateTransform {
+                version: 1,
+                from_path: "a".into(),
+                to_path: "b".into(),
+                transform: "javascript".into(),
+            },
+        ];
+        for transform in invalid {
+            assert!(matches!(
+                validate_state_transforms(&[transform]),
+                Err(AdvancedContinuityError::InvalidTransform(_))
+            ));
+        }
+        let duplicate_destination = vec![
+            StateTransform {
+                version: 1,
+                from_path: "a".into(),
+                to_path: "target".into(),
+                transform: "copy".into(),
+            },
+            StateTransform {
+                version: 1,
+                from_path: "b".into(),
+                to_path: "target".into(),
+                transform: "move".into(),
+            },
+        ];
+        assert!(matches!(
+            validate_state_transforms(&duplicate_destination),
+            Err(AdvancedContinuityError::InvalidTransform(_))
+        ));
+    }
+
+    fn migration_seed() -> LiveMigrationPlan {
+        LiveMigrationPlan {
+            id: MigrationPlanId::new(),
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            continuity_id: ContinuityId::new(),
+            from_sequence_id: orch8_types::ids::SequenceId::new(),
+            from_version: 1,
+            to_sequence_id: orch8_types::ids::SequenceId::new(),
+            to_version: 2,
+            disposition: MigrationDisposition::Pin,
+            transforms: Vec::new(),
+            finding_codes: Vec::new(),
+            rollback_capsule_required: false,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn migration_compiler_fails_closed_on_server_semantic_incompatibility() {
+        let incompatible = compile_migration_plan(
+            migration_seed(),
+            &["INCOMPATIBLE:OUTPUT_REFERENCE_DANGLING".into()],
+            Vec::new(),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(incompatible.disposition, MigrationDisposition::Incompatible);
+        assert!(incompatible.rollback_capsule_required);
+
+        let automatic =
+            compile_migration_plan(migration_seed(), &[], Vec::new(), Some(true)).unwrap();
+        assert_eq!(automatic.disposition, MigrationDisposition::Automatic);
+    }
 
     #[test]
     fn scenario_generation_is_bounded_and_incident_shrinking_is_deterministic() {

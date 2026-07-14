@@ -10,11 +10,13 @@ use orch8_types::continuity::{
     HandoffState, PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities,
     RuntimeId, StreamFrame, StreamId,
 };
+use orch8_types::continuity_advanced::{LiveMigrationRecord, MigrationPlanId};
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
 
 use super::PostgresStorage;
+use crate::LiveMigrationTransition;
 
 fn encode<T: Serialize>(value: &T) -> Result<serde_json::Value, StorageError> {
     serde_json::to_value(value).map_err(StorageError::Serialization)
@@ -1230,5 +1232,209 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(result.rows_affected())
+    }
+
+    async fn save_live_migration(&self, record: &LiveMigrationRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO live_migrations
+             (id, tenant_id, continuity_id, state, record, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        )
+        .bind(record.plan.id.into_uuid())
+        .bind(record.plan.tenant_id.as_str())
+        .bind(record.plan.continuity_id.into_uuid())
+        .bind(state_name(record.state)?)
+        .bind(encode(record)?)
+        .bind(record.plan.created_at)
+        .bind(record.plan.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_live_migration(
+        &self,
+        tenant_id: &TenantId,
+        id: MigrationPlanId,
+    ) -> Result<Option<LiveMigrationRecord>, StorageError> {
+        let row = sqlx::query("SELECT record FROM live_migrations WHERE tenant_id=$1 AND id=$2")
+            .bind(tenant_id.as_str())
+            .bind(id.into_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn cas_live_migration(
+        &self,
+        tenant_id: &TenantId,
+        expected: &LiveMigrationRecord,
+        next: &LiveMigrationRecord,
+    ) -> Result<bool, StorageError> {
+        let updated_at = next
+            .rolled_back_at
+            .or(next.applied_at)
+            .unwrap_or(next.plan.created_at);
+        let result = sqlx::query(
+            "UPDATE live_migrations SET state=$1, record=$2, updated_at=$3
+             WHERE tenant_id=$4 AND id=$5 AND state=$6",
+        )
+        .bind(state_name(next.state)?)
+        .bind(encode(next)?)
+        .bind(updated_at)
+        .bind(tenant_id.as_str())
+        .bind(expected.plan.id.into_uuid())
+        .bind(state_name(expected.state)?)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    #[allow(clippy::too_many_lines)] // one atomic SQL transaction
+    async fn commit_live_migration_transition(
+        &self,
+        transition: LiveMigrationTransition<'_>,
+    ) -> Result<bool, StorageError> {
+        let LiveMigrationTransition {
+            tenant_id,
+            expected_record,
+            next_record,
+            expected_execution,
+            next_execution,
+            expected_instance_state,
+            next_instance_state,
+            next_sequence_id,
+            next_context,
+            checkpoint,
+            forbid_effects_epoch,
+        } = transition;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        if let Some(epoch) = forbid_effects_epoch {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                   SELECT 1 FROM effect_receipts
+                   WHERE tenant_id=$1 AND continuity_id=$2
+                     AND (record->>'epoch')::bigint=$3
+                     AND state IN ('dispatched','committed','unknown','verified'))",
+            )
+            .bind(tenant_id.as_str())
+            .bind(expected_execution.continuity_id.into_uuid())
+            .bind(to_i64(epoch.get(), "effect epoch")?)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+            if blocked {
+                tx.rollback()
+                    .await
+                    .map_err(|error| StorageError::Query(error.to_string()))?;
+                return Ok(false);
+            }
+        }
+        let migration = sqlx::query(
+            "UPDATE live_migrations SET state=$1, record=$2, updated_at=$3
+             WHERE tenant_id=$4 AND id=$5 AND state=$6",
+        )
+        .bind(state_name(next_record.state)?)
+        .bind(encode(next_record)?)
+        .bind(next_execution.updated_at)
+        .bind(tenant_id.as_str())
+        .bind(expected_record.plan.id.into_uuid())
+        .bind(state_name(expected_record.state)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let continuity = sqlx::query(
+            "UPDATE continuity_executions
+             SET epoch=$1, owner_runtime_id=$2, state=$3, record=$4, updated_at=$5
+             WHERE tenant_id=$6 AND continuity_id=$7 AND epoch=$8 AND owner_runtime_id=$9",
+        )
+        .bind(to_i64(next_execution.epoch.get(), "next epoch")?)
+        .bind(next_execution.owner_runtime_id.into_uuid())
+        .bind(state_name(next_execution.state)?)
+        .bind(encode(next_execution)?)
+        .bind(next_execution.updated_at)
+        .bind(tenant_id.as_str())
+        .bind(expected_execution.continuity_id.into_uuid())
+        .bind(to_i64(expected_execution.epoch.get(), "expected epoch")?)
+        .bind(expected_execution.owner_runtime_id.into_uuid())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let instance = sqlx::query(
+            "UPDATE task_instances
+             SET sequence_id=$1, context=$2, state=$3, next_fire_at=NULL, updated_at=$4
+             WHERE id=$5 AND tenant_id=$6 AND state=$7",
+        )
+        .bind(next_sequence_id.into_uuid())
+        .bind(serde_json::to_value(next_context).map_err(StorageError::Serialization)?)
+        .bind(state_name(next_instance_state)?)
+        .bind(next_execution.updated_at)
+        .bind(expected_execution.current_instance_id.into_uuid())
+        .bind(tenant_id.as_str())
+        .bind(state_name(expected_instance_state)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        if migration.rows_affected() != 1
+            || continuity.rows_affected() != 1
+            || instance.rows_affected() != 1
+        {
+            tx.rollback()
+                .await
+                .map_err(|error| StorageError::Query(error.to_string()))?;
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM execution_tree WHERE instance_id=$1")
+            .bind(expected_execution.current_instance_id.into_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(checkpoint.id)
+        .bind(checkpoint.instance_id.into_uuid())
+        .bind(&checkpoint.checkpoint_data)
+        .bind(checkpoint.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let location = ContinuityLocation {
+            continuity_id: next_execution.continuity_id,
+            tenant_id: next_execution.tenant_id.clone(),
+            epoch: next_execution.epoch,
+            runtime_id: next_execution.owner_runtime_id,
+            instance_id: next_execution.current_instance_id,
+            handoff_id: None,
+            entered_at: next_execution.updated_at,
+        };
+        sqlx::query(
+            "INSERT INTO continuity_locations
+             (tenant_id,continuity_id,epoch,runtime_id,instance_id,handoff_id,record,entered_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        )
+        .bind(tenant_id.as_str())
+        .bind(next_execution.continuity_id.into_uuid())
+        .bind(to_i64(next_execution.epoch.get(), "location epoch")?)
+        .bind(next_execution.owner_runtime_id.into_uuid())
+        .bind(next_execution.current_instance_id.into_uuid())
+        .bind(Option::<uuid::Uuid>::None)
+        .bind(encode(&location)?)
+        .bind(next_execution.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(true)
     }
 }

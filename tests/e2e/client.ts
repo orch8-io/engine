@@ -353,6 +353,30 @@ export class Orch8Client {
     );
   }
 
+  async planContinuityMigration(req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post("/continuity/migrations/plan", req);
+  }
+
+  async getContinuityMigration(id: string, tenantId: string): Promise<ApiResponse> {
+    return this.#get(
+      `/continuity/migrations/${id}${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  async applyContinuityMigration(
+    id: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/migrations/${id}/apply`, req);
+  }
+
+  async rollbackContinuityMigration(
+    id: string,
+    req: Record<string, unknown>,
+  ): Promise<ApiResponse> {
+    return this.#post(`/continuity/migrations/${id}/rollback`, req);
+  }
+
   async extractContinuityTestFixture(
     continuityId: string,
     req: Record<string, unknown>,

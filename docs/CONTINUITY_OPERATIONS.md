@@ -43,6 +43,49 @@ Query the ordered path with
 wall-clock time—is authoritative if timestamps from different runtimes disagree.
 SQLite schema version 28 creates the same ledger for embedded runtimes.
 
+## Upgrade to migration 064
+
+Migration `064_live_migrations.sql` creates the tenant-scoped durable migration
+ledger used for plan and transition compare-and-swap. Apply it before exposing
+the live-migration endpoints. Migration records contain rollback context and
+checkpoint state; configure `ORCH8_ENCRYPTION_KEY` so the storage decorator
+encrypts those fields at rest. SQLite schema version 30 creates the same ledger.
+
+## Live sequence migration
+
+Plan only at a durable waiting or paused boundary. The server—not the caller—
+loads the source and exact target definitions, computes their semantic diff,
+checks completed checkpoint outputs, replays recorded evidence with real
+handlers disabled, and evaluates configured invariants. State transforms are
+bounded, deterministic version-1 operations over dotted checkpoint paths:
+`copy`, `move`, and `drop`. Unknown versions, operations, oversized paths,
+duplicate destinations, and missing sources are rejected.
+
+Use the returned disposition as an authorization boundary. `automatic` may be
+applied directly; `approval_required` needs `approved: true`; `pin` and
+`incompatible` cannot be applied. Apply rechecks the original state, sequence,
+and ownership epoch, then creates a signed encrypted pre-migration capsule and
+atomically advances the instance to the target sequence in `paused` state.
+Inspect the durable record before explicitly resuming normal execution.
+
+Rollback is intentionally narrow. It is accepted only while the retention
+window is open, the target remains paused under the applied epoch, and the
+retained capsule artifact passes its byte-count and SHA-256 checks. Any
+dispatched, committed, unknown, or verified effect in the target epoch blocks
+rollback; investigate or compensate that effect instead of pretending the
+external world was restored. A successful rollback atomically restores the
+source context, checkpoint, sequence, waiting/paused state, and advances the
+epoch again.
+
+The equivalent CLI flow is:
+
+```text
+orch8 execution migration-plan plan.json
+orch8 execution migration-get <plan-id> --tenant-id tenant-a
+orch8 execution migration-apply <plan-id> approval.json
+orch8 execution migration-rollback <plan-id> rollback.json
+```
+
 ## Capability and locality routing
 
 Runtime advertisements are short-lived, tenant-scoped facts. Alongside

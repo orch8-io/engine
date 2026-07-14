@@ -269,6 +269,27 @@ impl EncryptingStorage {
         Ok(run)
     }
 
+    fn encrypt_live_migration(
+        &self,
+        record: &orch8_types::continuity_advanced::LiveMigrationRecord,
+    ) -> Result<orch8_types::continuity_advanced::LiveMigrationRecord, StorageError> {
+        let mut encrypted = record.clone();
+        encrypted.source_checkpoint.checkpoint_data =
+            self.encrypt_json_value(&encrypted.source_checkpoint.checkpoint_data)?;
+        encrypted.source_context = self.encrypt_json_value(&encrypted.source_context)?;
+        Ok(encrypted)
+    }
+
+    fn decrypt_live_migration(
+        &self,
+        mut record: orch8_types::continuity_advanced::LiveMigrationRecord,
+    ) -> Result<orch8_types::continuity_advanced::LiveMigrationRecord, StorageError> {
+        record.source_checkpoint.checkpoint_data =
+            self.decrypt_json_value(&record.source_checkpoint.checkpoint_data)?;
+        record.source_context = self.decrypt_json_value(&record.source_context)?;
+        Ok(record)
+    }
+
     /// Encrypt `BlockOutput.output` -- handler results (LLM responses, HTTP
     /// bodies, etc.) are the same data class as `context.data`, so they get
     /// the same at-rest protection. Returns a borrowed `Cow` when the value
@@ -588,6 +609,47 @@ passthrough_impl! {
         async fn append_stream_frame(&self, frame: &orch8_types::continuity::StreamFrame) -> Result<bool, StorageError>;
         async fn list_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, after_sequence: Option<u64>, now: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::StreamFrame>, StorageError>;
         async fn retract_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, epoch: orch8_types::continuity::ExecutionEpoch, after_sequence: u64) -> Result<u64, StorageError>;
+        async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError> {
+            let encrypted = self.encrypt_live_migration(record)?;
+            self.inner.save_live_migration(&encrypted).await
+        }
+        async fn get_live_migration(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::MigrationPlanId) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError> {
+            self.inner
+                .get_live_migration(tenant_id, id)
+                .await?
+                .map(|record| self.decrypt_live_migration(record))
+                .transpose()
+        }
+        async fn cas_live_migration(&self, tenant_id: &orch8_types::ids::TenantId, expected: &orch8_types::continuity_advanced::LiveMigrationRecord, next: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<bool, StorageError> {
+            let encrypted_expected = self.encrypt_live_migration(expected)?;
+            let encrypted_next = self.encrypt_live_migration(next)?;
+            self.inner
+                .cas_live_migration(tenant_id, &encrypted_expected, &encrypted_next)
+                .await
+        }
+        async fn commit_live_migration_transition(&self, transition: crate::LiveMigrationTransition<'_>) -> Result<bool, StorageError> {
+            let encrypted_expected = self.encrypt_live_migration(transition.expected_record)?;
+            let encrypted_next = self.encrypt_live_migration(transition.next_record)?;
+            let encrypted_context = self.encrypt_context(transition.checkpoint.instance_id, transition.next_context)?;
+            let mut encrypted_checkpoint = transition.checkpoint.clone();
+            encrypted_checkpoint.checkpoint_data =
+                self.encrypt_json_value(&transition.checkpoint.checkpoint_data)?;
+            self.inner
+                .commit_live_migration_transition(crate::LiveMigrationTransition {
+                    tenant_id: transition.tenant_id,
+                    expected_record: &encrypted_expected,
+                    next_record: &encrypted_next,
+                    expected_execution: transition.expected_execution,
+                    next_execution: transition.next_execution,
+                    expected_instance_state: transition.expected_instance_state,
+                    next_instance_state: transition.next_instance_state,
+                    next_sequence_id: transition.next_sequence_id,
+                    next_context: encrypted_context.as_ref(),
+                    checkpoint: &encrypted_checkpoint,
+                    forbid_effects_epoch: transition.forbid_effects_epoch,
+                })
+                .await
+        }
     }
 }
 

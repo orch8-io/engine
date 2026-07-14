@@ -378,6 +378,18 @@ pub(crate) async fn migrate_instance(
         &format!("instance {}", req.instance_id),
     )?;
 
+    if state
+        .storage
+        .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "continuity execution"))?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(
+            "portable continuity instances must use /continuity/migrations/plan so state, ownership, effects, and rollback remain protected".into(),
+        ));
+    }
+
     if instance.state.is_terminal() {
         return Err(ApiError::InvalidArgument(format!(
             "instance {} is in terminal state {}",

@@ -195,9 +195,16 @@ pub enum MigrationDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct StateTransform {
+    #[serde(default = "default_transform_version")]
+    pub version: u32,
     pub from_path: String,
     pub to_path: String,
+    /// Pure operation: `copy`, `move`, or `drop`.
     pub transform: String,
+}
+
+const fn default_transform_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -214,6 +221,41 @@ pub struct LiveMigrationPlan {
     pub finding_codes: Vec<String>,
     pub rollback_capsule_required: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveMigrationState {
+    Planned,
+    Applied,
+    RolledBack,
+}
+
+/// Signed, encrypted pre-migration capsule retained for independent recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MigrationRollbackCapsule {
+    pub capsule_id: crate::continuity::CapsuleId,
+    pub payload_artifact: crate::continuity::ArtifactReference,
+    pub manifest_sha256: String,
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LiveMigrationRecord {
+    pub plan: LiveMigrationPlan,
+    pub expected_epoch: crate::continuity::ExecutionEpoch,
+    pub source_checkpoint: crate::checkpoint::Checkpoint,
+    /// Serialized execution context; encrypted as one field by storage decorators.
+    pub source_context: serde_json::Value,
+    pub source_state: crate::instance::InstanceState,
+    /// Present after apply; its encrypted payload remains usable until rollback expiry.
+    pub rollback_capsule: Option<MigrationRollbackCapsule>,
+    pub state: LiveMigrationState,
+    pub applied_epoch: Option<crate::continuity::ExecutionEpoch>,
+    pub rollback_expires_at: DateTime<Utc>,
+    pub applied_at: Option<DateTime<Utc>>,
+    pub rolled_back_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]

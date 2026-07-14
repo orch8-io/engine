@@ -889,6 +889,20 @@ CREATE TABLE IF NOT EXISTS what_if_runs (
 CREATE INDEX IF NOT EXISTS idx_what_if_runs_execution
     ON what_if_runs(tenant_id, continuity_id, created_at DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS live_migrations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    record TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (tenant_id, continuity_id)
+        REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_live_migrations_execution
+    ON live_migrations(tenant_id, continuity_id, created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS evaluation_scores (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -954,4 +968,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 29;
+pub(super) const SCHEMA_VERSION: i64 = 30;

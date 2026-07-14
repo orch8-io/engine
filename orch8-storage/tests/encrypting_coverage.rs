@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -27,7 +27,8 @@ use orch8_types::continuity::{
     ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
 };
 use orch8_types::continuity_advanced::{
-    CheckpointBoundary, ForkEffectMode, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+    CheckpointBoundary, ForkEffectMode, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
+    MigrationDisposition, MigrationPlanId, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::filter::{InstanceFilter, Pagination};
@@ -1369,4 +1370,80 @@ async fn what_if_payloads_are_encrypted_at_rest_and_decrypted_on_read() {
         .await
         .unwrap();
     assert_eq!(decrypted, [run]);
+}
+
+#[tokio::test]
+async fn live_migration_rollback_state_is_encrypted_at_rest() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let enc = FieldEncryptor::from_hex_key(TEST_KEY).unwrap();
+    let storage = EncryptingStorage::new(inner.clone(), enc);
+    let instance = mk_instance("t1", json!({"secret": "context"}));
+    seed_sequence(&storage, instance.sequence_id, "t1").await;
+    storage.create_instance(&instance).await.unwrap();
+    let continuity_id = ContinuityId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: instance.tenant_id.clone(),
+            current_instance_id: instance.id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let record = LiveMigrationRecord {
+        plan: LiveMigrationPlan {
+            id: MigrationPlanId::new(),
+            tenant_id: instance.tenant_id.clone(),
+            continuity_id,
+            from_sequence_id: instance.sequence_id,
+            from_version: 1,
+            to_sequence_id: SequenceId::new(),
+            to_version: 2,
+            disposition: MigrationDisposition::Automatic,
+            transforms: Vec::new(),
+            finding_codes: Vec::new(),
+            rollback_capsule_required: true,
+            created_at: now,
+        },
+        expected_epoch: ExecutionEpoch::initial(),
+        source_checkpoint: Checkpoint {
+            id: Uuid::now_v7(),
+            instance_id: instance.id,
+            checkpoint_data: json!({"secret": "checkpoint"}),
+            created_at: now,
+        },
+        source_context: serde_json::to_value(&instance.context).unwrap(),
+        source_state: instance.state,
+        rollback_capsule: None,
+        state: LiveMigrationState::Planned,
+        applied_epoch: None,
+        rollback_expires_at: now + Duration::hours(1),
+        applied_at: None,
+        rolled_back_at: None,
+    };
+    storage.save_live_migration(&record).await.unwrap();
+
+    let raw = inner
+        .get_live_migration(&instance.tenant_id, record.plan.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(FieldEncryptor::is_encrypted(
+        &raw.source_checkpoint.checkpoint_data
+    ));
+    assert!(FieldEncryptor::is_encrypted(&raw.source_context));
+    let decrypted = storage
+        .get_live_migration(&instance.tenant_id, record.plan.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        decrypted.source_checkpoint.checkpoint_data,
+        json!({"secret": "checkpoint"})
+    );
+    assert_eq!(decrypted.source_context, record.source_context);
 }

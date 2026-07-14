@@ -145,6 +145,22 @@ pub enum ExecutionCmd {
     },
     /// Compile a live-migration plan from a JSON request.
     MigrationPlan { request: PathBuf },
+    /// Inspect a durable live-migration plan and rollback window.
+    MigrationGet {
+        migration_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Apply a live-migration plan from an approval JSON request.
+    MigrationApply {
+        migration_id: Uuid,
+        request: PathBuf,
+    },
+    /// Roll back an applied migration before target-version effects commit.
+    MigrationRollback {
+        migration_id: Uuid,
+        request: PathBuf,
+    },
     /// Generate bounded fault/state-space scenarios from a JSON request.
     GenerateScenarios { request: PathBuf },
     /// Minimize an incident reproduction from a JSON request.
@@ -538,6 +554,41 @@ pub async fn run_execution(
             post_json_file(
                 client,
                 format!("{base}/continuity/migrations/plan"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::MigrationGet {
+            migration_id,
+            tenant_id,
+        } => {
+            let response = client
+                .get(format!("{base}/continuity/migrations/{migration_id}"))
+                .query(&[("tenant_id", tenant_id)])
+                .send()
+                .await?;
+            print_response(response, format).await
+        }
+        ExecutionCmd::MigrationApply {
+            migration_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/migrations/{migration_id}/apply"),
+                &request,
+                format,
+            )
+            .await
+        }
+        ExecutionCmd::MigrationRollback {
+            migration_id,
+            request,
+        } => {
+            post_json_file(
+                client,
+                format!("{base}/continuity/migrations/{migration_id}/rollback"),
                 &request,
                 format,
             )

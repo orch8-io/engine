@@ -2715,6 +2715,50 @@ pub trait ContinuityStore: Send + Sync + 'static {
         epoch: ExecutionEpoch,
         after_sequence: u64,
     ) -> Result<u64, StorageError>;
+
+    async fn save_live_migration(
+        &self,
+        record: &orch8_types::continuity_advanced::LiveMigrationRecord,
+    ) -> Result<(), StorageError>;
+
+    async fn get_live_migration(
+        &self,
+        tenant_id: &TenantId,
+        id: orch8_types::continuity_advanced::MigrationPlanId,
+    ) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
+
+    async fn cas_live_migration(
+        &self,
+        tenant_id: &TenantId,
+        expected: &orch8_types::continuity_advanced::LiveMigrationRecord,
+        next: &orch8_types::continuity_advanced::LiveMigrationRecord,
+    ) -> Result<bool, StorageError>;
+
+    /// Atomically advance a migration record, continuity epoch, instance
+    /// sequence/context/state, execution tree, and checkpoint. When
+    /// `forbid_effects_epoch` is set, the transaction fails closed if that
+    /// epoch has any dispatched/committed/unknown/verified effect receipt.
+    async fn commit_live_migration_transition(
+        &self,
+        transition: LiveMigrationTransition<'_>,
+    ) -> Result<bool, StorageError>;
+}
+
+/// Inputs to one atomic live-migration state transition. Grouping the fields
+/// prevents apply and rollback call sites from accidentally swapping adjacent
+/// state, sequence, or epoch arguments.
+pub struct LiveMigrationTransition<'a> {
+    pub tenant_id: &'a TenantId,
+    pub expected_record: &'a orch8_types::continuity_advanced::LiveMigrationRecord,
+    pub next_record: &'a orch8_types::continuity_advanced::LiveMigrationRecord,
+    pub expected_execution: &'a ContinuityExecution,
+    pub next_execution: &'a ContinuityExecution,
+    pub expected_instance_state: orch8_types::instance::InstanceState,
+    pub next_instance_state: orch8_types::instance::InstanceState,
+    pub next_sequence_id: SequenceId,
+    pub next_context: &'a orch8_types::context::ExecutionContext,
+    pub checkpoint: &'a orch8_types::checkpoint::Checkpoint,
+    pub forbid_effects_epoch: Option<ExecutionEpoch>,
 }
 
 // ============================================================================
