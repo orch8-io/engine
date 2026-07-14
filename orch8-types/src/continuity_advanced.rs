@@ -64,6 +64,8 @@ uuid_id!(FederationMessageId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CheckpointBoundary {
+    #[serde(default = "Uuid::nil")]
+    pub checkpoint_id: Uuid,
     pub instance_id: InstanceId,
     pub continuity_id: ContinuityId,
     pub epoch: ExecutionEpoch,
@@ -101,14 +103,27 @@ pub struct WhatIfScenario {
     pub retain_full_evidence: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ExtractedTestFixture {
     pub source: CheckpointBoundary,
     pub stable_id: String,
     pub sanitized_context: serde_json::Value,
     pub receipt_mocks: Vec<String>,
+    pub effect_mocks: Vec<ExtractedEffectMock>,
+    pub sequence: crate::sequence::SequenceDefinition,
+    pub contract: crate::contract::ContractSuite,
     pub missing_evidence: Vec<String>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ExtractedEffectMock {
+    pub block_id: BlockId,
+    pub kind: EffectKind,
+    pub state: crate::continuity::EffectState,
+    pub request_sha256: String,
+    pub destination_fingerprint: String,
+    pub provider_receipt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

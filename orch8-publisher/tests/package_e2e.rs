@@ -102,6 +102,7 @@ fn contract_suite(sequence_name: &str, handler: &str, case_names: &[&str]) -> Co
                 name: (*n).to_string(),
                 description: None,
                 input: json!({"amount": 100}),
+                initial_outputs: std::collections::BTreeMap::new(),
                 config: None,
                 mocks: vec![MockDef {
                     handler: Some(handler.to_string()),

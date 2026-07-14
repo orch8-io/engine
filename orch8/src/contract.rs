@@ -40,6 +40,11 @@ pub struct RunOptions {
     /// Recorded block outputs for [`MockPolicy::Recorded`], keyed by block
     /// id (e.g. loaded from an `orch8 test record` fixture).
     pub recorded_outputs: HashMap<String, Value>,
+    /// Outputs completed before a selected time-travel boundary. These are
+    /// persisted into the sandbox instance so the scheduler skips the prefix
+    /// instead of re-executing it. They remain available to downstream
+    /// `outputs.*` references but are excluded from the executed-path report.
+    pub initial_outputs: HashMap<String, Value>,
     /// Virtual-time epoch the clock starts at. Fixed by default so runs
     /// are reproducible.
     pub start_time: DateTime<Utc>,
@@ -49,6 +54,7 @@ impl Default for RunOptions {
     fn default() -> Self {
         Self {
             recorded_outputs: HashMap::new(),
+            initial_outputs: HashMap::new(),
             // Fixed epoch: contract runs must not depend on the wall clock.
             start_time: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         }
@@ -108,6 +114,12 @@ pub async fn run_case(
     case: &ContractCase,
     opts: &RunOptions,
 ) -> Result<CaseReport, Error> {
+    let mut initial_outputs = opts.initial_outputs.clone();
+    initial_outputs.extend(
+        case.initial_outputs
+            .iter()
+            .map(|(block, output)| (block.clone(), output.clone())),
+    );
     // --- mock lookup tables ---
     let mut by_handler: HashMap<String, MockPolicy> = HashMap::new();
     let mut by_block: HashMap<String, MockPolicy> = HashMap::new();
@@ -232,6 +244,21 @@ pub async fn run_case(
         )
         .await?;
 
+    for (block_id, output) in &initial_outputs {
+        engine
+            .seed_block_output(&orch8_types::output::BlockOutput {
+                id: uuid::Uuid::now_v7(),
+                instance_id,
+                block_id: orch8_types::ids::BlockId::new(block_id),
+                output: output.clone(),
+                output_ref: None,
+                output_size: 0,
+                attempt: 0,
+                created_at: opts.start_time,
+            })
+            .await?;
+    }
+
     // --- drive to terminal under virtual time ---
     let max_ticks = case.max_ticks.unwrap_or(DEFAULT_MAX_TICKS);
     let mut ticks = 0u32;
@@ -312,7 +339,7 @@ pub async fn run_case(
         if block.starts_with('_') {
             continue; // engine-internal sentinel rows
         }
-        if !executed_blocks.contains(&block) {
+        if !initial_outputs.contains_key(&block) && !executed_blocks.contains(&block) {
             executed_blocks.push(block.clone());
         }
         outputs.insert(block, o.output.clone()); // last attempt wins

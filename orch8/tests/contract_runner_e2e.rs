@@ -1174,6 +1174,40 @@ async fn recorded_outputs_are_keyed_by_block_not_handler() {
 }
 
 #[tokio::test]
+async fn initial_outputs_resume_after_boundary_without_reexecuting_prefix() {
+    let seq_def = seq(json!([
+        step("before", "must_not_run"),
+        step("after", "sandboxed")
+    ]));
+    let contract_case = case(json!({
+        "name": "resume from checkpoint",
+        "mocks": [
+            {"handler": "must_not_run", "type": "failure", "message": "prefix reran"},
+            {"handler": "sandboxed", "type": "success", "output": {"done": true}}
+        ],
+        "expect": {
+            "terminal_state": "completed",
+            "path": {"traversed": ["after"], "ordered": true},
+            "assertions": [
+                {"output": {"block": "before", "path": "saved"}, "op": "equals", "value": true}
+            ]
+        }
+    }));
+    let mut opts = RunOptions::default();
+    opts.initial_outputs
+        .insert("before".into(), json!({"saved": true}));
+
+    let report = run_case(&seq_def, UnmockedHandlerPolicy::Fail, &contract_case, &opts)
+        .await
+        .unwrap();
+
+    assert!(report.passed, "{:?}", report.failures);
+    assert_eq!(report.executed_blocks, ["after"]);
+    assert!(!report.handler_calls.contains_key("must_not_run"));
+    assert_eq!(report.handler_calls.get("sandboxed"), Some(&1));
+}
+
+#[tokio::test]
 async fn recorded_mock_with_partial_recordings_fails_missing_block() {
     let seq_def = seq(json!([step("have", "fetcher"), step("missing", "fetcher")]));
     let s = suite(json!([{

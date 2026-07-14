@@ -16,6 +16,7 @@ use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{Budget, InstanceState, Priority, TaskInstance};
+use orch8_types::output::BlockOutput;
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::{Signal, SignalType};
 
@@ -263,6 +264,16 @@ impl Engine {
         id: InstanceId,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
         Ok(self.inner.storage.get_all_outputs(id).await?)
+    }
+
+    /// Seed a durable block output before manual execution starts.
+    ///
+    /// This is intentionally crate-private: the contract/time-travel runner
+    /// uses it to model blocks completed before a selected checkpoint, while
+    /// the public engine API must not let callers forge production evidence.
+    pub(crate) async fn seed_block_output(&self, output: &BlockOutput) -> Result<(), Error> {
+        self.inner.storage.save_block_output(output).await?;
+        Ok(())
     }
 
     /// Fetch the current snapshot of an instance (state, context, timestamps).

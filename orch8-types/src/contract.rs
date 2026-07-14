@@ -67,6 +67,12 @@ pub struct ContractCase {
     /// Initial `context.data`.
     #[serde(default)]
     pub input: serde_json::Value,
+    /// Outputs already durable at the selected replay boundary. The offline
+    /// runner seeds these into its sandbox instance, making the fixture a
+    /// true continuation from that boundary rather than a replay from block
+    /// one. Real handlers are still never invoked.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub initial_outputs: BTreeMap<String, serde_json::Value>,
     /// Initial `context.config`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,

@@ -1,6 +1,7 @@
 //! Portable-continuity control-plane endpoints.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -28,17 +29,19 @@ use orch8_types::continuity::{
 };
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
-    CheckpointBoundary, DeviceDelegation, EvaluationId, EvaluationScore, ExtractedTestFixture,
-    FaultInjection, FaultKind, FederationEnvelope, FederationPeer, ForkEffectMode,
-    GeneratedScenario, InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan,
-    MigrationDisposition, MigrationPlanId, ProviderCandidate, ReservationState, ResidencyEvidence,
-    ReviewerCapabilities, ScenarioId, StateTransform, WhatIfScenario, WorkflowInvariant,
+    CheckpointBoundary, DeviceDelegation, EvaluationId, EvaluationScore, ExtractedEffectMock,
+    ExtractedTestFixture, FaultInjection, FaultKind, FederationEnvelope, FederationPeer,
+    ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
+    LiveMigrationPlan, MigrationDisposition, MigrationPlanId, ProviderCandidate, ReservationState,
+    ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfScenario,
+    WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
 use crate::AppState;
 use crate::error::ApiError;
 
+#[allow(clippy::too_many_lines)] // one declarative map of the continuity HTTP surface
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/continuity/executions", post(create_execution))
@@ -118,6 +121,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/continuity/executions/{id}/checkpoints",
             get(list_continuity_checkpoints),
+        )
+        .route(
+            "/continuity/executions/{id}/checkpoints/{checkpoint_id}",
+            get(get_continuity_checkpoint),
         )
         .route("/continuity/executions/{id}/what-if", post(run_what_if))
         .route(
@@ -2391,23 +2398,243 @@ async fn list_continuity_checkpoints(
     Query(query): Query<ContinuityCheckpointQuery>,
 ) -> Result<Json<Vec<CheckpointBoundary>>, ApiError> {
     let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
-    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
-    let sequence = state
+    let checkpoints = continuity_checkpoint_records(
+        &state,
+        &tenant_id,
+        id,
+        query.limit.unwrap_or(1_000).min(10_000),
+    )
+    .await?;
+    Ok(Json(
+        checkpoints
+            .into_iter()
+            .map(|checkpoint| checkpoint.boundary)
+            .collect(),
+    ))
+}
+
+struct ContinuityCheckpointRecord {
+    boundary: CheckpointBoundary,
+    checkpoint: orch8_types::checkpoint::Checkpoint,
+    instance: Arc<orch8_types::instance::TaskInstance>,
+    sequence: Arc<orch8_types::sequence::SequenceDefinition>,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckpointStateChange {
+    path: String,
+    before: serde_json::Value,
+    after: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ContinuityCheckpointDetail {
+    boundary: CheckpointBoundary,
+    checkpoint_data: serde_json::Value,
+    previous_checkpoint_id: Option<uuid::Uuid>,
+    redacted_state_diff: Vec<CheckpointStateChange>,
+}
+
+async fn get_continuity_checkpoint(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((id, checkpoint_id)): Path<(ContinuityId, uuid::Uuid)>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<ContinuityCheckpointDetail>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let records = continuity_checkpoint_records(&state, &tenant_id, id, 10_000).await?;
+    let position = records
+        .iter()
+        .position(|record| record.checkpoint.id == checkpoint_id)
+        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))?;
+    let current = &records[position];
+    let previous = position.checked_sub(1).and_then(|index| records.get(index));
+    let redaction = orch8_types::redaction::RedactionPolicy::default();
+    let before = previous.map_or_else(
+        || serde_json::json!({}),
+        |record| redaction.redacted(&record.checkpoint.checkpoint_data),
+    );
+    let after = redaction.redacted(&current.checkpoint.checkpoint_data);
+    let mut redacted_state_diff = Vec::new();
+    collect_checkpoint_changes("", &before, &after, 0, &mut redacted_state_diff);
+    Ok(Json(ContinuityCheckpointDetail {
+        boundary: current.boundary.clone(),
+        checkpoint_data: current.checkpoint.checkpoint_data.clone(),
+        previous_checkpoint_id: previous.map(|record| record.checkpoint.id),
+        redacted_state_diff,
+    }))
+}
+
+fn collect_checkpoint_changes(
+    path: &str,
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    depth: usize,
+    changes: &mut Vec<CheckpointStateChange>,
+) {
+    const MAX_CHANGES: usize = 1_000;
+    const MAX_DEPTH: usize = 32;
+    if before == after || changes.len() >= MAX_CHANGES {
+        return;
+    }
+    if depth >= MAX_DEPTH {
+        changes.push(CheckpointStateChange {
+            path: path.to_owned(),
+            before: before.clone(),
+            after: after.clone(),
+        });
+        return;
+    }
+    match (before, after) {
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            let keys: std::collections::BTreeSet<_> = left
+                .keys()
+                .chain(right.keys())
+                .map(String::as_str)
+                .collect();
+            for key in keys {
+                let child_path = if path.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_checkpoint_changes(
+                    &child_path,
+                    left.get(key).unwrap_or(&serde_json::Value::Null),
+                    right.get(key).unwrap_or(&serde_json::Value::Null),
+                    depth + 1,
+                    changes,
+                );
+                if changes.len() >= MAX_CHANGES {
+                    break;
+                }
+            }
+        }
+        (serde_json::Value::Object(left), serde_json::Value::Null) => {
+            for (key, value) in left {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_checkpoint_changes(
+                    &child_path,
+                    value,
+                    &serde_json::Value::Null,
+                    depth + 1,
+                    changes,
+                );
+                if changes.len() >= MAX_CHANGES {
+                    break;
+                }
+            }
+        }
+        (serde_json::Value::Null, serde_json::Value::Object(right)) => {
+            for (key, value) in right {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                collect_checkpoint_changes(
+                    &child_path,
+                    &serde_json::Value::Null,
+                    value,
+                    depth + 1,
+                    changes,
+                );
+                if changes.len() >= MAX_CHANGES {
+                    break;
+                }
+            }
+        }
+        _ => changes.push(CheckpointStateChange {
+            path: path.to_owned(),
+            before: before.clone(),
+            after: after.clone(),
+        }),
+    }
+}
+
+async fn continuity_checkpoint_records(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+    limit: u32,
+) -> Result<Vec<ContinuityCheckpointRecord>, ApiError> {
+    state
         .storage
-        .get_sequence(instance.sequence_id)
+        .get_continuity_execution(tenant_id, continuity_id)
         .await
-        .map_err(|error| ApiError::from_storage(error, "sequence"))?
-        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
-    let checkpoints = state
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let locations = state
         .storage
-        .list_checkpoints(instance.id, query.limit.unwrap_or(1_000).min(10_000))
+        .list_continuity_locations(tenant_id, continuity_id, 10_000)
         .await
-        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?;
-    checkpoints
+        .map_err(|error| ApiError::from_storage(error, "continuity locations"))?;
+    let mut records = Vec::new();
+    for location in locations {
+        let remaining = usize::try_from(limit)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(records.len());
+        if remaining == 0 {
+            break;
+        }
+        let instance = state
+            .storage
+            .get_instance(location.instance_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "checkpoint instance"))?
+            .ok_or_else(|| ApiError::NotFound("checkpoint instance".into()))?;
+        if &instance.tenant_id != tenant_id {
+            return Err(ApiError::NotFound("checkpoint instance".into()));
+        }
+        let sequence = state
+            .storage
+            .get_sequence(instance.sequence_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "checkpoint sequence"))?
+            .ok_or_else(|| ApiError::NotFound("checkpoint sequence".into()))?;
+        let checkpoints = state
+            .storage
+            .list_checkpoints(
+                instance.id,
+                u32::try_from(remaining).unwrap_or(u32::MAX).min(10_000),
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "checkpoints"))?;
+        let instance = Arc::new(instance);
+        let sequence = Arc::new(sequence);
+        for checkpoint in checkpoints {
+            records.push(ContinuityCheckpointRecord {
+                boundary: checkpoint_boundary(
+                    continuity_id,
+                    location.epoch,
+                    &sequence,
+                    &checkpoint,
+                )?,
+                checkpoint,
+                instance: Arc::clone(&instance),
+                sequence: Arc::clone(&sequence),
+            });
+        }
+    }
+    records.sort_by_key(|record| (record.boundary.epoch, record.boundary.created_at));
+    Ok(records)
+}
+
+async fn find_continuity_checkpoint(
+    state: &AppState,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+    checkpoint_id: uuid::Uuid,
+) -> Result<ContinuityCheckpointRecord, ApiError> {
+    continuity_checkpoint_records(state, tenant_id, continuity_id, 10_000)
+        .await?
         .into_iter()
-        .map(|checkpoint| checkpoint_boundary(&execution, &sequence, &checkpoint))
-        .collect::<Result<Vec<_>, _>>()
-        .map(Json)
+        .find(|record| record.checkpoint.id == checkpoint_id)
+        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))
 }
 
 async fn continuity_instance(
@@ -2434,7 +2661,8 @@ async fn continuity_instance(
 }
 
 fn checkpoint_boundary(
-    execution: &ContinuityExecution,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
     sequence: &orch8_types::sequence::SequenceDefinition,
     checkpoint: &orch8_types::checkpoint::Checkpoint,
 ) -> Result<CheckpointBoundary, ApiError> {
@@ -2447,9 +2675,10 @@ fn checkpoint_boundary(
     let canonical = orch8_publisher::manifest::canonical_json(&checkpoint.checkpoint_data)
         .map_err(|error| ApiError::Internal(error.to_string()))?;
     Ok(CheckpointBoundary {
+        checkpoint_id: checkpoint.id,
         instance_id: checkpoint.instance_id,
-        continuity_id: execution.continuity_id,
-        epoch: execution.epoch,
+        continuity_id,
+        epoch,
         sequence_id: sequence.id,
         sequence_version: sequence.version,
         block_id: orch8_types::ids::BlockId::new(block),
@@ -2489,13 +2718,11 @@ async fn run_what_if(
     Json(body): Json<WhatIfRequest>,
 ) -> Result<Json<WhatIfResponse>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
-    let source_sequence = state
-        .storage
-        .get_sequence(instance.sequence_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "sequence"))?
-        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
+    let located = find_continuity_checkpoint(&state, &tenant_id, id, body.checkpoint_id).await?;
+    let instance = Arc::unwrap_or_clone(located.instance);
+    let source_sequence = Arc::unwrap_or_clone(located.sequence);
+    let checkpoint = located.checkpoint;
+    let boundary = located.boundary;
     let sequence = if let Some(version) = body.target_sequence_version {
         state
             .storage
@@ -2511,28 +2738,24 @@ async fn run_what_if(
     } else {
         source_sequence
     };
-    let checkpoint = state
-        .storage
-        .list_checkpoints(instance.id, 10_000)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?
-        .into_iter()
-        .find(|checkpoint| checkpoint.id == body.checkpoint_id)
-        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))?;
-    let boundary = checkpoint_boundary(&execution, &sequence, &checkpoint)?;
     let mut input = checkpoint
         .checkpoint_data
         .get("context_snapshot")
         .cloned()
         .unwrap_or_else(|| instance.context.data.clone());
     merge_object_patch(&mut input, &body.context_patch)?;
-    let recorded = state
+    let outputs = state
         .storage
         .get_all_outputs(instance.id)
         .await
-        .map_err(|error| ApiError::from_storage(error, "outputs"))?
-        .into_iter()
+        .map_err(|error| ApiError::from_storage(error, "outputs"))?;
+    let initial_outputs = outputs
+        .iter()
         .filter(|output| output.created_at <= checkpoint.created_at)
+        .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let recorded = outputs
+        .into_iter()
         .map(|output| (output.block_id.as_str().to_owned(), output.output))
         .collect::<std::collections::HashMap<_, _>>();
     let overrides = body.output_overrides.as_object().ok_or_else(|| {
@@ -2549,18 +2772,17 @@ async fn run_what_if(
     }
     let mocks = sequence_step_blocks(&sequence)
         .into_iter()
-        .map(|block| {
+        .filter_map(|block| {
             let output = explicit_mocks
                 .get(&block)
                 .or_else(|| overrides.get(&block))
                 .cloned()
-                .or_else(|| recorded.get(&block).cloned())
-                .unwrap_or_else(|| serde_json::json!({}));
-            orch8_types::contract::MockDef {
+                .or_else(|| recorded.get(&block).cloned())?;
+            Some(orch8_types::contract::MockDef {
                 handler: None,
                 block: Some(block),
                 policy: orch8_types::contract::MockPolicy::Success { output },
-            }
+            })
         })
         .collect();
     let max_ticks = body.max_ticks.unwrap_or(5_000).min(10_000);
@@ -2568,6 +2790,7 @@ async fn run_what_if(
         name: "continuity-what-if".into(),
         description: Some("effect-free continuity simulation".into()),
         input,
+        initial_outputs,
         config: None,
         mocks,
         signals: Vec::new(),
@@ -2657,6 +2880,100 @@ struct ExtractFixtureRequest {
     allowlisted_fields: Vec<String>,
 }
 
+fn build_extracted_contract(
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    checkpoint: &orch8_types::checkpoint::Checkpoint,
+    sanitized_context: &serde_json::Value,
+    outputs: &[orch8_types::output::BlockOutput],
+    redaction: &orch8_types::redaction::RedactionPolicy,
+) -> Result<
+    (
+        orch8_types::sequence::SequenceDefinition,
+        orch8_types::contract::ContractSuite,
+    ),
+    ApiError,
+> {
+    let sanitized_sequence: orch8_types::sequence::SequenceDefinition = serde_json::from_value(
+        redaction.redacted(
+            &serde_json::to_value(sequence)
+                .map_err(|error| ApiError::Internal(error.to_string()))?,
+        ),
+    )
+    .map_err(|error| ApiError::Internal(format!("redacted sequence is invalid: {error}")))?;
+    let initial_outputs = outputs
+        .iter()
+        .filter(|output| output.created_at <= checkpoint.created_at)
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .map(|output| {
+            (
+                output.block_id.as_str().to_owned(),
+                redaction.redacted(&output.output),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mocks = outputs
+        .iter()
+        .filter(|output| output.created_at > checkpoint.created_at)
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .map(|output| orch8_types::contract::MockDef {
+            handler: None,
+            block: Some(output.block_id.as_str().to_owned()),
+            policy: orch8_types::contract::MockPolicy::Success {
+                output: redaction.redacted(&output.output),
+            },
+        })
+        .collect();
+    let contract = orch8_types::contract::ContractSuite {
+        schema_version: orch8_types::contract::CONTRACT_SCHEMA_VERSION,
+        sequence_name: Some(sanitized_sequence.name.clone()),
+        sequence_version: Some(i64::from(sanitized_sequence.version)),
+        unmocked_handlers: orch8_types::contract::UnmockedHandlerPolicy::Fail,
+        cases: vec![orch8_types::contract::ContractCase {
+            name: format!("continuation-{}", checkpoint.id),
+            description: Some(
+                "Sanitized continuation fixture extracted from durable evidence".into(),
+            ),
+            input: sanitized_context.clone(),
+            initial_outputs,
+            config: None,
+            mocks,
+            signals: Vec::new(),
+            expect: orch8_types::contract::Expectations::default(),
+            max_logical_duration_ms: Some(86_400_000),
+            max_ticks: Some(5_000),
+        }],
+    };
+    Ok((sanitized_sequence, contract))
+}
+
+fn build_extracted_effect_mocks(
+    receipts: &[EffectReceipt],
+    redaction: &orch8_types::redaction::RedactionPolicy,
+) -> (Vec<String>, Vec<ExtractedEffectMock>) {
+    let receipt_mocks = receipts
+        .iter()
+        .map(|receipt| receipt.request_sha256.clone())
+        .collect();
+    let effect_mocks = receipts
+        .iter()
+        .map(|receipt| ExtractedEffectMock {
+            block_id: receipt.block_id.clone(),
+            kind: receipt.kind,
+            state: receipt.state,
+            request_sha256: receipt.request_sha256.clone(),
+            destination_fingerprint: receipt.destination_fingerprint.clone(),
+            provider_receipt_id: receipt.provider_receipt_id.as_ref().map(|value| {
+                redaction
+                    .redacted(&serde_json::Value::String(value.clone()))
+                    .as_str()
+                    .unwrap_or(orch8_types::redaction::REDACTED)
+                    .to_owned()
+            }),
+        })
+        .collect();
+    (receipt_mocks, effect_mocks)
+}
+
 async fn extract_test_fixture(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -2669,22 +2986,11 @@ async fn extract_test_fixture(
             "test fixture allowlist exceeds 256 fields".into(),
         ));
     }
-    let (execution, instance) = continuity_instance(&state, &tenant_id, id).await?;
-    let sequence = state
-        .storage
-        .get_sequence(instance.sequence_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "sequence"))?
-        .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
-    let checkpoint = state
-        .storage
-        .list_checkpoints(instance.id, 10_000)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "checkpoints"))?
-        .into_iter()
-        .find(|checkpoint| checkpoint.id == body.checkpoint_id)
-        .ok_or_else(|| ApiError::NotFound("checkpoint".into()))?;
-    let source = checkpoint_boundary(&execution, &sequence, &checkpoint)?;
+    let located = find_continuity_checkpoint(&state, &tenant_id, id, body.checkpoint_id).await?;
+    let instance = Arc::unwrap_or_clone(located.instance);
+    let sequence = Arc::unwrap_or_clone(located.sequence);
+    let checkpoint = located.checkpoint;
+    let source = located.boundary;
     let context = checkpoint
         .checkpoint_data
         .get("context_snapshot")
@@ -2703,16 +3009,26 @@ async fn extract_test_fixture(
             )
         },
     );
-    let sanitized_context = orch8_types::redaction::RedactionPolicy::default().redacted(&selected);
+    let redaction = orch8_types::redaction::RedactionPolicy::default();
+    let sanitized_context = redaction.redacted(&selected);
+    let outputs = state
+        .storage
+        .get_all_outputs(instance.id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "fixture outputs"))?;
+    let (sanitized_sequence, contract) = build_extracted_contract(
+        &sequence,
+        &checkpoint,
+        &sanitized_context,
+        &outputs,
+        &redaction,
+    )?;
     let receipts = state
         .storage
         .list_effect_receipts(&tenant_id, id, 10_000)
         .await
         .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
-    let receipt_mocks: Vec<_> = receipts
-        .iter()
-        .map(|receipt| receipt.request_sha256.clone())
-        .collect();
+    let (receipt_mocks, effect_mocks) = build_extracted_effect_mocks(&receipts, &redaction);
     let mut missing_evidence = Vec::new();
     if checkpoint.checkpoint_data.get("context_snapshot").is_none() {
         missing_evidence.push("checkpoint.context_snapshot".into());
@@ -2723,10 +3039,28 @@ async fn extract_test_fixture(
     {
         missing_evidence.push("resolved_effect_receipt".into());
     }
+    let fixture_report = orch8::contract::run_suite(
+        &sanitized_sequence,
+        &contract,
+        &orch8::contract::RunOptions::default(),
+    )
+    .await
+    .map_err(|error| ApiError::Internal(format!("fixture validation failed: {error}")))?;
+    for failure in fixture_report
+        .cases
+        .iter()
+        .flat_map(|case| case.failures.iter())
+        .take(1_000)
+    {
+        missing_evidence.push(format!("offline_replay: {failure}"));
+    }
+    missing_evidence.sort();
+    missing_evidence.dedup();
     let stable_material = orch8_publisher::manifest::canonical_json(&serde_json::json!({
         "source": source,
-        "context": sanitized_context,
-        "receipts": receipt_mocks,
+        "sequence": sanitized_sequence,
+        "contract": contract,
+        "effects": effect_mocks,
         "missing": missing_evidence,
     }))
     .map_err(|error| ApiError::Internal(error.to_string()))?;
@@ -2735,6 +3069,9 @@ async fn extract_test_fixture(
         stable_id: hex_sha256(stable_material.as_bytes()),
         sanitized_context,
         receipt_mocks,
+        effect_mocks,
+        sequence: sanitized_sequence,
+        contract,
         complete: missing_evidence.is_empty(),
         missing_evidence,
     }))

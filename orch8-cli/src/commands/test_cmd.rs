@@ -67,6 +67,21 @@ pub enum TestCmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Extract a sanitized, runnable continuation fixture from a durable
+    /// checkpoint. Writes a sequence, contract suite, and evidence manifest.
+    Extract {
+        /// Portable continuity identity containing the checkpoint.
+        continuity_id: Uuid,
+        /// JSON request with `tenant_id`, `checkpoint_id`, and `allowlisted_fields`.
+        request: PathBuf,
+        /// Directory receiving `<stable>.json`, `<stable>.contracts.json`, and
+        /// `<stable>.evidence.json`.
+        #[arg(long, default_value = ".")]
+        out_dir: PathBuf,
+        /// Replace files with the same deterministic stable name.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -99,7 +114,98 @@ pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputForma
         TestCmd::Record { instance_id, out } => {
             record(client, base, instance_id, out.as_deref()).await
         }
+        TestCmd::Extract {
+            continuity_id,
+            request,
+            out_dir,
+            force,
+        } => extract_fixture(client, base, continuity_id, &request, &out_dir, force).await,
     }
+}
+
+const MAX_EXTRACT_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file beside {}", path.display()))?;
+    file.write_all(contents)?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replace {}", path.display()))?;
+    Ok(())
+}
+
+async fn extract_fixture(
+    client: &Client,
+    base: &str,
+    continuity_id: Uuid,
+    request: &Path,
+    out_dir: &Path,
+    force: bool,
+) -> Result<()> {
+    let metadata = std::fs::metadata(request)
+        .with_context(|| format!("reading metadata for {}", request.display()))?;
+    anyhow::ensure!(
+        metadata.len() <= MAX_EXTRACT_REQUEST_BYTES,
+        "extract request exceeds {MAX_EXTRACT_REQUEST_BYTES} bytes"
+    );
+    let request_body: Value = serde_json::from_slice(
+        &std::fs::read(request).with_context(|| format!("reading {}", request.display()))?,
+    )
+    .context("extract request is not valid JSON")?;
+    let url = format!("{base}/continuity/executions/{continuity_id}/test-fixture");
+    let response = client.post(&url).json(&request_body).send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("{url} → {status}: {body}");
+    }
+    let fixture: Value = response.json().await?;
+    let stable_id = fixture["stable_id"]
+        .as_str()
+        .context("fixture response missing stable_id")?;
+    anyhow::ensure!(
+        stable_id.len() >= 12 && stable_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "fixture response contains an invalid stable_id"
+    );
+    let base_name = format!("continuation-{}", &stable_id[..12]);
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let sequence_path = out_dir.join(format!("{base_name}.json"));
+    let contract_path = out_dir.join(format!("{base_name}.contracts.json"));
+    let evidence_path = out_dir.join(format!("{base_name}.evidence.json"));
+    for path in [&sequence_path, &contract_path, &evidence_path] {
+        anyhow::ensure!(
+            force || !path.exists(),
+            "{} already exists (pass --force to replace the stable fixture)",
+            path.display()
+        );
+    }
+    atomic_write(
+        &sequence_path,
+        serde_json::to_string_pretty(&fixture["sequence"])?.as_bytes(),
+    )?;
+    atomic_write(
+        &contract_path,
+        serde_json::to_string_pretty(&fixture["contract"])?.as_bytes(),
+    )?;
+    atomic_write(
+        &evidence_path,
+        serde_json::to_string_pretty(&fixture)?.as_bytes(),
+    )?;
+    eprintln!("sequence: {}", sequence_path.display());
+    eprintln!("contract: {}", contract_path.display());
+    eprintln!("evidence: {}", evidence_path.display());
+    if !fixture["complete"].as_bool().unwrap_or(false) {
+        eprintln!("fixture is incomplete; review missing_evidence before using it as a gate");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -323,6 +323,18 @@ export class Orch8Client {
     );
   }
 
+  async getContinuityCheckpoint(
+    continuityId: string,
+    checkpointId: string,
+    tenantId: string,
+  ): Promise<ApiResponse> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/checkpoints/${checkpointId}${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
   async runContinuityWhatIf(
     continuityId: string,
     req: Record<string, unknown>,

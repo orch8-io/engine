@@ -9,7 +9,17 @@ import {
   randomBytes,
   sign,
 } from "node:crypto";
-import { rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
@@ -18,6 +28,20 @@ import type { WorkerTask } from "../types.ts";
 
 const client = new Orch8Client();
 const artifactDir = `/tmp/o8-continuity-e2e-${uuid().slice(0, 8)}`;
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+
+function findCliBinary(): string {
+  const target = resolve(projectRoot, "target");
+  const candidates = [resolve(target, "debug/orch8")];
+  if (existsSync(target)) {
+    for (const entry of readdirSync(target)) {
+      candidates.push(resolve(target, entry, "debug/orch8"));
+    }
+  }
+  const binary = candidates.find(existsSync);
+  if (!binary) throw new Error("orch8 CLI binary not found; run cargo build -p orch8-cli");
+  return binary;
+}
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -431,6 +455,22 @@ describe("Portable Continuity", () => {
       tenantId,
     );
     assert.equal(boundaries[0].block_id, "work");
+    assert.equal(boundaries[0].checkpoint_id, checkpoint.id);
+    const checkpointDetail = await client.getContinuityCheckpoint(
+      execution.continuity_id,
+      checkpoint.id,
+      tenantId,
+    );
+    assert.equal(
+      checkpointDetail.checkpoint_data.context_snapshot.password,
+      "must-not-leak",
+      "authorized detail returns the exact checkpoint state",
+    );
+    assert.ok(checkpointDetail.redacted_state_diff.some(
+      (change: any) =>
+        change.path === "context_snapshot.password" &&
+        change.after === "[REDACTED]",
+    ));
     const whatIf = await client.runContinuityWhatIf(execution.continuity_id, {
       tenant_id: tenantId,
       checkpoint_id: checkpoint.id,
@@ -441,6 +481,11 @@ describe("Portable Continuity", () => {
     });
     assert.equal(whatIf.scenario.virtual_time, true);
     assert.equal(whatIf.scenario.effect_mode, "blocked");
+    assert.deepEqual(
+      whatIf.report.executed_blocks,
+      [],
+      "sandbox resumes after the selected boundary instead of replaying it",
+    );
     const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
       tenant_id: tenantId,
       checkpoint_id: checkpoint.id,
@@ -448,6 +493,38 @@ describe("Portable Continuity", () => {
     });
     assert.equal(fixture.sanitized_context.order_id, "order-1");
     assert.equal(fixture.sanitized_context.password, "[REDACTED]");
+    assert.equal(fixture.complete, true);
+
+    const fixtureDir = resolve(artifactDir, "extracted-fixture");
+    mkdirSync(fixtureDir, { recursive: true });
+    const extractRequest = resolve(fixtureDir, "extract-request.json");
+    writeFileSync(extractRequest, JSON.stringify({
+      tenant_id: tenantId,
+      checkpoint_id: checkpoint.id,
+      allowlisted_fields: ["order_id", "password"],
+    }));
+    execFileSync(findCliBinary(), [
+      "--url", `http://127.0.0.1:${server!.port}`,
+      "test", "extract", execution.continuity_id, extractRequest,
+      "--out-dir", fixtureDir,
+    ]);
+    const generated = readdirSync(fixtureDir);
+    const contractName = generated.find((name) => name.endsWith(".contracts.json"));
+    assert.ok(contractName);
+    const sequenceName = contractName.replace(".contracts.json", ".json");
+    const contractPath = resolve(fixtureDir, contractName);
+    const sequencePath = resolve(fixtureDir, sequenceName);
+    const generatedText = generated
+      .filter((name) => name.startsWith("continuation-"))
+      .map((name) => readFileSync(resolve(fixtureDir, name), "utf8"))
+      .join("\n");
+    assert.doesNotMatch(generatedText, /must-not-leak/);
+    const replay = execFileSync(findCliBinary(), [
+      "test", "run", contractPath,
+      "--sequence", sequencePath,
+      "--report", "json",
+    ], { encoding: "utf8" });
+    assert.equal(JSON.parse(replay).passed, true);
 
     await assert.rejects(
       () => client.getContinuityExecution(execution.continuity_id, `${tenantId}-other`),
@@ -769,6 +846,15 @@ describe("Portable Continuity", () => {
       returnedLocations.map((location) => location.runtime_id),
       [sourceRuntimeId, destinationRuntimeId, sourceRuntimeId],
     );
+    const historicalCheckpoints = await client.listContinuityCheckpoints(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.ok(historicalCheckpoints.some((boundary) =>
+      boundary.instance_id === sourceInstance.id &&
+      boundary.epoch === 0 &&
+      boundary.block_id === "handoff"
+    ));
     await client.waitForState(returnedInstanceId, "waiting");
     await client.sendSignal(
       returnedInstanceId,
@@ -900,6 +986,23 @@ describe("Portable Continuity", () => {
     assert.equal(receipts[0]!.idempotency_key, "order-effect-1");
     assert.equal(receipts[0]!.provider_receipt_id, "provider-effect-42");
     assert.match(receipts[0]!.request_sha256, /^[0-9a-f]{64}$/);
+
+    const checkpoint = await client.saveCheckpoint(instance.id, {
+      safe_boundary: "charge",
+      context_snapshot: {},
+    });
+    const fixture = await client.extractContinuityTestFixture(execution.continuity_id, {
+      tenant_id: tenantId,
+      checkpoint_id: checkpoint.id,
+      allowlisted_fields: [],
+    });
+    assert.equal(fixture.effect_mocks.length, 1);
+    assert.equal(fixture.effect_mocks[0].block_id, "charge");
+    assert.equal(fixture.effect_mocks[0].state, "committed");
+    assert.equal(
+      fixture.effect_mocks[0].provider_receipt_id,
+      "provider-effect-42",
+    );
   });
 
   it("blocks duplicate effects before dispatch and records one violation", async () => {

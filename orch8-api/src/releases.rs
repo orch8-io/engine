@@ -566,6 +566,7 @@ async fn replay_one(
         name: "release-validation".into(),
         description: None,
         input: context_data.clone(),
+        initial_outputs: std::collections::BTreeMap::new(),
         config: None,
         mocks,
         signals: vec![],
