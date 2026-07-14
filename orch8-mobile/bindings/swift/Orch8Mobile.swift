@@ -589,6 +589,290 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 
+public protocol CapsuleSigner: AnyObject, Sendable {
+
+    /**
+     * Stable identifier of the host-managed signing key.
+     */
+    func keyId()  -> String
+
+    /**
+     * Base64 raw 32-byte Ed25519 public key registered for this runtime.
+     */
+    func publicKeyBase64()  -> String
+
+    /**
+     * Sign the ASCII SHA-256 digest with a non-exportable host key.
+     */
+    func signManifestSha256(digest: String) throws  -> String
+
+}
+open class CapsuleSignerImpl: CapsuleSigner, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_capsulesigner(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_capsulesigner(handle, $0) }
+    }
+
+
+
+
+    /**
+     * Stable identifier of the host-managed signing key.
+     */
+open func keyId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_capsulesigner_key_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Base64 raw 32-byte Ed25519 public key registered for this runtime.
+     */
+open func publicKeyBase64() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Sign the ASCII SHA-256 digest with a non-exportable host key.
+     */
+open func signManifestSha256(digest: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(digest),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceCapsuleSigner {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceCapsuleSigner = UniffiVTableCallbackInterfaceCapsuleSigner(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeCapsuleSigner.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface CapsuleSigner: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeCapsuleSigner.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface CapsuleSigner: handle missing in uniffiClone")
+            }
+        },
+        keyId: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterTypeCapsuleSigner.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.keyId(
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        publicKeyBase64: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterTypeCapsuleSigner.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.publicKeyBase64(
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        signManifestSha256: { (
+            uniffiHandle: UInt64,
+            digest: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterTypeCapsuleSigner.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.signManifestSha256(
+                     digest: try FfiConverterString.lift(digest)
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeMobileError_lower
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceCapsuleSigner> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceCapsuleSigner>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitCapsuleSigner() {
+    uniffi_orch8_mobile_fn_init_callback_vtable_capsulesigner(UniffiCallbackInterfaceCapsuleSigner.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCapsuleSigner: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<CapsuleSigner>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = CapsuleSigner
+
+    public static func lift(_ handle: UInt64) throws -> CapsuleSigner {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return CapsuleSignerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: CapsuleSigner) -> UInt64 {
+         if let rustImpl = value as? CapsuleSignerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapsuleSigner {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: CapsuleSigner, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapsuleSigner_lift(_ handle: UInt64) throws -> CapsuleSigner {
+    return try FfiConverterTypeCapsuleSigner.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCapsuleSigner_lower(_ value: CapsuleSigner) -> UInt64 {
+    return FfiConverterTypeCapsuleSigner.lower(value)
+}
+
+
+
+
+
+
 /**
  * Callback interface for engine lifecycle events.
  * The host app receives notifications when instances complete, fail, or have pending steps.
@@ -911,6 +1195,13 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func completeStep(instanceId: String, stepName: String, output: String) throws
 
     /**
+     * Export a paused or waiting device-owned execution for a destination
+     * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
+     * never receives the private signing key.
+     */
+    func exportContinuityCapsule(instanceId: String, destinationRuntimeId: String, payloadKeyBase64: String, expiresInSeconds: UInt32, signer: CapsuleSigner) throws  -> ContinuityExportResult
+
+    /**
      * Flush buffered telemetry to the remote endpoint.
      *
      * The endpoint must be a public HTTPS URL on port 443 to limit SSRF risk.
@@ -1132,6 +1423,25 @@ open func completeStep(instanceId: String, stepName: String, output: String)thro
         FfiConverterString.lower(output),uniffiCallStatus
     )
 }
+}
+
+    /**
+     * Export a paused or waiting device-owned execution for a destination
+     * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
+     * never receives the private signing key.
+     */
+open func exportContinuityCapsule(instanceId: String, destinationRuntimeId: String, payloadKeyBase64: String, expiresInSeconds: UInt32, signer: CapsuleSigner)throws  -> ContinuityExportResult  {
+    return try  FfiConverterTypeContinuityExportResult_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(instanceId),
+        FfiConverterString.lower(destinationRuntimeId),
+        FfiConverterString.lower(payloadKeyBase64),
+        FfiConverterUInt32.lower(expiresInSeconds),
+        FfiConverterTypeCapsuleSigner_lower(signer),uniffiCallStatus
+    )
+})
 }
 
     /**
@@ -1862,6 +2172,72 @@ public func FfiConverterTypeTokenProvider_lower(_ value: TokenProvider) -> UInt6
 }
 
 
+
+
+public struct ContinuityExportResult: Equatable, Hashable {
+    public let capsuleId: String
+    public let continuityId: String
+    public let sourceEpoch: UInt64
+    public let capsuleJson: String
+    public let payloadBase64: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(capsuleId: String, continuityId: String, sourceEpoch: UInt64, capsuleJson: String, payloadBase64: String) {
+        self.capsuleId = capsuleId
+        self.continuityId = continuityId
+        self.sourceEpoch = sourceEpoch
+        self.capsuleJson = capsuleJson
+        self.payloadBase64 = payloadBase64
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ContinuityExportResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeContinuityExportResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ContinuityExportResult {
+        return
+            try ContinuityExportResult(
+                capsuleId: FfiConverterString.read(from: &buf),
+                continuityId: FfiConverterString.read(from: &buf),
+                sourceEpoch: FfiConverterUInt64.read(from: &buf),
+                capsuleJson: FfiConverterString.read(from: &buf),
+                payloadBase64: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ContinuityExportResult, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.capsuleId, into: &buf)
+        FfiConverterString.write(value.continuityId, into: &buf)
+        FfiConverterUInt64.write(value.sourceEpoch, into: &buf)
+        FfiConverterString.write(value.capsuleJson, into: &buf)
+        FfiConverterString.write(value.payloadBase64, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContinuityExportResult_lift(_ buf: RustBuffer) throws -> ContinuityExportResult {
+    return try FfiConverterTypeContinuityExportResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeContinuityExportResult_lower(_ value: ContinuityExportResult) -> RustBuffer {
+    return FfiConverterTypeContinuityExportResult.lower(value)
+}
 
 
 public struct ContinuityImportResult: Equatable, Hashable {
@@ -3336,6 +3712,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_complete_step() != 37083) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule() != 28196) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry() != 19645) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3387,6 +3766,15 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_tick_once() != 40919) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_capsulesigner_key_id() != 14959) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64() != 19094) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256() != 12400) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_tokenprovider_current_token() != 29353) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3409,6 +3797,7 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitCapsuleSigner()
     uniffiCallbackInitEngineListener()
     uniffiCallbackInitStepHandler()
     uniffiCallbackInitTokenProvider()

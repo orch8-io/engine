@@ -532,6 +532,7 @@ mod tests {
                 regions: vec!["br-south".into()],
                 hardware: Vec::new(),
                 offline_capable: true,
+                capsule_signing_public_key: None,
                 observed_at: now - chrono::Duration::minutes(2),
                 expires_at: now - chrono::Duration::minutes(1),
             },

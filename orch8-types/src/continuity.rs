@@ -174,6 +174,9 @@ pub struct RuntimeCapabilities {
     pub hardware: Vec<String>,
     #[serde(default)]
     pub offline_capable: bool,
+    /// Base64 Ed25519 key authorized to sign capsules emitted by this runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_signing_public_key: Option<String>,
     pub observed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }

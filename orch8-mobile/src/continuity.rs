@@ -13,6 +13,16 @@ use zeroize::Zeroizing;
 
 use crate::error::MobileError;
 
+#[uniffi::export(with_foreign)]
+pub trait CapsuleSigner: Send + Sync {
+    /// Stable identifier of the host-managed signing key.
+    fn key_id(&self) -> String;
+    /// Base64 raw 32-byte Ed25519 public key registered for this runtime.
+    fn public_key_base64(&self) -> String;
+    /// Sign the ASCII SHA-256 digest with a non-exportable host key.
+    fn sign_manifest_sha256(&self, digest: String) -> Result<String, MobileError>;
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct ContinuityImportResult {
     pub capsule_id: String,
@@ -20,6 +30,15 @@ pub struct ContinuityImportResult {
     pub instance_id: String,
     pub source_epoch: u64,
     pub state: String,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ContinuityExportResult {
+    pub capsule_id: String,
+    pub continuity_id: String,
+    pub source_epoch: u64,
+    pub capsule_json: String,
+    pub payload_base64: String,
 }
 
 fn invalid(message: impl Into<String>) -> MobileError {
@@ -43,6 +62,92 @@ fn transfer_encryptor(encoded: &str) -> Result<FieldEncryptor, MobileError> {
         .try_into()
         .map_err(|_| invalid("payload key must decode to exactly 32 bytes"))?;
     Ok(FieldEncryptor::from_bytes(key))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn export_capsule(
+    storage: &dyn StorageBackend,
+    capsule_signer: &dyn CapsuleSigner,
+    instance_id: &str,
+    destination_runtime_id: &str,
+    payload_key_base64: &str,
+    expires_in_seconds: u32,
+) -> Result<ContinuityExportResult, MobileError> {
+    if !(1..=3_600).contains(&expires_in_seconds) {
+        return Err(invalid("capsule expiry must be between 1 and 3600 seconds"));
+    }
+    let instance_id = InstanceId::from_uuid(parse_uuid(instance_id, "source instance id")?);
+    let destination_runtime_id = RuntimeId::from_uuid(parse_uuid(
+        destination_runtime_id,
+        "destination runtime id",
+    )?);
+    let instance = storage
+        .get_instance(instance_id)
+        .await?
+        .ok_or_else(|| invalid("source instance does not exist"))?;
+    let continuity = storage
+        .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+        .await?
+        .ok_or_else(|| invalid("source instance has no continuity identity"))?;
+    if continuity.state != OwnershipState::Owned || continuity.current_instance_id != instance.id {
+        return Err(invalid("source runtime does not own this execution"));
+    }
+    let key_id = capsule_signer.key_id();
+    if key_id.is_empty() || key_id.len() > 128 {
+        return Err(invalid(
+            "capsule signing key id must contain 1 to 128 bytes",
+        ));
+    }
+    let public_key = capsule_signer.public_key_base64();
+    let public_key_bytes: [u8; 32] = BASE64
+        .decode(&public_key)
+        .map_err(|_| invalid("capsule signing public key is not valid base64"))?
+        .try_into()
+        .map_err(|_| invalid("capsule signing public key must decode to 32 bytes"))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)
+        .map_err(|_| invalid("capsule signing public key is invalid"))?;
+    let encryptor = transfer_encryptor(payload_key_base64)?;
+    let manifest = orch8_engine::capsule::export_paused_capsule_manifest(
+        storage,
+        orch8_engine::capsule::CapsuleExportRequest {
+            continuity,
+            destination_runtime_id: Some(destination_runtime_id),
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
+            expires_at: Utc::now() + chrono::Duration::seconds(i64::from(expires_in_seconds)),
+            signing_key_id: key_id,
+            encryption_key_id: "destination-transfer-v1".into(),
+        },
+        &encryptor,
+    )
+    .await
+    .map_err(|error| invalid(format!("capsule export failed: {error}")))?;
+    let manifest_sha256 = orch8_publisher::capsule::manifest_sha256(&manifest)
+        .map_err(|error| invalid(error.to_string()))?;
+    let signature = capsule_signer.sign_manifest_sha256(manifest_sha256.clone())?;
+    let signed_capsule = SignedCapsuleManifest {
+        manifest,
+        manifest_sha256,
+        signature,
+        public_key,
+    };
+    orch8_publisher::capsule::verify_signed_capsule(&signed_capsule)
+        .map_err(|error| invalid(format!("host capsule signature is invalid: {error}")))?;
+    let payload = storage
+        .get_artifact(&signed_capsule.manifest.payload_artifact.key)
+        .await?
+        .ok_or_else(|| invalid("exported capsule payload is unavailable"))?;
+    if u64::try_from(payload.len()).ok() != Some(signed_capsule.manifest.payload_artifact.bytes) {
+        return Err(invalid(
+            "exported capsule payload size does not match its manifest",
+        ));
+    }
+    Ok(ContinuityExportResult {
+        capsule_id: signed_capsule.manifest.capsule_id.to_string(),
+        continuity_id: signed_capsule.manifest.continuity_id.to_string(),
+        source_epoch: signed_capsule.manifest.epoch.get(),
+        capsule_json: serde_json::to_string(&signed_capsule)?,
+        payload_base64: BASE64.encode(payload),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,8 +332,11 @@ mod tests {
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration, Utc};
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer as _, SigningKey};
     use orch8_engine::capsule::{CapsuleExportRequest, export_paused_capsule};
+    use orch8_storage::{
+        ContinuityStore as _, InstanceStore as _, ResourceStore as _, SequenceStore as _,
+    };
     use orch8_storage::artifacts::ObjectArtifactStore;
     use orch8_storage::sqlite::SqliteStorage;
     use orch8_types::checkpoint::Checkpoint;
@@ -243,8 +351,25 @@ mod tests {
 
     use super::*;
 
+    struct TestSigner(SigningKey);
+
+    impl CapsuleSigner for TestSigner {
+        fn key_id(&self) -> String {
+            "device-key".into()
+        }
+
+        fn public_key_base64(&self) -> String {
+            BASE64.encode(self.0.verifying_key().to_bytes())
+        }
+
+        fn sign_manifest_sha256(&self, digest: String) -> Result<String, MobileError> {
+            Ok(BASE64.encode(self.0.sign(digest.as_bytes()).to_bytes()))
+        }
+    }
+
     #[tokio::test]
-    async fn portable_import_survives_redelivery_and_activation() {
+    #[allow(clippy::too_many_lines)] // one round trip exercises every durable mobile boundary
+    async fn portable_roundtrip_survives_redelivery_and_activation() {
         let source = SqliteStorage::in_memory()
             .await
             .unwrap()
@@ -406,5 +531,30 @@ mod tests {
         assert_eq!(owned.owner_runtime_id, destination_runtime);
         assert_eq!(owned.epoch.get(), 1);
         assert_eq!(owned.state, OwnershipState::Owned);
+
+        destination
+            .update_instance_state(destination_instance, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        let return_key = [23; 32];
+        let exported = export_capsule(
+            &destination,
+            &TestSigner(SigningKey::from_bytes(&[29; 32])),
+            &destination_instance.to_string(),
+            &RuntimeId::new().to_string(),
+            &BASE64.encode(return_key),
+            300,
+        )
+        .await
+        .unwrap();
+        let signed_return: SignedCapsuleManifest =
+            serde_json::from_str(&exported.capsule_json).unwrap();
+        orch8_publisher::capsule::verify_signed_capsule(&signed_return).unwrap();
+        assert_eq!(
+            signed_return.manifest.source_runtime_id,
+            destination_runtime
+        );
+        assert_eq!(signed_return.manifest.epoch.get(), 1);
+        assert!(!exported.payload_base64.is_empty());
     }
 }

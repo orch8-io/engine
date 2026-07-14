@@ -243,6 +243,27 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD0
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod0)(uint64_t, RustBuffer* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD1
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod1)(uint64_t, RustBuffer* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD2
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD2
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD0
 typedef void (*UniffiCallbackInterfaceTokenProviderMethod0)(uint64_t, RustBuffer* _Nonnull,
@@ -283,6 +304,17 @@ typedef void (*UniffiCallbackInterfaceEngineListenerMethod2)(uint64_t, RustBuffe
 typedef void (*UniffiCallbackInterfaceStepHandlerMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CAPSULE_SIGNER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CAPSULE_SIGNER
+typedef struct UniffiVTableCallbackInterfaceCapsuleSigner {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceCapsuleSignerMethod0 _Nonnull keyId;
+    UniffiCallbackInterfaceCapsuleSignerMethod1 _Nonnull publicKeyBase64;
+    UniffiCallbackInterfaceCapsuleSignerMethod2 _Nonnull signManifestSha256;
+} UniffiVTableCallbackInterfaceCapsuleSigner;
 
 #endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_TOKEN_PROVIDER
@@ -348,6 +380,11 @@ void uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(uint64_t ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_COMPLETE_STEP
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_COMPLETE_STEP
 void uniffi_orch8_mobile_fn_method_mobileengine_complete_step(uint64_t ptr, RustBuffer instance_id, RustBuffer _step_name, RustBuffer output, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
+RustBuffer uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(uint64_t ptr, RustBuffer instance_id, RustBuffer destination_runtime_id, RustBuffer payload_key_base64, uint32_t expires_in_seconds, uint64_t signer, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_FLUSH_TELEMETRY
@@ -433,6 +470,36 @@ RustBuffer uniffi_orch8_mobile_fn_method_mobileengine_sync(uint64_t ptr, RustBuf
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_TICK_ONCE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_TICK_ONCE
 RustBuffer uniffi_orch8_mobile_fn_method_mobileengine_tick_once(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_CAPSULESIGNER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_CAPSULESIGNER
+uint64_t uniffi_orch8_mobile_fn_clone_capsulesigner(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_CAPSULESIGNER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_CAPSULESIGNER
+void uniffi_orch8_mobile_fn_free_capsulesigner(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_INIT_CALLBACK_VTABLE_CAPSULESIGNER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_INIT_CALLBACK_VTABLE_CAPSULESIGNER
+void uniffi_orch8_mobile_fn_init_callback_vtable_capsulesigner(const UniffiVTableCallbackInterfaceCapsuleSigner* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_KEY_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_KEY_ID
+RustBuffer uniffi_orch8_mobile_fn_method_capsulesigner_key_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
+RustBuffer uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
+RustBuffer uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(uint64_t ptr, RustBuffer digest, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_TOKENPROVIDER
@@ -794,6 +861,12 @@ uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(void
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
+uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_FLUSH_TELEMETRY
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_FLUSH_TELEMETRY
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry(void
@@ -893,6 +966,24 @@ uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_sync(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_TICK_ONCE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_TICK_ONCE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_tick_once(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_KEY_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_KEY_ID
+uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_key_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
+uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
+uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256(void
 
 );
 #endif

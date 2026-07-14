@@ -255,6 +255,7 @@ mod tests {
             regions: vec![region.into()],
             hardware: vec!["camera".into()],
             offline_capable: true,
+            capsule_signing_public_key: None,
             observed_at: now,
             expires_at: now + Duration::minutes(1),
         }

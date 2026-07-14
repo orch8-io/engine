@@ -40,7 +40,7 @@ use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
 pub use crate::config::MobileEngineConfig;
-pub use crate::continuity::ContinuityImportResult;
+pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
 pub use crate::sync::{RootKey, SyncResult};
@@ -561,6 +561,31 @@ impl MobileEngine {
                 &capsule_id,
                 &destination_runtime_id,
                 &destination_instance_id,
+            )
+            .await
+        })
+    }
+
+    /// Export a paused or waiting device-owned execution for a destination
+    /// runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
+    /// never receives the private signing key.
+    pub fn export_continuity_capsule(
+        &self,
+        instance_id: String,
+        destination_runtime_id: String,
+        payload_key_base64: String,
+        expires_in_seconds: u32,
+        signer: Arc<dyn CapsuleSigner>,
+    ) -> Result<ContinuityExportResult, MobileError> {
+        let payload_key_base64 = zeroize::Zeroizing::new(payload_key_base64);
+        self.run_with_timeout(async {
+            continuity::export_capsule(
+                self.storage.as_ref(),
+                signer.as_ref(),
+                &instance_id,
+                &destination_runtime_id,
+                payload_key_base64.as_str(),
+                expires_in_seconds,
             )
             .await
         })

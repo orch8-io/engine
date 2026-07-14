@@ -1,7 +1,14 @@
 /** E2E: portable continuity identity, capabilities, preview, and handoff request. */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  sign,
+} from "node:crypto";
 import { rmSync } from "node:fs";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
@@ -11,6 +18,56 @@ import type { WorkerTask } from "../types.ts";
 
 const client = new Orch8Client();
 const artifactDir = `/tmp/o8-continuity-e2e-${uuid().slice(0, 8)}`;
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function capsuleAad(
+  tenantId: string,
+  continuityId: string,
+  epoch: number,
+  destinationRuntimeId: string,
+): Buffer {
+  return Buffer.from(
+    `orch8-capsule-v1\0${tenantId}\0${continuityId}\0${epoch}\0${destinationRuntimeId}`,
+  );
+}
+
+function openCapsule(sealedBase64: string, keyBase64: string, aad: Buffer): any {
+  const sealed = Buffer.from(sealedBase64, "base64");
+  const decipher = createDecipheriv(
+    "aes-256-gcm",
+    Buffer.from(keyBase64, "base64"),
+    sealed.subarray(0, 12),
+  );
+  decipher.setAAD(aad);
+  decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+  return JSON.parse(
+    Buffer.concat([
+      decipher.update(sealed.subarray(12, sealed.length - 16)),
+      decipher.final(),
+    ]).toString("utf8"),
+  );
+}
+
+function sealCapsule(payload: unknown, key: Buffer, aad: Buffer): Buffer {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([
+    cipher.update(canonicalJson(payload)),
+    cipher.final(),
+  ]);
+  return Buffer.concat([nonce, ciphertext, cipher.getAuthTag()]);
+}
 
 async function waitForWorkerTask(
   handler: string,
@@ -345,6 +402,12 @@ describe("Portable Continuity", () => {
 
     const sourceRuntimeId = uuid();
     const destinationRuntimeId = uuid();
+    const deviceKeys = generateKeyPairSync("ed25519");
+    const devicePublicKey = Buffer.from(
+      deviceKeys.publicKey.export({ format: "der", type: "spki" }),
+    )
+      .subarray(-32)
+      .toString("base64");
     const execution = await client.createContinuityExecution({
       tenant_id: tenantId,
       instance_id: sourceInstance.id,
@@ -378,6 +441,7 @@ describe("Portable Continuity", () => {
         trust: "registered",
         handlers: ["human_review"],
         offline_capable: true,
+        capsule_signing_public_key: devicePublicKey,
         observed_at: new Date(now).toISOString(),
         expires_at: new Date(now + 60_000).toISOString(),
       },
@@ -510,6 +574,126 @@ describe("Portable Continuity", () => {
       tenant_id: tenantId,
     });
     assert.equal(resumed.state, "resumed");
+
+    // Simulate the device's host-managed exporter after offline work. It
+    // re-seals the portable payload for the server and signs the canonical
+    // manifest with the key registered for the mobile runtime.
+    await client.registerRuntime({
+      tenant_id: tenantId,
+      capabilities: {
+        runtime_id: sourceRuntimeId,
+        kind: "server",
+        trust: "registered",
+        handlers: ["human_review"],
+        offline_capable: false,
+        observed_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      },
+    });
+    const returnPreview = await client.previewHandoff(execution.continuity_id, {
+      tenant_id: tenantId,
+      destination_runtime_id: sourceRuntimeId,
+      requirements: { handlers: ["human_review"] },
+    });
+    const returnHandoff = await client.createHandoff({
+      tenant_id: tenantId,
+      continuity_id: execution.continuity_id,
+      destination_runtime_id: sourceRuntimeId,
+      requirements: { handlers: ["human_review"] },
+      preview_sha256: returnPreview.preview_sha256,
+    });
+    const portablePayload = openCapsule(
+      exported.payload_base64,
+      payloadKey,
+      capsuleAad(tenantId, execution.continuity_id, 0, destinationRuntimeId),
+    );
+    portablePayload.checkpoint.instance_id = destinationInstanceId;
+    portablePayload.checkpoint.created_at = new Date().toISOString();
+    const returnKey = randomBytes(32);
+    const returnPayload = sealCapsule(
+      portablePayload,
+      returnKey,
+      capsuleAad(tenantId, execution.continuity_id, 1, sourceRuntimeId),
+    );
+    const returnManifest = {
+      ...exported.capsule.manifest,
+      capsule_id: uuid(),
+      source_instance_id: destinationInstanceId,
+      epoch: 1,
+      source_runtime_id: destinationRuntimeId,
+      allowed_destination_runtime_id: sourceRuntimeId,
+      checkpoint: {
+        ...exported.capsule.manifest.checkpoint,
+        sha256: createHash("sha256")
+          .update(canonicalJson(portablePayload.checkpoint))
+          .digest("hex"),
+      },
+      payload_artifact: {
+        key: `device/${uuid()}`,
+        sha256: createHash("sha256").update(returnPayload).digest("hex"),
+        bytes: returnPayload.length,
+      },
+      issued_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      signing_key_id: "device-secure-key",
+      encryption_key_id: "destination-transfer-v1",
+    };
+    const returnManifestSha = createHash("sha256")
+      .update(canonicalJson(returnManifest))
+      .digest("hex");
+    const returnCapsule = {
+      manifest: returnManifest,
+      manifest_sha256: returnManifestSha,
+      signature: sign(
+        null,
+        Buffer.from(returnManifestSha),
+        deviceKeys.privateKey,
+      ).toString("base64"),
+      public_key: devicePublicKey,
+    };
+    const returnedInstanceId = uuid();
+    const attached = await client.attachDeviceCapsule(returnHandoff.id, {
+      tenant_id: tenantId,
+      destination_instance_id: returnedInstanceId,
+      capsule: returnCapsule,
+      payload_base64: returnPayload.toString("base64"),
+      payload_key_base64: returnKey.toString("base64"),
+    });
+    assert.equal(attached.handoff.state, "exported");
+    assert.equal(attached.destination_instance_id, returnedInstanceId);
+    const reattached = await client.attachDeviceCapsule(returnHandoff.id, {
+      tenant_id: tenantId,
+      destination_instance_id: returnedInstanceId,
+      capsule: returnCapsule,
+      payload_base64: returnPayload.toString("base64"),
+      payload_key_base64: returnKey.toString("base64"),
+    });
+    assert.equal(reattached.destination_instance_id, returnedInstanceId);
+    const returned = await client.acceptHandoff(returnHandoff.id, {
+      tenant_id: tenantId,
+      destination_instance_id: returnedInstanceId,
+    });
+    assert.equal(returned.execution.epoch, 2);
+    await client.resumeHandoff(returnHandoff.id, { tenant_id: tenantId });
+    const returnedLocations = await client.listContinuityLocations(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.deepEqual(
+      returnedLocations.map((location) => location.runtime_id),
+      [sourceRuntimeId, destinationRuntimeId, sourceRuntimeId],
+    );
+    await client.waitForState(returnedInstanceId, "waiting");
+    await client.sendSignal(
+      returnedInstanceId,
+      { custom: "human_input:handoff" } as unknown as string,
+      { value: "continue" },
+    );
+    await client.waitForState(returnedInstanceId, "completed");
+    assert.equal(
+      (await client.getInstance(returnedInstanceId)).state,
+      "completed",
+    );
   });
 
   it("fails preview when a required capability is missing", async () => {
@@ -644,6 +828,24 @@ describe("Portable Continuity", () => {
             runtime_id: runtimeId,
             kind: "server",
             trust: "attested",
+            observed_at: new Date(now).toISOString(),
+            expires_at: new Date(now + 60_000).toISOString(),
+          },
+        }),
+      (error: unknown) => {
+        assert.equal((error as ApiError).status, 400);
+        return true;
+      },
+    );
+    await assert.rejects(
+      () =>
+        client.registerRuntime({
+          tenant_id: tenantId,
+          capabilities: {
+            runtime_id: runtimeId,
+            kind: "mobile",
+            trust: "registered",
+            capsule_signing_public_key: "not-a-public-key",
             observed_at: new Date(now).toISOString(),
             expires_at: new Date(now + 60_000).toISOString(),
           },

@@ -738,7 +738,8 @@ fn validate_reference(
     };
 
     match schema_path_status(schema, &reference.path) {
-        SchemaPathStatus::Present => {}
+        SchemaPathStatus::Present | SchemaPathStatus::Optional | SchemaPathStatus::Nullable
+            if reference.has_fallback => {}
         SchemaPathStatus::Missing => findings.push(finding(
             "SCHEMA_PATH_MISSING",
             DataflowSeverity::Error,
@@ -753,21 +754,21 @@ fn validate_reference(
             reference,
             "reference traverses a dynamically typed schema path".into(),
         )),
-        SchemaPathStatus::Optional if !reference.has_fallback => findings.push(finding(
+        SchemaPathStatus::Optional => findings.push(finding(
             "VALUE_MAY_BE_ABSENT",
             DataflowSeverity::Error,
             consumer,
             reference,
             "referenced path is optional and has no explicit fallback".into(),
         )),
-        SchemaPathStatus::Nullable if !reference.has_fallback => findings.push(finding(
+        SchemaPathStatus::Nullable => findings.push(finding(
             "VALUE_MAY_BE_NULL",
             DataflowSeverity::Error,
             consumer,
             reference,
             "referenced path is nullable and has no explicit fallback".into(),
         )),
-        SchemaPathStatus::Optional | SchemaPathStatus::Nullable => {}
+        SchemaPathStatus::Present => {}
     }
 }
 

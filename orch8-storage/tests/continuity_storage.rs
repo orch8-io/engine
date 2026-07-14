@@ -32,6 +32,7 @@ async fn stale_runtime_heartbeat_cannot_replace_newer_capabilities() {
         regions: vec!["br-south".into()],
         hardware: Vec::new(),
         offline_capable: true,
+        capsule_signing_public_key: None,
         observed_at: now,
         expires_at: now + Duration::minutes(2),
     };

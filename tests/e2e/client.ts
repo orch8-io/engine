@@ -210,6 +210,10 @@ export class Orch8Client {
     return this.#post("/continuity/capsules/import", req);
   }
 
+  async attachDeviceCapsule(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/attach-device-capsule`, req);
+  }
+
   async acceptHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post(`/continuity/handoffs/${id}/accept`, req);
   }

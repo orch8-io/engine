@@ -50,6 +50,10 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/handoffs", post(create_handoff))
         .route("/continuity/handoffs/{id}", get(get_handoff))
         .route("/continuity/handoffs/{id}/export", post(export_handoff))
+        .route(
+            "/continuity/handoffs/{id}/attach-device-capsule",
+            post(attach_device_capsule),
+        )
         .route("/continuity/handoffs/{id}/accept", post(accept_handoff))
         .route("/continuity/handoffs/{id}/reject", post(reject_handoff))
         .route("/continuity/handoffs/{id}/resume", post(resume_handoff))
@@ -441,6 +445,22 @@ async fn register_runtime(
         return Err(ApiError::InvalidArgument(
             "signed or attested runtime trust requires a verified attestation flow".into(),
         ));
+    }
+    if let Some(public_key) = &body.capabilities.capsule_signing_public_key {
+        let bytes: [u8; 32] = BASE64
+            .decode(public_key)
+            .map_err(|_| {
+                ApiError::InvalidArgument("capsule signing public key is not valid base64".into())
+            })?
+            .try_into()
+            .map_err(|_| {
+                ApiError::InvalidArgument(
+                    "capsule signing public key must decode to 32 bytes".into(),
+                )
+            })?;
+        ed25519_dalek::VerifyingKey::from_bytes(&bytes).map_err(|_| {
+            ApiError::InvalidArgument("capsule signing public key is invalid".into())
+        })?;
     }
     state
         .storage
@@ -1001,6 +1021,184 @@ async fn import_capsule(
             state: "paused",
         }),
     ))
+}
+
+#[derive(Deserialize)]
+struct AttachDeviceCapsuleRequest {
+    tenant_id: TenantId,
+    destination_instance_id: InstanceId,
+    capsule: SignedCapsuleManifest,
+    payload_base64: String,
+    payload_key_base64: TransferPayloadKey,
+}
+
+#[derive(Debug, Serialize)]
+struct AttachDeviceCapsuleResponse {
+    handoff: ExecutionHandoff,
+    destination_instance_id: InstanceId,
+}
+
+#[allow(clippy::too_many_lines)] // audited external-runtime transfer phases stay explicit
+async fn attach_device_capsule(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<HandoffId>,
+    Json(body): Json<AttachDeviceCapsuleRequest>,
+) -> Result<Json<AttachDeviceCapsuleResponse>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let handoff = state
+        .storage
+        .get_handoff(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "handoff"))?
+        .ok_or_else(|| ApiError::NotFound(format!("handoff {id}")))?;
+    if handoff.state == HandoffState::Exported
+        && handoff.capsule_id == Some(body.capsule.manifest.capsule_id)
+        && state
+            .storage
+            .is_capsule_import_instance(
+                &tenant_id,
+                body.capsule.manifest.capsule_id,
+                handoff.destination_runtime_id,
+                body.destination_instance_id,
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "capsule import"))?
+    {
+        return Ok(Json(AttachDeviceCapsuleResponse {
+            handoff,
+            destination_instance_id: body.destination_instance_id,
+        }));
+    }
+    if !matches!(
+        handoff.state,
+        HandoffState::Requested | HandoffState::Quiescing
+    ) {
+        return Err(ApiError::Conflict(
+            "only a requested or recovering handoff can attach a device capsule".into(),
+        ));
+    }
+    if handoff.state == HandoffState::Quiescing
+        && handoff.capsule_id != Some(body.capsule.manifest.capsule_id)
+    {
+        return Err(ApiError::Conflict(
+            "recovering handoff is bound to another device capsule".into(),
+        ));
+    }
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, handoff.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if execution.state != OwnershipState::Owned
+        || execution.owner_runtime_id != handoff.source_runtime_id
+        || execution.epoch != handoff.expected_epoch
+    {
+        return Err(ApiError::Conflict(
+            "handoff source no longer owns the expected epoch".into(),
+        ));
+    }
+    let now = Utc::now();
+    let source_key = state
+        .storage
+        .list_runtime_capabilities(&tenant_id, now, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
+        .into_iter()
+        .find(|runtime| runtime.runtime_id == handoff.source_runtime_id)
+        .and_then(|runtime| runtime.capsule_signing_public_key)
+        .ok_or_else(|| {
+            ApiError::Conflict("source runtime has no live registered capsule signing key".into())
+        })?;
+    if body.capsule.public_key != source_key
+        || body.capsule.manifest.continuity_id != handoff.continuity_id
+        || body.capsule.manifest.source_runtime_id != handoff.source_runtime_id
+        || body.capsule.manifest.allowed_destination_runtime_id
+            != Some(handoff.destination_runtime_id)
+    {
+        return Err(ApiError::Conflict(
+            "device capsule identity does not match the requested handoff".into(),
+        ));
+    }
+    let declared_bytes = usize::try_from(body.capsule.manifest.payload_artifact.bytes)
+        .map_err(|_| ApiError::PayloadTooLarge("capsule payload size is unsupported".into()))?;
+    let max_sealed_bytes = orch8_types::continuity::CapsulePayload::MAX_ENCODED_BYTES + 64;
+    let max_base64_bytes = declared_bytes.saturating_add(2) / 3 * 4;
+    if declared_bytes > max_sealed_bytes || body.payload_base64.len() > max_base64_bytes {
+        return Err(ApiError::PayloadTooLarge(
+            "transported capsule payload exceeds protocol bounds".into(),
+        ));
+    }
+    let sealed = BASE64
+        .decode(&body.payload_base64)
+        .map_err(|_| ApiError::InvalidArgument("capsule payload is not valid base64".into()))?;
+    let (payload_encryptor, _) = transfer_payload_encryptor(body.payload_key_base64.expose())?;
+    let quiescing = if handoff.state == HandoffState::Requested {
+        let mut next = handoff.clone();
+        next.state = HandoffState::Quiescing;
+        next.capsule_id = Some(body.capsule.manifest.capsule_id);
+        next.version = handoff.version.saturating_add(1);
+        next.updated_at = now;
+        if !state
+            .storage
+            .cas_handoff(
+                &tenant_id,
+                id,
+                HandoffState::Requested,
+                handoff.version,
+                &next,
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "handoff"))?
+        {
+            return Err(ApiError::Conflict("handoff changed concurrently".into()));
+        }
+        next
+    } else {
+        handoff.clone()
+    };
+    let import = orch8_engine::capsule::verify_and_import_paused_capsule_bytes(
+        state.storage.as_ref(),
+        &body.capsule,
+        &sealed,
+        orch8_engine::capsule::CapsuleImportRequest {
+            tenant_id: &tenant_id,
+            destination_runtime_id: handoff.destination_runtime_id,
+            destination_instance_id: Some(body.destination_instance_id),
+            expected_epoch: handoff.expected_epoch,
+            trusted_public_keys: &[source_key],
+            now,
+        },
+        &payload_encryptor,
+    )
+    .await;
+    if let Err(error) = import {
+        return Err(
+            mark_capsule_export_failed(&state, &tenant_id, &quiescing, error.to_string()).await,
+        );
+    }
+    let mut exported = quiescing.clone();
+    exported.state = HandoffState::Exported;
+    exported.capsule_id = Some(body.capsule.manifest.capsule_id);
+    exported.version = quiescing.version.saturating_add(1);
+    exported.updated_at = Utc::now();
+    let mut transferring = execution.clone();
+    transferring.state = OwnershipState::Transferring;
+    transferring.updated_at = exported.updated_at;
+    orch8_engine::continuity::commit_handoff_export(
+        state.storage.as_ref(),
+        &quiescing,
+        &exported,
+        &execution,
+        &transferring,
+    )
+    .await
+    .map_err(|error| ApiError::Conflict(error.to_string()))?;
+    Ok(Json(AttachDeviceCapsuleResponse {
+        handoff: exported,
+        destination_instance_id: body.destination_instance_id,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

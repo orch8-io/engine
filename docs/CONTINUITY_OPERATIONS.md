@@ -82,6 +82,23 @@ Import, activation, and redelivery are idempotent. Preserve the bundle and key
 only until both quarantine imports are confirmed; then erase the transfer key.
 The device may execute with networking disabled after activation.
 
+To return ownership, refresh the device runtime registration with its raw
+base64 Ed25519 `capsule_signing_public_key`, register the destination runtime,
+and create a preview-bound return handoff. The device calls
+`exportContinuityCapsule` with a destination-generated payload key and a host
+`CapsuleSigner`. The signer callback receives only the canonical manifest's
+SHA-256 digest, so Secure Enclave/KeyStore private keys remain non-exportable
+and never enter Rust memory.
+
+Upload the returned manifest and encrypted payload to
+`POST /continuity/handoffs/{id}/attach-device-capsule`. The control plane
+requires a live source-runtime registration, an exact match to its signing
+key, source runtime, continuity ID, epoch, and requested destination, then
+imports the destination quarantine before atomically changing ownership to
+`transferring`. Repeating the same attach after a lost response returns the
+original imported instance. Accept and resume it through the normal handoff
+endpoints. A different capsule or instance cannot reuse that idempotency slot.
+
 ## Unknown external effects
 
 An effect receipt enters `unknown` when dispatch was durable but the engine did

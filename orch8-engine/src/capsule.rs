@@ -117,6 +117,19 @@ pub async fn export_paused_capsule(
     signing_key: &SigningKey,
     payload_encryptor: &FieldEncryptor,
 ) -> Result<SignedCapsuleManifest, CapsuleServiceError> {
+    let manifest = export_paused_capsule_manifest(storage, request, payload_encryptor).await?;
+    sign_capsule_manifest(manifest, signing_key).map_err(Into::into)
+}
+
+/// Assemble, encrypt, and persist a capsule without choosing how it is
+/// signed. Embedded runtimes use this boundary with host-managed signing keys,
+/// then verify the returned external signature before transport.
+#[allow(clippy::too_many_lines)] // protocol assembly is intentionally linear and auditable
+pub async fn export_paused_capsule_manifest(
+    storage: &dyn StorageBackend,
+    request: CapsuleExportRequest,
+    payload_encryptor: &FieldEncryptor,
+) -> Result<CapsuleManifest, CapsuleServiceError> {
     let instance = storage
         .get_instance(request.continuity.current_instance_id)
         .await?
@@ -249,7 +262,7 @@ pub async fn export_paused_capsule(
         encryption_key_id: request.encryption_key_id,
     };
     storage.save_capsule_manifest(&manifest).await?;
-    sign_capsule_manifest(manifest, signing_key).map_err(Into::into)
+    Ok(manifest)
 }
 
 pub async fn verify_and_import_paused_capsule(
@@ -305,7 +318,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
         signed.manifest.allowed_destination_runtime_id,
     );
     let plaintext = payload_encryptor
-        .decrypt_bytes_with_aad(&sealed, &aad)
+        .decrypt_bytes_with_aad(sealed, &aad)
         .map_err(|error| CapsuleServiceError::Encryption(error.to_string()))?;
     if plaintext.len() > CapsulePayload::MAX_ENCODED_BYTES {
         return Err(CapsuleServiceError::PayloadTooLarge);
@@ -329,9 +342,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
     }
     let now = request.now;
     let candidate = TaskInstance {
-        id: request
-            .destination_instance_id
-            .unwrap_or_else(InstanceId::new),
+        id: request.destination_instance_id.unwrap_or_default(),
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),
         namespace: payload.instance.namespace.clone(),
