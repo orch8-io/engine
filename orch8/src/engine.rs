@@ -363,10 +363,11 @@ impl Engine {
         if let Ok(Some(fresh)) = self.inner.storage.get_instance(id).await
             && fresh.state == InstanceState::Scheduled
         {
+            let now = self.inner.config.clock.now();
             let _ = self
                 .inner
                 .storage
-                .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
+                .update_instance_state(id, InstanceState::Scheduled, Some(now))
                 .await;
         }
 

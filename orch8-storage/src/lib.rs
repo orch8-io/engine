@@ -2750,6 +2750,18 @@ pub trait InvariantStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<InvariantResult>, StorageError>;
+
+    async fn save_what_if_run(
+        &self,
+        run: &orch8_types::continuity_advanced::WhatIfRunRecord,
+    ) -> Result<(), StorageError>;
+
+    async fn list_what_if_runs(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WhatIfRunRecord>, StorageError>;
 }
 
 #[async_trait]

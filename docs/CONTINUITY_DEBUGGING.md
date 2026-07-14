@@ -35,12 +35,67 @@ Post the selected checkpoint and optional patches to:
 POST /continuity/executions/{continuity_id}/what-if
 ```
 
+For example:
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "checkpoint_id": "019...",
+  "context_patch": {"priority": "urgent"},
+  "config_patch": {"routing_policy": "quality_first"},
+  "block_param_overrides": {
+    "classify": {"model": "premium-v2"}
+  },
+  "output_overrides": {
+    "classify": {
+      "tier": "premium",
+      "usage": {
+        "input_tokens": 20,
+        "output_tokens": 12,
+        "total_tokens": 32,
+        "cost_microunits": 1000,
+        "external_calls": 1
+      }
+    }
+  },
+  "handler_mocks": {"premium_path": {"selected": true}},
+  "signals": [
+    {
+      "signal_type": "custom:human_input:approve",
+      "payload": {"value": "continue"}
+    }
+  ],
+  "max_ticks": 5000
+}
+```
+
 Pre-boundary block outputs are seeded as completed evidence, so the sandbox
 starts after the selected boundary and preserves downstream `outputs.*`
 references. Recorded or explicitly supplied mocks may run after the boundary.
 An unmocked handler fails the simulation; it never falls through to a real
 provider, plugin, worker, or built-in effect. Time is virtual and bounded by
 `max_ticks` and the logical-duration limit.
+
+The response includes the immutable scenario description, `baseline_report`,
+patched `report`, and a `comparison`. The comparison calls out added/removed
+blocks, changed output values, terminal-state changes, handler-call deltas,
+simulated external-call differences, configured invariant outcomes, and usage
+totals/deltas. `effects.production_receipts_created` is always zero: a nonzero
+value would violate the sandbox contract.
+Usage is read from either the block output itself or its `usage` object;
+`prompt_tokens`/`completion_tokens` are accepted aliases for
+`input_tokens`/`output_tokens`. Cost is expressed as integer microunits.
+
+List persisted summaries with:
+
+```text
+GET /continuity/executions/{continuity_id}/what-if?tenant_id={tenant_id}&limit=100
+```
+
+The ledger is tenant scoped and intentionally stores reports/comparisons, not
+full production evidence. Apply PostgreSQL migration `063_what_if_runs.sql`
+before using these endpoints after an upgrade. Embedded SQLite runtimes migrate
+to schema version 29 automatically.
 
 ## Extract and run a fixture
 

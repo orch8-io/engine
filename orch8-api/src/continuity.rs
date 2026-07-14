@@ -33,8 +33,8 @@ use orch8_types::continuity_advanced::{
     ExtractedTestFixture, FaultInjection, FaultKind, FederationEnvelope, FederationPeer,
     ForkEffectMode, GeneratedScenario, InvariantId, InvariantResult, InvariantRule,
     LiveMigrationPlan, MigrationDisposition, MigrationPlanId, ProviderCandidate, ReservationState,
-    ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfScenario,
-    WorkflowInvariant,
+    ResidencyEvidence, ReviewerCapabilities, ScenarioId, StateTransform, WhatIfRunRecord,
+    WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 
@@ -126,7 +126,10 @@ pub fn routes() -> Router<AppState> {
             "/continuity/executions/{id}/checkpoints/{checkpoint_id}",
             get(get_continuity_checkpoint),
         )
-        .route("/continuity/executions/{id}/what-if", post(run_what_if))
+        .route(
+            "/continuity/executions/{id}/what-if",
+            get(list_what_if_runs).post(run_what_if),
+        )
         .route(
             "/continuity/executions/{id}/test-fixture",
             post(extract_test_fixture),
@@ -2694,20 +2697,389 @@ fn checkpoint_boundary(
 struct WhatIfRequest {
     tenant_id: TenantId,
     checkpoint_id: uuid::Uuid,
-    #[serde(default)]
+    #[serde(default = "empty_json_object")]
     context_patch: serde_json::Value,
-    #[serde(default)]
+    #[serde(default = "empty_json_object")]
+    config_patch: serde_json::Value,
+    #[serde(default = "empty_json_object")]
     output_overrides: serde_json::Value,
-    #[serde(default)]
+    #[serde(default = "empty_json_object")]
     handler_mocks: serde_json::Value,
+    #[serde(default = "empty_json_object")]
+    block_param_overrides: serde_json::Value,
+    #[serde(default)]
+    signals: Vec<orch8_types::contract::SignalFixture>,
     target_sequence_version: Option<i32>,
     max_ticks: Option<u32>,
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 #[derive(Debug, Serialize)]
 struct WhatIfResponse {
     scenario: WhatIfScenario,
+    baseline_report: orch8_types::contract::CaseReport,
     report: orch8_types::contract::CaseReport,
+    comparison: WhatIfComparison,
+}
+
+async fn list_what_if_runs(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<ContinuityCheckpointQuery>,
+) -> Result<Json<Vec<WhatIfRunRecord>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let runs = state
+        .storage
+        .list_what_if_runs(&tenant_id, id, query.limit.unwrap_or(1_000).min(10_000))
+        .await
+        .map_err(|error| ApiError::from_storage(error, "what-if runs"))?;
+    Ok(Json(runs))
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct WhatIfUsage {
+    input_tokens: i64,
+    output_tokens: i64,
+    total_tokens: i64,
+    cost_microunits: i64,
+    external_calls: i64,
+    steps: i64,
+    logical_duration_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct WhatIfComparison {
+    added_blocks: Vec<String>,
+    removed_blocks: Vec<String>,
+    output_changes: std::collections::BTreeMap<String, WhatIfOutputChange>,
+    terminal_state_changed: bool,
+    handler_call_delta: std::collections::BTreeMap<String, i64>,
+    effects: WhatIfEffectComparison,
+    baseline_invariants: Vec<WhatIfInvariantOutcome>,
+    candidate_invariants: Vec<WhatIfInvariantOutcome>,
+    baseline_usage: WhatIfUsage,
+    candidate_usage: WhatIfUsage,
+    usage_delta: WhatIfUsage,
+}
+
+#[derive(Debug, Serialize)]
+struct WhatIfOutputChange {
+    baseline: Option<serde_json::Value>,
+    candidate: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct WhatIfEffectComparison {
+    baseline_simulated_external_calls: i64,
+    candidate_simulated_external_calls: i64,
+    simulated_external_call_delta: i64,
+    production_receipts_created: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct WhatIfInvariantOutcome {
+    invariant_id: InvariantId,
+    name: String,
+    status: orch8_types::continuity_advanced::EvidenceStatus,
+    summary: String,
+}
+
+fn patch_step_params_value(
+    value: &mut serde_json::Value,
+    overrides: &serde_json::Map<String, serde_json::Value>,
+    applied: &mut std::collections::BTreeSet<String>,
+) -> Result<(), ApiError> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("handler")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && let Some(id) = object
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                && let Some(patch) = overrides.get(&id)
+            {
+                let patch = patch.as_object().ok_or_else(|| {
+                    ApiError::InvalidArgument(format!(
+                        "block_param_overrides.{id} must be a JSON object"
+                    ))
+                })?;
+                let params = object
+                    .entry("params")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        ApiError::Conflict(format!("block {id} params are not an object"))
+                    })?;
+                params.extend(patch.clone());
+                applied.insert(id);
+            }
+            for child in object.values_mut() {
+                patch_step_params_value(child, overrides, applied)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                patch_step_params_value(child, overrides, applied)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn patch_sequence_params(
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    overrides: &serde_json::Value,
+) -> Result<orch8_types::sequence::SequenceDefinition, ApiError> {
+    let Some(overrides) = overrides.as_object() else {
+        if overrides.is_null() {
+            return Ok(sequence.clone());
+        }
+        return Err(ApiError::InvalidArgument(
+            "block_param_overrides must be a JSON object".into(),
+        ));
+    };
+    if overrides.len() > 1_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "block parameter overrides exceed 1000 entries".into(),
+        ));
+    }
+    let mut value =
+        serde_json::to_value(sequence).map_err(|error| ApiError::Internal(error.to_string()))?;
+    let mut applied = std::collections::BTreeSet::new();
+    patch_step_params_value(&mut value, overrides, &mut applied)?;
+    if let Some(unknown) = overrides.keys().find(|block| !applied.contains(*block)) {
+        return Err(ApiError::InvalidArgument(format!(
+            "block_param_overrides references unknown step {unknown}"
+        )));
+    }
+    let patched: orch8_types::sequence::SequenceDefinition = serde_json::from_value(value)
+        .map_err(|error| {
+            ApiError::InvalidArgument(format!("invalid parameter override: {error}"))
+        })?;
+    patched
+        .validate()
+        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    Ok(patched)
+}
+
+fn scenario_mocks(
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    outputs: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<orch8_types::contract::MockDef> {
+    sequence_step_blocks(sequence)
+        .into_iter()
+        .filter_map(|block| {
+            outputs
+                .get(&block)
+                .cloned()
+                .map(|output| orch8_types::contract::MockDef {
+                    handler: None,
+                    block: Some(block),
+                    policy: orch8_types::contract::MockPolicy::Success { output },
+                })
+        })
+        .collect()
+}
+
+fn usage_metric(value: &serde_json::Value, names: &[&str]) -> i64 {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(serde_json::Value::as_i64))
+        .unwrap_or(0)
+}
+
+fn scenario_usage(
+    report: &orch8_types::contract::CaseReport,
+    outputs: &std::collections::HashMap<String, serde_json::Value>,
+) -> WhatIfUsage {
+    let mut usage = WhatIfUsage {
+        steps: i64::try_from(report.executed_blocks.len()).unwrap_or(i64::MAX),
+        logical_duration_ms: i64::try_from(report.logical_duration_ms).unwrap_or(i64::MAX),
+        ..WhatIfUsage::default()
+    };
+    for block in &report.executed_blocks {
+        let Some(output) = outputs.get(block) else {
+            continue;
+        };
+        let evidence = output.get("usage").unwrap_or(output);
+        let input = usage_metric(evidence, &["input_tokens", "prompt_tokens"]);
+        let output_tokens = usage_metric(evidence, &["output_tokens", "completion_tokens"]);
+        usage.input_tokens = usage.input_tokens.saturating_add(input);
+        usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
+        usage.total_tokens = usage.total_tokens.saturating_add(
+            evidence
+                .get("total_tokens")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_else(|| input.saturating_add(output_tokens)),
+        );
+        usage.cost_microunits = usage
+            .cost_microunits
+            .saturating_add(usage_metric(evidence, &["cost_microunits"]));
+        usage.external_calls = usage
+            .external_calls
+            .saturating_add(usage_metric(evidence, &["external_calls"]));
+    }
+    usage
+}
+
+fn usage_delta(candidate: &WhatIfUsage, baseline: &WhatIfUsage) -> WhatIfUsage {
+    WhatIfUsage {
+        input_tokens: candidate.input_tokens.saturating_sub(baseline.input_tokens),
+        output_tokens: candidate
+            .output_tokens
+            .saturating_sub(baseline.output_tokens),
+        total_tokens: candidate.total_tokens.saturating_sub(baseline.total_tokens),
+        cost_microunits: candidate
+            .cost_microunits
+            .saturating_sub(baseline.cost_microunits),
+        external_calls: candidate
+            .external_calls
+            .saturating_sub(baseline.external_calls),
+        steps: candidate.steps.saturating_sub(baseline.steps),
+        logical_duration_ms: candidate
+            .logical_duration_ms
+            .saturating_sub(baseline.logical_duration_ms),
+    }
+}
+
+fn compare_what_if(
+    baseline: &orch8_types::contract::CaseReport,
+    candidate: &orch8_types::contract::CaseReport,
+    baseline_outputs: &std::collections::HashMap<String, serde_json::Value>,
+    candidate_outputs: &std::collections::HashMap<String, serde_json::Value>,
+    baseline_invariants: Vec<WhatIfInvariantOutcome>,
+    candidate_invariants: Vec<WhatIfInvariantOutcome>,
+) -> WhatIfComparison {
+    let baseline_blocks: std::collections::BTreeSet<_> =
+        baseline.executed_blocks.iter().cloned().collect();
+    let candidate_blocks: std::collections::BTreeSet<_> =
+        candidate.executed_blocks.iter().cloned().collect();
+    let output_changes = baseline_blocks
+        .union(&candidate_blocks)
+        .filter_map(|block| {
+            let before = baseline_blocks
+                .contains(block)
+                .then(|| baseline_outputs.get(block).cloned())
+                .flatten();
+            let after = candidate_blocks
+                .contains(block)
+                .then(|| candidate_outputs.get(block).cloned())
+                .flatten();
+            (before != after).then(|| {
+                (
+                    block.clone(),
+                    WhatIfOutputChange {
+                        baseline: before,
+                        candidate: after,
+                    },
+                )
+            })
+        })
+        .collect();
+    let handlers: std::collections::BTreeSet<_> = baseline
+        .handler_calls
+        .keys()
+        .chain(candidate.handler_calls.keys())
+        .cloned()
+        .collect();
+    let handler_call_delta = handlers
+        .into_iter()
+        .map(|handler| {
+            let before = i64::from(*baseline.handler_calls.get(&handler).unwrap_or(&0));
+            let after = i64::from(*candidate.handler_calls.get(&handler).unwrap_or(&0));
+            (handler, after.saturating_sub(before))
+        })
+        .filter(|(_, delta)| *delta != 0)
+        .collect();
+    let baseline_usage = scenario_usage(baseline, baseline_outputs);
+    let candidate_usage = scenario_usage(candidate, candidate_outputs);
+    let usage_delta = usage_delta(&candidate_usage, &baseline_usage);
+    let effects = WhatIfEffectComparison {
+        baseline_simulated_external_calls: baseline_usage.external_calls,
+        candidate_simulated_external_calls: candidate_usage.external_calls,
+        simulated_external_call_delta: usage_delta.external_calls,
+        // The contract runner has no production storage/provider handles.
+        production_receipts_created: 0,
+    };
+    WhatIfComparison {
+        added_blocks: candidate_blocks
+            .difference(&baseline_blocks)
+            .cloned()
+            .collect(),
+        removed_blocks: baseline_blocks
+            .difference(&candidate_blocks)
+            .cloned()
+            .collect(),
+        output_changes,
+        terminal_state_changed: baseline.final_state != candidate.final_state,
+        handler_call_delta,
+        effects,
+        baseline_invariants,
+        candidate_invariants,
+        baseline_usage,
+        candidate_usage,
+        usage_delta,
+    }
+}
+
+fn evaluate_what_if_invariants(
+    invariants: Vec<WorkflowInvariant>,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
+    report: &orch8_types::contract::CaseReport,
+    outputs: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<WhatIfInvariantOutcome> {
+    let mut output_paths = std::collections::BTreeSet::new();
+    for block in report.executed_blocks.iter().take(10_000) {
+        if let Some(output) = outputs.get(block) {
+            collect_json_paths(
+                &orch8_types::ids::BlockId::new(block),
+                output,
+                "",
+                0,
+                &mut output_paths,
+            );
+        }
+    }
+    let evidence = orch8_engine::continuity_advanced::InvariantEvidence {
+        receipts: &[],
+        terminal_state: Some(&report.final_state),
+        budget_breached: None,
+        output_paths: &output_paths,
+    };
+    let now = Utc::now();
+    invariants
+        .into_iter()
+        .map(|invariant| {
+            let result = orch8_engine::continuity_advanced::evaluate_invariant(
+                &invariant,
+                continuity_id,
+                epoch,
+                &evidence,
+                now,
+            );
+            WhatIfInvariantOutcome {
+                invariant_id: invariant.id,
+                name: invariant.name,
+                status: result.status,
+                summary: result.summary,
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_lines)] // assembles one bounded, effect-free simulation from durable evidence
@@ -2723,7 +3095,7 @@ async fn run_what_if(
     let source_sequence = Arc::unwrap_or_clone(located.sequence);
     let checkpoint = located.checkpoint;
     let boundary = located.boundary;
-    let sequence = if let Some(version) = body.target_sequence_version {
+    let target_sequence = if let Some(version) = body.target_sequence_version {
         state
             .storage
             .get_sequence_by_name(
@@ -2736,14 +3108,19 @@ async fn run_what_if(
             .map_err(|error| ApiError::from_storage(error, "target sequence"))?
             .ok_or_else(|| ApiError::NotFound("target sequence version".into()))?
     } else {
-        source_sequence
+        source_sequence.clone()
     };
-    let mut input = checkpoint
+    let sequence = patch_sequence_params(&target_sequence, &body.block_param_overrides)?;
+    let baseline_input = checkpoint
         .checkpoint_data
         .get("context_snapshot")
         .cloned()
         .unwrap_or_else(|| instance.context.data.clone());
+    let mut input = baseline_input.clone();
     merge_object_patch(&mut input, &body.context_patch)?;
+    let baseline_config = instance.context.config.clone();
+    let mut config = baseline_config.clone();
+    merge_object_patch(&mut config, &body.config_patch)?;
     let outputs = state
         .storage
         .get_all_outputs(instance.id)
@@ -2752,10 +3129,12 @@ async fn run_what_if(
     let initial_outputs = outputs
         .iter()
         .filter(|output| output.created_at <= checkpoint.created_at)
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
         .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
     let recorded = outputs
         .into_iter()
+        .filter(|output| !output.block_id.as_str().starts_with('_'))
         .map(|output| (output.block_id.as_str().to_owned(), output.output))
         .collect::<std::collections::HashMap<_, _>>();
     let overrides = body.output_overrides.as_object().ok_or_else(|| {
@@ -2770,68 +3149,156 @@ async fn run_what_if(
             "what-if overrides exceed 1000 entries".into(),
         ));
     }
-    let mocks = sequence_step_blocks(&sequence)
-        .into_iter()
-        .filter_map(|block| {
-            let output = explicit_mocks
-                .get(&block)
-                .or_else(|| overrides.get(&block))
-                .cloned()
-                .or_else(|| recorded.get(&block).cloned())?;
-            Some(orch8_types::contract::MockDef {
-                handler: None,
-                block: Some(block),
-                policy: orch8_types::contract::MockPolicy::Success { output },
-            })
-        })
-        .collect();
+    if body.signals.len() > 1_000 {
+        return Err(ApiError::PayloadTooLarge(
+            "what-if signals exceed 1000 entries".into(),
+        ));
+    }
+    let mut candidate_outputs = recorded.clone();
+    candidate_outputs.extend(
+        overrides
+            .iter()
+            .map(|(block, output)| (block.clone(), output.clone())),
+    );
+    candidate_outputs.extend(
+        explicit_mocks
+            .iter()
+            .map(|(block, output)| (block.clone(), output.clone())),
+    );
+    let mut candidate_initial_outputs = initial_outputs.clone();
+    for (block, output) in &candidate_outputs {
+        if let Some(initial) = candidate_initial_outputs.get_mut(block) {
+            *initial = output.clone();
+        }
+    }
     let max_ticks = body.max_ticks.unwrap_or(5_000).min(10_000);
-    let case = orch8_types::contract::ContractCase {
-        name: "continuity-what-if".into(),
-        description: Some("effect-free continuity simulation".into()),
-        input,
+    let baseline_case = orch8_types::contract::ContractCase {
+        name: "continuity-baseline".into(),
+        description: Some("Recorded continuation baseline".into()),
+        input: baseline_input,
         initial_outputs,
-        config: None,
-        mocks,
-        signals: Vec::new(),
+        config: Some(baseline_config),
+        mocks: scenario_mocks(&source_sequence, &recorded),
+        signals: body.signals.clone(),
         expect: orch8_types::contract::Expectations::default(),
         max_logical_duration_ms: Some(86_400_000),
         max_ticks: Some(max_ticks),
     };
-    let report = orch8::contract::run_case(
-        &sequence,
-        orch8_types::contract::UnmockedHandlerPolicy::Fail,
-        &case,
-        &orch8::contract::RunOptions::default(),
+    let candidate_case = orch8_types::contract::ContractCase {
+        name: "continuity-what-if".into(),
+        description: Some("effect-free continuity simulation".into()),
+        input,
+        initial_outputs: candidate_initial_outputs,
+        config: Some(config),
+        mocks: scenario_mocks(&sequence, &candidate_outputs),
+        signals: body.signals.clone(),
+        expect: orch8_types::contract::Expectations::default(),
+        max_logical_duration_ms: Some(86_400_000),
+        max_ticks: Some(max_ticks),
+    };
+    let run_options = orch8::contract::RunOptions::default();
+    let (baseline_report, report) = tokio::try_join!(
+        orch8::contract::run_case(
+            &source_sequence,
+            orch8_types::contract::UnmockedHandlerPolicy::Fail,
+            &baseline_case,
+            &run_options,
+        ),
+        orch8::contract::run_case(
+            &sequence,
+            orch8_types::contract::UnmockedHandlerPolicy::Fail,
+            &candidate_case,
+            &run_options,
+        ),
     )
-    .await
     .map_err(|error| ApiError::Internal(format!("what-if simulation failed: {error}")))?;
+    let (baseline_invariants, candidate_invariants) = tokio::try_join!(
+        state.storage.list_workflow_invariants(
+            &tenant_id,
+            source_sequence.id,
+            source_sequence.version,
+            10_000,
+        ),
+        state
+            .storage
+            .list_workflow_invariants(&tenant_id, sequence.id, sequence.version, 10_000,),
+    )
+    .map_err(|error| ApiError::from_storage(error, "what-if invariants"))?;
+    let baseline_invariants = evaluate_what_if_invariants(
+        baseline_invariants,
+        id,
+        boundary.epoch,
+        &baseline_report,
+        &recorded,
+    );
+    let candidate_invariants = evaluate_what_if_invariants(
+        candidate_invariants,
+        id,
+        boundary.epoch,
+        &report,
+        &candidate_outputs,
+    );
+    let comparison = compare_what_if(
+        &baseline_report,
+        &report,
+        &recorded,
+        &candidate_outputs,
+        baseline_invariants,
+        candidate_invariants,
+    );
     let scenario = WhatIfScenario {
         id: ScenarioId::new(),
         tenant_id,
         source: boundary,
         context_patch: body.context_patch,
+        config_patch: body.config_patch,
         output_overrides: body.output_overrides,
         handler_mocks: body.handler_mocks,
+        block_param_overrides: body.block_param_overrides,
+        signals: body.signals,
         target_sequence_version: body.target_sequence_version,
         effect_mode: ForkEffectMode::Blocked,
         virtual_time: true,
         retain_full_evidence: false,
     };
-    Ok(Json(WhatIfResponse { scenario, report }))
+    state
+        .storage
+        .save_what_if_run(&WhatIfRunRecord {
+            scenario: scenario.clone(),
+            summary: serde_json::json!({
+                "baseline_report": &baseline_report,
+                "report": &report,
+                "comparison": &comparison,
+            }),
+            created_at: Utc::now(),
+        })
+        .await
+        .map_err(|error| ApiError::from_storage(error, "what-if run"))?;
+    Ok(Json(WhatIfResponse {
+        scenario,
+        baseline_report,
+        report,
+        comparison,
+    }))
 }
 
 fn merge_object_patch(
     target: &mut serde_json::Value,
     patch: &serde_json::Value,
 ) -> Result<(), ApiError> {
-    let patch = patch
-        .as_object()
-        .ok_or_else(|| ApiError::InvalidArgument("context_patch must be a JSON object".into()))?;
+    if patch.is_null() {
+        return Ok(());
+    }
+    let patch = patch.as_object().ok_or_else(|| {
+        ApiError::InvalidArgument("context/config patch must be a JSON object".into())
+    })?;
     if patch.len() > 1_000 {
         return Err(ApiError::PayloadTooLarge(
             "context_patch exceeds 1000 top-level entries".into(),
         ));
+    }
+    if target.is_null() {
+        *target = serde_json::json!({});
     }
     let target = target
         .as_object_mut()

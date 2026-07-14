@@ -120,6 +120,11 @@ pub async fn run_case(
             .iter()
             .map(|(block, output)| (block.clone(), output.clone())),
     );
+    // Engine-private outputs (for example `_tree_initialized`) describe the
+    // original instance's scheduler state. Replaying them into a fresh
+    // sandbox without the matching execution-node rows can suppress tree
+    // initialization and strand the case in `scheduled` forever.
+    initial_outputs.retain(|block, _| !block.starts_with('_'));
     // --- mock lookup tables ---
     let mut by_handler: HashMap<String, MockPolicy> = HashMap::new();
     let mut by_block: HashMap<String, MockPolicy> = HashMap::new();

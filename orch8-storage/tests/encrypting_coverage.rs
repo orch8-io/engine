@@ -18,11 +18,17 @@ use uuid::Uuid;
 use orch8_storage::encrypting::EncryptingStorage;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
-    AdminStore, InstanceStore, OutputStore, ResourceStore, SequenceStore, SignalStore,
-    StorageBackend, WorkerStore,
+    AdminStore, ContinuityStore, InstanceStore, InvariantStore, OutputStore, ResourceStore,
+    SequenceStore, SignalStore, StorageBackend, WorkerStore,
 };
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::{ExecutionContext, RuntimeContext};
+use orch8_types::continuity::{
+    ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
+};
+use orch8_types::continuity_advanced::{
+    CheckpointBoundary, ForkEffectMode, ScenarioId, WhatIfRunRecord, WhatIfScenario,
+};
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
@@ -1286,4 +1292,81 @@ async fn context_ciphertext_is_bound_to_its_instance_and_rejects_transplant() {
         result.is_err(),
         "a ciphertext transplanted from a different instance must not decrypt"
     );
+}
+
+#[tokio::test]
+async fn what_if_payloads_are_encrypted_at_rest_and_decrypted_on_read() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let enc = FieldEncryptor::from_hex_key(TEST_KEY).unwrap();
+    let storage = EncryptingStorage::new(inner.clone(), enc);
+    let instance = mk_instance("t1", json!({}));
+    seed_sequence(&storage, instance.sequence_id, "t1").await;
+    storage.create_instance(&instance).await.unwrap();
+    let continuity_id = ContinuityId::new();
+    let runtime_id = RuntimeId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: instance.tenant_id.clone(),
+            current_instance_id: instance.id,
+            owner_runtime_id: runtime_id,
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let run = WhatIfRunRecord {
+        scenario: WhatIfScenario {
+            id: ScenarioId::new(),
+            tenant_id: instance.tenant_id.clone(),
+            source: CheckpointBoundary {
+                checkpoint_id: Uuid::now_v7(),
+                instance_id: instance.id,
+                continuity_id,
+                epoch: ExecutionEpoch::initial(),
+                sequence_id: instance.sequence_id,
+                sequence_version: 1,
+                block_id: BlockId::new("approve"),
+                checkpoint_sha256: "a".repeat(64),
+                provenance_head: None,
+                created_at: now,
+            },
+            context_patch: json!({"secret": "context-value"}),
+            config_patch: json!({"secret": "config-value"}),
+            output_overrides: json!({"model": {"secret": "output-value"}}),
+            handler_mocks: json!({"handler": {"secret": "mock-value"}}),
+            block_param_overrides: json!({"model": {"secret": "param-value"}}),
+            signals: vec![orch8_types::contract::SignalFixture {
+                signal_type: "custom:human_input:approve".into(),
+                payload: json!({"secret": "signal-value"}),
+            }],
+            target_sequence_version: None,
+            effect_mode: ForkEffectMode::Blocked,
+            virtual_time: true,
+            retain_full_evidence: false,
+        },
+        summary: json!({"secret": "summary-value"}),
+        created_at: now,
+    };
+    storage.save_what_if_run(&run).await.unwrap();
+
+    let raw = inner
+        .list_what_if_runs(&instance.tenant_id, continuity_id, 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(FieldEncryptor::is_encrypted(&raw.scenario.context_patch));
+    assert!(FieldEncryptor::is_encrypted(
+        &raw.scenario.signals[0].payload
+    ));
+    assert!(FieldEncryptor::is_encrypted(&raw.summary));
+
+    let decrypted = storage
+        .list_what_if_runs(&instance.tenant_id, continuity_id, 1)
+        .await
+        .unwrap();
+    assert_eq!(decrypted, [run]);
 }

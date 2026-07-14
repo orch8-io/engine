@@ -145,7 +145,7 @@ pub enum MockOutcome {
 }
 
 /// A signal delivered while the case's instance is waiting.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SignalFixture {
     /// Signal type: `custom`, `resume`, `cancel`, ... (matches the engine's
     /// signal-type names).

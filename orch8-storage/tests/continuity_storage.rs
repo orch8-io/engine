@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{ContinuityStore, InstanceStore};
+use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore};
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
     ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
@@ -9,6 +9,9 @@ use orch8_types::continuity::{
     OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome,
     ProvenanceEntry, RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel, StreamFrame,
     StreamFrameState, StreamId,
+};
+use orch8_types::continuity_advanced::{
+    CheckpointBoundary, ForkEffectMode, ScenarioId, WhatIfRunRecord, WhatIfScenario,
 };
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
@@ -306,6 +309,73 @@ async fn guarded_effect_dispatch_has_one_concurrent_winner() {
             .filter(|receipt| receipt.state == EffectState::Prepared)
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn what_if_summaries_are_durable_and_tenant_scoped() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant_id = tenant("tenant-what-if");
+    let continuity_id = ContinuityId::new();
+    let instance_id = InstanceId::new();
+    let now = Utc::now();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant_id.clone(),
+            current_instance_id: instance_id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        })
+        .await
+        .unwrap();
+    let run = WhatIfRunRecord {
+        scenario: WhatIfScenario {
+            id: ScenarioId::new(),
+            tenant_id: tenant_id.clone(),
+            source: CheckpointBoundary {
+                checkpoint_id: uuid::Uuid::now_v7(),
+                instance_id,
+                continuity_id,
+                epoch: ExecutionEpoch::initial(),
+                sequence_id: SequenceId::new(),
+                sequence_version: 1,
+                block_id: BlockId::new("model"),
+                checkpoint_sha256: "a".repeat(64),
+                provenance_head: None,
+                created_at: now,
+            },
+            context_patch: serde_json::json!({}),
+            config_patch: serde_json::json!({}),
+            output_overrides: serde_json::json!({}),
+            handler_mocks: serde_json::json!({}),
+            block_param_overrides: serde_json::json!({}),
+            signals: Vec::new(),
+            target_sequence_version: None,
+            effect_mode: ForkEffectMode::Blocked,
+            virtual_time: true,
+            retain_full_evidence: false,
+        },
+        summary: serde_json::json!({"cost_delta": 42}),
+        created_at: now,
+    };
+    storage.save_what_if_run(&run).await.unwrap();
+
+    assert_eq!(
+        storage
+            .list_what_if_runs(&tenant_id, continuity_id, 10)
+            .await
+            .unwrap(),
+        [run]
+    );
+    assert!(
+        storage
+            .list_what_if_runs(&tenant("tenant-other"), continuity_id, 10)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

@@ -94,13 +94,26 @@ pub struct WhatIfScenario {
     #[serde(default)]
     pub context_patch: serde_json::Value,
     #[serde(default)]
+    pub config_patch: serde_json::Value,
+    #[serde(default)]
     pub output_overrides: serde_json::Value,
     #[serde(default)]
     pub handler_mocks: serde_json::Value,
+    #[serde(default)]
+    pub block_param_overrides: serde_json::Value,
+    #[serde(default)]
+    pub signals: Vec<crate::contract::SignalFixture>,
     pub target_sequence_version: Option<i32>,
     pub effect_mode: ForkEffectMode,
     pub virtual_time: bool,
     pub retain_full_evidence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WhatIfRunRecord {
+    pub scenario: WhatIfScenario,
+    pub summary: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

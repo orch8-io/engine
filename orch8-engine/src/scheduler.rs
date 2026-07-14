@@ -795,6 +795,23 @@ async fn process_signalled_instances(
         )
         .await?;
         if abort {
+            // Signal handling owns state transitions but deliberately has no
+            // scheduler clock parameter. Normalize any wake-up here so a
+            // virtual-time engine never inherits `Utc::now()` as its next
+            // fire time and interprets an immediate signal as a months-long
+            // delay.
+            if let Some(inst) = storage.get_instance(instance_id).await?
+                && inst.state == InstanceState::Scheduled
+            {
+                storage
+                    .conditional_update_instance_state(
+                        instance_id,
+                        InstanceState::Scheduled,
+                        InstanceState::Scheduled,
+                        Some(clock.now()),
+                    )
+                    .await?;
+            }
             debug!(
                 instance_id = %instance_id,
                 from_state = %current_state,

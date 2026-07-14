@@ -1196,6 +1196,10 @@ async fn initial_outputs_resume_after_boundary_without_reexecuting_prefix() {
     let mut opts = RunOptions::default();
     opts.initial_outputs
         .insert("before".into(), json!({"saved": true}));
+    // Production checkpoints can include this scheduler sentinel. A fresh
+    // sandbox must ignore it because execution-node state is not replayed.
+    opts.initial_outputs
+        .insert("_tree_initialized".into(), json!({"initialized": true}));
 
     let report = run_case(&seq_def, UnmockedHandlerPolicy::Fail, &contract_case, &opts)
         .await
@@ -1735,6 +1739,7 @@ async fn human_gate_valid_signal_completes_the_case() {
             "signals": [
                 {"signal_type": "custom:human_input:gate", "payload": {"value": "yes"}}
             ],
+            "max_logical_duration_ms": 1000,
             "expect": {
                 "terminal_state": "completed",
                 "assertions": [
@@ -1747,6 +1752,7 @@ async fn human_gate_valid_signal_completes_the_case() {
     .await;
     assert!(report.passed, "failures: {:?}", report.failures);
     assert_eq!(report.final_state, "completed");
+    assert_eq!(report.logical_duration_ms, 0);
 }
 
 /// Companion regression: once the gate resolves (here with "no"), both

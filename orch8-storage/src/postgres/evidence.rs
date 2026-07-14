@@ -6,7 +6,7 @@ use sqlx::Row;
 use orch8_types::continuity::ContinuityId;
 use orch8_types::continuity_advanced::{
     AttentionTask, AttentionTaskId, BudgetReservation, EvaluationScore, InvariantResult,
-    WorkflowInvariant,
+    WhatIfRunRecord, WorkflowInvariant,
 };
 use orch8_types::error::StorageError;
 use orch8_types::ids::{SequenceId, TenantId};
@@ -118,6 +118,44 @@ impl crate::InvariantStore for PostgresStorage {
             "SELECT record FROM invariant_results
              WHERE tenant_id = $1 AND continuity_id = $2
              ORDER BY evaluated_at DESC, id DESC LIMIT $3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.into_uuid())
+        .bind(i64::from(limit.min(10_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
+    async fn save_what_if_run(&self, run: &WhatIfRunRecord) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO what_if_runs (id, tenant_id, continuity_id, record, created_at)
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(run.scenario.id.into_uuid())
+        .bind(run.scenario.tenant_id.as_str())
+        .bind(run.scenario.source.continuity_id.into_uuid())
+        .bind(encode(run)?)
+        .bind(run.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn list_what_if_runs(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<WhatIfRunRecord>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM what_if_runs
+             WHERE tenant_id=$1 AND continuity_id=$2
+             ORDER BY created_at DESC, id DESC LIMIT $3",
         )
         .bind(tenant_id.as_str())
         .bind(continuity_id.into_uuid())

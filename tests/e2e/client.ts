@@ -342,6 +342,17 @@ export class Orch8Client {
     return this.#post(`/continuity/executions/${continuityId}/what-if`, req);
   }
 
+  async listContinuityWhatIfRuns(
+    continuityId: string,
+    tenantId: string,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/executions/${continuityId}/what-if${toQuery({
+        tenant_id: tenantId,
+      })}`,
+    );
+  }
+
   async extractContinuityTestFixture(
     continuityId: string,
     req: Record<string, unknown>,

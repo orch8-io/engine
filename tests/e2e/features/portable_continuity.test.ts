@@ -443,6 +443,7 @@ describe("Portable Continuity", () => {
     });
     assert.equal(assigned.assignee, "reviewer-a");
 
+    await client.waitForState(instance.id, "completed");
     const checkpoint = await client.saveCheckpoint(instance.id, {
       safe_boundary: "work",
       context_snapshot: {
@@ -1003,6 +1004,145 @@ describe("Portable Continuity", () => {
       fixture.effect_mocks[0].provider_receipt_id,
       "provider-effect-42",
     );
+  });
+
+  it("compares downstream behavior and usage in an effect-free what-if", async () => {
+    const tenantId = `continuity-what-if-${uuid().slice(0, 8)}`;
+    const modelHandler = `what_if_model_${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      "portable-what-if",
+      [
+        step("arm", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Capture simulation boundary?",
+            choices: [{ label: "Continue", value: "continue" }],
+          },
+        }),
+        step("model", modelHandler, { model: "baseline-v1" }),
+        step("standard", "noop", {}, {
+          when: 'outputs.model.tier == "basic"',
+        }),
+        step("premium", "noop", {}, {
+          when: 'outputs.model.tier == "premium"',
+        }),
+      ],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
+    const checkpoint = await client.saveCheckpoint(instance.id, {
+      safe_boundary: "arm",
+      context_snapshot: {},
+    });
+    await client.sendSignal(
+      instance.id,
+      { custom: "human_input:arm" } as unknown as string,
+      { value: "continue" },
+    );
+    const task = await waitForWorkerTask(modelHandler, "what-if-model-worker");
+    await client.completeWorkerTask(task.id, "what-if-model-worker", {
+      tier: "basic",
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+        cost_microunits: 100,
+        external_calls: 1,
+      },
+    });
+    await client.waitForState(instance.id, "completed");
+    await client.createContinuityInvariant({
+      tenant_id: tenantId,
+      sequence_id: createdSequence.id,
+      sequence_version: createdSequence.version,
+      name: "what-if reaches a terminal success",
+      rule: { type: "terminal_state_in", states: ["completed"] },
+    });
+
+    const whatIf = await client.runContinuityWhatIf(execution.continuity_id, {
+      tenant_id: tenantId,
+      checkpoint_id: checkpoint.id,
+      context_patch: {},
+      config_patch: { routing_policy: "quality_first" },
+      block_param_overrides: {
+        model: { model: "premium-v2" },
+      },
+      output_overrides: {
+        model: {
+          tier: "premium",
+          usage: {
+            input_tokens: 20,
+            output_tokens: 12,
+            total_tokens: 32,
+            cost_microunits: 1000,
+            external_calls: 1,
+          },
+        },
+      },
+      handler_mocks: {
+        premium: { selected: true },
+      },
+      signals: [{
+        signal_type: "custom:human_input:arm",
+        payload: { value: "continue" },
+      }],
+      max_ticks: 5000,
+    });
+    assert.equal(
+      whatIf.baseline_report.final_state,
+      "completed",
+      JSON.stringify(whatIf.baseline_report),
+    );
+    assert.equal(
+      whatIf.report.final_state,
+      "completed",
+      JSON.stringify(whatIf.report),
+    );
+    assert.deepEqual(whatIf.comparison.added_blocks, ["premium"]);
+    assert.deepEqual(whatIf.comparison.removed_blocks, ["standard"]);
+    assert.equal(whatIf.comparison.output_changes.model.baseline.tier, "basic");
+    assert.equal(whatIf.comparison.output_changes.model.candidate.tier, "premium");
+    assert.equal(whatIf.comparison.output_changes.standard.candidate, null);
+    assert.equal(whatIf.comparison.output_changes.premium.baseline, null);
+    assert.equal(whatIf.comparison.effects.production_receipts_created, 0);
+    assert.equal(whatIf.comparison.effects.simulated_external_call_delta, 0);
+    assert.equal(whatIf.comparison.baseline_invariants[0].status, "pass");
+    assert.equal(whatIf.comparison.candidate_invariants[0].status, "pass");
+    assert.equal(whatIf.comparison.usage_delta.input_tokens, 10);
+    assert.equal(whatIf.comparison.usage_delta.output_tokens, 7);
+    assert.equal(whatIf.comparison.usage_delta.total_tokens, 17);
+    assert.equal(whatIf.comparison.usage_delta.cost_microunits, 900);
+    assert.equal(whatIf.scenario.config_patch.routing_policy, "quality_first");
+    assert.equal(
+      whatIf.scenario.block_param_overrides.model.model,
+      "premium-v2",
+    );
+    assert.equal(
+      (await client.listContinuityEffects(execution.continuity_id, tenantId)).length,
+      1,
+      "sandbox runs must not add production effect receipts",
+    );
+    const persistedRuns = await client.listContinuityWhatIfRuns(
+      execution.continuity_id,
+      tenantId,
+    );
+    assert.equal(persistedRuns.length, 1);
+    assert.equal(persistedRuns[0].scenario.id, whatIf.scenario.id);
+    assert.equal(
+      persistedRuns[0].summary.comparison.usage_delta.cost_microunits,
+      900,
+    );
+    assert.equal(persistedRuns[0].scenario.retain_full_evidence, false);
   });
 
   it("blocks duplicate effects before dispatch and records one violation", async () => {

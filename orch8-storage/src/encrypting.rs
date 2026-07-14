@@ -232,6 +232,43 @@ impl EncryptingStorage {
         Ok(value.clone())
     }
 
+    fn encrypt_what_if_run(
+        &self,
+        run: &orch8_types::continuity_advanced::WhatIfRunRecord,
+    ) -> Result<orch8_types::continuity_advanced::WhatIfRunRecord, StorageError> {
+        let mut encrypted = run.clone();
+        let scenario = &mut encrypted.scenario;
+        scenario.context_patch = self.encrypt_json_value(&scenario.context_patch)?;
+        scenario.config_patch = self.encrypt_json_value(&scenario.config_patch)?;
+        scenario.output_overrides = self.encrypt_json_value(&scenario.output_overrides)?;
+        scenario.handler_mocks = self.encrypt_json_value(&scenario.handler_mocks)?;
+        scenario.block_param_overrides =
+            self.encrypt_json_value(&scenario.block_param_overrides)?;
+        for signal in &mut scenario.signals {
+            signal.payload = self.encrypt_json_value(&signal.payload)?;
+        }
+        encrypted.summary = self.encrypt_json_value(&encrypted.summary)?;
+        Ok(encrypted)
+    }
+
+    fn decrypt_what_if_run(
+        &self,
+        mut run: orch8_types::continuity_advanced::WhatIfRunRecord,
+    ) -> Result<orch8_types::continuity_advanced::WhatIfRunRecord, StorageError> {
+        let scenario = &mut run.scenario;
+        scenario.context_patch = self.decrypt_json_value(&scenario.context_patch)?;
+        scenario.config_patch = self.decrypt_json_value(&scenario.config_patch)?;
+        scenario.output_overrides = self.decrypt_json_value(&scenario.output_overrides)?;
+        scenario.handler_mocks = self.decrypt_json_value(&scenario.handler_mocks)?;
+        scenario.block_param_overrides =
+            self.decrypt_json_value(&scenario.block_param_overrides)?;
+        for signal in &mut scenario.signals {
+            signal.payload = self.decrypt_json_value(&signal.payload)?;
+        }
+        run.summary = self.decrypt_json_value(&run.summary)?;
+        Ok(run)
+    }
+
     /// Encrypt `BlockOutput.output` -- handler results (LLM responses, HTTP
     /// bodies, etc.) are the same data class as `context.data`, so they get
     /// the same at-rest protection. Returns a borrowed `Cow` when the value
@@ -554,12 +591,66 @@ passthrough_impl! {
     }
 }
 
-passthrough_impl! {
-    impl crate::InvariantStore for EncryptingStorage {
-        async fn create_workflow_invariant(&self, invariant: &orch8_types::continuity_advanced::WorkflowInvariant) -> Result<(), StorageError>;
-        async fn list_workflow_invariants(&self, tenant_id: &orch8_types::ids::TenantId, sequence_id: orch8_types::ids::SequenceId, sequence_version: i32, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError>;
-        async fn append_invariant_result(&self, tenant_id: &orch8_types::ids::TenantId, result: &orch8_types::continuity_advanced::InvariantResult) -> Result<bool, StorageError>;
-        async fn list_invariant_results(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::InvariantResult>, StorageError>;
+#[async_trait]
+impl crate::InvariantStore for EncryptingStorage {
+    async fn create_workflow_invariant(
+        &self,
+        invariant: &orch8_types::continuity_advanced::WorkflowInvariant,
+    ) -> Result<(), StorageError> {
+        self.inner.create_workflow_invariant(invariant).await
+    }
+
+    async fn list_workflow_invariants(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        sequence_id: orch8_types::ids::SequenceId,
+        sequence_version: i32,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
+        self.inner
+            .list_workflow_invariants(tenant_id, sequence_id, sequence_version, limit)
+            .await
+    }
+
+    async fn append_invariant_result(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        result: &orch8_types::continuity_advanced::InvariantResult,
+    ) -> Result<bool, StorageError> {
+        self.inner.append_invariant_result(tenant_id, result).await
+    }
+
+    async fn list_invariant_results(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        continuity_id: orch8_types::continuity::ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::InvariantResult>, StorageError> {
+        self.inner
+            .list_invariant_results(tenant_id, continuity_id, limit)
+            .await
+    }
+
+    async fn save_what_if_run(
+        &self,
+        run: &orch8_types::continuity_advanced::WhatIfRunRecord,
+    ) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_what_if_run(run)?;
+        self.inner.save_what_if_run(&encrypted).await
+    }
+
+    async fn list_what_if_runs(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+        continuity_id: orch8_types::continuity::ContinuityId,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WhatIfRunRecord>, StorageError> {
+        self.inner
+            .list_what_if_runs(tenant_id, continuity_id, limit)
+            .await?
+            .into_iter()
+            .map(|run| self.decrypt_what_if_run(run))
+            .collect()
     }
 }
 
