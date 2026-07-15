@@ -163,7 +163,7 @@ async function pausedContinuityFixture(
 }
 
 function sameShapeTarget(source: SequenceDef): SequenceDef {
-  return { ...source, id: uuid(), version: 2 };
+  return { ...source, id: uuid(), version: (source.version ?? 1) + 1 };
 }
 
 /** Full authorized-handoff request recipe (preview -> placement_decision_id). */
