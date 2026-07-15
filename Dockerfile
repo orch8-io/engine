@@ -53,8 +53,10 @@ RUN find orch8-*/src -name "*.rs" -exec touch {} + \
     && cargo build --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8
 
 # Copy binaries to a fixed location so stage 2 doesn't need to know the profile.
-RUN cp target/${CARGO_PROFILE}/orch8-server /app/orch8-server \
-    && cp target/${CARGO_PROFILE}/orch8 /app/orch8-cli
+# /app/bin avoids colliding with the orch8-server/ crate directory from COPY . .
+RUN mkdir -p /app/bin \
+    && cp target/${CARGO_PROFILE}/orch8-server /app/bin/orch8-server \
+    && cp target/${CARGO_PROFILE}/orch8 /app/bin/orch8
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -65,8 +67,8 @@ RUN apt-get update \
 
 RUN groupadd --system orch8 && useradd --system --gid orch8 orch8
 
-COPY --from=builder /app/orch8-server /usr/local/bin/orch8-server
-COPY --from=builder /app/orch8-cli /usr/local/bin/orch8
+COPY --from=builder /app/bin/orch8-server /usr/local/bin/orch8-server
+COPY --from=builder /app/bin/orch8 /usr/local/bin/orch8
 
 # Default SQLite storage (zero-config start).
 ENV ORCH8_STORAGE_BACKEND=sqlite \
