@@ -2203,7 +2203,7 @@ describe("Continuity Provider Routing, Evaluation Gates, Optimization Advisor, B
         () =>
           client.recommendContinuityOptimizations({
             tenant_id: tenantId,
-            continuity_id: scenario.source.continuity_id,
+            continuity_id: (scenario.source as Record<string, unknown>).continuity_id,
             serial_work_millipoints: 100,
             retry_rate_millipoints: 100,
             average_payload_bytes: 1000,
