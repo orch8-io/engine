@@ -67,3 +67,6 @@
 ## 2025-10-31 - [Zero-Allocation In-Place Vector Filtering]
 **Learning:** In the `enforce_concurrency_limits` hot path within `orch8-engine/src/scheduler.rs`, filtering elements from a `Vec` into a new `Vec` via `into_iter().enumerate().filter(...).collect()` forces unnecessary reallocation of the underlying buffer. Using `retain` avoids this reallocation by filtering the `Vec` in-place, keeping memory consumption stable during heavy scheduling loads.
 **Action:** When filtering a vector that you already own on a hot path, always use `.retain()` instead of collecting into a new vector to avoid unnecessary memory allocations.
+## 2025-10-31 - [Single-Pass Iterator Optimization]
+**Learning:** In the `check_termination` function within `orch8-engine/src/evaluator.rs`, the original code collected `.iter().filter(|n| n.parent_id.is_none())` into a `Vec` and then iterated over it three times with `.all()` and `.any()` checks. Allocating a `Vec` inside a hot evaluation loop is unnecessary and negatively impacts performance.
+**Action:** When performing aggregate checks on filtered elements in a hot path, prefer single-pass evaluation loops using boolean accumulators over collecting elements into an intermediate `Vec`. Ensure edge-case handling (like `.all()` returning `true` on an empty iterator) is strictly replicated in the rewritten logic.

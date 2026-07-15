@@ -611,25 +611,34 @@ pub async fn evaluate(
 /// Check if root nodes indicate the instance is done (all completed/skipped,
 /// or any failed/cancelled).
 fn check_termination(tree: &[ExecutionNode]) -> Option<EvalOutcome> {
-    let root_nodes: Vec<&ExecutionNode> = tree.iter().filter(|n| n.parent_id.is_none()).collect();
+    let mut any_failed = false;
+    let mut any_cancelled = false;
+    let mut all_completed_or_skipped = true;
 
-    // Termination: all root nodes done.
-    if root_nodes
-        .iter()
-        .all(|n| matches!(n.state, NodeState::Completed | NodeState::Skipped))
-    {
+    for n in tree.iter().filter(|n| n.parent_id.is_none()) {
+        match n.state {
+            NodeState::Completed | NodeState::Skipped => {}
+            NodeState::Failed => {
+                any_failed = true;
+                all_completed_or_skipped = false;
+            }
+            NodeState::Cancelled => {
+                any_cancelled = true;
+                all_completed_or_skipped = false;
+            }
+            _ => {
+                all_completed_or_skipped = false;
+            }
+        }
+    }
+
+    if all_completed_or_skipped {
         return Some(EvalOutcome::Done {
             any_failed: false,
             any_cancelled: false,
         });
     }
-    // Termination: any root node failed/cancelled.
-    if root_nodes
-        .iter()
-        .any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled))
-    {
-        let any_failed = root_nodes.iter().any(|n| n.state == NodeState::Failed);
-        let any_cancelled = root_nodes.iter().any(|n| n.state == NodeState::Cancelled);
+    if any_failed || any_cancelled {
         return Some(EvalOutcome::Done {
             any_failed,
             any_cancelled,
@@ -651,26 +660,24 @@ async fn phase_root_activation(
     sequence: &SequenceDefinition,
     outputs_snapshot: &OutputsSnapshot,
 ) -> Result<IterAction, EngineError> {
-    let root_nodes: Vec<&ExecutionNode> =
-        ctx.tree.iter().filter(|n| n.parent_id.is_none()).collect();
-
-    let first_pending_idx = root_nodes
-        .iter()
-        .position(|n| n.state == NodeState::Pending);
-    let Some(idx) = first_pending_idx else {
-        return Ok(IterAction::FallThrough);
-    };
-
-    // Only activate if all prior roots are done.
-    let all_prior_done = root_nodes[..idx].iter().all(|n| {
-        matches!(
+    let mut pending_node = None;
+    for n in ctx.tree.iter().filter(|n| n.parent_id.is_none()) {
+        if n.state == NodeState::Pending {
+            pending_node = Some(n);
+            break;
+        }
+        if !matches!(
             n.state,
             NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
-        )
-    });
-    if !all_prior_done {
-        return Ok(IterAction::FallThrough);
+        ) {
+            // A prior root is not done yet, so we cannot activate any pending root.
+            return Ok(IterAction::FallThrough);
+        }
     }
+
+    let Some(node) = pending_node else {
+        return Ok(IterAction::FallThrough);
+    };
 
     // Before activating new work, check if a cancel/pause signal arrived
     // mid-tick. Process it now to avoid dispatching already-cancelled or
@@ -708,7 +715,6 @@ async fn phase_root_activation(
         return Ok(IterAction::Continue);
     }
 
-    let node = root_nodes[idx];
     if let Some(block) = block_map.get(&node.block_id).copied() {
         dispatch_block(
             storage,
