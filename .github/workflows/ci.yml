@@ -196,7 +196,7 @@ jobs:
         working-directory: tests/e2e
         run: npm run typecheck
       - name: Build server
-        run: cargo build --bin orch8-server
+        run: cargo build --bin orch8-server --bin orch8
       - name: Run E2E tests (shared server)
         working-directory: tests/e2e
         # `npm test` boots orch8-server ONCE and runs every *.test.ts
