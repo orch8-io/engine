@@ -4656,6 +4656,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         invariant,
         paused,
         migrationPlan,
+        migrationTarget: target,
         whatIfResult,
         compSetup,
         compensationRun,
@@ -5555,7 +5556,11 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
     });
 
     it("migration planning under tenant B against tenant A's continuity_id is refused at create-time, before any checkpoint/instance-state check runs", async () => {
-      const target = sameShapeTarget(fixtureA.paused.sequence);
+      // fixtureA's own setup already consumed (namespace, name, version=2)
+      // via its internal migration (see buildIsolationFixture); derive from
+      // that already-created target rather than paused.sequence directly,
+      // or this collides with it on Postgres's idx_sequences_unique index.
+      const target = sameShapeTarget(fixtureA.migrationTarget);
       const createdTarget = await client.createSequence(target);
       await rejects(
         client.planContinuityMigration({

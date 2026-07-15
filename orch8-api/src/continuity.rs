@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::{Duration, Utc};
+use chrono::{Duration, SubsecRound, Utc};
 use orch8_publisher::capsule::SignedCapsuleManifest;
 use orch8_publisher::grant::{
     SignedContinuationGrant, sign_continuation_grant, verify_signed_continuation_grant,
@@ -5685,7 +5685,9 @@ async fn accept_optimization(
         draft.version = next_version;
         draft.status = SequenceStatus::Draft;
         draft.deprecated = false;
-        draft.created_at = Utc::now();
+        // See the `release.created_at` truncation below for why this must
+        // match Postgres's TIMESTAMPTZ precision, not chrono's native one.
+        draft.created_at = Utc::now().trunc_subsecs(6);
         match state.storage.create_sequence(&draft).await {
             Ok(()) => draft,
             Err(create_error) => {
@@ -5717,7 +5719,13 @@ async fn accept_optimization(
     {
         (existing, false)
     } else {
-        let now = Utc::now();
+        // Truncated to microseconds: Postgres TIMESTAMPTZ can't store finer
+        // precision than that, so a later idempotent call that re-fetches
+        // this release from storage must see byte-identical timestamps here
+        // — otherwise its accepted_sha256 (below) diverges from this call's
+        // and the provenance-dedup check spuriously appends a duplicate
+        // "optimization_accepted" entry.
+        let now = Utc::now().trunc_subsecs(6);
         let release = WorkflowRelease {
             id: deterministic_id,
             tenant_id: tenant_id.clone(),
