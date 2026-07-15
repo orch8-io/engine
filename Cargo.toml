@@ -130,6 +130,14 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 
+# CI/Docker profile: inherits release but skips expensive LTO and
+# single-codegen-unit to stay within CI runner time limits.
+# Usage: cargo build --profile docker-ci --bin orch8-server --bin orch8
+[profile.docker-ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 # Mobile release profile: optimise for binary size.
 # Usage: cargo build --profile mobile-release -p orch8-mobile --target <triple>
 [profile.mobile-release]

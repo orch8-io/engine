@@ -38,15 +38,23 @@ COPY orch8-grpc/build.rs orch8-grpc/build.rs
 # but RustEmbed in orch8-cli requires the folder to exist at compile time.
 RUN mkdir -p dashboard/dist
 
+# Cargo profile: "release" for production, "docker-ci" in CI smoke tests
+# (skips LTO + single-codegen-unit to stay within runner time limits).
+ARG CARGO_PROFILE=release
+
 # Build dependencies only (cached unless Cargo.toml/lock changes).
-RUN cargo build --release --bin orch8-server --bin orch8 2>/dev/null || true
+RUN cargo build --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8 2>/dev/null || true
 
 # Copy real source and rebuild.
 COPY . .
 RUN mkdir -p dashboard/dist
 # Touch all source files so cargo knows they changed.
 RUN find orch8-*/src -name "*.rs" -exec touch {} + \
-    && cargo build --release --bin orch8-server --bin orch8
+    && cargo build --profile ${CARGO_PROFILE} --bin orch8-server --bin orch8
+
+# Copy binaries to a fixed location so stage 2 doesn't need to know the profile.
+RUN cp target/${CARGO_PROFILE}/orch8-server /app/orch8-server \
+    && cp target/${CARGO_PROFILE}/orch8 /app/orch8-cli
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -57,8 +65,8 @@ RUN apt-get update \
 
 RUN groupadd --system orch8 && useradd --system --gid orch8 orch8
 
-COPY --from=builder /app/target/release/orch8-server /usr/local/bin/orch8-server
-COPY --from=builder /app/target/release/orch8 /usr/local/bin/orch8
+COPY --from=builder /app/orch8-server /usr/local/bin/orch8-server
+COPY --from=builder /app/orch8-cli /usr/local/bin/orch8
 
 # Default SQLite storage (zero-config start).
 ENV ORCH8_STORAGE_BACKEND=sqlite \

@@ -215,7 +215,7 @@ jobs:
   docker-smoke:
     name: Docker Smoke Test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: [check]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -230,6 +230,7 @@ jobs:
           push: false
           load: true
           tags: orch8-engine:ci
+          build-args: CARGO_PROFILE=docker-ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
