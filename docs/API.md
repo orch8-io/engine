@@ -1,10 +1,12 @@
 # Orch8 Engine — API Reference
 
-Base URL: `http://localhost:8080` (configurable via `ORCH8_HTTP_ADDR`)
+Canonical base URL: `http://localhost:8080/api/v1` (listen address configurable via `ORCH8_HTTP_ADDR`)
 
 All request/response bodies are JSON. Dates use ISO 8601 / RFC 3339 format.
 
-Every route is served both at the root path and under the `/api/v1` prefix (e.g. `/instances` and `/api/v1/instances` are equivalent).
+Product routes are served under `/api/v1`. Bare product paths remain compatibility
+aliases for pre-versioned clients. New integrations should always use `/api/v1`.
+Health, metrics, Swagger UI, and the OpenAPI JSON remain at root paths.
 
 ## Authentication
 
@@ -1398,7 +1400,35 @@ A rule body is `{ tenant_id, handler_name, queue_override, match_queue?, priorit
 
 ## Additional Endpoints
 
-The following endpoint groups are available via the OpenAPI spec (Swagger UI at `/swagger-ui/`) but not yet fully documented here:
+### Safe workflow releases
+
+Pin a baseline and candidate sequence version, inspect their semantic difference,
+replay recorded baseline executions without side effects, and route a guarded
+canary cohort.
+
+```
+POST /releases                         # create a draft
+GET  /releases                         # list newest first
+GET  /releases/{id}                    # current state and evidence summary
+GET  /releases/{id}/diff               # semantic operational diff
+GET  /releases/{id}/decisions          # immutable transition audit
+POST /releases/{id}/validate           # historical effect-free replay
+POST /releases/{id}/canary             # { "percent": 10 }
+POST /releases/{id}/evaluate           # evaluate gates; auto-rollback on fail
+POST /releases/{id}/promote            # { "force": false }
+POST /releases/{id}/pause              # return traffic to baseline; resumable
+POST /releases/{id}/rollback           # terminal rollback
+POST /sequences/releases/diff           # compare any exact sequence IDs
+```
+
+See [Safe workflow releases](RELEASES.md) for complete CLI and curl examples,
+state transitions, and denominator semantics.
+
+### Extended route groups
+
+The generated OpenAPI JSON at `/api-docs/openapi.json` is authoritative for
+request and response schemas. The running engine also exposes these groups,
+which are summarized rather than repeated field-by-field here:
 
 - **Sessions** — Stateful multi-instance coordination
 - **Pools** — Resource pool management with weighted allocation
@@ -1418,6 +1448,7 @@ The following endpoint groups are available via the OpenAPI spec (Swagger UI at 
 - **Rollback policies** — `/rollback-policies` CRUD
 - **Usage & info** — `GET /usage`, `GET /info` (version + environment label)
 - **MCP server** — `POST /mcp` (expose the engine itself as an MCP server)
+- **Safe releases** — `/releases` diff, validation, canary gates, decisions, promotion, pause, and rollback
 
 ---
 

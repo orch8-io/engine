@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { setApiUrl, setApiKey, clearApiKey, checkHealth } from "../api";
+import { setApiUrl, setApiKey, clearApiKey, setTenantId, clearTenantId, checkHealth } from "../api";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
@@ -15,6 +15,7 @@ export default function Settings() {
       "http://localhost:8080",
   );
   const [key, setKey] = useState(localStorage.getItem("orch8_api_key") || "");
+  const [tenant, setTenant] = useState(localStorage.getItem("orch8_tenant_id") || "");
   const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
   const [msg, setMsg] = useState("");
 
@@ -24,6 +25,8 @@ export default function Settings() {
       if (url) setApiUrl(url);
       if (key) setApiKey(key);
       else clearApiKey();
+      if (tenant) setTenantId(tenant);
+      else clearTenantId();
 
       await checkHealth();
       setStatus("ok");
@@ -63,8 +66,8 @@ export default function Settings() {
             <br />
             <strong className="text-ink">Auth.</strong> The API key is sent
             as the <code className="font-mono">X-API-Key</code>{" "}
-            header on every request. Never paste a production key into a
-            shared machine.
+            header and the optional tenant as <code className="font-mono">X-Tenant-Id</code>{" "}
+            on JSON API requests. Never paste a production key into a shared machine.
           </>
         }
       >
@@ -95,7 +98,21 @@ export default function Settings() {
               placeholder="Leave empty if no auth required"
             />
             <p className="annotation mt-1.5">
-              Optional. Sent as a bearer token on every request.
+              Optional. Sent in the <code className="font-mono">X-API-Key</code> header.
+            </p>
+          </div>
+
+          <div>
+            <FieldLabel>Tenant ID</FieldLabel>
+            <Input
+              type="text"
+              value={tenant}
+              onChange={(e) => setTenant(e.target.value)}
+              className="w-full font-mono"
+              placeholder="Required when tenant headers are enforced"
+            />
+            <p className="annotation mt-1.5">
+              Scopes dashboard JSON API requests when <code className="font-mono">ORCH8_REQUIRE_TENANT_HEADER</code> is enabled.
             </p>
           </div>
 

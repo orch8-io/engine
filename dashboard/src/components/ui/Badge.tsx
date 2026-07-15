@@ -51,30 +51,3 @@ export function Badge({
     </span>
   );
 }
-
-export const INSTANCE_TONE: Record<string, Tone> = {
-  scheduled: "dim",
-  running: "live",
-  waiting: "hold",
-  paused: "hold",
-  completed: "ok",
-  failed: "warn",
-  cancelled: "dim",
-};
-
-export const NODE_TONE: Record<string, Tone> = {
-  pending: "dim",
-  running: "live",
-  waiting: "hold",
-  completed: "ok",
-  failed: "warn",
-  cancelled: "dim",
-  skipped: "dim",
-};
-
-export const TASK_TONE: Record<string, Tone> = {
-  pending: "hold",
-  claimed: "live",
-  completed: "ok",
-  failed: "warn",
-};

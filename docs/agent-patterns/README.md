@@ -75,16 +75,22 @@ These patterns use the following **built-in** handlers (no external workers need
 ## Running a pattern
 
 ```bash
-# 1. Set your API key
+# 1. Set provider and engine credentials
 export OPENAI_API_KEY=sk-...
+export ORCH8_API_KEY=replace-me
+export ORCH8_URL=http://localhost:8080/api/v1
 
 # 2. POST the sequence
-curl -X POST http://localhost:8080/sequences \
+curl -X POST "$ORCH8_URL/sequences" \
+  -H "x-api-key: $ORCH8_API_KEY" \
+  -H 'x-tenant-id: demo' \
   -H 'Content-Type: application/json' \
   -d @react-loop.json
 
 # 3. Start an instance with a task
-curl -X POST http://localhost:8080/instances \
+curl -X POST "$ORCH8_URL/instances" \
+  -H "x-api-key: $ORCH8_API_KEY" \
+  -H 'x-tenant-id: demo' \
   -H 'Content-Type: application/json' \
   -d '{
     "sequence_id": "<id from previous step>",

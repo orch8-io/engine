@@ -39,7 +39,8 @@ import {
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
-import { Badge, INSTANCE_TONE, NODE_TONE } from "../components/ui/Badge";
+import { Badge } from "../components/ui/Badge";
+import { INSTANCE_TONE, NODE_TONE } from "../components/ui/badgeTones";
 import { Button } from "../components/ui/Button";
 import { Table, THead, TH, TR, TD, Empty } from "../components/ui/Table";
 import { Relative } from "../components/ui/Relative";

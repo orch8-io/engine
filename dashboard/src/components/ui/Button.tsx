@@ -23,7 +23,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ children, variant = "default", size = "md", className, ...rest }, ref) => {
     const sz =
-      size === "sm" ? "h-7 px-2.5 text-[12px]" : "h-8 px-3 text-[13px]";
+      size === "sm"
+        ? "min-h-11 px-2.5 text-[12px] lg:min-h-7"
+        : "min-h-11 px-3 text-[13px] lg:min-h-8";
     return (
       <button
         ref={ref}

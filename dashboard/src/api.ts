@@ -8,6 +8,10 @@ function getApiKey(): string | null {
   return localStorage.getItem("orch8_api_key");
 }
 
+function getTenantId(): string | null {
+  return localStorage.getItem("orch8_tenant_id");
+}
+
 export function setApiUrl(url: string) {
   localStorage.setItem("orch8_api_url", url);
 }
@@ -18,6 +22,14 @@ export function setApiKey(key: string) {
 
 export function clearApiKey() {
   localStorage.removeItem("orch8_api_key");
+}
+
+export function setTenantId(tenantId: string) {
+  localStorage.setItem("orch8_tenant_id", tenantId);
+}
+
+export function clearTenantId() {
+  localStorage.removeItem("orch8_tenant_id");
 }
 
 async function request<T>(
@@ -35,6 +47,8 @@ async function request<T>(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const apiKey = getApiKey();
   if (apiKey) headers["X-API-Key"] = apiKey;
+  const tenantId = getTenantId();
+  if (tenantId) headers["X-Tenant-Id"] = tenantId;
 
   const res = await fetch(url.toString(), { headers, signal });
 
@@ -50,7 +64,7 @@ async function request<T>(
 
 export class AuthError extends Error {
   constructor() {
-    super("Unauthorized");
+    super("Authentication failed. Check the API key and tenant ID in Settings.");
     this.name = "AuthError";
   }
 }
@@ -59,7 +73,14 @@ export class ApiRequestError extends Error {
   status: number;
   body: string;
   constructor(status: number, body: string) {
-    super(`API error ${status}`);
+    let detail = body.trim();
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown };
+      if (typeof parsed.error === "string") detail = parsed.error;
+    } catch {
+      // Plain-text errors are already suitable for the operator message.
+    }
+    super(detail ? `Request failed (${status}): ${detail}` : `Request failed with status ${status}.`);
     this.name = "ApiRequestError";
     this.status = status;
     this.body = body;
@@ -461,6 +482,104 @@ export function setSequenceStatus(
   return mutate(`/sequences/${encodeURIComponent(id)}/status`, "PUT", { status }, undefined, signal);
 }
 
+export type ReleaseState =
+  | "draft" | "validating" | "ready" | "canary"
+  | "promoted" | "paused" | "rolled_back" | "failed";
+
+export interface ReleaseGate {
+  metric: "error_rate" | "cancel_rate";
+  max_regression: number;
+  min_sample: number;
+}
+
+export interface WorkflowRelease {
+  id: string;
+  tenant_id: string;
+  namespace: string;
+  sequence_name: string;
+  baseline_sequence_id: string;
+  baseline_version: number;
+  candidate_sequence_id: string;
+  candidate_version: number;
+  state: ReleaseState;
+  canary_percent: number;
+  gates: ReleaseGate[];
+  in_flight_policy: "pin" | "operator_decision";
+  validation_summary?: Record<string, unknown> | null;
+  canary_started_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReleaseDecision {
+  id: string;
+  release_id: string;
+  from_state: ReleaseState;
+  to_state: ReleaseState;
+  actor: string;
+  reason: string;
+  decided_at: string;
+}
+
+export interface SemanticDiffEntry {
+  category: string;
+  severity: "informational" | "behavioral" | "side_effect_risk" | "incompatible";
+  block_id?: string | null;
+  summary: string;
+}
+
+export interface SemanticDiff {
+  entries: SemanticDiffEntry[];
+  max_severity?: SemanticDiffEntry["severity"] | null;
+  candidate_lint: string[];
+}
+
+export function listReleases(params?: { tenant_id?: string; limit?: string }, signal?: AbortSignal): Promise<WorkflowRelease[]> {
+  return request("/releases", params, signal);
+}
+
+export function createRelease(body: {
+  tenant_id: string;
+  baseline_sequence_id: string;
+  candidate_sequence_id: string;
+  gates: ReleaseGate[];
+  in_flight_policy?: "pin" | "operator_decision";
+}, signal?: AbortSignal): Promise<WorkflowRelease> {
+  return mutate("/releases", "POST", body, undefined, signal);
+}
+
+export function getReleaseDiff(id: string, signal?: AbortSignal): Promise<SemanticDiff> {
+  return request(`/releases/${encodeURIComponent(id)}/diff`, undefined, signal);
+}
+
+export function listReleaseDecisions(id: string, signal?: AbortSignal): Promise<ReleaseDecision[]> {
+  return request(`/releases/${encodeURIComponent(id)}/decisions`, undefined, signal);
+}
+
+export function validateRelease(id: string, sample = 10, signal?: AbortSignal) {
+  return mutate(`/releases/${encodeURIComponent(id)}/validate`, "POST", { sample, skip: false }, undefined, signal);
+}
+
+export function startReleaseCanary(id: string, percent: number, signal?: AbortSignal): Promise<WorkflowRelease> {
+  return mutate(`/releases/${encodeURIComponent(id)}/canary`, "POST", { percent }, undefined, signal);
+}
+
+export function evaluateRelease(id: string, signal?: AbortSignal) {
+  return mutate(`/releases/${encodeURIComponent(id)}/evaluate`, "POST", {}, undefined, signal);
+}
+
+export function promoteRelease(id: string, force = false, signal?: AbortSignal): Promise<WorkflowRelease> {
+  return mutate(`/releases/${encodeURIComponent(id)}/promote`, "POST", { force }, undefined, signal);
+}
+
+export function pauseRelease(id: string, signal?: AbortSignal): Promise<WorkflowRelease> {
+  return mutate(`/releases/${encodeURIComponent(id)}/pause`, "POST", {}, undefined, signal);
+}
+
+export function rollbackRelease(id: string, signal?: AbortSignal): Promise<WorkflowRelease> {
+  return mutate(`/releases/${encodeURIComponent(id)}/rollback`, "POST", {}, undefined, signal);
+}
+
 // ─── Version Pins ───────────────────────────────────────────────────────────
 
 export interface VersionPin {
@@ -848,6 +967,8 @@ async function mutate<T>(
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   const apiKey = getApiKey();
   if (apiKey) headers["X-API-Key"] = apiKey;
+  const tenantId = getTenantId();
+  if (tenantId) headers["X-Tenant-Id"] = tenantId;
   if (extraHeaders) Object.assign(headers, extraHeaders);
 
   const res = await fetch(url.toString(), {

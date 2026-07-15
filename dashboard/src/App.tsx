@@ -1,27 +1,30 @@
 import { Routes, Route } from "react-router-dom";
+import { lazy } from "react";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import Layout from "./components/Layout";
-import Overview from "./pages/Overview";
-import Tasks from "./pages/Tasks";
-import Workers from "./pages/Workers";
-import Instances from "./pages/Instances";
-import InstanceDetail from "./pages/InstanceDetail";
-import Approvals from "./pages/Approvals";
-import Sequences from "./pages/Sequences";
-import SequenceDetail from "./pages/SequenceDetail";
-import Cron from "./pages/Cron";
-import Triggers from "./pages/Triggers";
-import Operations from "./pages/Operations";
-import Sessions from "./pages/Sessions";
-import Plugins from "./pages/Plugins";
-import Credentials from "./pages/Credentials";
-import Pools from "./pages/Pools";
-import QueueRouting from "./pages/QueueRouting";
-import ApiKeys from "./pages/ApiKeys";
-import RollbackPolicies from "./pages/RollbackPolicies";
-import Settings from "./pages/Settings";
-import MobileSync from "./pages/MobileSync";
-import Usage from "./pages/Usage";
+
+const Overview = lazy(() => import("./pages/Overview"));
+const Tasks = lazy(() => import("./pages/Tasks"));
+const Workers = lazy(() => import("./pages/Workers"));
+const Instances = lazy(() => import("./pages/Instances"));
+const InstanceDetail = lazy(() => import("./pages/InstanceDetail"));
+const Approvals = lazy(() => import("./pages/Approvals"));
+const Sequences = lazy(() => import("./pages/Sequences"));
+const SequenceDetail = lazy(() => import("./pages/SequenceDetail"));
+const Cron = lazy(() => import("./pages/Cron"));
+const Triggers = lazy(() => import("./pages/Triggers"));
+const Operations = lazy(() => import("./pages/Operations"));
+const Sessions = lazy(() => import("./pages/Sessions"));
+const Plugins = lazy(() => import("./pages/Plugins"));
+const Credentials = lazy(() => import("./pages/Credentials"));
+const Pools = lazy(() => import("./pages/Pools"));
+const QueueRouting = lazy(() => import("./pages/QueueRouting"));
+const ApiKeys = lazy(() => import("./pages/ApiKeys"));
+const RollbackPolicies = lazy(() => import("./pages/RollbackPolicies"));
+const Settings = lazy(() => import("./pages/Settings"));
+const MobileSync = lazy(() => import("./pages/MobileSync"));
+const Usage = lazy(() => import("./pages/Usage"));
+const Releases = lazy(() => import("./pages/Releases"));
 
 export default function App() {
   return (
@@ -41,6 +44,7 @@ export default function App() {
           <Route path="operations" element={<Operations />} />
           <Route path="sessions" element={<Sessions />} />
           <Route path="usage" element={<Usage />} />
+          <Route path="releases" element={<Releases />} />
           <Route path="plugins" element={<Plugins />} />
           <Route path="credentials" element={<Credentials />} />
           <Route path="pools" element={<Pools />} />

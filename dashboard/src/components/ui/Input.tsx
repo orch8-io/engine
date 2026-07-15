@@ -2,7 +2,7 @@ import { forwardRef, type InputHTMLAttributes, type SelectHTMLAttributes, type R
 import { cn } from "../../lib/cn";
 
 const BASE =
-  "h-8 bg-sunken border border-hairline rounded-sm px-2.5 text-[13px] text-fg placeholder:text-faint hover:border-hairline-strong focus:border-signal focus:outline-none transition-colors";
+  "h-11 lg:h-8 bg-sunken border border-hairline rounded-sm px-2.5 text-[13px] text-fg placeholder:text-faint hover:border-hairline-strong focus:border-signal focus:outline-none transition-colors";
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
   ({ className, ...rest }, ref) => (

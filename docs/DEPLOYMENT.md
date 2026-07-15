@@ -28,7 +28,8 @@ Recommended:
 
 - **2+ replicas** for availability.
 - **PodDisruptionBudget** (or equivalent) of `maxUnavailable: 1`.
-- **`ORCH8_SHUTDOWN_GRACE_PERIOD_SECS=30`** — lets in-flight steps drain before SIGKILL.
+- **`[engine].shutdown_grace_period_secs = 30`** (the default) and an orchestrator
+  termination grace period longer than that — lets in-flight steps drain before SIGKILL.
 - **Readiness gate** on `GET /health/ready` (returns 200 only when the DB is reachable **and** the engine tick loop is alive; 503 otherwise, so a pod whose engine died is pulled from rotation instead of accepting work it will never run).
 - **Rolling updates** are safe — the stale-instance reaper recovers any instance held by a pod that exits ungracefully. Healthy pods heartbeat their claimed instances, so the reaper never yanks a long-running step from a live node.
 
@@ -92,7 +93,6 @@ spec:
             - { name: ORCH8_STORAGE_BACKEND, value: postgres }
             - { name: ORCH8_LOG_JSON,       value: "true" }
             - { name: ORCH8_HTTP_ADDR,      value: 0.0.0.0:8080 }
-            - { name: ORCH8_SHUTDOWN_GRACE_PERIOD_SECS, value: "30" }
           envFrom:
             - secretRef: { name: orch8-secrets }
           readinessProbe:

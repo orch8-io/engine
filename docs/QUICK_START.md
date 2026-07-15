@@ -55,6 +55,7 @@ request needs `x-api-key` and `x-tenant-id` headers:
 
 ```bash
 export ORCH8_API_KEY=$(sed -n 's/^api_key = "\(.*\)"/\1/p' orch8.toml)
+export ORCH8_URL=http://localhost:8080/api/v1
 alias ocurl='curl -s -H "x-api-key: $ORCH8_API_KEY" -H "x-tenant-id: demo"'
 ```
 
@@ -62,7 +63,7 @@ alias ocurl='curl -s -H "x-api-key: $ORCH8_API_KEY" -H "x-tenant-id: demo"'
 
 ```bash
 SEQUENCE_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-ocurl -X POST http://localhost:8080/sequences \
+ocurl -X POST "$ORCH8_URL/sequences" \
   -H 'Content-Type: application/json' \
   -d "{
     \"id\": \"$SEQUENCE_ID\",
@@ -101,7 +102,7 @@ scaffold ready-made sequences so you don't have to hand-write this JSON.)
 ### 5. Create an instance
 
 ```bash
-INSTANCE_ID=$(ocurl -X POST http://localhost:8080/instances \
+INSTANCE_ID=$(ocurl -X POST "$ORCH8_URL/instances" \
   -H 'Content-Type: application/json' \
   -d "{
     \"sequence_id\": \"$SEQUENCE_ID\",
@@ -120,14 +121,14 @@ echo "Instance: $INSTANCE_ID"
 ```bash
 # Poll until state is "completed"
 watch -n 1 "curl -s -H 'x-api-key: $ORCH8_API_KEY' -H 'x-tenant-id: demo' \
-  http://localhost:8080/instances/$INSTANCE_ID | jq '{state, updated_at}'"
+  $ORCH8_URL/instances/$INSTANCE_ID | jq '{state, updated_at}'"
 ```
 
 Or a simple loop:
 
 ```bash
 while true; do
-  STATE=$(ocurl http://localhost:8080/instances/$INSTANCE_ID | jq -r '.state')
+  STATE=$(ocurl "$ORCH8_URL/instances/$INSTANCE_ID" | jq -r '.state')
   echo "State: $STATE"
   [ "$STATE" = "completed" ] && break
   sleep 1
@@ -255,7 +256,7 @@ You can pause and resume a running instance at any time using signals.
 ### Pause
 
 ```bash
-ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST "$ORCH8_URL/instances/$INSTANCE_ID/signals" \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "pause",
@@ -266,7 +267,7 @@ ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
 ### Resume
 
 ```bash
-ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST "$ORCH8_URL/instances/$INSTANCE_ID/signals" \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "resume",
@@ -277,7 +278,7 @@ ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
 ### Cancel
 
 ```bash
-ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST "$ORCH8_URL/instances/$INSTANCE_ID/signals" \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "cancel",
@@ -291,7 +292,7 @@ Merge data into `context.data` while the instance is running (existing keys
 not named in the payload are preserved; `config` cannot be changed this way):
 
 ```bash
-ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/signals \
+ocurl -X POST "$ORCH8_URL/instances/$INSTANCE_ID/signals" \
   -H 'Content-Type: application/json' \
   -d '{
     "signal_type": "update_context",
@@ -307,20 +308,20 @@ Instances that exhaust all retry attempts land in the DLQ (they remain as `faile
 
 ```bash
 # List all failed instances for a tenant
-ocurl "http://localhost:8080/instances/dlq?tenant_id=demo&namespace=default&limit=50" \
+ocurl "$ORCH8_URL/instances/dlq?tenant_id=demo&namespace=default&limit=50" \
   | jq '[.[] | {id, sequence_id, updated_at, "error": .context.runtime.error}]'
 ```
 
 Retry a specific failed instance:
 
 ```bash
-ocurl -X POST http://localhost:8080/instances/$INSTANCE_ID/retry
+ocurl -X POST "$ORCH8_URL/instances/$INSTANCE_ID/retry"
 ```
 
 Bulk-cancel all failed instances for a sequence:
 
 ```bash
-ocurl -X PATCH http://localhost:8080/instances/bulk/state \
+ocurl -X PATCH "$ORCH8_URL/instances/bulk/state" \
   -H 'Content-Type: application/json' \
   -d "{
     \"filter\": {

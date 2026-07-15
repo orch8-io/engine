@@ -85,7 +85,7 @@ docker compose up -d   # starts Postgres
 ### Create a Sequence
 
 ```bash
-curl -X POST http://localhost:8080/sequences \
+curl -X POST http://localhost:8080/api/v1/sequences \
   -H 'Content-Type: application/json' \
   -d '{
     "id": "550e8400-e29b-41d4-a716-446655440000",
@@ -102,7 +102,7 @@ curl -X POST http://localhost:8080/sequences \
 ### Create an Instance
 
 ```bash
-curl -X POST http://localhost:8080/instances \
+curl -X POST http://localhost:8080/api/v1/instances \
   -H 'Content-Type: application/json' \
   -d '{
     "sequence_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -194,7 +194,9 @@ See [Configuration Reference](docs/CONFIGURATION.md) for the full list.
 
 ## API Surface
 
-229 documented REST endpoints covering:
+The generated OpenAPI document and Swagger UI are served by the running binary
+at `/api-docs/openapi.json` and `/swagger-ui`. Canonical product routes use the
+`/api/v1` prefix; bare paths remain compatibility aliases. The surface covers:
 
 - **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup, preflight readiness, template inspection, dataflow bindings
 - **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ, diagnosis, workbench (timeline/compare/fork-preview)
@@ -243,12 +245,13 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**~8,900 tests** across two layers:
+**8,600+ tests** across two primary layers (counts below are derived from the
+current checkout and intentionally rounded in this overview):
 
 | Layer | Tests | Scope |
 |-------|-------|-------|
-| **Rust unit + integration** | 6,840 | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
-| **TypeScript E2E** | 2,082 | 228 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if/invariants/compensation runs/attention leases/residency/disclosure/federation/delegation), typed dataflow |
+| **Rust unit + integration** | 6,600+ | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
+| **TypeScript E2E** | 1,900+ | 228 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if/invariants/compensation runs/attention leases/residency/disclosure/federation/delegation), typed dataflow |
 
 **Coverage by feature area:**
 
@@ -284,7 +287,7 @@ engine/
   orch8-types/        Shared domain types and config
   proto/              Protobuf service definitions
   migrations/         68 SQL migrations (Postgres schema; SQLite bundled schema v34)
-  tests/e2e/          228 TypeScript E2E test files (2,082 test cases)
+  tests/e2e/          228 TypeScript E2E test files (1,900+ test cases)
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
@@ -295,6 +298,7 @@ engine/
 
 ## Documentation
 
+- [Documentation index](docs/README.md) — learning, operating, reference, and architecture paths
 - [Quick Start](docs/QUICK_START.md) — zero to first completed instance in 5 minutes
 - [Sequences](docs/SEQUENCES.md) — build, publish, trigger, and extend sequences (the workflow format)
 - [API Reference](docs/API.md) — REST endpoints, block types, error codes
@@ -309,6 +313,8 @@ engine/
 - [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) — portable execution handoff, capsules, migrations, upgrade/recovery guidance
 - [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md) — checkpoint time-travel, what-if simulation, production-to-test extraction
 - [Typed Dataflow](docs/TYPED_DATAFLOW.md) — the `data.*`/`outputs.*` reference compiler and generated SDK bindings
+- [Safe Releases](docs/RELEASES.md) — semantic diff, historical replay, guarded canary, promotion, and rollback
+- [Operator Dashboard](docs/DASHBOARD.md) — connection, navigation, current surfaces, and verification
 - [Agent Patterns](docs/agent-patterns/README.md) — example sequences for AI agents
 - [Changelog](CHANGELOG.md)
 
@@ -340,7 +346,7 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 
 ## Status & Limitations
 
-Pre-1.0. This is the public release of an engine that has been running my own production for several months, with ~8,900 tests covering core paths. Honest about what it isn't yet:
+Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 8,600+ tests covering core paths. Honest about what it isn't yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
 - **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.

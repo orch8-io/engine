@@ -126,7 +126,9 @@ Backend for binary artifacts stored by the `blob_put` / `blob_get` handlers.
 
 ## Environment Variables
 
-All config fields can be set via `ORCH8_*` environment variables. Environment variables override values in `orch8.toml`.
+The environment variables listed below override their matching values in
+`orch8.toml`. Other TOML fields do not have an implicit environment mapping;
+mount a config file for those settings.
 
 ### Database
 
@@ -157,6 +159,7 @@ All config fields can be set via `ORCH8_*` environment variables. Environment va
 | `ORCH8_WEBHOOK_URLS` | — | Comma-separated webhook endpoint URLs |
 | `ORCH8_WEBHOOK_SECRET` | — | Shared secret for HMAC-signing outbound webhook deliveries (see `[engine.webhooks]` above) |
 | `ORCH8_ARTIFACT_RETENTION_SECS` | `0` | GC artifacts of instances terminal for longer than this (0 = keep forever) |
+| `ORCH8_INSTANCE_RETENTION_SECS` | `0` | GC terminal instances and their dependent records after this many seconds (0 = keep forever) |
 
 ### API
 

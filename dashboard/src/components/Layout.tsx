@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom";
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import {
   checkHealth,
   getEngineInfo,
@@ -37,26 +37,38 @@ const CONN_TONE = {
   connecting: "hold",
 } as const;
 
-const NAV = [
-  { to: "/", label: "Overview", icon: IconHome, end: true },
-  { to: "/instances", label: "Executions", icon: IconActivity },
-  { to: "/approvals", label: "Approvals", icon: IconCheckCircle },
-  { to: "/sequences", label: "Sequences", icon: IconLayers },
-  { to: "/tasks", label: "Tasks", icon: IconList },
-  { to: "/workers", label: "Workers", icon: IconWorkers },
-  { to: "/queues", label: "Queues", icon: IconList },
-  { to: "/cron", label: "Cron", icon: IconClock },
-  { to: "/triggers", label: "Triggers", icon: IconZap },
-  { to: "/sessions", label: "Sessions", icon: IconSession },
-  { to: "/usage", label: "Usage", icon: IconCost },
-  { to: "/plugins", label: "Plugins", icon: IconPlugin },
-  { to: "/credentials", label: "Credentials", icon: IconKey },
-  { to: "/pools", label: "Pools", icon: IconDatabase },
-  { to: "/mobile", label: "Mobile", icon: IconPhone },
-  { to: "/rollback", label: "Rollback", icon: IconShield },
-  { to: "/operations", label: "Operations", icon: IconShield },
-  { to: "/settings", label: "Settings", icon: IconSliders },
-  { to: "/api-keys", label: "API Keys", icon: IconKey },
+const NAV_GROUPS: Array<{
+  label: string;
+  items: Array<{ to: string; label: string; icon: typeof IconHome; end?: boolean }>;
+}> = [
+  { label: "Monitor", items: [
+    { to: "/", label: "Overview", icon: IconHome, end: true },
+    { to: "/instances", label: "Executions", icon: IconActivity },
+    { to: "/approvals", label: "Approvals", icon: IconCheckCircle },
+    { to: "/operations", label: "Operations", icon: IconShield },
+  ] },
+  { label: "Build & ship", items: [
+    { to: "/sequences", label: "Sequences", icon: IconLayers },
+    { to: "/releases", label: "Releases", icon: IconShield },
+    { to: "/cron", label: "Cron", icon: IconClock },
+    { to: "/triggers", label: "Triggers", icon: IconZap },
+    { to: "/sessions", label: "Sessions", icon: IconSession },
+  ] },
+  { label: "Runtime", items: [
+    { to: "/tasks", label: "Tasks", icon: IconList },
+    { to: "/workers", label: "Workers", icon: IconWorkers },
+    { to: "/queues", label: "Queues", icon: IconList },
+    { to: "/pools", label: "Pools", icon: IconDatabase },
+    { to: "/mobile", label: "Mobile", icon: IconPhone },
+    { to: "/usage", label: "Usage", icon: IconCost },
+  ] },
+  { label: "Administration", items: [
+    { to: "/plugins", label: "Plugins", icon: IconPlugin },
+    { to: "/credentials", label: "Credentials", icon: IconKey },
+    { to: "/rollback", label: "Rollback policies", icon: IconShield },
+    { to: "/api-keys", label: "API keys", icon: IconKey },
+    { to: "/settings", label: "Settings", icon: IconSliders },
+  ] },
 ];
 
 type ConnState = "connecting" | "online" | "offline";
@@ -108,43 +120,40 @@ export default function Layout() {
   }, []);
 
   return (
-    <div className="min-h-screen grid grid-cols-[220px_1fr] grid-rows-[1fr_28px] bg-bg text-ink">
+    <div className="min-h-screen grid grid-cols-1 grid-rows-[auto_1fr] lg:grid-cols-[220px_1fr] lg:grid-rows-[1fr_28px] bg-bg text-ink">
       {/* ── Sidebar ─────────────────────────────────────────── */}
-      <aside className="row-span-2 border-r border-rule flex flex-col">
+      <aside className="border-b lg:row-span-2 lg:border-b-0 lg:border-r border-rule flex flex-col max-h-[46vh] lg:max-h-none">
         <div className="px-5 py-5 border-b border-rule flex items-baseline gap-2">
           <Wordmark />
         </div>
 
-        <div className="px-5 pt-5 pb-3">
-          <span className="eyebrow">Navigation</span>
-        </div>
-
-        <nav className="flex-1 px-3 space-y-px overflow-y-auto">
-          {NAV.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                `relative flex items-center gap-3 pl-5 pr-3 h-9 text-[13px] transition-colors ${
-                  isActive
-                    ? "text-ink before:absolute before:left-0 before:top-2 before:bottom-2 before:w-[2px] before:bg-signal"
-                    : "text-muted hover:text-ink"
-                }`
-              }
-            >
-              <Icon size={14} />
-              <span>{label}</span>
-              {to === "/approvals" && approvalCount > 0 && (
-                <Badge tone="hold" className="ml-auto">
-                  {approvalCount}
-                </Badge>
-              )}
-            </NavLink>
-          ))}
+        <nav aria-label="Primary" className="flex-1 px-3 py-3 space-y-5 overflow-y-auto">
+          {NAV_GROUPS.map((group) => <div key={group.label}>
+            <div className="eyebrow px-5 pb-2">{group.label}</div>
+            <div className="space-y-px">
+              {group.items.map(({ to, label, icon: Icon, end }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  className={({ isActive }) =>
+                    `relative flex items-center gap-3 pl-5 pr-3 min-h-11 text-[13px] transition-colors lg:min-h-10 ${
+                      isActive
+                        ? "text-ink before:absolute before:left-0 before:top-2 before:bottom-2 before:w-[2px] before:bg-signal"
+                        : "text-muted hover:text-ink hover:bg-surface"
+                    }`
+                  }
+                >
+                  <Icon size={16} />
+                  <span>{label}</span>
+                  {to === "/approvals" && approvalCount > 0 && <Badge tone="hold" className="ml-auto">{approvalCount}</Badge>}
+                </NavLink>
+              ))}
+            </div>
+          </div>)}
         </nav>
 
-        <div className="p-5 border-t border-rule space-y-2">
+        <div className="hidden lg:block p-5 border-t border-rule space-y-2">
           <div className="eyebrow">Engine</div>
           <div className="flex items-center gap-2">
             <StatusDot tone={CONN_TONE[conn]} live={conn === "online"} />
@@ -167,13 +176,15 @@ export default function Layout() {
             {info.env_label}
           </div>
         )}
-        <div className="max-w-[1280px] mx-auto px-12 py-10 fade-in">
-          <Outlet />
+        <div className="max-w-[1280px] mx-auto px-4 py-8 md:px-8 lg:px-12 lg:py-10 fade-in">
+          <Suspense fallback={<div role="status" className="notice">Loading surface…</div>}>
+            <Outlet />
+          </Suspense>
         </div>
       </main>
 
       {/* ── Statusline ──────────────────────────────────────── */}
-      <footer className="col-start-2 border-t border-rule px-12 flex items-center gap-6 text-[10px] font-mono text-muted tracking-[0.14em] uppercase">
+      <footer className="hidden lg:flex col-start-2 border-t border-rule px-12 items-center gap-6 text-[10px] font-mono text-muted tracking-[0.14em] uppercase">
         <span className="flex items-center gap-2">
           <StatusDot tone={CONN_TONE[conn]} live={conn === "online"} />
           <span className="text-ink-dim">{conn}</span>

@@ -1,0 +1,29 @@
+{
+  "id": "01922222-2222-7222-8222-222222222222",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "name": "release-example",
+  "version": 2,
+  "created_at": "2026-01-02T00:00:00Z",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "prepare",
+      "handler": "noop",
+      "params": { "message": "candidate" },
+      "retry": {
+        "max_attempts": 3,
+        "initial_backoff": 100,
+        "max_backoff": 1000,
+        "backoff_multiplier": 2.0
+      }
+    },
+    {
+      "type": "step",
+      "id": "confirm",
+      "handler": "noop",
+      "when": "data.confirm == true",
+      "params": { "message": "confirmed" }
+    }
+  ]
+}

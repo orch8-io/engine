@@ -1061,6 +1061,16 @@ mod tests {
     }
 
     #[test]
+    fn safe_release_documentation_fixtures_are_valid_sequences() {
+        for fixture in [
+            include_str!("../../../examples/safe-release/baseline.json"),
+            include_str!("../../../examples/safe-release/candidate.json"),
+        ] {
+            parse_sequence(fixture, 1).expect("safe-release fixture must remain executable");
+        }
+    }
+
+    #[test]
     fn parse_sequence_rejects_invalid_json() {
         let err = format!("{:#}", parse_sequence("{ not json", 1).unwrap_err());
         assert!(err.contains("invalid JSON"), "got: {err}");
