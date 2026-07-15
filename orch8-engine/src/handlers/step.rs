@@ -126,9 +126,7 @@ pub async fn execute_step_dry(
         // the block_outputs.attempt column. Refuse to memoize rather than
         // clamping — a clamp would make every retry past 32 767 collide
         // against the same row and silently replay a stale output.
-        let matches_memoized = u16::try_from(exec.attempt)
-            .ok()
-            .is_some_and(|a| existing.attempt == a);
+        let matches_memoized = u16::try_from(exec.attempt).is_ok_and(|a| existing.attempt == a);
         if matches_memoized {
             info!(
                 instance_id = %exec.instance_id,
@@ -327,9 +325,7 @@ pub async fn execute_step(
         // the block_outputs.attempt column. Refuse to memoize rather than
         // clamping — a clamp would make every retry past 32 767 collide
         // against the same row and silently replay a stale output.
-        let matches_memoized = u16::try_from(exec.attempt)
-            .ok()
-            .is_some_and(|a| existing.attempt == a);
+        let matches_memoized = u16::try_from(exec.attempt).is_ok_and(|a| existing.attempt == a);
         if matches_memoized {
             info!(
                 instance_id = %exec.instance_id,
