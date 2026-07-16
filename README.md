@@ -53,9 +53,6 @@ Portable Continuity takes that further: a running execution can hand off between
 ## Install
 
 ```bash
-# Docker (fastest)
-docker run -d -p 8080:8080 ghcr.io/orch8-io/engine:latest
-
 # Binary release (downloads from GitHub releases)
 curl -fsSL https://raw.githubusercontent.com/orch8-io/engine/main/install.sh | sh
 
@@ -63,54 +60,24 @@ curl -fsSL https://raw.githubusercontent.com/orch8-io/engine/main/install.sh | s
 brew tap orch8-io/orch8 && brew install orch8-server
 ```
 
+The container image is `ghcr.io/orch8-io/engine:latest`, but a secure container
+also needs storage, API-key, and encryption configuration. Use the
+[Docker deployment example](docs/DEPLOYMENT.md#docker) instead of starting the
+image with only a port mapping.
+
 ## Quick Start
 
-### With SQLite (zero dependencies)
+Run one local instance without starting a server:
 
 ```bash
-# Initialize a project
 orch8 init my-project
-cd my-project
-
-# Start the engine (--insecure skips API key requirement)
-orch8-server --insecure
+orch8 dev my-project --mock 'greet_user={"greeting":"hello"}' \
+  --skip-timers --once
 ```
 
-### With Docker Compose
-
-```bash
-docker compose up -d   # starts Postgres
-```
-
-### Create a Sequence
-
-```bash
-curl -X POST http://localhost:8080/api/v1/sequences \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "tenant_id": "demo",
-    "namespace": "default",
-    "name": "hello-world",
-    "version": 1,
-    "blocks": [
-      { "type": "step", "id": "greet", "handler": "noop", "params": {} }
-    ]
-  }'
-```
-
-### Create an Instance
-
-```bash
-curl -X POST http://localhost:8080/api/v1/instances \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "sequence_id": "550e8400-e29b-41d4-a716-446655440000",
-    "tenant_id": "demo",
-    "namespace": "default",
-    "context": { "data": { "user": "alice" } }
-  }'
-```
+Then follow the [progressive quick starts](docs/quick-starts/README.md) to add
+dataflow, the durable API server, external workers, failure recovery, and safe
+production releases.
 
 ## SDKs
 
@@ -169,28 +136,12 @@ orch8-cli             CLI tool (init, sequence, instance, signal, health)
 
 ## Configuration
 
-Configuration via `orch8.toml`, environment variables (`ORCH8_*`), or both (env vars override file).
+Configuration comes from `orch8.toml`, `ORCH8_*` environment variables, or
+both; environment variables win. The server fails closed without an API key
+and encryption key unless the corresponding insecure flags are explicit.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ORCH8_STORAGE_BACKEND` | `postgres` | `sqlite` or `postgres` |
-| `ORCH8_DATABASE_URL` | — | Connection string (required) |
-| `ORCH8_HTTP_ADDR` | `127.0.0.1:8080` | HTTP API listen address |
-| `ORCH8_GRPC_ADDR` | `127.0.0.1:50051` | gRPC API listen address |
-| `ORCH8_TICK_INTERVAL_MS` | `100` | Scheduler tick interval (ms) |
-| `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
-| `ORCH8_BATCH_SIZE` | `256` | Max instances claimed per tick |
-| `ORCH8_MAX_CONCURRENT_STEPS` | `128` | Semaphore limit for step execution |
-| `ORCH8_MAX_INSTANCES_PER_TENANT` | `0` | Per-tenant claim limit (0 = unlimited) |
-| `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest |
-| `ORCH8_LOG_LEVEL` | `info` | trace, debug, info, warn, error |
-| `ORCH8_LOG_JSON` | `false` | JSON-formatted log output |
-| `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers) |
-| `ORCH8_API_KEY` | — | Set to require API key auth |
-| `ORCH8_CONTINUITY_LAB_ENABLED` | `false` | Enable the deterministic fault-injection lab (`orch8 execution run-fault-lab`) |
-| `ORCH8_FEDERATION_PEERS` | — | Bounded, unique HTTPS trust roots for continuity federation envelope verification |
-
-See [Configuration Reference](docs/CONFIGURATION.md) for the full list.
+Use the [Configuration Reference](docs/CONFIGURATION.md) as the single source
+for field names, defaults, environment overrides, and complete examples.
 
 ## API Surface
 
@@ -245,13 +196,13 @@ cargo test --test '*' --workspace
 
 ## Test Coverage
 
-**8,600+ tests** across two primary layers (counts below are derived from the
-current checkout and intentionally rounded in this overview):
+The repository has two primary test layers. Exact counts change frequently, so
+the checked-in test tree and CI results are the source of truth.
 
-| Layer | Tests | Scope |
-|-------|-------|-------|
-| **Rust unit + integration** | 6,600+ | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
-| **TypeScript E2E** | 1,900+ | 228 test files hitting the live HTTP API — sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity (handoff/capsule/migration/what-if/invariants/compensation runs/attention leases/residency/disclosure/federation/delegation), typed dataflow |
+| Layer | Scope |
+|-------|-------|
+| **Rust unit + integration** | Storage backends (Postgres + SQLite), evaluator, scheduler, handlers, config parsing, state machine transitions, gRPC auth, API error mapping, encryption, mobile sync, expressions, circuit breakers, crash recovery, continuity/provenance/effect-receipt races, dataflow compiler soundness |
+| **TypeScript E2E** | Live HTTP API coverage for sequences, instances, workers, cron, triggers, webhooks, approvals, sessions, plugins, credentials, pools, cluster, SSE streaming, mobile sync, portable continuity, and typed dataflow |
 
 **Coverage by feature area:**
 
@@ -286,8 +237,8 @@ engine/
   orch8-storage/      Storage trait + Postgres + SQLite impls
   orch8-types/        Shared domain types and config
   proto/              Protobuf service definitions
-  migrations/         68 SQL migrations (Postgres schema; SQLite bundled schema v34)
-  tests/e2e/          228 TypeScript E2E test files (1,900+ test cases)
+  migrations/         Ordered PostgreSQL schema migrations
+  tests/e2e/          TypeScript end-to-end API tests
   loadgen/            Load generator with per-template metrics
   activepieces/       Activepieces sidecar integration
   dashboard/          React admin dashboard
@@ -299,7 +250,7 @@ engine/
 ## Documentation
 
 - [Documentation index](docs/README.md) — learning, operating, reference, and architecture paths
-- [Quick Start](docs/QUICK_START.md) — zero to first completed instance in 5 minutes
+- [Progressive Quick Starts](docs/quick-starts/README.md) — from a local workflow to guarded production releases
 - [Sequences](docs/SEQUENCES.md) — build, publish, trigger, and extend sequences (the workflow format)
 - [API Reference](docs/API.md) — REST endpoints, block types, error codes
 - [Architecture](docs/ARCHITECTURE.md) — execution model, schema, performance
@@ -346,7 +297,9 @@ Chart repo: [orch8-io/helm-charts](https://github.com/orch8-io/helm-charts)
 
 ## Status & Limitations
 
-Pre-1.0. This is the public release of an engine that has been running my own production for several months, with 8,600+ tests covering core paths. Honest about what it isn't yet:
+Pre-1.0. This is the public release of an engine that has been running in
+production for several months, with extensive automated coverage of core paths.
+Honest about what it is not yet:
 
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
 - **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.

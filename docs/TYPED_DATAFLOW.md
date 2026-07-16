@@ -28,6 +28,10 @@ with `GET /sequences/{id}/dataflow`. Both return the compatibility report, a
 canonical schema artifact, deterministic TypeScript and Python bindings, the
 generator version, and a SHA-256 hash of normalized sequence content.
 
+Those routes are relative to `/api/v1` and require the same API-key and tenant
+headers as other product endpoints. The CLI reads `ORCH8_URL`,
+`ORCH8_API_KEY`, and `ORCH8_TENANT_ID`.
+
 The same findings are included in sequence preflight. Any dataflow error makes
 preflight fail and names the producer/reference and consumer chain. Unknown
 evidence remains a warning.

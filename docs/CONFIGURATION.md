@@ -190,6 +190,17 @@ mount a config file for those settings.
 |----------|---------|-------------|
 | `ORCH8_LLM_DEFAULT_MODEL_OPENAI` | `gpt-4o` | Default model for the `llm_call` handler when provider is OpenAI-compatible and no `model` param is set |
 | `ORCH8_LLM_DEFAULT_MODEL_ANTHROPIC` | `claude-sonnet-4-6` | Default model for the `llm_call` handler when provider is `anthropic` and no `model` param is set |
+| `ORCH8_MODEL_PRICING` | — | JSON map of model-prefix pricing overrides used by `GET /usage`, e.g. `{"model":{"input_per_1m":1.0,"output_per_1m":2.0}}`. Estimates only; read once on first use. |
+| `ORCH8_ACTIVEPIECES_URL` | `http://127.0.0.1:50052/execute` | Activepieces sidecar action endpoint used by `ap://` handlers and polling triggers. |
+| `ORCH8_ALLOW_INTERNAL_URLS` | `false` | Allows built-in outbound HTTP/tool handlers to target loopback or private addresses. Dangerous SSRF opt-out; use only for isolated local testing. |
+
+### Portable Continuity
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCH8_CONTINUITY_LAB_ENABLED` | `false` | Enables the deterministic continuity fault laboratory. Use only in a non-production process. |
+| `ORCH8_CONTINUITY_TRUSTED_SIGNING_KEYS_JSON` | — | JSON object mapping historical signing-key IDs to base64 Ed25519 public keys for provenance verification during key rotation. Never include private keys. |
+| `ORCH8_FEDERATION_PEERS` | — | Bounded JSON array of explicitly trusted federation peers. Invalid configuration disables federation rather than accepting a partial trust set. See [Continuity operations](CONTINUITY_OPERATIONS.md#enforce-sovereign-edge-boundaries-from-registered-facts). |
 
 ### Logging
 

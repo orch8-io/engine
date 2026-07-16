@@ -4,6 +4,15 @@ Sequences are Orch8's portable workflow format. A sequence is JSON: it names the
 
 This document is optimized for fast adoption and for LLMs that need to generate valid sequences.
 
+For a complete generated request schema, use the running server's
+`/swagger-ui`. The examples below assume:
+
+```bash
+export ORCH8_URL=http://127.0.0.1:8080/api/v1
+export ORCH8_API_KEY='<configured-api-key>'
+export ORCH8_TENANT_ID=demo
+```
+
 ## Mental Model
 
 Use these building blocks:
@@ -55,8 +64,9 @@ Publish it:
 
 ```bash
 curl -s -X POST "$ORCH8_URL/sequences" \
+  -H "X-Api-Key: $ORCH8_API_KEY" \
   -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: demo" \
+  -H "X-Tenant-Id: $ORCH8_TENANT_ID" \
   -d @sequence.json
 ```
 
@@ -64,8 +74,9 @@ Start one instance:
 
 ```bash
 curl -s -X POST "$ORCH8_URL/instances" \
+  -H "X-Api-Key: $ORCH8_API_KEY" \
   -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: demo" \
+  -H "X-Tenant-Id: $ORCH8_TENANT_ID" \
   -d '{
     "sequence_id": "018f85d4-9c2b-7f5f-a2a5-f4143fa7d001",
     "tenant_id": "demo",

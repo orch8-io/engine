@@ -58,7 +58,7 @@ Block-level and signal events are not published.
 | `event_type` | string | Event identifier (see table above) |
 | `instance_id` | UUID \| null | Instance the event pertains to (always set for current events) |
 | `timestamp` | RFC 3339 string | When the event was produced |
-| `data` | object | Reserved for event-specific fields. Currently always `{}`. |
+| `data` | object | Event-specific fields. Completion normally uses `{}`; failures may include `error`, and SLA breaches include limit/elapsed metadata. |
 
 ---
 
@@ -74,7 +74,9 @@ Block-level and signal events are not published.
 
 ### Guidance for subscribers
 
-1. **Idempotency.** Use `instance_id` + `event_type` as your de-duplication key.
+1. **Idempotency.** Use `instance_id` + `event_type` + `timestamp` as your
+   de-duplication key. Retries retain the same payload timestamp, while two
+   distinct SLA breach types for one instance remain distinguishable.
 2. **Return quickly.** Acknowledge within `timeout_secs` (default 10s) and do work asynchronously.
 3. **Return 2xx fast.** Any slow response eats into your subscriber's capacity and increases retry pressure.
 4. **Don't depend on webhooks alone for consistency.** Delivery is at-least-once and exhausted events require an operator (or automation) to redeliver from the outbox. Treat webhooks as a latency optimization on top of periodic `GET /instances` polling if you need guaranteed delivery.
@@ -113,6 +115,11 @@ Exposed at `/metrics` in Prometheus format:
 
 ## Receiver example (Node/Express)
 
+This minimal receiver demonstrates acknowledgement and deduplication. In a
+signed deployment, capture the raw request bytes and verify
+`X-Orch8-Timestamp` and `X-Orch8-Signature` before JSON parsing or queueing;
+reserializing `req.body` does not reproduce the signed byte sequence.
+
 ```ts
 import express from "express";
 const app = express();
@@ -122,7 +129,7 @@ const seen = new Set<string>(); // in-memory dedup; use Redis in prod
 
 app.post("/orch8-events", (req, res) => {
   const { event_type, instance_id, timestamp } = req.body;
-  const key = `${instance_id}:${event_type}`;
+  const key = `${instance_id}:${event_type}:${timestamp}`;
   if (seen.has(key)) return res.sendStatus(200); // already processed
   seen.add(key);
 

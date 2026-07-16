@@ -185,7 +185,7 @@ Server orchestration is a solved market. Embedded orchestration is not.
 
 ## See also
 
-- [Quick Start](QUICK_START.md) — get the engine running in 5 minutes
+- [Progressive Quick Starts](quick-starts/README.md) — learn the engine through increasingly advanced working examples
 - [Architecture](ARCHITECTURE.md) — execution model and crate structure
 - [Configuration](CONFIGURATION.md) — tuning for embedded constraints (batch size, tick interval, concurrency)
 - [Deployment](DEPLOYMENT.md) — production deployment patterns

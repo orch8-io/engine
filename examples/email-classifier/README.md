@@ -105,7 +105,7 @@ this with your own filtering rules (sender allowlist, regex patterns, etc).
 ### Prerequisites
 
 - orch8 engine binary (built from this repo)
-- Node.js 18+
+- Node.js 20+ (required by the Activepieces sidecar)
 - ngrok (for local development with Resend webhooks)
 - Activepieces sidecar with `@activepieces/piece-slack` installed
 
@@ -210,7 +210,7 @@ Resend receives mail at `enquire@auto.orch8.io` and POSTs to your webhook URL:
 
 `webhook.ts` transforms this into:
 
-```json
+```http
 POST /instances
 {
   "sequence_id": "...",
@@ -276,17 +276,25 @@ which calls Slack's `chat.postMessage` API. Result appears in your channel.
 
 ## Production deployment
 
-In production:
+The checked-in adapter and scripts intentionally target the local `--insecure`
+demo server and do not attach Orch8 authentication headers. Before production,
+use the authenticated SDK or add `x-api-key` and `x-tenant-id` to every engine
+request in `deploy.ts`, `worker.ts`, `webhook.ts`, and `trigger.ts`.
+
+Also change these deployment boundaries:
 
 - **No ngrok** — orch8 runs behind a load balancer with a real domain
 - **No `--insecure`** — set `ORCH8_API_KEY` for authenticated access
 - **PostgreSQL** — use `ORCH8_DATABASE_URL` instead of SQLite
-- **Encrypted credentials** — store API keys in orch8's credential store, not env vars
-- **Resend webhook** points directly at `https://orch8.yourcompany.com/webhook/resend`
+- **Encryption at rest** — set a stable `ORCH8_ENCRYPTION_KEY` from a secrets manager
+- **Credentials** — resolve provider credentials from the Orch8 credential store instead of embedding them in a sequence definition
+- **Resend webhook** — point at the deployed webhook adapter, not directly at the engine API
 
 ```bash
+ORCH8_STORAGE_BACKEND=postgres \
 ORCH8_DATABASE_URL=postgres://... \
 ORCH8_API_KEY=your-api-key \
+ORCH8_ENCRYPTION_KEY=<64-hex-characters> \
 ./orch8-server
 ```
 

@@ -1,5 +1,11 @@
 # Rust Codebase Review — Best-Practice Issues
 
+> **Historical review record, not current reference.** Findings and line
+> numbers describe the checkout reviewed in July 2026. Some rows have later
+> status annotations, but unresolved-looking items must be reverified against
+> the current source before being scheduled. Use current CI, `cargo audit`,
+> Clippy, and the referenced source files as the authority.
+
 This report records the findings from a deep review of the `orch8.io/engine` Rust workspace for potential bugs, non-idiomatic patterns, and missing best practices.
 
 > **Status update (2026-07-06):** subsequent fix passes resolved several findings below;

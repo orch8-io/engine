@@ -1,7 +1,17 @@
 # Migrations
 
-Applied via `sqlx::migrate!("../migrations")` (see `orch8-storage/src/postgres/mod.rs`).
-`sqlx` records each migration's checksum in `_sqlx_migrations` the first time it runs.
+These are PostgreSQL migrations embedded with `sqlx::migrate!`. Apply them in a
+deployment step with:
+
+```bash
+orch8 migrate --database-url "$ORCH8_DATABASE_URL"
+```
+
+Single-node development can instead enable `database.run_migrations`; rolling
+deployments should run the CLI command once before starting the new fleet.
+`sqlx` records each migration's checksum in `_sqlx_migrations` the first time it
+runs. SQLite uses its bundled schema and versioned upgrade path rather than
+these PostgreSQL files.
 
 ## Rule: never edit a migration once it has shipped in a release
 

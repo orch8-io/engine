@@ -1,5 +1,11 @@
 # Portable Continuity Operations
 
+This is a task-oriented operator guide for deployments with portable
+continuity enabled. Start with the section matching the operation you need;
+commands assume an authenticated `orch8` CLI configured for the canonical
+`/api/v1` base URL. The engine fails closed when it cannot prove ownership or
+whether an external effect happened.
+
 ## Reserve and settle multidimensional budgets
 
 Reserve estimated usage before dispatch so concurrent workers cannot pass a check-then-act race:
@@ -79,10 +85,6 @@ export ORCH8_FEDERATION_PEERS='[{"id":"...","name":"partner-a","trust_root_sha25
 The list is bounded to 128 unique peers; each peer requires a bounded HTTPS endpoint, a non-empty tenant allowlist, and a SHA-256 trust-root digest. Any invalid entry disables federation rather than retaining a partially trusted configuration.
 
 Verification uses that configured key—not a request-supplied key—and binds peer, tenant, continuity ID, epoch, destination, payload digest, issue time, and expiry. Envelopes have a maximum five-minute lifetime. A durable database receipt admits exactly one concurrent delivery for each tenant/peer/message tuple; expired receipts are pruned at ingestion because their envelopes can no longer verify. Accepted envelope digests enter provenance while contents remain encrypted or referenced.
-
-This guide covers the operator actions that require judgment when portable
-continuity is enabled. The engine fails closed when it cannot prove whether an
-external effect happened.
 
 ## Verify execution provenance
 

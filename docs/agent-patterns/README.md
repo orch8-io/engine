@@ -128,7 +128,6 @@ Patterns nest — the `multi-agent-delegation` pattern is built on top of `tool-
 ## See also
 
 - [API reference — Block Definition Reference](../API.md#block-definition-reference)
-- [API reference — Built-in Handlers](../API.md#built-in-handlers)
 - [Architecture — Built-in Step Handlers](../ARCHITECTURE.md#built-in-step-handlers)
 - [External Workers](../WORKERS.md) — how to implement custom handlers
 - [Configuration](../CONFIGURATION.md) — `ORCH8_ENCRYPTION_KEY` for API key encryption at rest

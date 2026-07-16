@@ -2,6 +2,11 @@
 
 Canonical base URL: `http://localhost:8080/api/v1` (listen address configurable via `ORCH8_HTTP_ADDR`)
 
+> **Scope:** this is a curated guide to common requests and concepts, not the
+> complete wire contract. The running server's `/api-docs/openapi.json` and
+> `/swagger-ui` are generated from the current code and are authoritative for
+> fields, status codes, and routes.
+
 All request/response bodies are JSON. Dates use ISO 8601 / RFC 3339 format.
 
 Product routes are served under `/api/v1`. Bare product paths remain compatibility
@@ -84,7 +89,7 @@ POST /sequences
       "id": "check_engagement",
       "routes": [
         {
-          "condition": "opened == true",
+          "condition": "data.opened == true",
           "blocks": [
             { "type": "step", "id": "send_followup", "handler": "email_send", "params": { "template": "followup" } }
           ]

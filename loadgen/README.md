@@ -6,8 +6,20 @@ types, cron triggers, signals) and doubles as a stress tool.
 
 ## Quick start
 
+The load generator does not currently send Orch8 API-key or tenant headers.
+Run it only against an isolated local engine started with `--insecure` and
+both tenant-isolation overrides shown below, never against a shared or
+production environment.
+
 ```bash
-# from repo root, with the engine running at :18080
+# isolated engine terminal
+ORCH8_HTTP_ADDR=127.0.0.1:18080 \
+ORCH8_API_KEY="" \
+ORCH8_REQUIRE_TENANT_HEADER=false \
+ORCH8_ALLOW_NO_TENANT_ISOLATION=1 \
+orch8-server --config orch8.toml --insecure
+
+# load-generator terminal, from repo root
 cd loadgen
 npm install
 npm run light     # ~1 instance/sec, 20 concurrent, 2 workers
@@ -61,14 +73,8 @@ Eight always-on templates plus one gated LLM template:
 
 ## Cleanup
 
-Everything the loadgen creates lives under tenants `loadgen-*`. Scrub via:
-
-```bash
-# delete all loadgen instances + sequences + crons
-curl -X POST "$BASE_URL/admin/cleanup-tenant?tenant_id=loadgen-a"
-curl -X POST "$BASE_URL/admin/cleanup-tenant?tenant_id=loadgen-b"
-curl -X POST "$BASE_URL/admin/cleanup-tenant?tenant_id=loadgen-c"
-```
-
-(If the admin cleanup endpoint isn't wired yet, drop the tenant rows
-directly from the DB — they're namespaced so there's no risk to real data.)
+Everything the load generator creates uses `loadgen-*` tenants. There is no
+public tenant-cleanup endpoint. Use a disposable SQLite database or dedicated
+PostgreSQL database for a run, then delete that database through your normal
+database lifecycle. Do not issue ad-hoc cross-table deletes against a shared
+Orch8 database.

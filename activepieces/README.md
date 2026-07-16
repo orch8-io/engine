@@ -94,7 +94,10 @@ platform registration doesn't exist headlessly). Register a poll trigger on
 the orch8 side with:
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/triggers -H 'content-type: application/json' -d '{
+curl -X POST http://localhost:8080/api/v1/triggers \
+  -H "x-api-key: $ORCH8_API_KEY" \
+  -H 'x-tenant-id: t1' \
+  -H 'content-type: application/json' -d '{
   "slug": "stripe-failed-payments",
   "sequence_name": "payment-recovery",
   "tenant_id": "t1",

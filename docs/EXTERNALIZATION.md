@@ -61,7 +61,7 @@ Only **top-level** keys of `context.data` are eligible. If you stuff a 500 KiB b
 
 This is deliberate: shallow walks are cheap and preserve atomic semantics per top-level key. Structure your context so large values live at top-level keys:
 
-```json
+```jsonc
 {
   "data": {
     "user_id": "u123",          // small, stays inline
@@ -76,6 +76,12 @@ This is deliberate: shallow walks are cheap and preserve atomic semantics per to
 Each step's return value is a `BlockOutput` row. If the serialized output exceeds the threshold (or `always_outputs` is set), the output JSON is written to `externalized_state` and `block_outputs.output_ref` is populated instead.
 
 The `GET /instances/{id}/outputs` endpoint re-hydrates externalized outputs transparently — API consumers never see the marker envelope.
+
+The current scheduler does not reinflate externalized block outputs when
+resolving a downstream `outputs.<block>.*` template. Keep intermediate producer
+outputs below the externalization threshold; use output externalization for
+terminal, audit, or retrieval-only values. This limitation does not apply to
+top-level context fields, which have a separate dispatch-time hydration path.
 
 ---
 

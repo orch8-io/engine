@@ -24,7 +24,10 @@ Selection uses Postgres' `FOR UPDATE SKIP LOCKED` — many workers can poll conc
 
 ## Protocol
 
-All endpoints accept and return JSON. See [API.md](API.md#external-workers) for the canonical request/response shapes.
+All product endpoints below are relative to the canonical `/api/v1` base URL
+and accept/return JSON. Authenticated deployments require `x-api-key` and
+`x-tenant-id` on every worker request. See
+[API.md](API.md#external-workers) for the canonical request/response shapes.
 
 ### 1. Poll for tasks
 
@@ -156,7 +159,9 @@ A minimal Python worker:
 ```python
 import httpx, time, socket, os
 
-ENGINE = "http://localhost:8080"
+ENGINE = os.getenv("ORCH8_URL", "http://localhost:8080/api/v1")
+API_KEY = os.environ["ORCH8_API_KEY"]
+TENANT_ID = os.getenv("ORCH8_TENANT_ID", "demo")
 WORKER_ID = f"py-worker-{socket.gethostname()}-{os.getpid()}"
 
 def send_email(task):
@@ -165,7 +170,10 @@ def send_email(task):
 
 HANDLERS = {"send_email": send_email}
 
-with httpx.Client(base_url=ENGINE, timeout=10) as http:
+with httpx.Client(base_url=ENGINE, timeout=10, headers={
+    "x-api-key": API_KEY,
+    "x-tenant-id": TENANT_ID,
+}) as http:
     while True:
         for handler_name in HANDLERS:
             r = http.post("/workers/tasks/poll", json={

@@ -1,5 +1,10 @@
 # Security Audit Notes — Second Rust Workspace Review
 
+> **Historical security record, not a current assurance statement.** This file
+> preserves the scope and results of a specific audit pass. Reverify remaining
+> items against the current source and consult current CI/security tooling
+> before making a risk decision.
+
 This document records the issues identified and fixed during the second deep
 security audit of the `orch8.io/engine` Rust workspace.
 

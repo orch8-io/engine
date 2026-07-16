@@ -346,41 +346,24 @@ Events: `instance.completed`, `instance.failed`. Configurable URLs, retry with e
 
 ## Performance
 
-Benchmarked on Apple Silicon, single Postgres, single engine process:
+Capacity depends on workflow shape, handler latency, database topology, payload
+size, and configured concurrency. Measure the current checkout and your own
+workload with the Rust benches and the isolated [load generator](../loadgen/README.md);
+old point-in-time throughput numbers are not a production sizing guarantee.
 
-| Operation | Throughput |
-|-----------|-----------|
-| Batch INSERT 100K instances | ~37,000/sec |
-| Claim (SKIP LOCKED, batch=256) | ~37,000/sec |
-| E2E noop, 1-step sequences | ~860/sec |
-| E2E noop, 3-step sequences | ~610/sec |
-
-**What makes it fast:** Postgres as scheduler (no in-memory queue), batch prefetch (2 queries not 2N), multi-block execution per claim, sequence LRU cache, jemalloc, semaphore-bounded concurrency, SKIP LOCKED (no lock contention).
+The main performance mechanisms are Postgres-backed scheduling, batch prefetch,
+multi-block execution per claim, sequence caching, semaphore-bounded execution,
+and `SKIP LOCKED` claim coordination.
 
 ---
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ORCH8_STORAGE_BACKEND` | `postgres` | Storage backend (`postgres` or `sqlite`) |
-| `ORCH8_DATABASE_URL` | — | Connection string (required) |
-| `ORCH8_DATABASE_MAX_CONNECTIONS` | `64` | DB connection pool size |
-| `ORCH8_HTTP_ADDR` | `127.0.0.1:8080` | HTTP listen address |
-| `ORCH8_GRPC_ADDR` | `127.0.0.1:50051` | gRPC listen address |
-| `ORCH8_LOG_LEVEL` | `info` | Log level |
-| `ORCH8_LOG_JSON` | `false` | JSON log format |
-| `ORCH8_TICK_INTERVAL_MS` | `100` | Scheduler tick interval |
-| `ORCH8_BATCH_SIZE` | `256` | Instances claimed per tick |
-| `ORCH8_MAX_CONCURRENT_STEPS` | `128` | Max concurrent step executions |
-| `ORCH8_MAX_INSTANCES_PER_TENANT` | `0` | Per-tenant claim limit (0 = unlimited) |
-| `ORCH8_CRON_TICK_SECS` | `10` | Cron loop check interval (seconds) |
-| `ORCH8_WEBHOOK_URLS` | — | Comma-separated webhook URLs |
-| `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers) |
-| `ORCH8_API_KEY` | — | API key for auth (the server refuses to start without one unless `--insecure-auth` / `--insecure` is passed) |
-| `ORCH8_ENCRYPTION_KEY` | — | 64 hex chars for AES-256-GCM encryption at rest (required unless `--insecure-storage` / `--insecure` is passed) |
-
-See [Configuration Reference](CONFIGURATION.md) for all options including TOML fields.
+Architecture-sensitive settings include storage selection, scheduler cadence,
+claim batch size, concurrency bounds, authentication, encryption, and external
+state policy. Their defaults and environment names change independently from
+this explanation, so the [Configuration Reference](CONFIGURATION.md) is the
+single source of truth.
 
 ---
 
@@ -405,7 +388,7 @@ See [Configuration Reference](CONFIGURATION.md) for all options including TOML f
 
 ## See also
 
-- [Quick Start](QUICK_START.md) — zero to first completed instance in 5 minutes
+- [Progressive Quick Starts](quick-starts/README.md) — build from local execution to production operations
 - [API Reference](API.md) — REST endpoints, block types, error codes
 - [Configuration](CONFIGURATION.md) — all config options and env vars
 - [External Workers](WORKERS.md) — writing handlers in any language

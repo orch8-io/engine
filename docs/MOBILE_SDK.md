@@ -2,6 +2,11 @@
 
 Server-configurable workflows running on-device. Update onboarding flows, promotions, and feature journeys without app store deployments.
 
+This document describes the bindings generated from the current workspace
+(`0.6.0`). Published Swift and Android artifacts may version independently.
+Replace `<published-version>` below with a version that exists in your package
+repository; do not assume it matches the Rust workspace version.
+
 ## Architecture
 
 ```
@@ -31,7 +36,10 @@ Add the package dependency in Xcode or `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/orch8-io/orch8-mobile-swift", from: "0.1.0"),
+    .package(
+        url: "https://github.com/orch8-io/orch8-mobile-swift",
+        exact: "<published-version>"
+    ),
 ]
 ```
 
@@ -49,7 +57,7 @@ Add the AAR dependency:
 
 ```kotlin
 dependencies {
-    implementation("io.orch8:orch8-mobile:0.1.0")
+    implementation("io.orch8:orch8-mobile:<published-version>")
 }
 ```
 
@@ -84,7 +92,7 @@ let config = MobileEngineConfig(
     telemetryUrl: "https://telemetry.example.com/ingest",
     environment: "production",
     rootPublicKey: "<base64-ed25519-public-key>",
-    sdkVersion: "0.1.0",
+    sdkVersion: "<host-sdk-version>",
     memoryBudgetBytes: 0,
     sequencesUrl: "",
     syncUrl: "",       // optional server command/status sync
@@ -118,7 +126,7 @@ val config = MobileEngineConfig(
     telemetryUrl = "https://telemetry.example.com/ingest",
     environment = "production",
     rootPublicKey = "<base64-ed25519-public-key>",
-    sdkVersion = "0.1.0",
+    sdkVersion = "<host-sdk-version>",
     memoryBudgetBytes = 0u,
     sequencesUrl = "",
     syncUrl = "",       // optional server command/status sync
