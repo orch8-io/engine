@@ -567,7 +567,30 @@ describe("Continuity Invariants", () => {
     });
 
     it("terminal_state_in evaluates to unknown when the instance has not reached a terminal state", async () => {
-      const { tenantId, createdSequence, execution } = await freshExecution("inv-eval-term-unknown");
+      const tenantId = tid("inv-eval-term-unknown");
+      const sequence = testSequence(
+        "inv-eval-term-unknown",
+        [step("s1", "human_review", {}, {
+          wait_for_input: {
+            prompt: "Keep running",
+            choices: [{ label: "Done", value: "done" }],
+          },
+        })],
+        { tenantId },
+      );
+      const created = await client.createSequence(sequence);
+      const createdSequence = { ...sequence, id: created.id };
+      const instance = await client.createInstance({
+        sequence_id: createdSequence.id,
+        tenant_id: tenantId,
+        namespace: "default",
+      });
+      await client.waitForState(instance.id, "waiting");
+      const execution = await client.createContinuityExecution({
+        tenant_id: tenantId,
+        instance_id: instance.id,
+        runtime_id: uuid(),
+      });
       await client.createContinuityInvariant({
         tenant_id: tenantId,
         sequence_id: createdSequence.id,
