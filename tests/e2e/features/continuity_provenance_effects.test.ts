@@ -978,11 +978,33 @@ describe("Continuity Invariants", () => {
   });
 
   it("terminal_state_in is unknown/inconclusive while the instance is still running", async () => {
-    const { tenantId, execution, createdSequence } = await freshExecution("inv-eval-terminal-running");
+    const tenantId = `inv-eval-terminal-running-${uuid().slice(0, 8)}`;
+    const sequence = testSequence(
+      "inv-eval-terminal-running",
+      [step("s1", "human_review", {}, {
+        wait_for_input: {
+          prompt: "Keep running",
+          choices: [{ label: "Done", value: "done" }],
+        },
+      })],
+      { tenantId },
+    );
+    const createdSequence = await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: createdSequence.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    await client.waitForState(instance.id, "waiting");
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId,
+      instance_id: instance.id,
+      runtime_id: uuid(),
+    });
     await client.createContinuityInvariant({
       tenant_id: tenantId,
       sequence_id: createdSequence.id,
-      sequence_version: createdSequence.version,
+      sequence_version: sequence.version,
       name: "must reach completed",
       rule: { type: "terminal_state_in", states: ["completed"] },
     });
