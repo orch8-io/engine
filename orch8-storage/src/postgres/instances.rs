@@ -419,6 +419,39 @@ pub(super) async fn conditional_update_state(
     Ok(result.rows_affected() > 0)
 }
 
+/// Transactional variant: CAS the state and enqueue its webhook rows in the
+/// same commit. A lost CAS queues no events.
+pub(super) async fn conditional_update_state_with_outbox(
+    store: &PostgresStorage,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let result = sqlx::query(
+        "UPDATE task_instances \
+         SET state = $2, next_fire_at = $3, updated_at = NOW() \
+         WHERE id = $1 AND state = $4",
+    )
+    .bind(id.into_uuid())
+    .bind(new_state.to_string())
+    .bind(next_fire_at)
+    .bind(expected_state.to_string())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    for entry in entries {
+        super::webhook_outbox::park_tx(&mut tx, entry).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn update_context(
     store: &PostgresStorage,
     id: InstanceId,
@@ -451,23 +484,56 @@ pub(super) async fn update_context_cas(
     Ok(result.rows_affected() > 0)
 }
 
-/// Update only `context.runtime.started_at` via `jsonb_set` so the scheduler
-/// doesn't have to clone + re-serialize the entire context just to stamp the
-/// first-run timestamp.
-pub(super) async fn update_started_at(
+/// Ensure `context.runtime.run_id` and `started_at` are populated without
+/// overwriting a run identity created by retry/resume (first writer wins per
+/// field).
+pub(super) async fn ensure_run_started(
     store: &PostgresStorage,
     id: InstanceId,
+    run_id: &str,
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
     let started_at_json = serde_json::to_value(started_at)?;
     sqlx::query(
         "UPDATE task_instances \
-         SET context = jsonb_set(context, ARRAY['runtime', 'started_at'], $2), \
+         SET context = jsonb_set( \
+                 jsonb_set(context, ARRAY['runtime', 'run_id'], \
+                     COALESCE(context #> ARRAY['runtime', 'run_id'], to_jsonb($2::text)), true), \
+                 ARRAY['runtime', 'started_at'], \
+                 COALESCE(context #> ARRAY['runtime', 'started_at'], $3::jsonb), true), \
              updated_at = NOW() \
          WHERE id = $1",
     )
     .bind(id.into_uuid())
+    .bind(run_id)
     .bind(started_at_json)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+/// Reset the bookkeeping that is scoped to one execution run while preserving
+/// user context and audit/config data.
+pub(super) async fn reset_run(
+    store: &PostgresStorage,
+    id: InstanceId,
+    run_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = jsonb_set( \
+                 context, ARRAY['runtime'], \
+                 COALESCE(context -> 'runtime', '{}'::jsonb) || jsonb_build_object( \
+                     'run_id', $2::text, \
+                     'total_steps_executed', 0, \
+                     'current_step', NULL, \
+                     'current_step_started_at', NULL, \
+                     'started_at', NULL), true), \
+             updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(id.into_uuid())
+    .bind(run_id)
     .execute(&store.pool)
     .await?;
     Ok(())

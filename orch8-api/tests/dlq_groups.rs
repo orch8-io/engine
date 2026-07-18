@@ -79,6 +79,22 @@ async fn plant_failed_instance(
         .update_instance_state(instance_id, InstanceState::Failed, None)
         .await
         .unwrap();
+
+    let mut failed = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    failed.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    failed.context.runtime.total_steps_executed = 900;
+    failed.context.runtime.current_step = Some(BlockId::new("charge"));
+    failed.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    failed.context.runtime.started_at = Some(chrono::Utc::now());
+    srv.storage
+        .update_instance_context(instance_id, &failed.context)
+        .await
+        .unwrap();
     id
 }
 
@@ -193,6 +209,10 @@ async fn bulk_retry_requires_sample_or_force() {
         .unwrap();
     assert_eq!(inst.state, InstanceState::Scheduled);
     assert_eq!(inst.metadata["dlq_sample_retry"]["fingerprint"], json!(fp));
+    assert_eq!(inst.context.runtime.total_steps_executed, 0);
+    assert!(inst.context.runtime.current_step.is_none());
+    assert!(inst.context.runtime.current_step_started_at.is_none());
+    assert!(inst.context.runtime.started_at.is_none());
 
     // Bulk citing the sample while it has NOT completed → still 409.
     let resp = client

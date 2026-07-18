@@ -24,9 +24,20 @@ Upgrades are safe on both backends: Postgres migrations are checksum-verified an
 
 The engine is stateless. Run N replicas pointing at the same Postgres — `FOR UPDATE SKIP LOCKED` guarantees no double-claiming. No leader election, no peer discovery, no sidecar coordinator.
 
+> **Warning — triggers are not lease-gated.** Instance *claiming* is safe at
+> any replica count, but the trigger processor is not: every node runs the
+> trigger loop and spawns its own NATS subscription / file watcher for each
+> enabled trigger, so one event fans out into **one workflow instance per
+> node** (duplicate executions). The other background loops (cron, GC,
+> stale-instance reaper) also run on every node but coordinate through the
+> database, so they stay single-fire. Until trigger lease-gating ships: if you
+> use NATS or file-watch triggers, run a **single engine node**. Workloads
+> without those triggers can scale API serving + execution to 2+ replicas
+> behind a load balancer as described below.
+
 Recommended:
 
-- **2+ replicas** for availability.
+- **2+ replicas** for availability (single node if you use NATS/file triggers — see the warning above).
 - **PodDisruptionBudget** (or equivalent) of `maxUnavailable: 1`.
 - **`[engine].shutdown_grace_period_secs = 30`** (the default) and an orchestrator
   termination grace period longer than that — lets in-flight steps drain before SIGKILL.
@@ -213,7 +224,11 @@ Before opening traffic:
 - [ ] `/metrics` is scraped by your Prometheus — it sits behind API-key auth, so configure the scrape job to send the `x-api-key` header (and `x-tenant-id` when tenant enforcement is on).
 - [ ] Log level is `info` or `warn`, format is `json`.
 - [ ] Webhook subscribers handle dedup on `instance_id + event_type` (see [WEBHOOKS.md](WEBHOOKS.md)).
-- [ ] Replicas ≥ 2 behind a load balancer with health checks.
+- [ ] Replicas ≥ 2 behind a load balancer with health checks — unless you use NATS/file triggers (see the warning in [High availability](#high-availability)).
+- [ ] Retention is configured — set `instance_retention_secs` (e.g. 30–90 days) so terminal instances are swept; `0` (the default) keeps them forever. Trade-off: the sweep deletes queryable instance history (`orch8 instance get`, outputs, execution tree), so pick a window your debugging/audit needs can live with.
+- [ ] Table growth is monitored — track `pg_total_relation_size` on `task_instances`, `block_outputs`, `audit_log`, and `step_logs`; they grow with every execution and dominate storage.
+- [ ] Partitioning is planned for volume — once `block_outputs` or `audit_log` pass ~10M rows, partition by `created_at` (monthly) so retention drops and vacuum stay cheap.
+- [ ] Backlog/lag alerts — alert when `orch8_queue_depth` sits at the `batch_size` ceiling for several minutes (work is arriving faster than it is claimed) and on `orch8_recovery_stale_instances_total` increments (a node died holding work).
 - [ ] Graceful shutdown verified — send SIGTERM, in-flight steps complete, no orphaned tasks.
 
 ---

@@ -86,10 +86,17 @@ pub(super) async fn get_all(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockOutput>, StorageError> {
-    let rows = sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at")
-        .bind(instance_id.into_uuid().to_string())
-        .fetch_all(&storage.pool)
-        .await?;
+    // `id` tiebreaker: rows written in the same millisecond share a
+    // `created_at`, and without a second key their relative order (hence
+    // which attempt "wins" in last-wins consumers like
+    // `build_outputs_shape`) is planner-dependent. Ids are UUIDv7, so
+    // lexicographic TEXT order matches insertion order — same convention
+    // as `get_page` / `copy_for_blocks`.
+    let rows =
+        sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at, id")
+            .bind(instance_id.into_uuid().to_string())
+            .fetch_all(&storage.pool)
+            .await?;
     rows.iter().map(row_to_output).collect()
 }
 
@@ -139,14 +146,22 @@ pub(super) async fn get_completed_ids(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockId>, StorageError> {
-    // Exclude `__retry__` markers: a retry marker advances the attempt
-    // counter (via `get_block_output`) but does NOT mean the block completed —
-    // it must stay eligible for re-execution. The `__in_progress__` sentinel
-    // is intentionally NOT excluded (it makes a mid-flight block skip on crash
-    // recovery, preventing duplicate side effects).
+    // Exclude internal bookkeeping markers — neither means the block's
+    // handler ran to completion:
+    //   - `__retry__`: advances the attempt counter (via `get_block_output`)
+    //     after a retryable failure, but the block must stay eligible for
+    //     re-execution.
+    //   - `__in_progress__`: a crash-mid-step sentinel. The handler's effect
+    //     is UNKNOWN (it may not have run at all), so counting the block as
+    //     completed would let an instance reach `Completed` without the
+    //     step's effect ever happening — and `build_outputs_shape` would feed
+    //     the sentinel JSON to downstream `{{ outputs.* }}` templates.
+    //     Excluding it makes crash recovery re-execute the step at the same
+    //     attempt (see `compute_attempt` and the memoization guard in
+    //     `execute_step_dry`) — at-least-once, identical to the tree path.
     let rows = sqlx::query(
         "SELECT DISTINCT block_id FROM block_outputs \
-         WHERE instance_id=?1 AND (output_ref IS NULL OR output_ref <> '__retry__')",
+         WHERE instance_id=?1 AND (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))",
     )
     .bind(instance_id.into_uuid().to_string())
     .fetch_all(&storage.pool)
@@ -171,8 +186,10 @@ pub(super) async fn get_completed_ids_batch(
     for id in instance_ids {
         separated.push_bind(id.to_string());
     }
-    // See `get_completed_ids`: retry markers don't count as completed.
-    separated.push_unseparated(") AND (output_ref IS NULL OR output_ref <> '__retry__')");
+    // See `get_completed_ids`: internal markers don't count as completed.
+    separated.push_unseparated(
+        ") AND (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))",
+    );
     let query = qb.build();
     let rows = query.fetch_all(&storage.pool).await?;
     let mut result: HashMap<InstanceId, Vec<BlockId>> =

@@ -116,6 +116,23 @@ async fn resume_from_middle_block_wipes_tail_and_reschedules() {
         .await
         .unwrap();
 
+    let old_run_id = Uuid::now_v7().to_string();
+    let mut before_resume = srv
+        .storage
+        .get_instance(InstanceId::from_uuid(inst))
+        .await
+        .unwrap()
+        .unwrap();
+    before_resume.context.runtime.run_id = Some(old_run_id.clone());
+    before_resume.context.runtime.total_steps_executed = 900;
+    before_resume.context.runtime.current_step = Some(BlockId::new("s2"));
+    before_resume.context.runtime.current_step_started_at = Some(Utc::now());
+    before_resume.context.runtime.started_at = Some(Utc::now());
+    srv.storage
+        .update_instance_context(before_resume.id, &before_resume.context)
+        .await
+        .unwrap();
+
     let resp = client
         .post(format!("{}/instances/{inst}/resume-from/s2", srv.base_url))
         .header("X-Tenant-Id", "t1")
@@ -148,6 +165,27 @@ async fn resume_from_middle_block_wipes_tail_and_reschedules() {
     let fetched: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(fetched["state"], "scheduled");
     assert!(fetched["next_fire_at"].is_string());
+
+    let after_resume = srv
+        .storage
+        .get_instance(InstanceId::from_uuid(inst))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        after_resume.context.runtime.run_id.as_deref(),
+        Some(old_run_id.as_str())
+    );
+    assert_eq!(after_resume.context.runtime.total_steps_executed, 0);
+    assert!(after_resume.context.runtime.current_step.is_none());
+    assert!(
+        after_resume
+            .context
+            .runtime
+            .current_step_started_at
+            .is_none()
+    );
+    assert!(after_resume.context.runtime.started_at.is_none());
 }
 
 #[tokio::test]

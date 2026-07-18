@@ -260,11 +260,13 @@ impl Engine {
             }
         });
 
-        // Stale instance reaper. Resets instances stuck in Running/Waiting
+        // Stale instance reaper. Resets instances stuck in Running
         // back to Scheduled so the scheduler can re-process them. This is the
         // runtime counterpart of the startup-only `recover_stale_instances` —
         // without it, an instance orphaned by a panic or cancelled task stays
-        // stuck until the engine restarts.
+        // stuck until the engine restarts. Waiting instances are not touched:
+        // they never heartbeat, so the sweep would recycle every parked gate
+        // on each pass; their liveness is the deadline/timeout sweep's job.
         let inst_reaper_storage = Arc::clone(&self.storage);
         let inst_reaper_cancel = self.cancel.clone();
         let inst_reaper_threshold = Duration::from_secs(self.config.stale_instance_threshold_secs);
@@ -319,6 +321,17 @@ impl Engine {
             )
             .await;
             tracing::info!("trigger processor loop exited");
+        });
+
+        // Durable webhook outbox. Terminal events are committed alongside the
+        // instance state transition; this loop owns network delivery and
+        // survives process restarts through pending/stale-claim recovery.
+        let webhook_storage = Arc::clone(&self.storage);
+        let webhook_config = self.config.webhooks.clone();
+        let webhook_cancel = self.cancel.clone();
+        set.spawn(async move {
+            webhooks::run_outbox_loop(webhook_storage, webhook_config, webhook_cancel).await;
+            tracing::info!("webhook outbox loop exited");
         });
 
         Self::spawn_credentials_refresh(&mut set, Arc::clone(&self.storage), self.cancel.clone());

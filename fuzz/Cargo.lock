@@ -1729,7 +1729,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orch8-engine"
-version = "0.6.0"
+version = "0.7.0-dev"
 dependencies = [
  "base64",
  "bytes",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.6.0"
+version = "0.7.0-dev"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1790,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.6.0"
+version = "0.7.0-dev"
 dependencies = [
  "aes-gcm",
  "base64",

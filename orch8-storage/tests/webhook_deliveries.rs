@@ -184,6 +184,9 @@ async fn parked_outbox_row_links_to_delivery() {
         last_error: Some("http 503".into()),
         created_at: Utc::now(),
         delivery_id: Some(delivery),
+        status: orch8_types::webhook_outbox::WebhookOutboxStatus::Parked,
+        next_attempt_at: None,
+        claimed_at: None,
     };
     s.park_webhook(&entry).await.unwrap();
     let fetched = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();

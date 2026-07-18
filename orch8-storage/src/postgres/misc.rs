@@ -95,11 +95,21 @@ pub(super) async fn recover_stale_instances(
     stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
     let threshold_secs = stale_threshold.as_secs_f64();
+    // `running` only — never `waiting`. Parked waiters (human-review gates,
+    // wait-for-event) have no heartbeat, so a lease-age sweep cannot tell a
+    // legitimately parked gate from a wedged worker: every pass reclaimed
+    // them, churning claim → re-park transitions and an audit row per park.
+    // A waiting instance's liveness contract is the deadline/timeout sweep
+    // (`process_waiting_deadlines`), not the lease.
+    //
+    // `next_fire_at` is still reset for the running scope: a wedged instance
+    // may carry a far-future fire time from before it stalled, and claim_due
+    // would otherwise leave it unclaimed until that time naturally arrives.
     let result = sqlx::query(
         r"
         UPDATE task_instances
         SET state = 'scheduled', next_fire_at = NOW(), updated_at = NOW()
-        WHERE state IN ('running', 'waiting')
+        WHERE state = 'running'
           AND updated_at < NOW() - make_interval(secs => $1::double precision)
         ",
     )

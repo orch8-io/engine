@@ -1118,11 +1118,13 @@ passthrough_impl! {
     async fn update_instance_state(&self, id: InstanceId, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
     async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
     async fn conditional_update_instance_state(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
     async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
     async fn count_instances(&self, filter: &orch8_types::filter::InstanceFilter) -> Result<u64, StorageError>;
     async fn bulk_update_state(&self, filter: &orch8_types::filter::InstanceFilter, new_state: orch8_types::instance::InstanceState) -> Result<u64, StorageError>;
     async fn bulk_reschedule(&self, filter: &orch8_types::filter::InstanceFilter, offset_secs: i64) -> Result<u64, StorageError>;
-    async fn update_instance_started_at(&self, id: InstanceId, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+    async fn ensure_instance_run_started(&self, id: InstanceId, run_id: &str, started_at: DateTime<Utc>) -> Result<(), StorageError>;
+    async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError>;
     // Pass-through: the counter lives in `context.runtime`, which is never
     // encrypted (only `context.data` is), so the inner backend's atomic
     // increment is correct as-is.
@@ -1559,6 +1561,10 @@ passthrough_impl! {
     async fn list_webhook_outbox(&self, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn get_webhook_outbox(&self, id: Uuid) -> Result<Option<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn claim_due_webhook_outbox(&self, now: DateTime<Utc>, limit: u32) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+    async fn claim_webhook_outbox_row(&self, id: Uuid, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
+    async fn fail_webhook_outbox_attempt(&self, id: Uuid, last_error: &str, next_attempt_at: Option<DateTime<Utc>>) -> Result<(), StorageError>;
+    async fn recover_stale_webhook_claims(&self, stale_before: DateTime<Utc>) -> Result<u64, StorageError>;
     async fn record_webhook_attempt(&self, attempt: &orch8_types::webhook_delivery::WebhookDeliveryAttempt) -> Result<(), StorageError>;
     async fn list_webhook_deliveries(&self, filter: &orch8_types::webhook_delivery::DeliveryFilter, limit: u32) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliverySummary>, StorageError>;
     async fn get_webhook_delivery_attempts(&self, delivery_id: Uuid) -> Result<Vec<orch8_types::webhook_delivery::WebhookDeliveryAttempt>, StorageError>;

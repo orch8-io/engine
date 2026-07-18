@@ -3,8 +3,10 @@ use tracing::{info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::audit::AuditLogEntry;
+use orch8_types::config::WebhookConfig;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::InstanceState;
+use orch8_types::webhook_outbox::WebhookOutboxEntry;
 
 use crate::error::EngineError;
 
@@ -20,6 +22,46 @@ pub async fn transition_instance(
     from: InstanceState,
     to: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
+) -> Result<(), EngineError> {
+    transition_instance_inner(storage, instance_id, tenant_id, from, to, next_fire_at, &[]).await
+}
+
+/// Transition an instance and durably enqueue one webhook row per configured
+/// destination in the same database transaction. The background outbox loop
+/// performs network delivery after commit.
+#[allow(clippy::too_many_arguments)]
+pub async fn transition_instance_with_webhook(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tenant_id: Option<&TenantId>,
+    from: InstanceState,
+    to: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    webhook_config: &WebhookConfig,
+    event: &crate::webhooks::WebhookEvent,
+) -> Result<(), EngineError> {
+    let entries = crate::webhooks::pending_entries(webhook_config, event);
+    transition_instance_inner(
+        storage,
+        instance_id,
+        tenant_id,
+        from,
+        to,
+        next_fire_at,
+        &entries,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transition_instance_inner(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tenant_id: Option<&TenantId>,
+    from: InstanceState,
+    to: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    outbox_entries: &[WebhookOutboxEntry],
 ) -> Result<(), EngineError> {
     if !from.can_transition_to(to) {
         warn!(
@@ -38,9 +80,21 @@ pub async fn transition_instance(
     // Atomic CAS: only update if the row is still in `from` state.
     // Prevents a concurrent cancel/fail from being silently overwritten
     // by a late scheduler or worker callback.
-    let updated = storage
-        .conditional_update_instance_state(instance_id, from, to, next_fire_at)
-        .await?;
+    let updated = if outbox_entries.is_empty() {
+        storage
+            .conditional_update_instance_state(instance_id, from, to, next_fire_at)
+            .await?
+    } else {
+        storage
+            .conditional_update_instance_state_with_outbox(
+                instance_id,
+                from,
+                to,
+                next_fire_at,
+                outbox_entries,
+            )
+            .await?
+    };
     if !updated {
         warn!(
             instance_id = %instance_id,
@@ -132,7 +186,7 @@ pub async fn audit_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{AdminStore, InstanceStore};
+    use orch8_storage::{AdminStore, InstanceStore, WorkerStore};
 
     use chrono::Utc;
     use orch8_types::context::{ExecutionContext, RuntimeContext};
@@ -282,6 +336,59 @@ mod tests {
         .unwrap();
         let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
         assert_eq!(stored.state, InstanceState::Completed);
+    }
+
+    #[tokio::test]
+    async fn terminal_transition_queues_one_durable_webhook_per_url() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut inst = mk_scheduled_instance();
+        inst.state = InstanceState::Running;
+        storage.create_instance(&inst).await.unwrap();
+        let config = WebhookConfig {
+            urls: vec![
+                "https://hooks.example.com/a".into(),
+                "https://hooks.example.com/b".into(),
+            ],
+            timeout_secs: 5,
+            max_retries: 1,
+            secret: None,
+        };
+        let event = crate::webhooks::instance_event(
+            "instance.completed",
+            inst.id,
+            json!({"run_id": "run-1"}),
+        );
+
+        transition_instance_with_webhook(
+            &storage,
+            inst.id,
+            Some(&inst.tenant_id),
+            InstanceState::Running,
+            InstanceState::Completed,
+            None,
+            &config,
+            &event,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            storage.get_instance(inst.id).await.unwrap().unwrap().state,
+            InstanceState::Completed
+        );
+        let queued = storage
+            .claim_due_webhook_outbox(Utc::now(), 10)
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 2);
+        assert!(queued.iter().all(|entry| {
+            entry.status == orch8_types::webhook_outbox::WebhookOutboxStatus::InFlight
+                && entry.event_type == "instance.completed"
+                && entry.instance_id == Some(inst.id.into_uuid())
+                && entry.payload["data"]["run_id"] == "run-1"
+        }));
     }
 
     #[tokio::test]

@@ -191,6 +191,11 @@ pub(crate) async fn inspect_instance_block(
     // Outputs snapshot in storage order; last attempt per block wins,
     // truncated at the requested boundary (default: the inspected block —
     // a block never sees its own output).
+    //
+    // Internal bookkeeping rows (`__in_progress__` crash sentinels and
+    // `__retry__` attempt markers) are skipped — this endpoint shows what
+    // `{{ outputs.* }}` would resolve to, and `build_outputs_shape` (the
+    // engine-side shape) filters the same rows, so the two views must agree.
     let boundary = q.at_block.as_deref().unwrap_or(&block_id);
     let raw = state
         .storage
@@ -201,6 +206,12 @@ pub(crate) async fn inspect_instance_block(
     for o in &raw {
         let bid = o.block_id.as_str();
         if bid.starts_with('_') {
+            continue;
+        }
+        if matches!(
+            o.output_ref.as_deref(),
+            Some("__in_progress__" | "__retry__")
+        ) {
             continue;
         }
         if bid == boundary {

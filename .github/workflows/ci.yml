@@ -69,6 +69,10 @@ jobs:
         run: cargo fmt --check
       - name: Migration immutability
         run: ./scripts/check-migration-immutability.sh
+      - name: Destructive migration lint
+        run: ./scripts/check-destructive-migrations.sh
+      - name: Review-fix guard regression tests
+        run: ./scripts/test-review-fix-guards.sh
       - name: Check
         run: cargo check --workspace
       - name: Clippy (all targets)
@@ -261,3 +265,141 @@ jobs:
       - name: Tear down
         if: always()
         run: docker rm -f orch8-ci || true
+
+  # The E2E suites assume Postgres (the security suites query the DB via psql),
+  # so instead of an e2e matrix leg this boots the server on SQLite and drives
+  # one minimal sequence to completion through the CLI — a smoke that the
+  # sqlite backend executes workflows end to end.
+  sqlite-smoke:
+    name: SQLite Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [check]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build server & CLI
+        run: cargo build --bin orch8-server --bin orch8
+      - name: Start server (SQLite)
+        run: |
+          ORCH8_STORAGE_BACKEND=sqlite \
+          ORCH8_DATABASE_URL="sqlite://${RUNNER_TEMP}/orch8-smoke.db" \
+          ORCH8_HTTP_ADDR=127.0.0.1:8080 \
+          ORCH8_REQUIRE_TENANT_HEADER=false \
+          ORCH8_RUN_MIGRATIONS=true \
+          ORCH8_LOG_LEVEL=warn \
+          ./target/debug/orch8-server --insecure > "${RUNNER_TEMP}/orch8-smoke.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/orch8-smoke.pid"
+          # Wait for /health/ready (up to 30s).
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "engine ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "engine never became ready — server log follows:"
+          cat "${RUNNER_TEMP}/orch8-smoke.log"
+          exit 1
+      - name: Run a minimal sequence to completion
+        run: |
+          cat > "${RUNNER_TEMP}/sequence.json" <<'EOF'
+          {
+            "tenant_id": "smoke",
+            "namespace": "default",
+            "name": "sqlite-smoke",
+            "version": 1,
+            "blocks": [
+              { "type": "step", "id": "first", "handler": "noop" },
+              { "type": "step", "id": "second", "handler": "noop" }
+            ]
+          }
+          EOF
+          ./target/debug/orch8 sequence apply "${RUNNER_TEMP}/sequence.json"
+          SEQUENCE_ID="$(./target/debug/orch8 --output json sequence lookup smoke default sqlite-smoke | jq -r '.id')"
+          INSTANCE_ID="$(./target/debug/orch8 --output json instance create --sequence-id "${SEQUENCE_ID}" --tenant-id smoke | jq -r '.id')"
+          ./target/debug/orch8 instance get "${INSTANCE_ID}" --watch
+          STATE="$(./target/debug/orch8 --output json instance get "${INSTANCE_ID}" | jq -r '.state')"
+          echo "terminal state: ${STATE}"
+          test "${STATE}" = "completed"
+      - name: Tear down
+        if: always()
+        run: kill "$(cat "${RUNNER_TEMP}/orch8-smoke.pid")" 2>/dev/null || true
+
+  # Short fuzz pass over every target in fuzz/fuzz_targets/ — 60s of
+  # libFuzzer per target, mostly to catch "the harness no longer compiles"
+  # and shallow crashes. Deep runs stay a scheduled/local activity.
+  fuzz-smoke:
+    name: Fuzz Smoke (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [expression, template]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # nightly
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: |
+            .
+            fuzz
+          key: fuzz-${{ matrix.target }}
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Fuzz ${{ matrix.target }} (60s)
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+
+  # scripts/test-mobile-sync.sh is CI-runnable: it only needs a server on
+  # localhost:8080 with mobile sync enabled. Boots one on SQLite and runs it.
+  mobile-sync-smoke:
+    name: Mobile Sync Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [check]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Install protoc & uuidgen
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler uuid-runtime
+      - name: Build server
+        run: cargo build --bin orch8-server
+      - name: Start server (SQLite, mobile sync enabled)
+        run: |
+          ORCH8_STORAGE_BACKEND=sqlite \
+          ORCH8_DATABASE_URL="sqlite://${RUNNER_TEMP}/orch8-mobile.db" \
+          ORCH8_HTTP_ADDR=127.0.0.1:8080 \
+          ORCH8_MOBILE_SYNC_ENABLED=true \
+          ORCH8_REQUIRE_TENANT_HEADER=false \
+          ORCH8_RUN_MIGRATIONS=true \
+          ORCH8_LOG_LEVEL=warn \
+          ./target/debug/orch8-server --insecure > "${RUNNER_TEMP}/orch8-mobile.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/orch8-mobile.pid"
+          # Wait for /health/ready (up to 30s).
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "engine ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "engine never became ready — server log follows:"
+          cat "${RUNNER_TEMP}/orch8-mobile.log"
+          exit 1
+      - name: Run mobile sync script
+        run: ./scripts/test-mobile-sync.sh
+      - name: Tear down
+        if: always()
+        run: kill "$(cat "${RUNNER_TEMP}/orch8-mobile.pid")" 2>/dev/null || true

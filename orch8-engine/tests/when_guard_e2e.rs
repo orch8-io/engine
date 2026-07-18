@@ -81,6 +81,34 @@ async fn when_guard_falsy_skips_step() {
 }
 
 // ================================================================
+// when = unparseable → step fails loudly (no silent skip)
+// ================================================================
+
+#[tokio::test]
+async fn when_guard_parse_error_fails_instance() {
+    // M7: an unparseable `when` expression is a malformed step definition,
+    // not a falsy condition. It must surface as a failure — instance Failed,
+    // node Failed — never as a silent skip that lets the flow complete.
+    let (storage, seq, inst) = setup_with_ctx(
+        vec![mk_step_with_when("s1", "noop", "this is not ( valid")],
+        json!({}),
+    )
+    .await;
+    let handlers = registry();
+    drive(&storage, &handlers, inst.id, &seq).await;
+
+    let final_inst = storage.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(final_inst.state, InstanceState::Failed);
+
+    let nodes = storage.get_execution_tree(inst.id).await.unwrap();
+    let node = nodes
+        .iter()
+        .find(|n| n.block_id == BlockId::new("s1"))
+        .unwrap();
+    assert_eq!(node.state, NodeState::Failed);
+}
+
+// ================================================================
 // No when → step always executes
 // ================================================================
 

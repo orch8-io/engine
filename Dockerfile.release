@@ -18,8 +18,11 @@ RUN mkdir -p /data && chown orch8:orch8 /data
 
 EXPOSE 8080 50051
 
+# Derive host/port from ORCH8_HTTP_ADDR (default 127.0.0.1:8080) so the check
+# keeps working when the listen address is overridden. A wildcard bind
+# (0.0.0.0) is probed via loopback from inside the container.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/orch8", "--url", "http://127.0.0.1:8080", "health"]
+    CMD ["sh", "-c", "addr=\"${ORCH8_HTTP_ADDR:-127.0.0.1:8080}\"; host=\"${addr%:*}\"; port=\"${addr##*:}\"; if [ -z \"$host\" ] || [ \"$host\" = \"0.0.0.0\" ]; then host=127.0.0.1; fi; exec /usr/local/bin/orch8 --url \"http://${host}:${port}\" health"]
 
 USER orch8
 

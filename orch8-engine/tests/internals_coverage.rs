@@ -1433,8 +1433,8 @@ fn webhook_75_none_instance_id_serializes_as_null() {
     assert!(json_str.contains("\"instance_id\":null"));
 }
 
-#[test]
-fn webhook_76_emit_empty_urls() {
+#[tokio::test]
+async fn webhook_76_emit_empty_urls() {
     use orch8_types::config::WebhookConfig;
     let config = WebhookConfig {
         urls: vec![],
@@ -1443,7 +1443,7 @@ fn webhook_76_emit_empty_urls() {
         secret: None,
     };
     let event = instance_event("test", InstanceId::new(), json!({}));
-    webhooks::emit(&config, &event, &CancellationToken::new());
+    webhooks::emit(&config, &event, &CancellationToken::new()).await;
 }
 
 #[test]
@@ -1479,8 +1479,8 @@ fn webhook_79_nested_data() {
     assert_eq!(event.data, payload);
 }
 
-#[test]
-fn webhook_80_cancelled_token_noop() {
+#[tokio::test]
+async fn webhook_80_cancelled_token_noop() {
     use orch8_types::config::WebhookConfig;
     let config = WebhookConfig {
         urls: vec![],
@@ -1491,7 +1491,7 @@ fn webhook_80_cancelled_token_noop() {
     let event = instance_event("x", InstanceId::new(), json!({}));
     let cancel = CancellationToken::new();
     cancel.cancel();
-    webhooks::emit(&config, &event, &cancel);
+    webhooks::emit(&config, &event, &cancel).await;
 }
 
 // ================================================================

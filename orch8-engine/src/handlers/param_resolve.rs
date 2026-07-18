@@ -27,6 +27,18 @@ use crate::error::EngineError;
 /// Build the `outputs` JSON shape expected by `template::resolve`:
 /// `{ "block_id_1": <output>, "block_id_2": <output>, ... }`.
 /// Fetches all prior block outputs for the instance from storage.
+///
+/// Internal bookkeeping rows are NOT step outputs and must never surface in
+/// `{{ outputs.* }}` templates, so they are filtered here as defense in
+/// depth (the completed-id queries already exclude them, but a stale row can
+/// still be returned by `get_all_outputs` — e.g. the sentinel left behind by
+/// a crashed attempt after the re-executed step saves its real output):
+///   - `__in_progress__`: crash-mid-step sentinel — its `{"_sentinel":
+///     true, ...}` payload is garbage to downstream templates.
+///   - `__retry__`: attempt-counter marker — likewise not a real result.
+///
+/// `__error__` rows are kept deliberately: they are genuine failure evidence
+/// a compensation / `try_catch` path may legitimately reference.
 pub(crate) async fn build_outputs_shape(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -37,6 +49,12 @@ pub(crate) async fn build_outputs_shape(
         .map_err(EngineError::Storage)?;
     let mut map = serde_json::Map::with_capacity(outputs.len());
     for o in outputs {
+        if matches!(
+            o.output_ref.as_deref(),
+            Some(IN_PROGRESS_SENTINEL | "__retry__")
+        ) {
+            continue;
+        }
         map.insert(o.block_id.as_str().to_owned(), o.output);
     }
     Ok(serde_json::Value::Object(map))
@@ -121,7 +139,9 @@ pub(crate) async fn resolve_templates_in_params(
 /// scheduler before invoking a side-effectful handler. It is NOT a real output:
 /// `compute_attempt` and the memoization guard in `execute_step_dry` must treat
 /// it specially so a crash mid-step neither replays a bogus output nor inflates
-/// the retry count.
+/// the retry count. It is likewise excluded from the completed-block set
+/// (`get_completed_block_ids*`) so a crashed step re-executes on recovery, and
+/// filtered from `build_outputs_shape` so it can never reach `{{ outputs.* }}`.
 pub(crate) const IN_PROGRESS_SENTINEL: &str = "__in_progress__";
 
 /// Compute the attempt number for a step from the latest prior
@@ -268,12 +288,22 @@ mod tests {
         bid: &str,
         out: serde_json::Value,
     ) {
+        save_output_with_ref(storage, id, bid, out, None).await;
+    }
+
+    async fn save_output_with_ref(
+        storage: &dyn StorageBackend,
+        id: InstanceId,
+        bid: &str,
+        out: serde_json::Value,
+        output_ref: Option<&str>,
+    ) {
         let bo = BlockOutput {
             id: uuid::Uuid::now_v7(),
             instance_id: id,
             block_id: BlockId::new(bid),
             output: out,
-            output_ref: None,
+            output_ref: output_ref.map(str::to_owned),
             output_size: 0,
             attempt: 0,
             created_at: Utc::now(),
@@ -313,9 +343,92 @@ mod tests {
         save_output(&s, inst.id, "b1", json!({"v": 1})).await;
         save_output(&s, inst.id, "b1", json!({"v": 2})).await;
         let shape = build_outputs_shape(&s, inst.id).await.unwrap();
-        // Storage returns both; the last inserted wins when building the map.
-        let v = &shape["b1"]["v"];
-        assert!(v == &json!(1) || v == &json!(2));
+        // `get_all_outputs` orders by `created_at, id` and ids are UUIDv7
+        // (time-ordered), so the second save deterministically wins even if
+        // both rows land in the same millisecond.
+        assert_eq!(shape["b1"], json!({"v": 2}));
+    }
+
+    // PR3b: a crash-mid-step sentinel must never surface as a block's output —
+    // its `{"_sentinel": true, ...}` payload is garbage to `{{ outputs.* }}`.
+    // Regression guard for the fast-path crash-recovery contract (the sentinel
+    // is also excluded from the completed-block set so the step re-executes).
+    #[tokio::test]
+    async fn build_outputs_shape_filters_in_progress_sentinel() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+        save_output_with_ref(
+            &s,
+            inst.id,
+            "b1",
+            json!({"_sentinel": true, "_handler": "h"}),
+            Some(IN_PROGRESS_SENTINEL),
+        )
+        .await;
+        save_output(&s, inst.id, "b2", json!({"ok": true})).await;
+        let shape = build_outputs_shape(&s, inst.id).await.unwrap();
+        assert_eq!(shape, json!({"b2": {"ok": true}}));
+    }
+
+    // PR3c: a `__retry__` attempt marker is internal bookkeeping too — a block
+    // whose only row is a retry marker has no output yet.
+    #[tokio::test]
+    async fn build_outputs_shape_filters_retry_marker() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+        save_output_with_ref(
+            &s,
+            inst.id,
+            "b1",
+            json!({"_retry_marker": true, "error": "boom"}),
+            Some("__retry__"),
+        )
+        .await;
+        let shape = build_outputs_shape(&s, inst.id).await.unwrap();
+        assert_eq!(shape, json!({}));
+    }
+
+    // PR3d: a stale sentinel BEHIND a real output (left over when a crashed
+    // attempt is re-executed and succeeds) must not shadow the real result.
+    #[tokio::test]
+    async fn build_outputs_shape_real_output_wins_over_stale_sentinel() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+        save_output_with_ref(
+            &s,
+            inst.id,
+            "b1",
+            json!({"_sentinel": true, "_handler": "h"}),
+            Some(IN_PROGRESS_SENTINEL),
+        )
+        .await;
+        save_output(&s, inst.id, "b1", json!({"result": 42})).await;
+        let shape = build_outputs_shape(&s, inst.id).await.unwrap();
+        assert_eq!(shape, json!({"b1": {"result": 42}}));
+    }
+
+    #[tokio::test]
+    async fn outputs_snapshot_is_single_fetch_and_refreshes_only_when_recreated() {
+        let storage = mk_storage().await;
+        let instance = mk_instance(InstanceId::new());
+        storage.create_instance(&instance).await.unwrap();
+        save_output(&storage, instance.id, "first", json!(1)).await;
+        let snapshot = OutputsSnapshot::new();
+
+        let first_read = snapshot.get(&storage, instance.id).await.unwrap();
+        assert_eq!(first_read["first"], 1);
+        save_output(&storage, instance.id, "second", json!(2)).await;
+
+        let cached_read = snapshot.get(&storage, instance.id).await.unwrap();
+        assert!(std::ptr::eq(first_read, cached_read));
+        assert!(cached_read.get("second").is_none());
+
+        let refreshed = OutputsSnapshot::new();
+        let refreshed_read = refreshed.get(&storage, instance.id).await.unwrap();
+        assert_eq!(refreshed_read["second"], 2);
     }
 
     // PR4: resolve_templates_in_params substitutes context.data paths.

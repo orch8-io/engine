@@ -40,6 +40,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::sequence::{CompensationVerificationPolicy, SequenceDefinition, SequenceStatus};
 use orch8_types::signal::{Signal, SignalType};
 use orch8_types::step_log::StepLogEntry;
+use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 const TEST_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -72,6 +73,73 @@ fn mk_instance(tenant: &str, data: serde_json::Value) -> TaskInstance {
         created_at: now,
         updated_at: now,
     }
+}
+
+#[tokio::test]
+async fn new_run_and_atomic_webhook_operations_forward_through_encryption_decorator() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let mut instance = mk_instance("T1", json!({"secret": "kept-encrypted"}));
+    instance.state = InstanceState::Running;
+    instance.context.runtime.run_id = Some("old-run".into());
+    instance.context.runtime.total_steps_executed = 900;
+    seed_sequence(&storage, instance.sequence_id, "T1").await;
+    storage.create_instance(&instance).await.unwrap();
+
+    storage
+        .reset_instance_run(instance.id, "new-run")
+        .await
+        .unwrap();
+    let reset = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(reset.context.data, json!({"secret": "kept-encrypted"}));
+    assert_eq!(reset.context.runtime.run_id.as_deref(), Some("new-run"));
+    assert_eq!(reset.context.runtime.total_steps_executed, 0);
+    assert!(FieldEncryptor::is_encrypted(
+        &inner
+            .get_instance(instance.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context
+            .data
+    ));
+
+    let outbox = WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        url: "https://hooks.example.com/terminal".into(),
+        event_type: "instance.completed".into(),
+        instance_id: Some(instance.id.into_uuid()),
+        payload: json!({"event_type": "instance.completed"}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(Uuid::now_v7()),
+        status: WebhookOutboxStatus::Pending,
+        next_attempt_at: None,
+        claimed_at: None,
+    };
+    assert!(
+        storage
+            .conditional_update_instance_state_with_outbox(
+                instance.id,
+                InstanceState::Running,
+                InstanceState::Completed,
+                None,
+                std::slice::from_ref(&outbox),
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage
+            .get_webhook_outbox(outbox.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 async fn seed_sequence(storage: &dyn StorageBackend, seq_id: SequenceId, tenant: &str) {

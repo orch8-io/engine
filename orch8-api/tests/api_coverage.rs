@@ -4,7 +4,8 @@
 //! approvals, credentials, error handling, and auth/tenant scoping.
 
 use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::WorkerStore;
+use orch8_storage::{InstanceStore, WorkerStore};
+use orch8_types::ids::InstanceId;
 use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
@@ -844,6 +845,7 @@ async fn t30_retry_from_failed_resets_to_scheduled() {
     let client = reqwest::Client::new();
     let seq_id = create_seq(&client, &srv.base_url, "t1").await;
     let inst_id = create_inst(&client, &srv.base_url, seq_id, "t1").await;
+    let instance_id = InstanceId::from_uuid(Uuid::parse_str(&inst_id).unwrap());
     client
         .patch(format!("{}/instances/{inst_id}/state", srv.base_url))
         .header("X-Tenant-Id", "t1")
@@ -858,6 +860,22 @@ async fn t30_retry_from_failed_resets_to_scheduled() {
         .send()
         .await
         .unwrap();
+    let old_run_id = Uuid::now_v7().to_string();
+    let mut failed = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    failed.context.runtime.run_id = Some(old_run_id.clone());
+    failed.context.runtime.total_steps_executed = 900;
+    failed.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("step-1"));
+    failed.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    failed.context.runtime.started_at = Some(chrono::Utc::now());
+    srv.storage
+        .update_instance_context(failed.id, &failed.context)
+        .await
+        .unwrap();
     let resp = client
         .post(format!("{}/instances/{inst_id}/retry", srv.base_url))
         .header("X-Tenant-Id", "t1")
@@ -867,6 +885,20 @@ async fn t30_retry_from_failed_resets_to_scheduled() {
     assert_eq!(resp.status(), StatusCode::OK);
     let v: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(v["state"], "scheduled");
+    let retried = srv
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        retried.context.runtime.run_id.as_deref(),
+        Some(old_run_id.as_str())
+    );
+    assert_eq!(retried.context.runtime.total_steps_executed, 0);
+    assert!(retried.context.runtime.current_step.is_none());
+    assert!(retried.context.runtime.current_step_started_at.is_none());
+    assert!(retried.context.runtime.started_at.is_none());
 }
 
 // ════════════════════════════════════════════════════════════════════════════

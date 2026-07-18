@@ -776,14 +776,15 @@ async fn tick_two_sequences_both_complete() {
     assert_eq!(r2.state, InstanceState::Completed);
 }
 
-/// 36. tick sets `started_at` on first execution.
+/// 36. tick sets the run identity and `started_at` on first execution.
 #[tokio::test]
-async fn tick_sets_started_at() {
+async fn tick_sets_run_id_and_started_at() {
     let s = storage().await;
     let seq = mk_sequence(vec![mk_step("s1", "noop")]);
     s.create_sequence(&seq).await.unwrap();
     let inst = mk_instance(seq.id);
     assert!(inst.context.runtime.started_at.is_none());
+    assert!(inst.context.runtime.run_id.is_none());
     s.create_instance(&inst).await.unwrap();
 
     let h = Arc::new(registry());
@@ -791,6 +792,7 @@ async fn tick_sets_started_at() {
 
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert!(refreshed.context.runtime.started_at.is_some());
+    assert!(refreshed.context.runtime.run_id.is_some());
 }
 
 /// 37. Instance with already-completed blocks skips them.
@@ -2319,4 +2321,98 @@ async fn tick_full_e2e_delayed_multi_step() {
     assert_eq!(result.steps_executed, 0);
     let refreshed = s.get_instance(inst.id).await.unwrap().unwrap();
     assert_eq!(refreshed.state, InstanceState::Scheduled);
+}
+
+// ================================================================
+// CRASH RECOVERY — fast path is at-least-once
+// ================================================================
+
+/// A step that crashes mid-handler leaves an `__in_progress__` sentinel row
+/// behind. After the wedged instance is reclaimed, the fast path must
+/// RE-EXECUTE the step (at-least-once — the same contract the tree path's
+/// memoization guard already provided), because "completed" must imply the
+/// handler's effect ran. This pins the current contract: the sentinel
+/// previously counted as completed, so the step was skipped and the instance
+/// could reach `Completed` with downstream `{{ outputs.* }}` templates
+/// resolving to the sentinel's garbage payload.
+#[tokio::test]
+async fn crash_mid_step_reexecutes_step_after_reclaim() {
+    let s = storage().await;
+
+    let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut reg = registry();
+    {
+        let calls = Arc::clone(&calls);
+        reg.register("counting", move |_ctx| {
+            let calls = Arc::clone(&calls);
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(json!({"result": "ran"}))
+            })
+        });
+    }
+    {
+        let captured = Arc::clone(&captured);
+        reg.register("capture", move |ctx| {
+            let captured = Arc::clone(&captured);
+            Box::pin(async move {
+                captured.lock().unwrap().push(ctx.params.clone());
+                Ok(json!({}))
+            })
+        });
+    }
+
+    // s1 "crashed" mid-handler; s2 consumes s1's real output — if the
+    // sentinel leaked into `{{ outputs.* }}`, s2 would capture garbage.
+    let seq = mk_sequence(vec![
+        mk_step("s1", "counting"),
+        mk_step_with_params("s2", "capture", json!({"v": "{{outputs.s1.result}}"})),
+    ]);
+    s.create_sequence(&seq).await.unwrap();
+
+    // Simulate the crashed worker: instance wedged in Running (stale
+    // updated_at), carrying the sentinel row the dead worker wrote before
+    // invoking the handler.
+    let mut inst = mk_instance_in_state(seq.id, InstanceState::Running);
+    let stale = Utc::now() - chrono::Duration::seconds(600);
+    inst.created_at = stale;
+    inst.updated_at = stale;
+    s.create_instance(&inst).await.unwrap();
+    s.save_block_output(&orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId::new("s1"),
+        output: json!({"_sentinel": true, "_handler": "counting"}),
+        output_ref: Some("__in_progress__".into()),
+        output_size: 0,
+        attempt: 0,
+        created_at: stale,
+    })
+    .await
+    .unwrap();
+
+    // Reclaim the wedged instance, then tick.
+    assert_eq!(
+        orch8_engine::recovery::recover_stale_instances(s.as_ref(), 60)
+            .await
+            .unwrap(),
+        1
+    );
+    let h = Arc::new(reg);
+    tick(&s, &h).await;
+
+    // The step re-executed (under the old contract it was skipped: zero
+    // handler calls, and the instance completed on the sentinel's data).
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let inst = s.get_instance(inst.id).await.unwrap().unwrap();
+    assert_eq!(inst.state, InstanceState::Completed);
+    // Downstream consumed the REAL output, not the sentinel JSON.
+    assert_eq!(captured.lock().unwrap().as_slice(), &[json!({"v": "ran"})]);
+    let latest = s
+        .get_block_output(inst.id, &BlockId::new("s1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.output, json!({"result": "ran"}));
 }

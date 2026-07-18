@@ -13,12 +13,23 @@
 # release tag reachable from HEAD. A migration that already existed at that
 # tag must be byte-identical today; new migrations (not present at the tag)
 # are unrestricted. Run in CI on every PR.
+#
+# It also fails if a migration that shipped at the tag has been DELETED from
+# the worktree (the file-walking diff alone is blind to deletions), and --
+# under CI -- if no tag is reachable at all, since a tagless checkout would
+# otherwise skip every check and report success.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
 latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 if [[ -z "$latest_tag" ]]; then
+    if [[ -n "${CI:-}" ]]; then
+        echo "FAIL: no git tag reachable from HEAD -- cannot verify migration" >&2
+        echo "  immutability without a release baseline. Fetch tags in the" >&2
+        echo "  checkout step (actions/checkout with fetch-depth: 0)." >&2
+        exit 1
+    fi
     echo "No git tags found -- skipping migration immutability check."
     exit 0
 fi
@@ -38,10 +49,22 @@ while IFS= read -r -d '' file; do
     fi
 done < <(find migrations -maxdepth 1 -name '*.sql' -print0 | sort -z)
 
+# Deletions: the loop above only walks files that exist in the worktree
+# today, so compare against the tag's file list as well -- a shipped
+# migration must never be removed.
+while IFS= read -r file; do
+    if [[ ! -f "$file" ]]; then
+        echo "FAIL: $file shipped in $latest_tag but is missing from the worktree"
+        echo "  A migration that already shipped must never be deleted --"
+        echo "  restore the file."
+        failed=1
+    fi
+done < <(git ls-tree -r --name-only "$latest_tag" -- migrations/)
+
 if [[ "$failed" -ne 0 ]]; then
     echo
-    echo "One or more already-released migrations were modified. See above."
+    echo "One or more already-released migrations were modified or deleted. See above."
     exit 1
 fi
 
-echo "OK: no released migration files were modified."
+echo "OK: no released migration files were modified or deleted."

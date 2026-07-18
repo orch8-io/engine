@@ -131,6 +131,22 @@ pub fn evaluate_condition(
     is_truthy(&result)
 }
 
+/// Strict variant of [`evaluate_condition`]: surfaces tokenizer/parse errors
+/// as `Err` instead of swallowing them to `null` → `false`. Used by the
+/// step-execution `when` guard so a malformed guard fails loudly rather than
+/// silently skipping the step (and everything downstream of it). Semantic
+/// oddities the lenient path also tolerates (unknown function, missing path,
+/// non-numeric arithmetic operand) still evaluate to `null`/falsy — only
+/// genuine parse failures become `Err`.
+pub fn evaluate_condition_strict(
+    condition: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+) -> Result<bool, ExprError> {
+    let result = try_evaluate(strip_template_braces(condition), context, outputs)?;
+    Ok(is_truthy(&result))
+}
+
 // === Tokenizer ===
 
 #[derive(Debug, Clone, PartialEq)]

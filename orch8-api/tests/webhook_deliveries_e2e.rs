@@ -129,6 +129,9 @@ fn mk_parked(url: &str, delivery_id: Option<Uuid>) -> WebhookOutboxEntry {
         last_error: Some("http 503".into()),
         created_at: Utc::now(),
         delivery_id,
+        status: orch8_types::webhook_outbox::WebhookOutboxStatus::Parked,
+        next_attempt_at: None,
+        claimed_at: None,
     }
 }
 

@@ -140,3 +140,52 @@ async fn max_step_runtime_breach_emits_once() {
         "step breach must not re-alert"
     );
 }
+
+#[tokio::test]
+async fn breach_beyond_first_page_fires() {
+    // H6 regression: with more active instances than `batch_size`, the old
+    // fixed first-page window never saw instances sorted past it — a breach
+    // there never fired. `tick_once` scans all pages, so the breach on the
+    // last-sorted instance must fire on the first tick.
+    let storage = storage().await;
+    let handlers = Arc::new(registry());
+
+    let sla_seq = {
+        let mut seq = mk_sequence(vec![mk_step("s1", "noop")]);
+        seq.sla = Some(SlaPolicy {
+            max_runtime: Some(Duration::from_secs(60)),
+            max_step_runtime: None,
+        });
+        seq
+    };
+    storage.create_sequence(&sla_seq).await.unwrap();
+    let plain_seq = mk_sequence(vec![mk_step("s1", "noop")]);
+    storage.create_sequence(&plain_seq).await.unwrap();
+
+    // Five no-SLA fillers with old `updated_at` sort ahead of the breaching
+    // instance (`updated_at ASC`); batch_size = 2 puts the breacher on page 3.
+    for _ in 0..5 {
+        let mut filler = mk_instance_in_state(plain_seq.id, InstanceState::Waiting);
+        filler.updated_at = Utc::now() - chrono::Duration::hours(2);
+        storage.create_instance(&filler).await.unwrap();
+    }
+    let mut breacher = mk_instance_in_state(sla_seq.id, InstanceState::Waiting);
+    breacher.created_at = Utc::now() - chrono::Duration::hours(1);
+    breacher.updated_at = Utc::now();
+    storage.create_instance(&breacher).await.unwrap();
+
+    let sem = semaphore(128);
+    let mut config = default_config();
+    config.batch_size = 2;
+    let seq_cache = cache();
+    let cancel = CancellationToken::new();
+    tick_once(&storage, &handlers, &sem, &config, &seq_cache, &cancel)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sentinel_count(&storage, breacher.id, "_sla:runtime").await,
+        1,
+        "breach beyond the first page must fire"
+    );
+}

@@ -306,6 +306,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_waiting_updated
     ON task_instances(updated_at) WHERE state = 'waiting';
+-- Backs the stale-instance reaper's running-side scan (Postgres migration
+-- 070). The waiting-side index above now serves only the waiting-deadline
+-- sweep; the reaper no longer scans `waiting` (parked waiters never
+-- heartbeat — their liveness contract is the deadline/timeout sweep).
+CREATE INDEX IF NOT EXISTS idx_task_instances_running_updated
+    ON task_instances(updated_at) WHERE state = 'running';
 
 -- R7: scope_kind + scope_value columns replace the old parent_instance_id
 -- so the handler can pick per-parent or per-tenant dedupe at call time.
@@ -514,9 +520,17 @@ CREATE TABLE IF NOT EXISTS webhook_outbox (
     attempts    INTEGER NOT NULL DEFAULT 0,
     last_error  TEXT,
     created_at  TEXT NOT NULL,
-    delivery_id TEXT
+    delivery_id TEXT,
+    -- Delivery queue columns (mirror 071_webhook_outbox_dispatch.sql):
+    -- pending rows are claimed by the drain loop / fast path, flipped to
+    -- parked when retries exhaust. Pre-existing rows default to 'parked'.
+    status          TEXT NOT NULL DEFAULT 'parked',
+    next_attempt_at TEXT,
+    claimed_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_created ON webhook_outbox(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_due
+    ON webhook_outbox(next_attempt_at) WHERE status = 'pending';
 
 -- Webhook delivery attempt history (delivery inspector). One row per
 -- outbound attempt; delivery_id groups one delivery pass. Bounded,
@@ -1019,4 +1033,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 34;
+pub(super) const SCHEMA_VERSION: i64 = 35;

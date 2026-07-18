@@ -410,6 +410,46 @@ pub trait InstanceStore: Send + Sync + 'static {
         Ok(true)
     }
 
+    /// CAS the instance state AND enqueue webhook outbox rows in one
+    /// transaction, so a terminal transition can never commit without its
+    /// webhook events being durably queued (a crash between the two writes
+    /// would otherwise lose the event). Returns whether the CAS won.
+    ///
+    /// Required method (it spans `task_instances` and `webhook_outbox`, so no
+    /// single-trait default exists); the encrypting wrapper passes through to
+    /// its inner backend.
+    async fn conditional_update_instance_state_with_outbox(
+        &self,
+        id: InstanceId,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+    ) -> Result<bool, StorageError>;
+
+    /// Reset the per-run bookkeeping in `context.runtime` for a NEW run:
+    /// regenerate `run_id`, zero `total_steps_executed`, and clear
+    /// `current_step` / `current_step_started_at` / `started_at` (the start
+    /// timestamp is re-stamped on the next claim). Called by retry /
+    /// resume-from-block / DLQ-retry so a resurrected instance does not
+    /// phantom-re-fail against `max_steps_per_instance` and its webhooks
+    /// carry a fresh run identity.
+    ///
+    /// The default is a read-modify-write fallback for in-memory / test
+    /// backends; SQL backends override with a targeted `json_set` /
+    /// `jsonb_set` UPDATE (same style as [`Self::increment_total_steps`]).
+    async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError> {
+        let Some(mut inst) = self.get_instance(id).await? else {
+            return Ok(());
+        };
+        inst.context.runtime.run_id = Some(run_id.to_string());
+        inst.context.runtime.total_steps_executed = 0;
+        inst.context.runtime.current_step = None;
+        inst.context.runtime.current_step_started_at = None;
+        inst.context.runtime.started_at = None;
+        self.update_instance_context(id, &inst.context).await
+    }
+
     async fn update_instance_context(
         &self,
         id: InstanceId,
@@ -429,13 +469,16 @@ pub trait InstanceStore: Send + Sync + 'static {
         Ok(true)
     }
 
-    /// Update only the `runtime.started_at` field for an instance.
-    /// Avoids the full context clone + deserialization that
-    /// `update_instance_context` incurs when all we need is stamp the start
-    /// time on the first run.
-    async fn update_instance_started_at(
+    /// Ensure `runtime.run_id` and `runtime.started_at` are set, keeping
+    /// whichever value is already stored for each (first writer wins per
+    /// field). Stamps a fresh run identity on the first execution of a run
+    /// without clobbering the `run_id` a retry/resume already regenerated,
+    /// and avoids the full context clone + deserialization that
+    /// `update_instance_context` incurs.
+    async fn ensure_instance_run_started(
         &self,
         id: InstanceId,
+        run_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         // Default impl for test/memory backends: fall back to the full-path.
@@ -443,7 +486,11 @@ pub trait InstanceStore: Send + Sync + 'static {
             .get_instance(id)
             .await?
             .ok_or_else(|| StorageError::Query(format!("instance not found: {id}")))?;
-        inst.context.runtime.started_at = Some(started_at);
+        inst.context
+            .runtime
+            .run_id
+            .get_or_insert_with(|| run_id.to_string());
+        inst.context.runtime.started_at.get_or_insert(started_at);
         self.update_instance_context(id, &inst.context).await
     }
 
@@ -624,6 +671,10 @@ pub trait InstanceStore: Send + Sync + 'static {
 
     /// Find all instances that were `Running` when the engine crashed
     /// and reset them to `Scheduled` for re-execution.
+    ///
+    /// `Waiting` instances are deliberately out of scope: they never
+    /// heartbeat, so a lease-age sweep recycles every parked gate on each
+    /// pass. Their liveness is owned by the deadline/timeout sweep.
     async fn recover_stale_instances(&self, stale_threshold: Duration)
     -> Result<u64, StorageError>;
 
@@ -860,6 +911,12 @@ pub trait OutputStore: Send + Sync + 'static {
 
     /// Return just the block IDs that have outputs for this instance.
     /// Lighter than `get_all_outputs` -- avoids deserializing full output JSON.
+    ///
+    /// Internal bookkeeping rows are NOT completion evidence and are excluded:
+    /// `__retry__` markers (attempt-counter bookkeeping after a retryable
+    /// failure) and `__in_progress__` sentinels (crash mid-handler — the
+    /// effect is unknown, so the block must stay eligible for re-execution).
+    /// "Completed" must imply the handler ran to completion.
     async fn get_completed_block_ids(
         &self,
         instance_id: InstanceId,
@@ -1350,15 +1407,19 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     // === Webhook Outbox ===
 
-    /// Park a webhook delivery that exhausted its retries, for later
-    /// inspection / redelivery. Best-effort: callers log on error rather than
-    /// failing the originating operation.
+    /// Insert a webhook outbox row: `pending` rows queue an event for the
+    /// drain loop / in-memory fast path; `parked` rows preserve a delivery
+    /// that exhausted its retries for later inspection / redelivery.
+    /// Best-effort at call sites: they log on error rather than failing the
+    /// originating operation.
     async fn park_webhook(
         &self,
         entry: &orch8_types::webhook_outbox::WebhookOutboxEntry,
     ) -> Result<(), StorageError>;
 
-    /// List parked webhook deliveries, most recently parked first.
+    /// List parked webhook deliveries (exhausted retries; the operator
+    /// surface), most recently parked first. In-flight `pending` work is
+    /// deliberately not listed.
     async fn list_webhook_outbox(
         &self,
         limit: u32,
@@ -1372,6 +1433,47 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Remove a parked delivery (after a successful redelivery or a discard).
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError>;
+
+    /// Claim up to `limit` due `pending` outbox rows for dispatch, flipping
+    /// them to `in_flight` with `now` as the claim timestamp. `Postgres` uses
+    /// `FOR UPDATE SKIP LOCKED`; `SQLite` serializes the claim in a
+    /// `BEGIN IMMEDIATE` transaction (the same analogue as
+    /// [`SchedulingStore::claim_due_instances`]).
+    async fn claim_due_webhook_outbox(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError>;
+
+    /// Claim one specific `pending` row for the in-memory fast path. Returns
+    /// `false` when the row is gone or already claimed — another dispatcher
+    /// owns it and the caller must NOT dispatch a duplicate.
+    async fn claim_webhook_outbox_row(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError>;
+
+    /// Record a failed dispatch attempt against a claimed row: bump
+    /// `attempts`, store `last_error`, and clear the claim. When
+    /// `next_attempt_at` is `Some` the row goes back to `pending` for that
+    /// time (backoff reschedule); when `None` the delivery is exhausted and
+    /// the row is `parked` (manual redelivery only — the pre-existing
+    /// exhausted-delivery behavior).
+    async fn fail_webhook_outbox_attempt(
+        &self,
+        id: Uuid,
+        last_error: &str,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
+    /// Reset `in_flight` rows whose claim predates `stale_before` back to
+    /// `pending` — crash recovery for a dispatcher that died mid-dispatch.
+    /// Returns the number of rows recovered.
+    async fn recover_stale_webhook_claims(
+        &self,
+        stale_before: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
 
     // === Webhook Delivery Attempts (delivery inspector) ===
 

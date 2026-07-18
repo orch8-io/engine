@@ -72,23 +72,25 @@ pub(crate) fn require_str<'a>(params: &'a Value, field: &str) -> Result<&'a str,
 
 /// Map a `StorageError` to the appropriate `StepError` retryability.
 ///
-/// Connection/pool/query errors are treated as retryable (transient infra
-/// issues). Everything else — serialization, constraint violations, terminal
-/// targets, logic errors — is permanent. `TerminalTarget` in particular is
-/// permanent by definition: the target will never leave the terminal state,
-/// so retrying would only produce the same error.
+/// Retryability is delegated to [`StorageError::is_transient`] — the single
+/// source of truth shared with the scheduler's safety net — so transient
+/// infrastructure failures (connection loss, pool exhaustion, transient
+/// external-backend blips) are retryable, and everything else — query/syntax
+/// errors, serialization, constraint violations, terminal targets — is
+/// permanent. `TerminalTarget` in particular is permanent by definition: the
+/// target will never leave the terminal state, so retrying would only
+/// produce the same error.
 pub(crate) fn map_storage_err(e: &StorageError) -> StepError {
-    match e {
-        StorageError::Connection(_) | StorageError::PoolExhausted | StorageError::Query(_) => {
-            StepError::Retryable {
-                message: format!("storage: {e}"),
-                details: None,
-            }
-        }
-        _ => StepError::Permanent {
+    if e.is_transient() {
+        StepError::Retryable {
             message: format!("storage: {e}"),
             details: None,
-        },
+        }
+    } else {
+        StepError::Permanent {
+            message: format!("storage: {e}"),
+            details: None,
+        }
     }
 }
 
@@ -242,9 +244,19 @@ mod tests {
     }
 
     #[test]
-    fn map_storage_err_query_is_retryable() {
-        let err = map_storage_err(&StorageError::Query("timeout".into()));
+    fn map_storage_err_backend_is_retryable() {
+        let err = map_storage_err(&StorageError::Backend("throttled".into()));
         assert!(matches!(err, StepError::Retryable { .. }));
+    }
+
+    /// A `Query` error is a SQL/logic failure (syntax error, type mismatch),
+    /// not an infrastructure blip — permanent, so it must not burn retry
+    /// budget. It used to be retryable here while the scheduler treated it as
+    /// permanent; both now follow `StorageError::is_transient`.
+    #[test]
+    fn map_storage_err_query_is_permanent() {
+        let err = map_storage_err(&StorageError::Query("syntax error".into()));
+        assert!(matches!(err, StepError::Permanent { .. }));
     }
 
     #[test]

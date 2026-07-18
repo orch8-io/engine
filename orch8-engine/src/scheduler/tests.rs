@@ -261,6 +261,58 @@ async fn scheduler_execute_step_block_template_failure_fails_instance() {
 }
 
 #[tokio::test]
+async fn scheduler_execute_step_block_unparseable_when_guard_fails_instance() {
+    // M7: a `when` guard that fails to parse is a malformed step definition,
+    // not a falsy condition. The lenient evaluator swallowed parse errors to
+    // `null` → guard false → the step was silently skipped. It must now fail
+    // the instance loudly, before the handler runs.
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+
+    let instance_id = InstanceId::new();
+    seed_instance_with_context(storage.as_ref(), instance_id, ExecutionContext::default()).await;
+    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+
+    let mut step_def = mk_step_def("guarded", "capture_params", serde_json::json!({}));
+    step_def.when = Some("5 5".into());
+
+    let handler_called = Arc::new(Mutex::new(false));
+    let handler_called_clone = Arc::clone(&handler_called);
+    let mut registry = HandlerRegistry::new();
+    registry.register("capture_params", move |_ctx| {
+        let flag = Arc::clone(&handler_called_clone);
+        async move {
+            *flag.lock().unwrap() = true;
+            Ok(serde_json::json!({}))
+        }
+    });
+
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+
+    let outcome = execute_step_block(
+        &storage,
+        &registry,
+        &webhook_config,
+        0,
+        &instance,
+        &step_def,
+        &cancel,
+        &SharedClock::default(),
+    )
+    .await
+    .expect("execute_step_block errored");
+
+    assert!(matches!(outcome, StepOutcome::Failed));
+    assert!(
+        !*handler_called.lock().unwrap(),
+        "handler must not run when the when guard is unparseable"
+    );
+
+    let refreshed = storage.get_instance(instance_id).await.unwrap().unwrap();
+    assert_eq!(refreshed.state, InstanceState::Failed);
+}
+
+#[tokio::test]
 async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
     // Regression: the fast path previously deleted ALL block outputs on a
     // retryable failure without persisting a retry marker, so
@@ -1103,4 +1155,233 @@ fn backoff_formula_doubles_with_cap() {
     assert_eq!(compute_backoff(6), 5000, "should cap at 5000ms");
     assert_eq!(compute_backoff(10), 5000, "should stay at cap");
     assert_eq!(compute_backoff(u32::MAX), 5000, "should never overflow");
+}
+
+// ---------------------------------------------------------------------------
+// SLA breach sweep: rotation cursor + idle skip (H6)
+// ---------------------------------------------------------------------------
+
+/// Build a sequence with a `max_runtime` SLA for the sweep tests below.
+fn mk_sla_sequence(name: &str, max_runtime: std::time::Duration) -> SequenceDefinition {
+    use orch8_types::sequence::{BlockDefinition, SequenceStatus, SlaPolicy};
+    SequenceDefinition {
+        id: SequenceId::new(),
+        tenant_id: TenantId::unchecked("t"),
+        namespace: Namespace::new("ns"),
+        name: name.into(),
+        version: 1,
+        deprecated: false,
+        status: SequenceStatus::default(),
+        blocks: vec![BlockDefinition::Step(Box::new(mk_step_def(
+            "s1",
+            "noop",
+            serde_json::json!({}),
+        )))],
+        interceptors: None,
+        input_schema: None,
+        sla: Some(SlaPolicy {
+            max_runtime: Some(max_runtime),
+            max_step_runtime: None,
+        }),
+        on_failure: None,
+        on_cancel: None,
+        created_at: Utc::now(),
+    }
+}
+
+/// A Waiting instance of `seq_id` created `created_age` ago with the given
+/// `updated_at` (controls where it sorts in the sweep's `updated_at ASC`
+/// pages). Waiting so no other sweep/claim path touches it mid-test.
+fn mk_waiting_instance(
+    seq_id: SequenceId,
+    created_age: chrono::Duration,
+    updated_at: chrono::DateTime<Utc>,
+) -> TaskInstance {
+    TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: seq_id,
+        tenant_id: TenantId::unchecked("t"),
+        namespace: Namespace::new("ns"),
+        state: InstanceState::Waiting,
+        next_fire_at: None,
+        priority: Priority::Normal,
+        timezone: "UTC".into(),
+        metadata: serde_json::json!({}),
+        context: ExecutionContext::default(),
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
+        budget: None,
+        created_at: Utc::now() - created_age,
+        updated_at,
+    }
+}
+
+async fn sla_sentinel_exists(storage: &dyn StorageBackend, instance_id: InstanceId) -> bool {
+    storage
+        .get_block_output(instance_id, &BlockId::new("_sla:runtime"))
+        .await
+        .unwrap()
+        .is_some()
+}
+
+#[tokio::test]
+async fn sla_sweep_rotates_beyond_first_page_across_ticks() {
+    // H6 regression: with more active instances than one page holds, the old
+    // fixed `LIMIT batch_size` window never saw instances sorted past the
+    // first page — their breaches never fired. The cursor must rotate the
+    // scan window across ticks so every instance is swept.
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let seq = mk_sla_sequence("sla-rotate", std::time::Duration::from_secs(60));
+    storage.create_sequence(&seq).await.unwrap();
+
+    // Both instances are an hour past the 60s SLA. `older` sorts into page 1,
+    // `newer` into page 2 (batch_size = 1 below).
+    let older = mk_waiting_instance(
+        seq.id,
+        chrono::Duration::hours(1),
+        Utc::now() - chrono::Duration::hours(2),
+    );
+    let newer = mk_waiting_instance(
+        seq.id,
+        chrono::Duration::hours(1),
+        Utc::now() - chrono::Duration::hours(1),
+    );
+    storage.create_instance(&older).await.unwrap();
+    storage.create_instance(&newer).await.unwrap();
+
+    let cache = SequenceCache::new(100, Duration::from_secs(60));
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let mut cursor = SlaSweepCursor::default();
+
+    // batch_size = 1, one page per tick → one instance swept per tick.
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sla_sentinel_exists(storage.as_ref(), older.id).await,
+        "first tick should alert the first-page instance"
+    );
+    assert!(
+        !sla_sentinel_exists(storage.as_ref(), newer.id).await,
+        "beyond-first-page instance must wait for the next tick's page"
+    );
+
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sla_sentinel_exists(storage.as_ref(), newer.id).await,
+        "second tick must alert the instance beyond the first page"
+    );
+}
+
+#[tokio::test]
+async fn sla_sweep_idles_when_no_sla_and_rescans_after_idle_window() {
+    // With no SLA-bearing sequence anywhere, a completed rotation arms the
+    // idle skip: the sweep stops issuing the instance query every tick. The
+    // idle window is bounded — once it elapses, the next tick rescans and
+    // discovers a newly registered SLA sequence.
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let cache = SequenceCache::new(100, Duration::from_secs(60));
+    let webhook_config = WebhookConfig::default();
+    let cancel = CancellationToken::new();
+    let clock = SharedClock::default();
+    let mut cursor = SlaSweepCursor::default();
+
+    // Empty database → the first sweep completes a rotation observing no SLA
+    // and arms the idle window.
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor.idle_ticks_remaining, SLA_SWEEP_IDLE_RESCAN_TICKS);
+
+    // While idle, ticks skip the scan entirely (the counter just runs down).
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor.idle_ticks_remaining, SLA_SWEEP_IDLE_RESCAN_TICKS - 1);
+
+    // A new SLA sequence + breaching instance arrives mid-idle…
+    let seq = mk_sla_sequence("sla-late", std::time::Duration::from_secs(60));
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_waiting_instance(
+        seq.id,
+        chrono::Duration::hours(1),
+        Utc::now() - chrono::Duration::hours(1),
+    );
+    storage.create_instance(&inst).await.unwrap();
+
+    // …and is picked up as soon as the idle window elapses (shorten it to 1
+    // tick for the test: this tick runs the counter out, the next rescans).
+    cursor.idle_ticks_remaining = 1;
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cursor.idle_ticks_remaining, 0);
+    process_sla_breaches(
+        &storage,
+        &cache,
+        &webhook_config,
+        &cancel,
+        1,
+        &clock,
+        &mut cursor,
+        1,
+    )
+    .await
+    .unwrap();
+    assert!(
+        sla_sentinel_exists(storage.as_ref(), inst.id).await,
+        "the rescan after the idle window must discover the new SLA instance"
+    );
 }

@@ -15,6 +15,10 @@
 //!      concurrent pollers (BEGIN IMMEDIATE).
 //!   6. `copy_block_outputs` batch INSERT copies all rows faithfully.
 //!   7. `create_instance_with_dedupe` returns `AlreadyExists` for the loser.
+//!   8. `recover_stale_instances` must NOT reclaim `Waiting` instances —
+//!      parked waiters never heartbeat, so the lease sweep churned every
+//!      parked gate on each pass. Their liveness contract is the
+//!      deadline/timeout sweep.
 //!
 //! Running only this file:
 //!
@@ -38,6 +42,7 @@ use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
 use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::output::BlockOutput;
+use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 async fn store() -> SqliteStorage {
@@ -95,6 +100,28 @@ fn make_output(instance_id: InstanceId, block_id: &str) -> BlockOutput {
     }
 }
 
+fn pending_webhook(instance_id: InstanceId) -> WebhookOutboxEntry {
+    WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        url: "https://hooks.example.com/terminal".into(),
+        event_type: "instance.completed".into(),
+        instance_id: Some(instance_id.into_uuid()),
+        payload: json!({
+            "event_type": "instance.completed",
+            "instance_id": instance_id,
+            "timestamp": Utc::now().to_rfc3339(),
+            "data": {}
+        }),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(Uuid::now_v7()),
+        status: WebhookOutboxStatus::Pending,
+        next_attempt_at: None,
+        claimed_at: None,
+    }
+}
+
 fn make_queue_task(instance_id: InstanceId, block: &str) -> WorkerTask {
     WorkerTask {
         id: Uuid::now_v7(),
@@ -149,6 +176,214 @@ async fn recover_stale_resets_next_fire_at() {
         fire_at <= Utc::now() + Duration::seconds(5),
         "next_fire_at must be reset to now so claim_due picks the instance up, got {fire_at}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 8. recover_stale_instances leaves stale Waiting instances parked
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn recover_stale_skips_waiting_instances() {
+    let s = store().await;
+
+    // A waiting instance parked for an hour (e.g. a human-review gate with
+    // no timeout) is well past the stale threshold, but nothing heartbeats
+    // parked waiters — the reaper must not recycle it. A stale Running
+    // instance alongside it proves the sweep still fires.
+    let mut waiting = make_instance(InstanceState::Waiting);
+    waiting.updated_at = Utc::now() - Duration::hours(1);
+    s.create_instance(&waiting).await.unwrap();
+
+    let mut running = make_instance(InstanceState::Running);
+    running.updated_at = Utc::now() - Duration::hours(1);
+    s.create_instance(&running).await.unwrap();
+
+    let recovered = s
+        .recover_stale_instances(StdDuration::from_secs(300))
+        .await
+        .unwrap();
+    assert_eq!(recovered, 1, "only the running instance may be recovered");
+
+    let parked = s.get_instance(waiting.id).await.unwrap().unwrap();
+    assert_eq!(parked.state, InstanceState::Waiting);
+    let reclaimed = s.get_instance(running.id).await.unwrap().unwrap();
+    assert_eq!(reclaimed.state, InstanceState::Scheduled);
+}
+
+// ---------------------------------------------------------------------------
+// H3. terminal state + durable webhook outbox are one transaction
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn terminal_cas_atomically_queues_and_recovers_webhook_delivery() {
+    let s = store().await;
+    let instance = make_instance(InstanceState::Running);
+    s.create_instance(&instance).await.unwrap();
+    let entry = pending_webhook(instance.id);
+
+    let won = s
+        .conditional_update_instance_state_with_outbox(
+            instance.id,
+            InstanceState::Running,
+            InstanceState::Completed,
+            None,
+            std::slice::from_ref(&entry),
+        )
+        .await
+        .unwrap();
+    assert!(won);
+    assert_eq!(
+        s.get_instance(instance.id).await.unwrap().unwrap().state,
+        InstanceState::Completed
+    );
+    assert_eq!(
+        s.get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WebhookOutboxStatus::Pending
+    );
+
+    // A losing CAS must not leak an event for a transition that did not occur.
+    let losing_entry = pending_webhook(instance.id);
+    let won = s
+        .conditional_update_instance_state_with_outbox(
+            instance.id,
+            InstanceState::Running,
+            InstanceState::Failed,
+            None,
+            std::slice::from_ref(&losing_entry),
+        )
+        .await
+        .unwrap();
+    assert!(!won);
+    assert!(
+        s.get_webhook_outbox(losing_entry.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let claimed = s.claim_due_webhook_outbox(Utc::now(), 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, entry.id);
+    assert_eq!(claimed[0].status, WebhookOutboxStatus::InFlight);
+    assert_eq!(
+        s.get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WebhookOutboxStatus::InFlight
+    );
+
+    // Simulate a dispatcher crash, recover its stale claim, then exhaust the
+    // retry pass into the operator-visible parked queue.
+    assert_eq!(
+        s.recover_stale_webhook_claims(Utc::now() + Duration::seconds(1))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.claim_due_webhook_outbox(Utc::now(), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    s.fail_webhook_outbox_attempt(entry.id, "http 503", None)
+        .await
+        .unwrap();
+    let parked = s.list_webhook_outbox(10).await.unwrap();
+    assert_eq!(parked.len(), 1);
+    assert_eq!(parked[0].id, entry.id);
+    assert_eq!(parked[0].status, WebhookOutboxStatus::Parked);
+}
+
+#[tokio::test]
+async fn webhook_row_claim_is_single_winner() {
+    let s = store().await;
+    let entry = pending_webhook(InstanceId::new());
+    s.park_webhook(&entry).await.unwrap();
+
+    let claimed_at = Utc::now();
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, claimed_at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.claim_webhook_outbox_row(entry.id, claimed_at)
+            .await
+            .unwrap()
+    );
+    let stored = s.get_webhook_outbox(entry.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, WebhookOutboxStatus::InFlight);
+    assert_eq!(stored.claimed_at, Some(claimed_at));
+}
+
+#[tokio::test]
+async fn webhook_retry_is_hidden_until_next_attempt_is_due() {
+    let s = store().await;
+    let entry = pending_webhook(InstanceId::new());
+    s.park_webhook(&entry).await.unwrap();
+    let now = Utc::now();
+    assert!(s.claim_webhook_outbox_row(entry.id, now).await.unwrap());
+
+    let retry_at = now + Duration::minutes(5);
+    s.fail_webhook_outbox_attempt(entry.id, "http 503", Some(retry_at))
+        .await
+        .unwrap();
+
+    assert!(
+        s.claim_due_webhook_outbox(now, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let due = s
+        .claim_due_webhook_outbox(retry_at + Duration::milliseconds(1), 10)
+        .await
+        .unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, entry.id);
+    assert_eq!(due[0].attempts, 1);
+}
+
+// ---------------------------------------------------------------------------
+// H10. retry/resume starts a new run instead of inheriting old counters
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_start_is_first_writer_wins_and_reset_clears_old_budget_state() {
+    let s = store().await;
+    let mut instance = make_instance(InstanceState::Running);
+    instance.context.runtime.current_step = Some(BlockId::new("old-step"));
+    instance.context.runtime.current_step_started_at = Some(Utc::now());
+    instance.context.runtime.total_steps_executed = 900;
+    s.create_instance(&instance).await.unwrap();
+
+    let first_started_at = Utc::now() - Duration::minutes(2);
+    s.ensure_instance_run_started(instance.id, "run-1", first_started_at)
+        .await
+        .unwrap();
+    // A later scheduler pass must not silently change the identity/baseline.
+    s.ensure_instance_run_started(instance.id, "run-racing", Utc::now())
+        .await
+        .unwrap();
+    let started = s.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(started.context.runtime.run_id.as_deref(), Some("run-1"));
+    assert_eq!(started.context.runtime.started_at, Some(first_started_at));
+
+    s.reset_instance_run(instance.id, "run-2").await.unwrap();
+    let reset = s.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(reset.context.runtime.run_id.as_deref(), Some("run-2"));
+    assert_eq!(reset.context.runtime.total_steps_executed, 0);
+    assert!(reset.context.runtime.current_step.is_none());
+    assert!(reset.context.runtime.current_step_started_at.is_none());
+    assert!(reset.context.runtime.started_at.is_none());
 }
 
 // ---------------------------------------------------------------------------

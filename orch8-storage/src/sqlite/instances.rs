@@ -353,6 +353,41 @@ pub(super) async fn conditional_update_state(
     Ok(result.rows_affected() > 0)
 }
 
+/// Transactional variant: CAS the state AND insert the webhook outbox rows in
+/// one transaction — a terminal transition can never commit without its
+/// webhook events being durably queued.
+pub(super) async fn conditional_update_state_with_outbox(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    expected_state: InstanceState,
+    new_state: InstanceState,
+    next_fire_at: Option<DateTime<Utc>>,
+    entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+) -> Result<bool, StorageError> {
+    let mut tx = storage.pool.begin().await?;
+    let result = sqlx::query(
+        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5",
+    )
+    .bind(id.to_string())
+    .bind(new_state.to_string())
+    .bind(next_fire_at.map(ts))
+    .bind(ts(Utc::now()))
+    .bind(expected_state.to_string())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        // CAS lost — roll back so no outbox rows are queued for a transition
+        // that never happened.
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    for entry in entries {
+        super::webhook_outbox::park_tx(&mut tx, entry).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn update_context(
     storage: &SqliteStorage,
     id: InstanceId,
@@ -385,24 +420,57 @@ pub(super) async fn update_context_cas(
     Ok(result.rows_affected() > 0)
 }
 
-/// Update only `context.runtime.started_at` via `json_set` so the scheduler
-/// doesn't have to clone + re-serialize the entire context just to stamp the
-/// first-run timestamp.
-pub(super) async fn update_started_at(
+/// Stamp `context.runtime.started_at` and ensure a `run_id` via `json_set`
+/// (first writer wins per field) so the scheduler doesn't have to clone +
+/// re-serialize the entire context on the first run of an instance.
+pub(super) async fn ensure_instance_run_started(
     storage: &SqliteStorage,
     id: InstanceId,
+    run_id: &str,
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    // Bind the raw RFC-3339 string (not a JSON-encoded Value) so SQLite's
-    // json_set treats it as a plain string and wraps it in quotes once.
+    // Bind raw strings (not JSON-encoded Values) so json_set wraps them in
+    // quotes once. COALESCE keeps an already-stored run_id (a retry/resume
+    // regenerates it before the next claim) and an existing started_at.
     sqlx::query(
         "UPDATE task_instances \
-         SET context = json_set(context, '$.runtime.started_at', ?2), \
+         SET context = json_set(context, \
+             '$.runtime.run_id', COALESCE(json_extract(context, '$.runtime.run_id'), ?2), \
+             '$.runtime.started_at', COALESCE(json_extract(context, '$.runtime.started_at'), ?3)), \
+             updated_at = ?4 \
+         WHERE id = ?1",
+    )
+    .bind(id.to_string())
+    .bind(run_id)
+    .bind(started_at.to_rfc3339())
+    .bind(ts(Utc::now()))
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+/// Reset the per-run bookkeeping for a NEW run (retry / resume-from-block /
+/// DLQ-retry): fresh `run_id`, zeroed step counter, cleared step/start
+/// markers. `json_set` with SQL NULL writes JSON null, which the
+/// `Option` fields deserialize back to `None`.
+pub(super) async fn reset_instance_run(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    run_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE task_instances \
+         SET context = json_set(context, \
+             '$.runtime.run_id', ?2, \
+             '$.runtime.total_steps_executed', 0, \
+             '$.runtime.current_step', NULL, \
+             '$.runtime.current_step_started_at', NULL, \
+             '$.runtime.started_at', NULL), \
              updated_at = ?3 \
          WHERE id = ?1",
     )
     .bind(id.to_string())
-    .bind(started_at.to_rfc3339())
+    .bind(run_id)
     .bind(ts(Utc::now()))
     .execute(&storage.pool)
     .await?;

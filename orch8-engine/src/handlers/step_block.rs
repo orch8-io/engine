@@ -264,14 +264,36 @@ pub async fn execute_step_node(
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
     // Conditional guard: if `when` is set, evaluate the expression against
-    // the current context + outputs. Skip the step entirely if falsy.
+    // the current context + outputs. Skip the step entirely if falsy. Strict
+    // evaluation: a guard that fails to *parse* is a malformed step
+    // definition, not a falsy condition — fail the node (M7), mirroring the
+    // template/credential failure handling below and the flat path's
+    // `fail_instance_with_error`, instead of silently skipping.
     if let Some(ref when_expr) = step_def.when {
         let outputs_val = outputs.get(storage.as_ref(), instance.id).await?;
-        if !crate::expression::evaluate_condition(when_expr, &instance.context, outputs_val) {
-            storage
-                .update_node_state(node.id, orch8_types::execution::NodeState::Skipped)
-                .await?;
-            return Ok(true);
+        match crate::expression::evaluate_condition_strict(
+            when_expr,
+            &instance.context,
+            outputs_val,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                storage
+                    .update_node_state(node.id, orch8_types::execution::NodeState::Skipped)
+                    .await?;
+                return Ok(true);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    instance_id = %instance.id,
+                    block_id = %step_def.id,
+                    when = %when_expr,
+                    error = %e,
+                    "when guard failed to parse, failing node"
+                );
+                evaluator::fail_node(storage.as_ref(), node.id).await?;
+                return Ok(false);
+            }
         }
     }
 
@@ -1037,6 +1059,62 @@ mod tests {
         assert!(!more, "node should have failed");
 
         // Node state must have been transitioned to Failed by evaluator::fail_node.
+        let refreshed = storage
+            .get_execution_tree(instance_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == node.id)
+            .unwrap();
+        assert_eq!(refreshed.state, NodeState::Failed);
+    }
+
+    #[tokio::test]
+    async fn execute_step_node_unparseable_when_guard_fails_node() {
+        // M7: a `when` guard that fails to parse is a malformed step
+        // definition, not a falsy condition — the lenient evaluator used to
+        // swallow parse errors to `null` and silently skip the step. The node
+        // must fail (same contract as template failures), which the evaluator
+        // turns into an instance failure.
+        let storage: Arc<dyn orch8_storage::StorageBackend> =
+            Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let sqlite: &dyn StorageBackend = storage.as_ref();
+
+        let instance_id = InstanceId::new();
+        seed_instance_with_context(sqlite, instance_id, ExecutionContext::default()).await;
+        let instance = load_instance(sqlite, instance_id).await;
+        let node = mk_step_node(sqlite, instance_id, "guarded").await;
+
+        let mut step_def = mk_step_def("guarded", "capture_params", serde_json::json!({}));
+        step_def.when = Some("5 5".into());
+
+        let handler_called = std::sync::Arc::new(std::sync::Mutex::new(false));
+        let handler_called_clone = std::sync::Arc::clone(&handler_called);
+        let mut registry = super::HandlerRegistry::new();
+        registry.register("capture_params", move |_ctx| {
+            let flag = std::sync::Arc::clone(&handler_called_clone);
+            async move {
+                *flag.lock().unwrap() = true;
+                Ok(serde_json::json!({}))
+            }
+        });
+
+        let more = execute_step_node(
+            &storage,
+            &registry,
+            &instance,
+            &node,
+            &step_def,
+            &OutputsSnapshot::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!more, "node should have failed");
+        assert!(
+            !*handler_called.lock().unwrap(),
+            "handler must not run when the when guard is unparseable"
+        );
+
         let refreshed = storage
             .get_execution_tree(instance_id)
             .await

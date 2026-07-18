@@ -22,6 +22,9 @@ fn mk_parked(url: &str) -> WebhookOutboxEntry {
         last_error: Some("http 500".into()),
         created_at: chrono::Utc::now(),
         delivery_id: None,
+        status: orch8_types::webhook_outbox::WebhookOutboxStatus::Parked,
+        next_attempt_at: None,
+        claimed_at: None,
     }
 }
 

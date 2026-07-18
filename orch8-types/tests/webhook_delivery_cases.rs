@@ -8,7 +8,7 @@ use orch8_types::webhook_delivery::{
     DeliveryErrorClass, DeliveryFilter, MAX_ERROR_EXCERPT_LEN, WebhookDeliveryAttempt,
     WebhookDeliverySummary, classify_error,
 };
-use orch8_types::webhook_outbox::WebhookOutboxEntry;
+use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use uuid::Uuid;
 
 const ALL_CLASSES: [DeliveryErrorClass; 12] = [
@@ -1307,6 +1307,9 @@ fn outbox_entry(delivery_id: Option<Uuid>) -> WebhookOutboxEntry {
         last_error: Some("http 503".into()),
         created_at: Utc.with_ymd_and_hms(2026, 7, 3, 9, 0, 0).unwrap(),
         delivery_id,
+        status: orch8_types::webhook_outbox::WebhookOutboxStatus::Parked,
+        next_attempt_at: None,
+        claimed_at: None,
     }
 }
 
@@ -1321,6 +1324,38 @@ fn outbox_serializes_delivery_id_when_present() {
 fn outbox_omits_delivery_id_when_none() {
     let value = serde_json::to_value(outbox_entry(None)).unwrap();
     assert!(!value.as_object().unwrap().contains_key("delivery_id"));
+}
+
+#[test]
+fn outbox_status_labels_round_trip() {
+    for status in [
+        WebhookOutboxStatus::Pending,
+        WebhookOutboxStatus::InFlight,
+        WebhookOutboxStatus::Parked,
+    ] {
+        assert_eq!(WebhookOutboxStatus::parse(status.as_str()), status);
+    }
+}
+
+#[test]
+fn unknown_outbox_status_fails_safe_to_parked() {
+    assert_eq!(
+        WebhookOutboxStatus::parse("written-by-newer-engine"),
+        WebhookOutboxStatus::Parked
+    );
+}
+
+#[test]
+fn legacy_outbox_json_defaults_status_to_parked() {
+    let mut value = serde_json::to_value(outbox_entry(None)).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("status");
+    object.remove("next_attempt_at");
+    object.remove("claimed_at");
+    let entry: WebhookOutboxEntry = serde_json::from_value(value).unwrap();
+    assert_eq!(entry.status, WebhookOutboxStatus::Parked);
+    assert!(entry.next_attempt_at.is_none());
+    assert!(entry.claimed_at.is_none());
 }
 
 #[test]

@@ -418,6 +418,25 @@ impl crate::InstanceStore for PostgresStorage {
         instances::conditional_update_state(self, id, expected_state, new_state, next_fire_at).await
     }
 
+    async fn conditional_update_instance_state_with_outbox(
+        &self,
+        id: InstanceId,
+        expected_state: InstanceState,
+        new_state: InstanceState,
+        next_fire_at: Option<DateTime<Utc>>,
+        entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
+    ) -> Result<bool, StorageError> {
+        instances::conditional_update_state_with_outbox(
+            self,
+            id,
+            expected_state,
+            new_state,
+            next_fire_at,
+            entries,
+        )
+        .await
+    }
+
     async fn update_instance_context(
         &self,
         id: InstanceId,
@@ -435,12 +454,17 @@ impl crate::InstanceStore for PostgresStorage {
         instances::update_context_cas(self, id, context, expected_updated_at).await
     }
 
-    async fn update_instance_started_at(
+    async fn ensure_instance_run_started(
         &self,
         id: InstanceId,
+        run_id: &str,
         started_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        instances::update_started_at(self, id, started_at).await
+        instances::ensure_run_started(self, id, run_id, started_at).await
+    }
+
+    async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError> {
+        instances::reset_run(self, id, run_id).await
     }
 
     async fn increment_total_steps(&self, id: InstanceId) -> Result<u32, StorageError> {
@@ -1172,6 +1196,38 @@ impl crate::WorkerStore for PostgresStorage {
 
     async fn delete_webhook_outbox(&self, id: Uuid) -> Result<(), StorageError> {
         webhook_outbox::delete(self, id).await
+    }
+
+    async fn claim_due_webhook_outbox(
+        &self,
+        now: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::webhook_outbox::WebhookOutboxEntry>, StorageError> {
+        webhook_outbox::claim_due(self, now, limit).await
+    }
+
+    async fn claim_webhook_outbox_row(
+        &self,
+        id: Uuid,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        webhook_outbox::claim_row(self, id, claimed_at).await
+    }
+
+    async fn fail_webhook_outbox_attempt(
+        &self,
+        id: Uuid,
+        last_error: &str,
+        next_attempt_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        webhook_outbox::fail_attempt(self, id, last_error, next_attempt_at).await
+    }
+
+    async fn recover_stale_webhook_claims(
+        &self,
+        stale_before: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        webhook_outbox::recover_stale(self, stale_before).await
     }
 
     async fn record_webhook_attempt(

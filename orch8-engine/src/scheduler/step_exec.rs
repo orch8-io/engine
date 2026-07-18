@@ -502,18 +502,61 @@ pub(super) async fn execute_step_block(
         return Ok(StepOutcome::Deferred);
     }
 
-    // Conditional guard: evaluate `when` expression before any work.
+    // One outputs snapshot for the whole invocation, shared by the `when`
+    // guard below and `prepare_step` further down — previously each built
+    // its own, doubling the `get_all_outputs` fetch per templated step.
+    // Lazy (`OnceCell`): it costs nothing unless one of them actually reads
+    // it. Sharing is safe: the guard's `evaluate_condition_strict` is pure,
+    // and the
+    // only output-writer between guard and prepare is the human-gate accept
+    // path (`accept_human_input`), whose just-accepted value was never
+    // observable to `prepare_step` on the tree path anyway —
+    // `execute_step_node` already evaluates guard + gate + prepare against
+    // a single per-iteration snapshot, so one snapshot here unifies the two
+    // dispatch paths instead of changing the contract.
+    let outputs_snap = crate::handlers::param_resolve::OutputsSnapshot::new();
+
+    // Conditional guard: evaluate `when` expression before any work. Strict
+    // evaluation: a guard that fails to *parse* is a malformed step
+    // definition, not a falsy condition — the lenient evaluator would
+    // swallow the error to `null` and silently skip the step (M7). Fail the
+    // instance via `fail_instance_with_error` instead, the same category as
+    // the template/credential resolution errors below: no retry policy
+    // applies to authoring errors, and the failure surfaces on the instance.
     if let Some(ref when_expr) = step_def.when {
-        let outputs_snap = crate::handlers::param_resolve::OutputsSnapshot::new();
         let outputs_val = outputs_snap.get(storage.as_ref(), instance_id).await?;
-        if !crate::expression::evaluate_condition(when_expr, &instance.context, outputs_val) {
-            debug!(
-                instance_id = %instance_id,
-                block_id = %step_def.id,
-                when = %when_expr,
-                "when guard is false, skipping step"
-            );
-            return Ok(StepOutcome::Skipped);
+        match crate::expression::evaluate_condition_strict(
+            when_expr,
+            &instance.context,
+            outputs_val,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    when = %when_expr,
+                    "when guard is false, skipping step"
+                );
+                return Ok(StepOutcome::Skipped);
+            }
+            Err(e) => {
+                warn!(
+                    instance_id = %instance_id,
+                    block_id = %step_def.id,
+                    when = %when_expr,
+                    error = %e,
+                    "when guard failed to parse, failing instance"
+                );
+                return fail_instance_with_error(
+                    storage.as_ref(),
+                    instance,
+                    webhook_config,
+                    cancel,
+                    &format!("when guard on step '{}' failed to parse: {e}", step_def.id),
+                )
+                .await;
+            }
         }
     }
 
@@ -604,10 +647,10 @@ pub(super) async fn execute_step_block(
     .await?;
 
     // Resolve context snapshot + templates + credentials + cache key (shared
-    // with the tree path via `step_block::prepare_step`). The fast path runs at
-    // most one step per call, so a fresh outputs snapshot is all we need.
-    // Template/credential failures fail the *instance*; infra errors propagate.
-    let outputs = crate::handlers::param_resolve::OutputsSnapshot::new();
+    // with the tree path via `step_block::prepare_step`). Reuses the outputs
+    // snapshot created above (see its comment for why sharing with the
+    // `when` guard is safe). Template/credential failures fail the
+    // *instance*; infra errors propagate.
     let crate::handlers::step_block::PreparedStep {
         step_context,
         resolved_params,
@@ -616,7 +659,7 @@ pub(super) async fn execute_step_block(
         storage.as_ref(),
         instance,
         step_def,
-        &outputs,
+        &outputs_snap,
     )
     .await
     {
@@ -686,10 +729,13 @@ pub(super) async fn execute_step_block(
 
     // Write a sentinel output BEFORE executing the handler. If the process
     // crashes between handler execution and the real output save, recovery
-    // will see this row and skip the block — preventing double side effects
-    // (e.g. duplicate emails, duplicate HTTP POST calls). The real output is
-    // appended as a new row afterwards; `get_block_output` (most-recent)
-    // will return the real one.
+    // finds this row as the block's latest output: it is excluded from the
+    // completed-block set (so the step is NOT skipped), `compute_attempt`
+    // resumes the same attempt, and the memoization guard in
+    // `execute_step_dry` refuses to serve it as a cached result — so the
+    // handler re-runs (at-least-once, same as the tree path). The real
+    // output is appended as a new row afterwards; `get_block_output`
+    // (most-recent) will return the real one.
     let sentinel = orch8_types::output::BlockOutput {
         id: uuid::Uuid::now_v7(),
         instance_id,
@@ -741,9 +787,10 @@ pub(super) async fn execute_step_block(
             }
 
             // Clean up the sentinel now that the real output is persisted.
-            // The sentinel served its purpose (preventing double-execution if
-            // the process crashed during handler execution). Leaving it would
-            // double the output count visible to callers of `get_all_outputs`.
+            // The sentinel served its purpose (marking the in-flight attempt
+            // so a crash mid-handler resumes — not skips — this step).
+            // Leaving it would double the output count visible to callers of
+            // `get_all_outputs`.
             //
             // Swallowing the error was convenient but hid a real operational
             // problem — if this delete keeps failing, `block_outputs` grows
@@ -890,32 +937,31 @@ pub(super) async fn execute_step_block(
                 cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             persist_permanent_error(storage.as_ref(), instance_id, &step_def.id, attempt, &e).await;
-            // Keep the sentinel on permanent failure — the handler already
-            // executed (side effects may have occurred). If the user later
-            // triggers a DLQ retry, the sentinel ensures this step is
-            // skipped rather than re-executed (preventing double emails,
-            // duplicate HTTP calls, etc.).
+            // Keep the sentinel on permanent failure: the handler already ran
+            // (side effects may have occurred), and the row is useful
+            // forensic evidence next to the `__error__` marker. Note it no
+            // longer affects scheduling — sentinels are excluded from the
+            // completed-block set, and DLQ retry deletes sentinel rows
+            // (`delete_sentinel_block_outputs`) so a retried instance
+            // re-executes this step from scratch.
 
             // Permanent failure or timeout.
-            crate::lifecycle::transition_instance(
+            let failed_event = crate::webhooks::instance_event(
+                "instance.failed",
+                instance_id,
+                serde_json::json!({ "error": e.to_string() }),
+            );
+            crate::lifecycle::transition_instance_with_webhook(
                 storage.as_ref(),
                 instance_id,
                 Some(&instance.tenant_id),
                 InstanceState::Running,
                 InstanceState::Failed,
                 None,
+                webhook_config,
+                &failed_event,
             )
             .await?;
-
-            crate::webhooks::emit(
-                webhook_config,
-                &crate::webhooks::instance_event(
-                    "instance.failed",
-                    instance_id,
-                    serde_json::json!({ "error": e.to_string() }),
-                ),
-                cancel,
-            );
 
             // Wake parent if this child reached a terminal Failed state via a
             // permanent step error — the tree-evaluator branches above are
@@ -974,32 +1020,29 @@ async fn fail_retryable_instance(
     attempt: u32,
     webhook_config: &WebhookConfig,
     message: &str,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
-    crate::lifecycle::transition_instance(
+    let failed_event = crate::webhooks::instance_event(
+        "instance.failed",
+        instance_id,
+        serde_json::json!({
+            "error": message,
+            "attempts": attempt,
+            "block_id": step_def.id.as_str(),
+        }),
+    );
+    crate::lifecycle::transition_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
+        webhook_config,
+        &failed_event,
     )
     .await?;
-
-    crate::webhooks::emit(
-        webhook_config,
-        &crate::webhooks::instance_event(
-            "instance.failed",
-            instance_id,
-            serde_json::json!({
-                "error": message,
-                "attempts": attempt,
-                "block_id": step_def.id.as_str(),
-            }),
-        ),
-        cancel,
-    );
 
     wake_parent_if_child(storage, instance).await;
 
@@ -1103,25 +1146,22 @@ pub(super) async fn handle_retryable_failure(
     }
 
     // No retry policy — fail the instance.
-    crate::lifecycle::transition_instance(
+    let failed_event = crate::webhooks::instance_event(
+        "instance.failed",
+        instance_id,
+        serde_json::json!({ "error": message }),
+    );
+    crate::lifecycle::transition_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
+        webhook_config,
+        &failed_event,
     )
     .await?;
-
-    crate::webhooks::emit(
-        webhook_config,
-        &crate::webhooks::instance_event(
-            "instance.failed",
-            instance_id,
-            serde_json::json!({ "error": message }),
-        ),
-        cancel,
-    );
 
     // Wake parent: no retry policy -> terminal Failed.
     wake_parent_if_child(storage, instance).await;
@@ -1138,30 +1178,27 @@ pub(super) async fn fail_instance_with_error(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     webhook_config: &WebhookConfig,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     error: &str,
 ) -> Result<StepOutcome, EngineError> {
     let instance_id = instance.id;
     crate::metrics::inc(crate::metrics::STEPS_FAILED);
-    crate::lifecycle::transition_instance(
+    let failed_event = crate::webhooks::instance_event(
+        "instance.failed",
+        instance_id,
+        serde_json::json!({ "error": error }),
+    );
+    crate::lifecycle::transition_instance_with_webhook(
         storage,
         instance_id,
         Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Failed,
         None,
+        webhook_config,
+        &failed_event,
     )
     .await?;
-
-    crate::webhooks::emit(
-        webhook_config,
-        &crate::webhooks::instance_event(
-            "instance.failed",
-            instance_id,
-            serde_json::json!({ "error": error }),
-        ),
-        cancel,
-    );
 
     // Wake parent: template/credential resolution failure -> terminal Failed.
     wake_parent_if_child(storage, instance).await;

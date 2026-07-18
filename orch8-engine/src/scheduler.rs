@@ -140,6 +140,11 @@ pub async fn tick_once(
     )
     .await?;
 
+    // `tick_once` is the single-shot mobile entry point — no cursor is
+    // carried between calls, so each call scans the full active set
+    // (u32::MAX pages). Bounding pages here would leave instances sorted
+    // past the bound never swept on this path.
+    let mut sla_cursor = SlaSweepCursor::default();
     process_sla_breaches(
         storage,
         sequence_cache,
@@ -147,6 +152,8 @@ pub async fn tick_once(
         cancel,
         config.batch_size,
         &config.clock,
+        &mut sla_cursor,
+        u32::MAX,
     )
     .await?;
 
@@ -180,6 +187,7 @@ struct PrefetchedData {
 /// 1. Claims a batch of due instances (`FOR UPDATE SKIP LOCKED`)
 /// 2. Spawns bounded concurrent tasks to process each instance
 /// 3. Overlapping ticks are safe — `SKIP LOCKED` prevents double-claiming
+#[allow(clippy::too_many_lines)]
 pub async fn run_tick_loop(
     storage: Arc<dyn StorageBackend>,
     handlers: Arc<HandlerRegistry>,
@@ -217,6 +225,10 @@ pub async fn run_tick_loop(
     );
 
     let mut consecutive_failures: u32 = 0;
+    // Rotating cursor for the SLA sweep — persists across ticks so the sweep
+    // covers the whole active set over successive ticks, a bounded number of
+    // pages at a time.
+    let mut sla_cursor = SlaSweepCursor::default();
 
     loop {
         tokio::select! {
@@ -299,7 +311,8 @@ pub async fn run_tick_loop(
                 }
                 // Alert-only SLA sweep over active instances (max_runtime /
                 // max_step_runtime). Emits webhook + metric on breach; never
-                // changes instance state.
+                // changes instance state. Rotates through the active set via
+                // `sla_cursor`, a bounded page count per tick.
                 if let Err(e) = process_sla_breaches(
                     &storage,
                     &sequence_cache,
@@ -307,6 +320,8 @@ pub async fn run_tick_loop(
                     &cancel,
                     batch_size,
                     &config.clock,
+                    &mut sla_cursor,
+                    SLA_SWEEP_MAX_PAGES_PER_TICK,
                 ).await {
                     error!(error = %e, "sla breach sweep failed");
                 }
@@ -1164,15 +1179,69 @@ async fn run_cleanup_hooks(
     }
 }
 
+/// Max pages of active instances the SLA sweep scans per tick. Bounds
+/// per-tick work for the tick loop; the rotating [`SlaSweepCursor`] gives
+/// full coverage over successive ticks regardless of active-set size.
+const SLA_SWEEP_MAX_PAGES_PER_TICK: u32 = 4;
+
+/// Ticks the sweep skips after a full rotation found no SLA-bearing sequence
+/// before re-scanning once (≈30s at the default 100ms tick). Bounds how long
+/// a newly registered SLA sequence can go unnoticed while keeping the
+/// no-SLA-anywhere steady state free of instance queries.
+const SLA_SWEEP_IDLE_RESCAN_TICKS: u32 = 300;
+
+/// Upper bound on the cursor's sequence → has-SLA memo. Reached only on
+/// version-heavy deployments; clearing just relearns lazily from the
+/// sequence cache.
+const SLA_SWEEP_MEMO_MAX: usize = 4096;
+
+/// Rotating-scan state for the SLA breach sweep, carried across ticks by the
+/// tick loop. (`tick_once` builds a fresh one per call — see its call site.)
+///
+/// - `offset`: rotating page offset into the active-instance list
+///   (`ORDER BY updated_at ASC`). The sweep scans a bounded number of pages
+///   per tick starting here, so successive ticks cover the whole active
+///   set — the old fixed first-page window never saw instances sorted past
+///   `batch_size`, and the lease heartbeat (which touches `updated_at` for
+///   in-flight instances) actively pushes the longest-running ones out of
+///   it, so their `max_runtime` / `max_step_runtime` breaches never fired.
+///   Heartbeats reorder the list mid-rotation, making coverage statistical
+///   rather than exact; alert-only detection tolerates a tick or two of
+///   latency, and the once-only sentinel makes a re-scan harmless.
+/// - `sla_by_sequence`: memo of `sequence_id` → declares an SLA. SLA is
+///   immutable per sequence id (a changed SLA ships as a new version under a
+///   new id; `create_sequence` is insert-only), so entries never go stale.
+/// - `idle_ticks_remaining`: when a full rotation observes no SLA-bearing
+///   sequence at all, the sweep skips the instance query for this many
+///   ticks before re-scanning once to discover newly registered SLA
+///   sequences. Once any SLA sequence is seen the sweep scans every tick —
+///   telling "sequence deleted" apart from "no instances right now" would
+///   need refcounting, and the memo keeps each scan cheap.
+#[derive(Default)]
+pub(crate) struct SlaSweepCursor {
+    offset: u64,
+    sla_by_sequence: HashMap<orch8_types::ids::SequenceId, bool>,
+    idle_ticks_remaining: u32,
+}
+
 /// Alert-only SLA sweep. For every non-terminal instance whose sequence
 /// declares an `sla` policy, emit an `instance.sla_breached` webhook and
 /// increment `orch8_sla_breached_total` when the instance's wall-clock lifetime
 /// exceeds `max_runtime`, or the current step's runtime exceeds
 /// `max_step_runtime`. Each breach alerts exactly once — a sentinel block
 /// output per breach kind de-duplicates across ticks. The instance is never
-/// failed or paused (alert-only). Skips the per-instance work entirely when no
-/// active instances exist.
-#[allow(clippy::too_many_lines)]
+/// failed or paused (alert-only).
+///
+/// Pages through the active set via `cursor` (see its docs) instead of
+/// re-reading the first page every tick, and skips the query entirely while
+/// idling on a known-SLA-free deployment.
+///
+/// Note on projection: `list_instances` always returns full `TaskInstance`
+/// rows (context JSON included). A projected variant would cut the per-page
+/// deserialization cost, but the trait has none and adding one just for this
+/// sweep would contort every backend — the idle-skip and memo keep the
+/// steady-state cost low without it.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn process_sla_breaches(
     storage: &Arc<dyn StorageBackend>,
     sequence_cache: &SequenceCache,
@@ -1180,11 +1249,15 @@ async fn process_sla_breaches(
     cancel: &CancellationToken,
     batch_size: u32,
     clock: &SharedClock,
+    cursor: &mut SlaSweepCursor,
+    max_pages_per_tick: u32,
 ) -> Result<(), EngineError> {
     // A pending SLA alert: which instance, what kind, the sentinel block id used
     // for once-only de-dup, and the timing facts for the payload.
     struct Candidate {
-        idx: usize,
+        instance_id: InstanceId,
+        tenant_id: orch8_types::ids::TenantId,
+        sequence_id: orch8_types::ids::SequenceId,
         kind: &'static str,
         block_id: BlockId,
         elapsed_ms: i64,
@@ -1192,7 +1265,14 @@ async fn process_sla_breaches(
         step_id: Option<String>,
     }
 
-    use orch8_types::filter::{InstanceFilter, Pagination};
+    use orch8_types::filter::Pagination;
+
+    // Idle skip: the last full rotation found no SLA-bearing sequence, so
+    // nothing can breach. Bounded — see `SlaSweepCursor` docs.
+    if cursor.idle_ticks_remaining > 0 && !cursor.sla_by_sequence.values().any(|known| *known) {
+        cursor.idle_ticks_remaining -= 1;
+        return Ok(());
+    }
 
     let filter = InstanceFilter {
         states: Some(vec![
@@ -1203,127 +1283,165 @@ async fn process_sla_breaches(
         ]),
         ..Default::default()
     };
-    let pagination = Pagination {
-        offset: 0,
-        limit: batch_size,
-        sort_ascending: true,
-    };
-    let active = storage.list_instances(&filter, &pagination).await?;
-    if active.is_empty() {
-        return Ok(());
-    }
 
     let now = clock.now();
-    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut rotation_complete = false;
 
-    for (idx, instance) in active.iter().enumerate() {
-        let Ok(seq) = sequence_cache
-            .get_by_id(storage.as_ref(), instance.sequence_id)
-            .await
-        else {
-            continue;
+    for _page in 0..max_pages_per_tick {
+        let pagination = Pagination {
+            offset: cursor.offset,
+            limit: batch_size,
+            sort_ascending: true,
         };
-        let Some(sla) = seq.sla.as_ref() else {
-            continue;
-        };
+        let page = storage.list_instances(&filter, &pagination).await?;
+        let page_len = page.len();
+        if page_len == 0 {
+            cursor.offset = 0;
+            rotation_complete = true;
+            break;
+        }
 
-        if let Some(max_runtime) = sla.max_runtime {
-            let elapsed = now - instance.created_at;
-            let limit = chrono::Duration::from_std(max_runtime).unwrap_or(chrono::TimeDelta::MAX);
-            if elapsed > limit {
-                candidates.push(Candidate {
-                    idx,
-                    kind: "max_runtime",
-                    block_id: BlockId::new("_sla:runtime"),
-                    elapsed_ms: elapsed.num_milliseconds(),
-                    limit_ms: u64::try_from(max_runtime.as_millis()).unwrap_or(u64::MAX),
-                    step_id: None,
-                });
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for instance in &page {
+            // Pre-filter on the memo: instances whose sequence is already
+            // known to carry no SLA are skipped without a sequence lookup.
+            if matches!(
+                cursor.sla_by_sequence.get(&instance.sequence_id),
+                Some(false)
+            ) {
+                continue;
+            }
+            let Ok(seq) = sequence_cache
+                .get_by_id(storage.as_ref(), instance.sequence_id)
+                .await
+            else {
+                continue;
+            };
+            if !cursor.sla_by_sequence.contains_key(&instance.sequence_id) {
+                if cursor.sla_by_sequence.len() >= SLA_SWEEP_MEMO_MAX {
+                    cursor.sla_by_sequence.clear();
+                }
+                cursor
+                    .sla_by_sequence
+                    .insert(instance.sequence_id, seq.sla.is_some());
+            }
+            let Some(sla) = seq.sla.as_ref() else {
+                continue;
+            };
+
+            if let Some(max_runtime) = sla.max_runtime {
+                let elapsed = now - instance.created_at;
+                let limit =
+                    chrono::Duration::from_std(max_runtime).unwrap_or(chrono::TimeDelta::MAX);
+                if elapsed > limit {
+                    candidates.push(Candidate {
+                        instance_id: instance.id,
+                        tenant_id: instance.tenant_id.clone(),
+                        sequence_id: instance.sequence_id,
+                        kind: "max_runtime",
+                        block_id: BlockId::new("_sla:runtime"),
+                        elapsed_ms: elapsed.num_milliseconds(),
+                        limit_ms: u64::try_from(max_runtime.as_millis()).unwrap_or(u64::MAX),
+                        step_id: None,
+                    });
+                }
+            }
+
+            if let Some(max_step) = sla.max_step_runtime
+                && let (Some(step), Some(started)) = (
+                    instance.context.runtime.current_step.as_ref(),
+                    instance.context.runtime.current_step_started_at,
+                )
+            {
+                let elapsed = now - started;
+                let limit = chrono::Duration::from_std(max_step).unwrap_or(chrono::TimeDelta::MAX);
+                if elapsed > limit {
+                    candidates.push(Candidate {
+                        instance_id: instance.id,
+                        tenant_id: instance.tenant_id.clone(),
+                        sequence_id: instance.sequence_id,
+                        kind: "max_step_runtime",
+                        block_id: BlockId::new(format!("_sla:step:{}", step.as_str())),
+                        elapsed_ms: elapsed.num_milliseconds(),
+                        limit_ms: u64::try_from(max_step.as_millis()).unwrap_or(u64::MAX),
+                        step_id: Some(step.as_str().to_string()),
+                    });
+                }
             }
         }
 
-        if let Some(max_step) = sla.max_step_runtime
-            && let (Some(step), Some(started)) = (
-                instance.context.runtime.current_step.as_ref(),
-                instance.context.runtime.current_step_started_at,
-            )
-        {
-            let elapsed = now - started;
-            let limit = chrono::Duration::from_std(max_step).unwrap_or(chrono::TimeDelta::MAX);
-            if elapsed > limit {
-                candidates.push(Candidate {
-                    idx,
-                    kind: "max_step_runtime",
-                    block_id: BlockId::new(format!("_sla:step:{}", step.as_str())),
-                    elapsed_ms: elapsed.num_milliseconds(),
-                    limit_ms: u64::try_from(max_step.as_millis()).unwrap_or(u64::MAX),
-                    step_id: Some(step.as_str().to_string()),
-                });
+        if !candidates.is_empty() {
+            // One batch query for all sentinel keys: a present sentinel means
+            // this breach already alerted and must not alert again.
+            let keys: Vec<(InstanceId, &BlockId)> = candidates
+                .iter()
+                .map(|c| (c.instance_id, &c.block_id))
+                .collect();
+            let existing = storage.get_block_outputs_batch(&keys).await?;
+            let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
+            for k in existing.keys() {
+                existing_ref.insert((&k.0, &k.1));
+            }
+
+            for c in &candidates {
+                if existing_ref.contains(&(&c.instance_id, &c.block_id)) {
+                    continue;
+                }
+                // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
+                // double-alert on the next tick (we prefer at-most-once for alerts).
+                let sentinel = orch8_types::output::BlockOutput {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id: c.instance_id,
+                    block_id: c.block_id.clone(),
+                    output: serde_json::json!({
+                        "_sla_breach": c.kind,
+                        "_alerted_at": now.to_rfc3339(),
+                    }),
+                    output_ref: None,
+                    output_size: 0,
+                    attempt: 0,
+                    created_at: Utc::now(),
+                };
+                storage.save_block_output(&sentinel).await?;
+
+                crate::metrics::inc_with(crate::metrics::SLA_BREACHED, &[("type", c.kind)]);
+
+                let event = crate::webhooks::instance_event(
+                    "instance.sla_breached",
+                    c.instance_id,
+                    serde_json::json!({
+                        "type": c.kind,
+                        "limit_ms": c.limit_ms,
+                        "elapsed_ms": c.elapsed_ms,
+                        "step_id": c.step_id,
+                        "sequence_id": c.sequence_id.into_uuid(),
+                        "tenant_id": c.tenant_id.as_str(),
+                    }),
+                );
+                crate::webhooks::emit(webhook_config, &event, cancel).await;
+
+                warn!(
+                    instance_id = %c.instance_id,
+                    sla_type = c.kind,
+                    elapsed_ms = c.elapsed_ms,
+                    limit_ms = c.limit_ms,
+                    "SLA breach (alert-only)"
+                );
             }
         }
-    }
 
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    // One batch query for all sentinel keys: a present sentinel means this
-    // breach already alerted and must not alert again.
-    let keys: Vec<(InstanceId, &BlockId)> = candidates
-        .iter()
-        .map(|c| (active[c.idx].id, &c.block_id))
-        .collect();
-    let existing = storage.get_block_outputs_batch(&keys).await?;
-    let mut existing_ref = std::collections::HashSet::with_capacity(existing.len());
-    for k in existing.keys() {
-        existing_ref.insert((&k.0, &k.1));
-    }
-
-    for c in &candidates {
-        let instance = &active[c.idx];
-        if existing_ref.contains(&(&instance.id, &c.block_id)) {
-            continue;
+        if page_len < usize::try_from(batch_size).unwrap_or(usize::MAX) {
+            // Short page — end of the active set; restart from the front on
+            // the next tick.
+            cursor.offset = 0;
+            rotation_complete = true;
+            break;
         }
-        // Persist the sentinel BEFORE emitting so a crash mid-emit cannot
-        // double-alert on the next tick (we prefer at-most-once for alerts).
-        let sentinel = orch8_types::output::BlockOutput {
-            id: uuid::Uuid::now_v7(),
-            instance_id: instance.id,
-            block_id: c.block_id.clone(),
-            output: serde_json::json!({
-                "_sla_breach": c.kind,
-                "_alerted_at": now.to_rfc3339(),
-            }),
-            output_ref: None,
-            output_size: 0,
-            attempt: 0,
-            created_at: Utc::now(),
-        };
-        storage.save_block_output(&sentinel).await?;
+        cursor.offset += page_len as u64;
+    }
 
-        crate::metrics::inc_with(crate::metrics::SLA_BREACHED, &[("type", c.kind)]);
-
-        let event = crate::webhooks::instance_event(
-            "instance.sla_breached",
-            instance.id,
-            serde_json::json!({
-                "type": c.kind,
-                "limit_ms": c.limit_ms,
-                "elapsed_ms": c.elapsed_ms,
-                "step_id": c.step_id,
-                "sequence_id": instance.sequence_id.into_uuid(),
-                "tenant_id": instance.tenant_id.as_str(),
-            }),
-        );
-        crate::webhooks::emit(webhook_config, &event, cancel);
-
-        warn!(
-            instance_id = %instance.id,
-            sla_type = c.kind,
-            elapsed_ms = c.elapsed_ms,
-            limit_ms = c.limit_ms,
-            "SLA breach (alert-only)"
-        );
+    if rotation_complete && !cursor.sla_by_sequence.values().any(|known| *known) {
+        cursor.idle_ticks_remaining = SLA_SWEEP_IDLE_RESCAN_TICKS;
     }
 
     Ok(())
@@ -1555,16 +1673,28 @@ async fn process_instance(
         .await?;
 
     // claim_due_instances already set state to Running.
-    // Stamp runtime.started_at on the first run so timeout / escalation
-    // handlers (e.g. human_review) can compute elapsed time. Uses the
-    // scheduler clock (not wall time) because this value is the baseline for
-    // deadline / human-input timeout *scheduling decisions*.
-    let instance = if instance.context.runtime.started_at.is_none() {
-        let started_at = clock.now();
+    // Ensure the run identity and start timestamp together. Retry/resume may
+    // already have installed a fresh run_id; first execution creates one.
+    // The scheduler clock is the baseline for timeout scheduling decisions.
+    let missing_run_id = instance.context.runtime.run_id.is_none();
+    let missing_started_at = instance.context.runtime.started_at.is_none();
+    let instance = if missing_run_id || missing_started_at {
+        let started_at = instance
+            .context
+            .runtime
+            .started_at
+            .unwrap_or_else(|| clock.now());
+        let run_id = instance
+            .context
+            .runtime
+            .run_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
         storage
-            .update_instance_started_at(instance_id, started_at)
+            .ensure_instance_run_started(instance_id, &run_id, started_at)
             .await?;
         let mut inst = instance;
+        inst.context.runtime.run_id = Some(run_id);
         inst.context.runtime.started_at = Some(started_at);
         inst.context.runtime.instance_id = Some(instance_id.to_string());
         inst
@@ -1824,22 +1954,21 @@ async fn process_instance(
         crate::interceptors::emit_on_complete(storage.as_ref(), interceptors, instance_id).await;
     }
 
-    crate::lifecycle::transition_instance(
+    let completed_event =
+        crate::webhooks::instance_event("instance.completed", instance_id, serde_json::json!({}));
+    crate::lifecycle::transition_instance_with_webhook(
         storage.as_ref(),
         instance_id,
         Some(&instance.tenant_id),
         InstanceState::Running,
         InstanceState::Completed,
         None,
+        webhook_config,
+        &completed_event,
     )
     .await?;
 
     crate::metrics::inc(crate::metrics::INSTANCES_COMPLETED);
-    crate::webhooks::emit(
-        webhook_config,
-        &crate::webhooks::instance_event("instance.completed", instance_id, serde_json::json!({})),
-        cancel,
-    );
 
     info!(instance_id = %instance_id, "instance completed all blocks");
 
@@ -1917,7 +2046,7 @@ async fn process_instance_tree(
     instance: &orch8_types::instance::TaskInstance,
     sequence: &SequenceDefinition,
     max_steps_per_instance: u32,
-    cancel: &CancellationToken,
+    _cancel: &CancellationToken,
     clock: &SharedClock,
 ) -> Result<(), EngineError> {
     use crate::evaluator::EvalOutcome;
@@ -2040,16 +2169,44 @@ async fn process_instance_tree(
                 InstanceState::Completed
             };
 
-            if let Err(e) = crate::lifecycle::transition_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&instance.tenant_id),
-                current,
-                target,
-                None,
-            )
-            .await
-            {
+            let terminal_event = match target {
+                InstanceState::Failed => Some(crate::webhooks::instance_event(
+                    "instance.failed",
+                    instance_id,
+                    serde_json::json!({}),
+                )),
+                InstanceState::Completed => Some(crate::webhooks::instance_event(
+                    "instance.completed",
+                    instance_id,
+                    serde_json::json!({}),
+                )),
+                _ => None,
+            };
+            let transition = if let Some(event) = terminal_event.as_ref() {
+                crate::lifecycle::transition_instance_with_webhook(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    current,
+                    target,
+                    None,
+                    webhook_config,
+                    event,
+                )
+                .await
+            } else {
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    current,
+                    target,
+                    None,
+                )
+                .await
+            };
+
+            if let Err(e) = transition {
                 if !matches!(e, crate::error::EngineError::InvalidTransition { .. }) {
                     return Err(e);
                 }
@@ -2085,15 +2242,6 @@ async fn process_instance_tree(
                             .await;
                         }
                         crate::metrics::inc(crate::metrics::INSTANCES_FAILED);
-                        crate::webhooks::emit(
-                            webhook_config,
-                            &crate::webhooks::instance_event(
-                                "instance.failed",
-                                instance_id,
-                                serde_json::json!({}),
-                            ),
-                            cancel,
-                        );
                         info!(instance_id = %instance_id, "instance failed (tree evaluation)");
                     }
                     InstanceState::Completed => {
@@ -2111,15 +2259,6 @@ async fn process_instance_tree(
                             .await;
                         }
                         crate::metrics::inc(crate::metrics::INSTANCES_COMPLETED);
-                        crate::webhooks::emit(
-                            webhook_config,
-                            &crate::webhooks::instance_event(
-                                "instance.completed",
-                                instance_id,
-                                serde_json::json!({}),
-                            ),
-                            cancel,
-                        );
                         info!(instance_id = %instance_id, "instance completed (tree evaluation)");
                     }
                     _ => {}

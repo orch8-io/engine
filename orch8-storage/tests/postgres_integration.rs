@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::{
-    ExecutionTreeStore, InstanceStore, MobileSyncStore, ResourceStore, SchedulingStore,
-    SequenceStore, WorkerStore,
+    ExecutionTreeStore, InstanceStore, MobileSyncStore, OutputStore, ResourceStore,
+    SchedulingStore, SequenceStore, WorkerStore,
 };
 use orch8_types::context::{ExecutionContext, RuntimeContext};
 use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
@@ -27,6 +27,7 @@ use orch8_types::ids::{
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
+use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 /// Returns `None` (test should skip) if `DATABASE_URL` isn't set.
@@ -548,4 +549,267 @@ async fn batch_node_updates_preserve_started_at_postgres() {
         first, second,
         "batch re-transition must keep started_at on Postgres"
     );
+}
+
+/// Postgres parity for the `SQLite` test of the same name: internal
+/// bookkeeping rows (`__retry__`, `__in_progress__`) are not completion
+/// evidence. The sentinel exclusion is what makes crash recovery re-execute
+/// a crashed step instead of skipping it (at-least-once).
+#[tokio::test]
+async fn completed_block_ids_exclude_internal_markers() {
+    use orch8_types::output::BlockOutput;
+
+    let s = require_postgres!();
+    let tenant = format!("t-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let inst = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&inst).await.unwrap();
+
+    let mk = |block: &str, attempt: u16, output_ref: Option<&str>| BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst.id,
+        block_id: BlockId::new(block),
+        output: serde_json::json!({}),
+        output_ref: output_ref.map(str::to_owned),
+        output_size: 2,
+        attempt,
+        created_at: Utc::now(),
+    };
+
+    s.save_block_output(&mk("real", 0, None)).await.unwrap();
+    s.save_block_output(&mk("retrying", 1, Some("__retry__")))
+        .await
+        .unwrap();
+    s.save_block_output(&mk("crashed", 0, Some("__in_progress__")))
+        .await
+        .unwrap();
+
+    let ids = s.get_completed_block_ids(inst.id).await.unwrap();
+    assert_eq!(ids.len(), 1, "only the real output counts, got {ids:?}");
+    assert_eq!(ids[0].as_str(), "real");
+
+    let batch = s.get_completed_block_ids_batch(&[inst.id]).await.unwrap();
+    let batch_ids = batch.get(&inst.id).map_or(&[][..], Vec::as_slice);
+    assert_eq!(batch_ids.len(), 1, "batch: {batch_ids:?}");
+    assert_eq!(batch_ids[0].as_str(), "real");
+}
+
+#[tokio::test]
+async fn outputs_with_equal_timestamps_use_id_tiebreaker_postgres() {
+    use orch8_types::output::BlockOutput;
+
+    let s = require_postgres!();
+    let tenant = format!("t-output-order-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+    let timestamp = Utc::now();
+    let low_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
+    let high_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
+
+    for (id, value) in [(high_id, "high"), (low_id, "low")] {
+        s.save_block_output(&BlockOutput {
+            id,
+            instance_id: instance.id,
+            block_id: BlockId::new("same"),
+            output: serde_json::json!({"value": value}),
+            output_ref: None,
+            output_size: 16,
+            attempt: 0,
+            created_at: timestamp,
+        })
+        .await
+        .unwrap();
+    }
+
+    let outputs = s.get_all_outputs(instance.id).await.unwrap();
+    assert_eq!(
+        outputs.iter().map(|o| o.id).collect::<Vec<_>>(),
+        vec![low_id, high_id]
+    );
+}
+
+#[tokio::test]
+async fn stale_recovery_skips_waiting_instances_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-recovery-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let stale_at = Utc::now() - chrono::Duration::hours(1);
+    let mut waiting = mk_instance(&tenant, seq_id, None);
+    waiting.state = InstanceState::Waiting;
+    waiting.next_fire_at = None;
+    waiting.updated_at = stale_at;
+    s.create_instance(&waiting).await.unwrap();
+    let mut running = mk_instance(&tenant, seq_id, None);
+    running.state = InstanceState::Running;
+    running.next_fire_at = None;
+    running.updated_at = stale_at;
+    s.create_instance(&running).await.unwrap();
+
+    assert_eq!(
+        s.recover_stale_instances(std::time::Duration::from_secs(300))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        s.get_instance(waiting.id).await.unwrap().unwrap().state,
+        InstanceState::Waiting
+    );
+    assert_eq!(
+        s.get_instance(running.id).await.unwrap().unwrap().state,
+        InstanceState::Scheduled
+    );
+}
+
+/// Postgres parity for the atomic terminal transition/outbox protocol. The
+/// `SQLite` version exercises the same contract in `review_fixes_2026_06`.
+#[tokio::test]
+async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres() {
+    let s = require_postgres!();
+    let tenant = format!("t-outbox-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+
+    let entry = WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        url: "https://hooks.example.com/terminal".into(),
+        event_type: "instance.completed".into(),
+        instance_id: Some(instance.id.into_uuid()),
+        payload: serde_json::json!({"event_type": "instance.completed"}),
+        attempts: 0,
+        last_error: None,
+        created_at: Utc::now(),
+        delivery_id: Some(Uuid::now_v7()),
+        status: WebhookOutboxStatus::Pending,
+        next_attempt_at: None,
+        claimed_at: None,
+    };
+    assert!(
+        s.conditional_update_instance_state_with_outbox(
+            instance.id,
+            InstanceState::Scheduled,
+            InstanceState::Completed,
+            None,
+            std::slice::from_ref(&entry),
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+        s.get_instance(instance.id).await.unwrap().unwrap().state,
+        InstanceState::Completed
+    );
+    assert_eq!(
+        s.get_webhook_outbox(entry.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        WebhookOutboxStatus::Pending
+    );
+
+    let losing = WebhookOutboxEntry {
+        id: Uuid::now_v7(),
+        ..entry.clone()
+    };
+    assert!(
+        !s.conditional_update_instance_state_with_outbox(
+            instance.id,
+            InstanceState::Scheduled,
+            InstanceState::Failed,
+            None,
+            std::slice::from_ref(&losing),
+        )
+        .await
+        .unwrap()
+    );
+    assert!(s.get_webhook_outbox(losing.id).await.unwrap().is_none());
+
+    let claimed = s.claim_due_webhook_outbox(Utc::now(), 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, entry.id);
+    assert_eq!(claimed[0].status, WebhookOutboxStatus::InFlight);
+
+    let retry_at = Utc::now() + chrono::Duration::minutes(5);
+    s.fail_webhook_outbox_attempt(entry.id, "http 503", Some(retry_at))
+        .await
+        .unwrap();
+    assert!(
+        s.claim_due_webhook_outbox(Utc::now(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let retried = s
+        .claim_due_webhook_outbox(retry_at + chrono::Duration::milliseconds(1), 10)
+        .await
+        .unwrap();
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].attempts, 1);
+
+    assert_eq!(
+        s.recover_stale_webhook_claims(retry_at + chrono::Duration::seconds(1))
+            .await
+            .unwrap(),
+        1
+    );
+    let claimed_at = retry_at + chrono::Duration::seconds(2);
+    assert!(
+        s.claim_webhook_outbox_row(entry.id, claimed_at)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !s.claim_webhook_outbox_row(entry.id, claimed_at)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn run_initialization_and_reset_preserve_postgres_context() {
+    let s = require_postgres!();
+    let tenant = format!("t-run-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let mut instance = mk_instance(&tenant, seq_id, None);
+    instance.context.data = serde_json::json!({"keep": true});
+    instance.context.runtime.current_step = Some(BlockId::new("old"));
+    instance.context.runtime.total_steps_executed = 900;
+    s.create_instance(&instance).await.unwrap();
+
+    let started_at = Utc::now() - chrono::Duration::minutes(1);
+    s.ensure_instance_run_started(instance.id, "run-1", started_at)
+        .await
+        .unwrap();
+    s.ensure_instance_run_started(instance.id, "run-racing", Utc::now())
+        .await
+        .unwrap();
+    let started = s.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(started.context.runtime.run_id.as_deref(), Some("run-1"));
+    assert_eq!(started.context.runtime.started_at, Some(started_at));
+
+    s.reset_instance_run(instance.id, "run-2").await.unwrap();
+    let reset = s.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(reset.context.data, serde_json::json!({"keep": true}));
+    assert_eq!(reset.context.runtime.run_id.as_deref(), Some("run-2"));
+    assert_eq!(reset.context.runtime.total_steps_executed, 0);
+    assert!(reset.context.runtime.current_step.is_none());
+    assert!(reset.context.runtime.started_at.is_none());
 }

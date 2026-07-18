@@ -46,10 +46,39 @@ pub enum StorageError {
     Backend(String),
 }
 
+impl StorageError {
+    /// `true` when this error is a *transient* infrastructure failure —
+    /// connection loss, connection-pool exhaustion, or a transient
+    /// external-backend blip (e.g. a database failover or an object-store
+    /// throttle).
+    ///
+    /// This is the single source of truth for storage-error retryability:
+    /// the scheduler's per-instance safety net (`EngineError::is_transient_storage`)
+    /// and the step-level mapper used by the coordination handlers both
+    /// consult it, so a variant cannot be rescheduled in one place and
+    /// failed/DLQ'd in another. Logic errors (`Query`, `Serialization`,
+    /// `Conflict`, `Unsupported`, …) are NOT transient — retrying them loops
+    /// forever.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_) | Self::PoolExhausted | Self::Backend(_)
+        )
+    }
+}
+
 impl From<sqlx::Error> for StorageError {
     fn from(err: sqlx::Error) -> Self {
         match err {
             sqlx::Error::PoolTimedOut => Self::PoolExhausted,
+            // Transport-level failures — socket I/O, TLS handshake, pool
+            // closed mid-operation — are transient connection problems, not
+            // query errors: mapping them to `Query` would classify them as
+            // permanent and fail healthy instances on a momentary blip.
+            sqlx::Error::Io(_) | sqlx::Error::Tls(_) | sqlx::Error::PoolClosed => {
+                Self::Connection(err.to_string())
+            }
             sqlx::Error::RowNotFound => Self::NotFound {
                 entity: "row",
                 id: String::new(),
@@ -142,6 +171,89 @@ mod tests {
         let err: StorageError = serde_err.into();
         assert!(matches!(err, StorageError::Serialization(_)));
         assert!(err.to_string().starts_with("serialization error:"));
+    }
+
+    // --- StorageError::is_transient / sqlx mapping ---
+
+    /// Transport-level sqlx failures must surface as `Connection` (transient),
+    /// not `Query` (permanent) — otherwise a momentary network/TLS blip or a
+    /// closed pool fails/DLQs healthy instances.
+    #[test]
+    fn sqlx_io_error_maps_to_transient_connection() {
+        let err: StorageError = sqlx::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ))
+        .into();
+        assert!(matches!(err, StorageError::Connection(_)));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn sqlx_tls_error_maps_to_transient_connection() {
+        let err: StorageError = sqlx::Error::Tls("handshake failed".into()).into();
+        assert!(matches!(err, StorageError::Connection(_)));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn sqlx_pool_closed_maps_to_transient_connection() {
+        let err: StorageError = sqlx::Error::PoolClosed.into();
+        assert!(matches!(err, StorageError::Connection(_)));
+        assert!(err.is_transient());
+    }
+
+    #[test]
+    fn sqlx_pool_timed_out_maps_to_transient_pool_exhausted() {
+        let err: StorageError = sqlx::Error::PoolTimedOut.into();
+        assert!(matches!(err, StorageError::PoolExhausted));
+        assert!(err.is_transient());
+    }
+
+    /// Every variant's retryability classification, pinned in one table —
+    /// this is the source of truth both engine classifiers must agree with.
+    /// Keep it in sync when adding variants.
+    #[test]
+    fn storage_error_is_transient_table() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let cases: Vec<(&str, StorageError, bool)> = vec![
+            ("Connection", StorageError::Connection("x".into()), true),
+            ("Query", StorageError::Query("x".into()), false),
+            (
+                "NotFound",
+                StorageError::NotFound {
+                    entity: "instance",
+                    id: "x".into(),
+                },
+                false,
+            ),
+            ("Conflict", StorageError::Conflict("x".into()), false),
+            (
+                "TerminalTarget",
+                StorageError::TerminalTarget {
+                    entity: "instance".into(),
+                    id: "x".into(),
+                },
+                false,
+            ),
+            ("Migration", StorageError::Migration("x".into()), false),
+            (
+                "Serialization",
+                StorageError::Serialization(serde_err),
+                false,
+            ),
+            ("PoolExhausted", StorageError::PoolExhausted, true),
+            ("Unsupported", StorageError::Unsupported("x".into()), false),
+            ("Backend", StorageError::Backend("x".into()), true),
+        ];
+        assert_eq!(
+            cases.len(),
+            10,
+            "table must cover every StorageError variant"
+        );
+        for (name, err, expected) in cases {
+            assert_eq!(err.is_transient(), expected, "{name} misclassified");
+        }
     }
 
     // --- StepError Display ---

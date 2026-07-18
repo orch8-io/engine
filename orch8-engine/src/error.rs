@@ -75,18 +75,15 @@ impl EngineError {
     /// storage error must **reschedule** the instance (it stays healthy and
     /// retries on a later tick) rather than transition it to terminal
     /// `Failed`, which would DLQ an entire claimed batch on a momentary
-    /// database blip. Logic errors (`Query`, `Serialization`, `Conflict`,
-    /// `Unsupported`, …) are NOT transient — retrying them loops forever.
+    /// database blip.
+    ///
+    /// Delegates to [`StorageError::is_transient`] — the single source of
+    /// truth shared with the step-level mapper — so both classifiers always
+    /// agree: logic errors (`Query`, `Serialization`, `Conflict`,
+    /// `Unsupported`, …) are NOT transient; retrying them loops forever.
     #[must_use]
     pub fn is_transient_storage(&self) -> bool {
-        matches!(
-            self,
-            Self::Storage(
-                StorageError::Connection(_)
-                    | StorageError::PoolExhausted
-                    | StorageError::Backend(_)
-            )
-        )
+        matches!(self, Self::Storage(e) if e.is_transient())
     }
 
     /// Normalize `StepTimeout` into a retryable `StepFailed`, leaving every
@@ -141,6 +138,61 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("instance"));
         assert!(msg.contains("xyz"));
+    }
+
+    /// The scheduler safety net (`is_transient_storage`) and the step-level
+    /// mapper (`map_storage_err`) used to classify `Query` in opposite
+    /// directions — permanent in one place, retryable in the other. Both now
+    /// delegate to `StorageError::is_transient`; pin that they agree on every
+    /// variant. Keep the table in sync when adding variants.
+    #[test]
+    fn storage_classifiers_agree_on_every_variant() {
+        use crate::handlers::util::map_storage_err;
+        use orch8_types::error::StepError;
+
+        let serde_err = serde_json::from_str::<serde_json::Value>("{bad").unwrap_err();
+        let variants: Vec<(&str, StorageError)> = vec![
+            ("Connection", StorageError::Connection("x".into())),
+            ("Query", StorageError::Query("x".into())),
+            (
+                "NotFound",
+                StorageError::NotFound {
+                    entity: "instance",
+                    id: "x".into(),
+                },
+            ),
+            ("Conflict", StorageError::Conflict("x".into())),
+            (
+                "TerminalTarget",
+                StorageError::TerminalTarget {
+                    entity: "instance".into(),
+                    id: "x".into(),
+                },
+            ),
+            ("Migration", StorageError::Migration("x".into())),
+            ("Serialization", StorageError::Serialization(serde_err)),
+            ("PoolExhausted", StorageError::PoolExhausted),
+            ("Unsupported", StorageError::Unsupported("x".into())),
+            ("Backend", StorageError::Backend("x".into())),
+        ];
+        assert_eq!(
+            variants.len(),
+            10,
+            "table must cover every StorageError variant"
+        );
+        for (name, err) in variants {
+            let step_retryable = matches!(map_storage_err(&err), StepError::Retryable { .. });
+            let source_of_truth = err.is_transient();
+            let scheduler_transient = EngineError::Storage(err).is_transient_storage();
+            assert_eq!(
+                scheduler_transient, source_of_truth,
+                "{name}: scheduler classifier disagrees"
+            );
+            assert_eq!(
+                step_retryable, source_of_truth,
+                "{name}: step-level mapper disagrees"
+            );
+        }
     }
 
     #[test]

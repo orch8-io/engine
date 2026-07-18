@@ -102,12 +102,18 @@ pub(super) async fn recover_stale_instances(
     let cutoff = chrono::Utc::now()
         - chrono::Duration::from_std(stale_threshold)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    // `running` only — never `waiting`: parked waiters (human-review gates,
+    // wait-for-event) never heartbeat, so every reaper pass used to recycle
+    // them (claim → re-park, one audit row per park). Their liveness
+    // contract is the deadline/timeout sweep, not the lease. Parity with the
+    // Postgres impl.
+    //
     // Reset next_fire_at as well (parity with the Postgres impl): a stale
     // instance may carry a far-future next_fire_at from before it wedged, and
     // claim_due would otherwise not pick the recovered instance up until that
     // time naturally arrives.
     let result = sqlx::query(
-        "UPDATE task_instances SET state='scheduled', next_fire_at=?1, updated_at=?1 WHERE state IN ('running', 'waiting') AND updated_at < ?2",
+        "UPDATE task_instances SET state='scheduled', next_fire_at=?1, updated_at=?1 WHERE state='running' AND updated_at < ?2",
     )
     .bind(ts(chrono::Utc::now()))
     .bind(ts(cutoff))

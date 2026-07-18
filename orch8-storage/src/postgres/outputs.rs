@@ -108,9 +108,14 @@ pub(super) async fn get_all(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockOutput>, StorageError> {
+    // `id` tiebreaker: rows written in the same millisecond share a
+    // `created_at`, and without a second key their relative order (hence
+    // which attempt "wins" in last-wins consumers like
+    // `build_outputs_shape`) is planner-dependent. Ids are UUIDv7
+    // (time-ordered), matching the `get_page` convention.
     let rows = sqlx::query_as::<_, BlockOutputRow>(
         r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
-           FROM block_outputs WHERE instance_id = $1 ORDER BY created_at",
+           FROM block_outputs WHERE instance_id = $1 ORDER BY created_at, id",
     )
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
@@ -173,13 +178,20 @@ pub(super) async fn get_completed_ids(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockId>, StorageError> {
-    // Exclude `__retry__` markers: a retry marker advances the attempt counter
-    // but the block has NOT completed and must stay eligible for re-execution.
-    // The `__in_progress__` sentinel is intentionally kept (crash recovery
-    // skips a mid-flight block to avoid duplicate side effects).
+    // Exclude internal bookkeeping markers — neither means the block's
+    // handler ran to completion:
+    //   - `__retry__`: advances the attempt counter after a retryable
+    //     failure, but the block must stay eligible for re-execution.
+    //   - `__in_progress__`: a crash-mid-step sentinel. The handler's effect
+    //     is UNKNOWN (it may not have run at all), so counting the block as
+    //     completed would let an instance reach `Completed` without the
+    //     step's effect ever happening. Excluding it makes crash recovery
+    //     re-execute the step at the same attempt (see `compute_attempt`
+    //     and the memoization guard in `execute_step_dry`) — at-least-once,
+    //     identical to the tree path.
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT block_id FROM block_outputs \
-         WHERE instance_id = $1 AND (output_ref IS NULL OR output_ref <> '__retry__')",
+         WHERE instance_id = $1 AND (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))",
     )
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
@@ -195,10 +207,10 @@ pub(super) async fn get_completed_ids_batch(
         return Ok(std::collections::HashMap::new());
     }
     let uuids: Vec<Uuid> = instance_ids.iter().map(|id| id.into_uuid()).collect();
-    // See `get_completed_ids`: retry markers don't count as completed.
+    // See `get_completed_ids`: internal markers don't count as completed.
     let rows: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT DISTINCT instance_id, block_id FROM block_outputs \
-         WHERE instance_id = ANY($1) AND (output_ref IS NULL OR output_ref <> '__retry__')",
+         WHERE instance_id = ANY($1) AND (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))",
     )
     .bind(&uuids)
     .fetch_all(&store.pool)

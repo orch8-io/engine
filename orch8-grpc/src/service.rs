@@ -178,6 +178,9 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
         }
         StorageError::Connection(_) => Status::unavailable("storage unavailable"),
         StorageError::PoolExhausted => Status::unavailable("pool exhausted"),
+        // Transient external-backend (object store) failure — retryable,
+        // mirrors the HTTP 503 mapping instead of signalling a server bug.
+        StorageError::Backend(_) => Status::unavailable("storage backend unavailable"),
         other => {
             tracing::error!(error = %other, "internal storage error");
             Status::internal("internal error")
@@ -1431,5 +1434,26 @@ impl Orch8Service for Orch8GrpcService {
             .await
             .map_err(storage_err)?;
         Ok(Response::new(proto::Empty {}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::storage_err;
+    use orch8_types::error::StorageError;
+    use tonic::Code;
+
+    #[test]
+    fn transient_backend_error_maps_to_unavailable() {
+        let status = storage_err(StorageError::Backend("object store throttled".into()));
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(status.message(), "storage backend unavailable");
+    }
+
+    #[test]
+    fn permanent_query_error_maps_to_internal() {
+        let status = storage_err(StorageError::Query("bad sql".into()));
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "internal error");
     }
 }

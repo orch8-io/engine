@@ -118,6 +118,9 @@ async fn redeliver_preview_has_no_side_effects_and_links_history() {
         last_error: Some("http 503".into()),
         created_at: chrono::Utc::now(),
         delivery_id: Some(delivery),
+        status: orch8_types::webhook_outbox::WebhookOutboxStatus::Parked,
+        next_attempt_at: None,
+        claimed_at: None,
     };
     srv.storage.park_webhook(&entry).await.unwrap();
 

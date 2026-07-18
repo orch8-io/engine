@@ -1340,6 +1340,39 @@ async fn block_output_crud() {
 }
 
 #[tokio::test]
+async fn outputs_with_equal_timestamps_use_id_as_deterministic_tiebreaker() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+    let timestamp = Utc::now();
+    let low_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000001").unwrap();
+    let high_id = Uuid::parse_str("018f0000-0000-7000-8000-000000000002").unwrap();
+
+    // Insert in the opposite order so insertion/planner order cannot satisfy
+    // the assertion accidentally.
+    for (id, value) in [(high_id, "high"), (low_id, "low")] {
+        s.save_block_output(&BlockOutput {
+            id,
+            instance_id: inst_id,
+            block_id: BlockId::new("same"),
+            output: json!({"value": value}),
+            output_ref: None,
+            output_size: 16,
+            attempt: 0,
+            created_at: timestamp,
+        })
+        .await
+        .unwrap();
+    }
+
+    let outputs = s.get_all_outputs(inst_id).await.unwrap();
+    assert_eq!(
+        outputs.iter().map(|o| o.id).collect::<Vec<_>>(),
+        vec![low_id, high_id]
+    );
+}
+
+#[tokio::test]
 async fn save_output_and_transition_atomic() {
     let s = store().await;
     let seq = make_sequence("t1");
@@ -1457,6 +1490,57 @@ async fn completed_block_ids_batch() {
         .unwrap();
     assert_eq!(batch.get(&inst1).map_or(0, Vec::len), 2);
     assert_eq!(batch.get(&inst2).map_or(0, Vec::len), 1);
+}
+
+/// Internal bookkeeping rows are not completion evidence. A `__retry__`
+/// marker only advances the attempt counter, and an `__in_progress__`
+/// sentinel means the handler crashed mid-flight — its effect is unknown,
+/// so the block must stay eligible for re-execution (at-least-once). The
+/// sentinel previously counted as completed, which let the fast path skip a
+/// crashed step and complete the instance without its effect ever running.
+#[tokio::test]
+async fn completed_block_ids_exclude_internal_markers() {
+    let s = store().await;
+    let inst = InstanceId::new();
+    seed_instance(&s, inst).await;
+
+    // Real output — counts as completed.
+    s.save_block_output(&mk_output(inst, "real", 0))
+        .await
+        .unwrap();
+
+    // Retry marker — attempt bookkeeping only.
+    let mut retry_marker = mk_output(inst, "retrying", 1);
+    retry_marker.output_ref = Some("__retry__".into());
+    s.save_block_output(&retry_marker).await.unwrap();
+
+    // Crash-mid-step sentinel — effect unknown, must NOT count as completed.
+    let mut sentinel = mk_output(inst, "crashed", 0);
+    sentinel.output_ref = Some("__in_progress__".into());
+    s.save_block_output(&sentinel).await.unwrap();
+
+    let ids = s.get_completed_block_ids(inst).await.unwrap();
+    assert_eq!(ids.len(), 1, "only the real output counts, got {ids:?}");
+    assert_eq!(ids[0].as_str(), "real");
+
+    // The batch variant must apply the same exclusion (it backs the
+    // scheduler's prefetch, which builds the fast-path skip set).
+    let batch = s.get_completed_block_ids_batch(&[inst]).await.unwrap();
+    let batch_ids = batch.get(&inst).map_or(&[][..], Vec::as_slice);
+    assert_eq!(batch_ids.len(), 1, "batch: {batch_ids:?}");
+    assert_eq!(batch_ids[0].as_str(), "real");
+
+    // A sentinel BEHIND a real output must not revoke completion either —
+    // the DISTINCT query filters rows, not blocks, so the real row still
+    // qualifies the block.
+    s.save_block_output(&mk_output(inst, "crashed", 1))
+        .await
+        .unwrap();
+    let ids = s.get_completed_block_ids(inst).await.unwrap();
+    assert!(
+        ids.iter().any(|b| b.as_str() == "crashed"),
+        "real output behind a stale sentinel still completes the block: {ids:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2446,6 +2530,7 @@ async fn context_round_trip_all_sections() {
             current_step_started_at: None,
             resource_key: None,
             instance_id: None,
+            run_id: None,
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,
@@ -2685,6 +2770,7 @@ async fn merge_context_data_preserves_other_sections() {
             current_step_started_at: None,
             resource_key: None,
             instance_id: None,
+            run_id: None,
             total_steps_executed: 0,
             dry_run: false,
             dry_run_auto_approve: false,

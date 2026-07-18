@@ -715,6 +715,11 @@ async fn retry_one(state: &AppState, id: InstanceId) -> Result<(), ApiError> {
         .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
     state
         .storage
+        .reset_instance_run(id, &Uuid::now_v7().to_string())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+    state
+        .storage
         .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;

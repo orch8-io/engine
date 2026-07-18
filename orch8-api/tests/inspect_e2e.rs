@@ -1217,9 +1217,12 @@ async fn instance_error_marker_row_is_included_as_an_output() {
 }
 
 #[tokio::test]
-async fn instance_retry_marker_after_real_output_wins_last_attempt() {
-    // Last-attempt-wins applies to marker rows too: a `__retry__` row
-    // written after the real output shadows it.
+async fn instance_retry_marker_after_real_output_does_not_shadow() {
+    // Contract change (deep review 2026-07): `__retry__` rows are internal
+    // attempt-counter bookkeeping, NOT outputs — they are now filtered here
+    // exactly as `build_outputs_shape` filters them engine-side, so a marker
+    // written after a real output no longer shadows it. (Previously
+    // last-attempt-wins applied to marker rows and `result` went missing.)
     let (srv, client, inst) = pipeline_instance(json!({"data": {}})).await;
     srv.storage
         .save_block_output(&fetch_row(inst, 0))
@@ -1238,8 +1241,8 @@ async fn instance_retry_marker_after_real_output_wins_last_attempt() {
 
     let resp = get_resolved_input(&client, &srv.v1_url(), inst, "notify", None, "t1").await;
     let trace: Value = resp.json().await.unwrap();
-    // The marker's payload replaced the real one → `result` is gone.
-    assert_eq!(entry(&trace, "from_fetch")["status"], "missing");
+    // The marker is invisible; the real output is what `{{ outputs.* }}` sees.
+    assert_eq!(entry(&trace, "from_fetch")["value"], "fetched");
 }
 
 #[tokio::test]

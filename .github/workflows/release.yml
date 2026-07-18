@@ -18,11 +18,87 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # -- Release gate -----------------------------------------------------------
+  # Tag pushes do not trigger ci.yml, so before anything is published prove
+  # the tagged commit is releasable: the tag must match the workspace version
+  # and the CI workflow must have passed on the tagged SHA.
+  verify:
+    name: Verify tag & CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      checks: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Tag matches workspace version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          TAG_VERSION="${TAG#v}"
+          CRATE_VERSION="$(awk -F'"' '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version/{print $2; exit}' Cargo.toml)"
+          if [[ -z "$CRATE_VERSION" ]]; then
+            echo "::error::Could not read [workspace.package] version from Cargo.toml."
+            exit 1
+          fi
+          if [[ "$TAG_VERSION" != "$CRATE_VERSION" ]]; then
+            echo "::error::Tag ${TAG} does not match [workspace.package] version \"${CRATE_VERSION}\" in Cargo.toml."
+            echo "Bump the workspace version (or re-tag) so the tag and Cargo.toml agree."
+            exit 1
+          fi
+          echo "Tag ${TAG} matches workspace version ${CRATE_VERSION}."
+
+      - name: CI is green on the tagged SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Dereference the tag to its commit (annotated tags resolve to a
+          # tag object in github.sha, which never has CI runs).
+          SHA="$(git rev-list -n 1 "${GITHUB_REF#refs/tags/}")"
+          # ci.yml only runs on main pushes and PRs, never on tag pushes, so
+          # look up the CI run for this commit via the Actions API. Poll for
+          # up to 30 minutes in case that run is still in progress.
+          deadline=$((SECONDS + 1800))
+          while true; do
+            state="$(curl -sf \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=${SHA}&per_page=100" \
+              | jq -r '([.workflow_runs[] | select(.path == ".github/workflows/ci.yml")] | .[0]) as $r | if $r == null then "none" else "\($r.status)/\($r.conclusion)" end')" \
+              || state="api-error"
+            case "$state" in
+              completed/success)
+                echo "CI run for ${SHA} completed successfully."
+                exit 0
+                ;;
+              completed/*)
+                echo "::error::The CI run for ${SHA} finished with conclusion '${state#*/}'."
+                echo "Let the CI workflow go green on the commit before tagging it."
+                exit 1
+                ;;
+              none)
+                echo "No CI run found for ${SHA} yet; waiting..."
+                ;;
+              *)
+                echo "CI run for ${SHA} is '${state}'; waiting..."
+                ;;
+            esac
+            if (( SECONDS >= deadline )); then
+              echo "::error::No successful CI run for ${SHA} after 30 minutes."
+              echo "ci.yml does not run on tag pushes. Push the commit to main (or merge a PR),"
+              echo "let the CI workflow go green on it, then tag that commit."
+              exit 1
+            fi
+            sleep 60
+          done
+
   # -- Server binaries (4 targets) ------------------------------------------
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    needs: [verify]
     strategy:
       matrix:
         include:
@@ -151,9 +227,39 @@ jobs:
           file: docker-ctx/Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
-          provenance: false
+          provenance: true
           tags: |
             ghcr.io/orch8-io/engine:${{ steps.version.outputs.tag }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+
+      - name: Smoke test pushed image
+        env:
+          IMAGE: ghcr.io/orch8-io/engine:${{ steps.version.outputs.tag }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+        run: |
+          docker pull "$IMAGE"
+          # Mirrors the ci.yml docker-smoke job: default SQLite backend and
+          # --insecure, since the smoke container has no API/encryption keys.
+          docker run -d --name orch8-release-smoke \
+            -p 8080:8080 \
+            -e ORCH8_LOG_JSON=true \
+            --entrypoint /usr/local/bin/orch8-server \
+            "$IMAGE" --insecure
+          # Wait for /health/ready (up to 30s).
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "engine ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "engine never became ready — container logs follow:"
+          docker logs orch8-release-smoke
+          exit 1
+
+      # The docker-manifest job (and its `latest` update) only runs once both
+      # platform legs pass this smoke test.
+      - name: Tear down smoke container
+        if: always()
+        run: docker rm -f orch8-release-smoke || true
 
   docker-manifest:
     name: Docker Manifest
@@ -180,16 +286,23 @@ jobs:
             "ghcr.io/orch8-io/engine:${TAG}-arm64"
           docker manifest push "ghcr.io/orch8-io/engine:${TAG}"
 
-          docker manifest create "ghcr.io/orch8-io/engine:latest" \
-            "ghcr.io/orch8-io/engine:${TAG}-amd64" \
-            "ghcr.io/orch8-io/engine:${TAG}-arm64"
-          docker manifest push "ghcr.io/orch8-io/engine:latest"
+          # Prerelease tags (anything with a '-', e.g. 0.7.0-rc.1) publish
+          # their own manifest but must not move `latest`.
+          if [[ "$TAG" == *-* ]]; then
+            echo "Prerelease tag ${TAG} — skipping the latest manifest."
+          else
+            docker manifest create "ghcr.io/orch8-io/engine:latest" \
+              "ghcr.io/orch8-io/engine:${TAG}-amd64" \
+              "ghcr.io/orch8-io/engine:${TAG}-arm64"
+            docker manifest push "ghcr.io/orch8-io/engine:latest"
+          fi
 
   # -- iOS builds (3 targets) -----------------------------------------------
   ios:
     name: iOS (${{ matrix.target }})
     runs-on: macos-latest
     timeout-minutes: 45
+    needs: [verify]
     strategy:
       matrix:
         include:
@@ -206,7 +319,7 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
       - name: Ensure cargo on PATH
-        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+        run: dirname "$(rustup which cargo)" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           key: ios-${{ matrix.target }}
@@ -227,6 +340,7 @@ jobs:
     name: Android (${{ matrix.target }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [verify]
     strategy:
       matrix:
         include:
@@ -243,7 +357,7 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
       - name: Ensure cargo on PATH
-        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+        run: dirname "$(rustup which cargo)" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           key: android-${{ matrix.target }}
@@ -258,15 +372,17 @@ jobs:
         run: |
           NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
           TOOLCHAIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "CC_armv7_linux_androideabi=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang" >> "$GITHUB_ENV"
-          echo "CC_x86_64_linux_android=${TOOLCHAIN}/bin/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
-          echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
-          echo "AR_armv7_linux_androideabi=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
-          echo "AR_x86_64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang"
+            echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang"
+            echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/x86_64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang"
+            echo "CC_armv7_linux_androideabi=${TOOLCHAIN}/bin/armv7a-linux-androideabi24-clang"
+            echo "CC_x86_64_linux_android=${TOOLCHAIN}/bin/x86_64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar"
+            echo "AR_armv7_linux_androideabi=${TOOLCHAIN}/bin/llvm-ar"
+            echo "AR_x86_64_linux_android=${TOOLCHAIN}/bin/llvm-ar"
+          } >> "$GITHUB_ENV"
 
       - name: Build liborch8_mobile
         run: cargo build --profile mobile-release --target ${{ matrix.target }} -p orch8-mobile
@@ -282,13 +398,14 @@ jobs:
     name: Generate bindings
     runs-on: macos-latest
     timeout-minutes: 20
+    needs: [verify]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
       - name: Ensure cargo on PATH
-        run: echo "$(dirname "$(rustup which cargo)")" >> "$GITHUB_PATH"
+        run: dirname "$(rustup which cargo)" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
 
       - name: Build library for binding generation

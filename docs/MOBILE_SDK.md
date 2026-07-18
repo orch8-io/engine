@@ -3,7 +3,7 @@
 Server-configurable workflows running on-device. Update onboarding flows, promotions, and feature journeys without app store deployments.
 
 This document describes the bindings generated from the current workspace
-(`0.6.0`). Published Swift and Android artifacts may version independently.
+(`0.7.0-dev`). Published Swift and Android artifacts may version independently.
 Replace `<published-version>` below with a version that exists in your package
 repository; do not assume it matches the Rust workspace version.
 

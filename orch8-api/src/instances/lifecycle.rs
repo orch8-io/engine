@@ -771,6 +771,12 @@ pub async fn retry_instance(
 
     state
         .storage
+        .reset_instance_run(instance_id, &Uuid::now_v7().to_string())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
+    state
+        .storage
         .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
@@ -1052,6 +1058,15 @@ pub async fn resume_from_block(
             .await
             .map_err(|e| ApiError::from_storage(e, "signal"))?;
     }
+
+    // A resume is a new execution run. Reset run-scoped budget/timing fields
+    // after applying the optional context patch so the patch cannot write the
+    // old runtime counters back over the reset.
+    state
+        .storage
+        .reset_instance_run(instance_id, &Uuid::now_v7().to_string())
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
     state
         .storage
