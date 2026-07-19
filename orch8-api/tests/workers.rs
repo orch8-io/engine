@@ -79,6 +79,8 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -255,6 +257,50 @@ async fn heartbeat_extends_task_claim() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // Persist resumable progress using the sequence returned by the prior
+    // heartbeat/poll contract.
+    let resp = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "checkpoint_seq": 0,
+            "checkpoint": { "page": 7, "cursor": "abc" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["checkpoint_seq"], 1);
+
+    let stored = srv.storage.get_worker_task(task_id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.resume_checkpoint,
+        Some(json!({"page": 7, "cursor": "abc"}))
+    );
+    assert_eq!(stored.checkpoint_seq, 1);
+
+    // Replaying an old checkpoint version cannot clobber progress.
+    let stale = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "worker_id": "worker-1",
+            "checkpoint_seq": 0,
+            "checkpoint": { "page": 999 }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]

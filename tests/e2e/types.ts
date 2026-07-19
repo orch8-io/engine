@@ -107,6 +107,8 @@ export interface WorkerTask {
   state: WorkerTaskState;
   block_id: string;
   params: Record<string, unknown>;
+  resume_checkpoint?: unknown;
+  checkpoint_seq: number;
   [k: string]: unknown;
 }
 

@@ -4,16 +4,16 @@ use std::collections::BTreeSet;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use orch8_types::continuity::{EffectReceipt, EffectState, RuntimeTrustLevel};
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, BudgetReservation, DeviceDelegation, DisclosureResult,
     DurableWritePhase, EvaluationGateEvidence, EvaluationOutcome, EvaluationScore, EvidenceStatus,
-    FaultInjection, FaultLabRun, FaultProfile, FederationEnvelope, FederationPeer,
-    GeneratedScenario, IncidentCaseId, IncidentReproduction, InvariantResult, InvariantResultId,
-    InvariantRule, LiveMigrationPlan, MigrationDisposition, MigrationPlanId,
-    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, ProviderDecision,
-    ProviderDecisionId, RecommendationId, ReservationState, ResidencyEvidence,
+    FaultInjection, FaultLabRun, FaultProfile, FederationEnvelope, FederationMessageId,
+    FederationPeer, FederationPeerId, GeneratedScenario, IncidentCaseId, IncidentReproduction,
+    InvariantResult, InvariantResultId, InvariantRule, LiveMigrationPlan, MigrationDisposition,
+    MigrationPlanId, OptimizationRecommendation, OwnershipTransition, ProviderCandidate,
+    ProviderDecision, ProviderDecisionId, RecommendationId, ReservationState, ResidencyEvidence,
     ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfScenario,
     WorkflowInvariant,
 };
@@ -1039,6 +1039,43 @@ pub fn verify_federation_envelope(
 }
 
 #[must_use]
+pub struct FederationSigningRequest<'a> {
+    pub peer_id: FederationPeerId,
+    pub tenant_id: orch8_types::ids::TenantId,
+    pub continuity_id: orch8_types::continuity::ContinuityId,
+    pub epoch: orch8_types::continuity::ExecutionEpoch,
+    pub destination_runtime_id: orch8_types::continuity::RuntimeId,
+    pub payload: &'a [u8],
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[must_use]
+pub fn sign_federation_envelope(
+    signing_key: &SigningKey,
+    request: FederationSigningRequest<'_>,
+) -> FederationEnvelope {
+    let mut envelope = FederationEnvelope {
+        id: FederationMessageId::new(),
+        peer_id: request.peer_id,
+        tenant_id: request.tenant_id,
+        continuity_id: request.continuity_id,
+        epoch: request.epoch,
+        destination_runtime_id: request.destination_runtime_id,
+        payload_sha256: hex_sha256(request.payload),
+        issued_at: request.issued_at,
+        expires_at: request.expires_at,
+        signature: String::new(),
+    };
+    envelope.signature = BASE64.encode(
+        signing_key
+            .sign(&federation_signing_bytes(&envelope))
+            .to_bytes(),
+    );
+    envelope
+}
+
+#[must_use]
 pub fn evaluate_residency(
     classification: orch8_types::continuity::DataClassification,
     operation: impl Into<String>,
@@ -1231,7 +1268,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::SigningKey;
     use orch8_types::continuity::{ContinuityId, ExecutionEpoch};
     use orch8_types::continuity_advanced::{
         BudgetReservationId, DurableWritePhase, FaultKind, FaultPoint, FaultProfile,
@@ -1621,22 +1658,18 @@ mod tests {
             revoked_at: None,
         };
         let payload = b"ciphertext";
-        let mut envelope = FederationEnvelope {
-            id: orch8_types::continuity_advanced::FederationMessageId::new(),
-            peer_id: peer.id,
-            tenant_id: tenant,
-            continuity_id: ContinuityId::new(),
-            epoch: ExecutionEpoch::initial(),
-            destination_runtime_id: orch8_types::continuity::RuntimeId::new(),
-            payload_sha256: hex_sha256(payload),
-            issued_at: now,
-            expires_at: now + Duration::minutes(5),
-            signature: String::new(),
-        };
-        envelope.signature = BASE64.encode(
-            signing_key
-                .sign(&federation_signing_bytes(&envelope))
-                .to_bytes(),
+        let envelope = sign_federation_envelope(
+            &signing_key,
+            FederationSigningRequest {
+                peer_id: peer.id,
+                tenant_id: tenant,
+                continuity_id: ContinuityId::new(),
+                epoch: ExecutionEpoch::initial(),
+                destination_runtime_id: orch8_types::continuity::RuntimeId::new(),
+                payload,
+                issued_at: now,
+                expires_at: now + Duration::minutes(5),
+            },
         );
         verify_federation_envelope(&peer, &envelope, payload, now).unwrap();
         assert_eq!(

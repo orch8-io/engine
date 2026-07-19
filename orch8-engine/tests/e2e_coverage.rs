@@ -7,6 +7,7 @@
 use chrono::Utc;
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use orch8_engine::evaluator::{self, EvalOutcome};
 use orch8_engine::handlers::{HandlerRegistry, builtin::register_builtins};
@@ -535,6 +536,80 @@ async fn parallel_with_multi_step_branches() {
     assert_eq!(node_state(&tree, "b0s0"), NodeState::Completed);
     assert_eq!(node_state(&tree, "b0s1"), NodeState::Completed);
     assert_eq!(node_state(&tree, "b1s0"), NodeState::Completed);
+}
+
+#[tokio::test]
+async fn parallel_in_process_steps_overlap() {
+    let par = BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("par"),
+        branches: vec![
+            vec![mk_step("left", "barrier")],
+            vec![mk_step("right", "barrier")],
+        ],
+    }));
+    let (storage, seq, inst) = setup(vec![par]).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let mut reg = registry();
+    reg.register("barrier", {
+        let barrier = Arc::clone(&barrier);
+        move |_ctx| {
+            let barrier = Arc::clone(&barrier);
+            async move {
+                barrier.wait().await;
+                Ok(json!({"overlapped": true}))
+            }
+        }
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        drive(&storage, &reg, inst.id, &seq),
+    )
+    .await
+    .expect("distinct Parallel branches must be polled concurrently");
+
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    assert_eq!(node_state(&tree, "left"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "right"), NodeState::Completed);
+}
+
+#[tokio::test]
+async fn parallel_in_process_dispatch_is_bounded_to_two() {
+    let par = BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("par"),
+        branches: vec![
+            vec![mk_step("one", "tracked")],
+            vec![mk_step("two", "tracked")],
+            vec![mk_step("three", "tracked")],
+        ],
+    }));
+    let (storage, seq, inst) = setup(vec![par]).await;
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let mut reg = registry();
+    reg.register("tracked", {
+        let active = Arc::clone(&active);
+        let peak = Arc::clone(&peak);
+        move |_ctx| {
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            async move {
+                let in_flight = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(in_flight, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(json!({"completed": true}))
+            }
+        }
+    });
+
+    drive(&storage, &reg, inst.id, &seq).await;
+
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    assert_eq!(node_state(&tree, "one"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "two"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "three"), NodeState::Completed);
 }
 
 // --- 10. TryCatch ---

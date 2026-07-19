@@ -1913,6 +1913,9 @@ async fn process_instance(
                     .await?;
                     return Ok(());
                 }
+                if cooperatively_preempt(storage, &instance, clock).await? {
+                    return Ok(());
+                }
             }
             StepOutcome::Failed => {
                 // Best-effort cleanup: on_failure (fast-path step failure).
@@ -1936,6 +1939,9 @@ async fn process_instance(
             StepOutcome::Skipped => {
                 if let Err(pos) = completed_blocks.binary_search(&step_def.id) {
                     completed_blocks.insert(pos, step_def.id.clone());
+                }
+                if cooperatively_preempt(storage, &instance, clock).await? {
+                    return Ok(());
                 }
             }
         }
@@ -1976,6 +1982,40 @@ async fn process_instance(
     wake_parent_if_child(storage.as_ref(), &instance).await;
 
     Ok(())
+}
+
+/// Yield a scheduler slot at a durable block boundary when higher-priority
+/// work is ready. This is intentionally cooperative: aborting an in-flight
+/// handler could duplicate an external effect or discard an uncommitted
+/// result. The completed block output is already durable before this runs.
+async fn cooperatively_preempt(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &orch8_types::instance::TaskInstance,
+    clock: &SharedClock,
+) -> Result<bool, EngineError> {
+    let now = clock.now();
+    if !storage
+        .has_due_higher_priority(now, instance.priority)
+        .await?
+    {
+        return Ok(false);
+    }
+    let yielded = storage
+        .conditional_update_instance_state(
+            instance.id,
+            InstanceState::Running,
+            InstanceState::Scheduled,
+            Some(now),
+        )
+        .await?;
+    if yielded {
+        debug!(
+            instance_id = %instance.id,
+            priority = ?instance.priority,
+            "cooperatively preempted instance for higher-priority work"
+        );
+    }
+    Ok(yielded)
 }
 
 /// If this instance has a `parent_instance_id`, transition the parent from

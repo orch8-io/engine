@@ -15,6 +15,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/mobile/sync", post(handle_sync))
         .route("/mobile/devices/register", post(register_device))
+        .route(
+            "/mobile/devices/{device_id}/runtime",
+            post(register_device_runtime),
+        )
         .route("/mobile/devices", get(list_devices))
         .route("/mobile/approvals", get(list_approvals))
         .route("/mobile/approvals/{id}/resolve", post(resolve_approval))
@@ -355,6 +359,53 @@ async fn register_device(
 
     debug!(device_id = %req.device_id, "mobile device registered");
     Ok(StatusCode::CREATED)
+}
+
+#[derive(Deserialize)]
+struct RegisterDeviceRuntimeRequest {
+    capabilities: orch8_types::continuity::RuntimeCapabilities,
+}
+
+async fn register_device_runtime(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(device_id): Path<String>,
+    Json(mut req): Json<RegisterDeviceRuntimeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let device = state
+        .storage
+        .get_mobile_device(&device_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "mobile_devices"))?
+        .ok_or_else(|| ApiError::NotFound(format!("device {device_id}")))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(&device.tenant_id),
+        "mobile device",
+    )?;
+    if req.capabilities.kind != orch8_types::continuity::RuntimeKind::Mobile {
+        return Err(ApiError::InvalidArgument(
+            "a mobile device runtime must use kind `mobile`".into(),
+        ));
+    }
+    let device_fact = format!("device:{device_id}");
+    if !req.capabilities.hardware.contains(&device_fact) {
+        req.capabilities.hardware.push(device_fact);
+    }
+    let now = chrono::Utc::now();
+    crate::continuity::validate_runtime_registration(&req.capabilities, now)?;
+    let tenant_id = orch8_types::ids::TenantId::unchecked(device.tenant_id);
+    state
+        .storage
+        .upsert_runtime_capabilities(&tenant_id, &req.capabilities)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    debug!(
+        device_id = %device_id,
+        runtime_id = %req.capabilities.runtime_id,
+        "mobile device joined runtime capability mesh"
+    );
+    Ok((StatusCode::CREATED, Json(req.capabilities)))
 }
 
 // ---------------------------------------------------------------------------

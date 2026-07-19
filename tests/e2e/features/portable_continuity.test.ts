@@ -394,6 +394,15 @@ describe("Portable Continuity", () => {
       (await client.listContinuityFrames(stream.stream_id, tenantId, 0))[0].payload.token,
       "part-1",
     );
+    const windows = await client.listContinuityWindows(stream.stream_id, tenantId, "session", {
+      gap_ms: 60_000,
+    });
+    assert.equal(windows.length, 1);
+    assert.equal(windows[0].kind, "session");
+    assert.deepEqual(
+      windows[0].frames.map((frame: { sequence: number }) => frame.sequence),
+      [0, 1],
+    );
     assert.equal(
       (
         await client.retractContinuityFrames(stream.stream_id, {

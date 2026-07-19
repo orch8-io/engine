@@ -39,6 +39,7 @@ pub mod sequence_cache;
 pub mod signals;
 pub mod step_logs;
 pub mod stream_bus;
+pub mod stream_windows;
 pub mod template;
 pub mod template_trace;
 pub mod triggers;

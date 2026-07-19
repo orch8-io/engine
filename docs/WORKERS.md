@@ -45,6 +45,10 @@ Content-Type: application/json
 
 Returns an array of up to `limit` `WorkerTask` objects. Empty array means no work. Each task is locked to this `worker_id` until completion or heartbeat timeout.
 
+For resumable work, a reclaimed or retried task also carries
+`resume_checkpoint` and its monotonic `checkpoint_seq`. Start from that
+checkpoint rather than repeating completed activity work.
+
 The optional `version` field is recorded on the worker registry and checked against
 version pins (see [Fleet management](#fleet-management)) — a worker below a pinned
 `min_version` for that handler is refused tasks. Workers bound to a named queue poll
@@ -58,6 +62,23 @@ POST /workers/tasks/{task_id}/heartbeat
 ```
 
 Call every 15–30s. Tasks with no heartbeat for 60s (`worker_reaper_stale_secs`) are reclaimed by the engine's reaper — which sweeps every 30s (`worker_reaper_tick_secs`) — and re-offered to other workers.
+
+To persist progress atomically with the heartbeat, include the sequence from
+the claimed task (or the previous heartbeat response):
+
+```json
+{
+  "worker_id": "node-worker-42",
+  "checkpoint_seq": 0,
+  "checkpoint": { "completed_batches": 12, "cursor": "next-page-token" }
+}
+```
+
+The response contains the next `checkpoint_seq`. Checkpoints are capped at
+256 KiB, encrypted at rest when storage encryption is enabled, preserved by
+retry and stale-lease recovery, and updated with compare-and-swap semantics.
+A stale sequence or former lease owner receives `409 Conflict` and cannot
+overwrite newer progress.
 
 ### 3. Complete
 

@@ -84,6 +84,48 @@ fn build_prefetch_map_completed_only_instance() {
     assert_eq!(result[&id].completed_block_ids.len(), 2);
 }
 
+#[tokio::test]
+async fn cooperative_preemption_reschedules_lower_priority_instance() {
+    let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let now = Utc::now();
+    let make = |priority, state, fire_at| TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: SequenceId::new(),
+        tenant_id: TenantId::unchecked("tenant-a"),
+        namespace: Namespace::new("default"),
+        state,
+        next_fire_at: fire_at,
+        priority,
+        timezone: "UTC".into(),
+        metadata: serde_json::json!({}),
+        context: ExecutionContext::default(),
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
+        budget: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let low = make(Priority::Low, InstanceState::Running, None);
+    let high = make(
+        Priority::High,
+        InstanceState::Scheduled,
+        Some(now - chrono::Duration::seconds(1)),
+    );
+    storage.create_instance(&low).await.unwrap();
+    storage.create_instance(&high).await.unwrap();
+
+    assert!(
+        cooperatively_preempt(&storage, &low, &SharedClock::default())
+            .await
+            .unwrap()
+    );
+    let low = storage.get_instance(low.id).await.unwrap().unwrap();
+    assert_eq!(low.state, InstanceState::Scheduled);
+}
+
 // ------------------------------------------------------------------
 // R6 follow-up: template::resolve wiring into scheduler dispatch path
 // ------------------------------------------------------------------

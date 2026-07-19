@@ -48,6 +48,54 @@ async fn register_device() {
     assert_eq!(resp.status(), StatusCode::CREATED);
 }
 
+#[tokio::test]
+async fn mobile_device_can_join_capability_mesh() {
+    let srv = spawn_test_server_with_mobile_sync().await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{}/mobile/devices/register", srv.base_url))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({"device_id": DEVICE_ID, "platform": "ios"}))
+        .send()
+        .await
+        .unwrap();
+    let observed = chrono::Utc::now();
+    let runtime_id = uuid::Uuid::now_v7();
+    let response = client
+        .post(format!(
+            "{}/mobile/devices/{DEVICE_ID}/runtime",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({
+            "capabilities": {
+                "runtime_id": runtime_id,
+                "kind": "mobile",
+                "trust": "registered",
+                "handlers": ["camera"],
+                "hardware": ["camera"],
+                "offline_capable": true,
+                "connectivity": "wifi",
+                "battery_percent": 80,
+                "draining": false,
+                "observed_at": observed,
+                "expires_at": observed + chrono::Duration::minutes(2)
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let registered: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(registered["runtime_id"], runtime_id.to_string());
+    assert!(
+        registered["hardware"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(format!("device:{DEVICE_ID}")))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Sync: empty request returns empty commands
 // ---------------------------------------------------------------------------

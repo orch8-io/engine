@@ -129,6 +129,13 @@ pub struct WorkerTask {
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Latest durable progress snapshot supplied by the activity worker.
+    /// A replacement worker receives this value when it claims the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_checkpoint: Option<serde_json::Value>,
+    /// Monotonic compare-and-swap version for `resume_checkpoint`.
+    #[serde(default)]
+    pub checkpoint_seq: u64,
     pub completed_at: Option<DateTime<Utc>>,
     pub output: Option<serde_json::Value>,
     pub error_message: Option<String>,

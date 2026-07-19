@@ -13,7 +13,7 @@ use super::helpers::{row_to_worker_task, ts};
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18) ON CONFLICT(instance_id,block_id) DO NOTHING"
+        "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,resume_checkpoint,checkpoint_seq,completed_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(instance_id,block_id) DO NOTHING"
     )
     .bind(t.id.to_string())
     .bind(t.instance_id.into_uuid().to_string())
@@ -31,6 +31,13 @@ pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<()
     .bind(t.timeout_ms)
     .bind(t.claimed_at.map(ts))
     .bind(t.heartbeat_at.map(ts))
+    .bind(
+        t.resume_checkpoint
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?,
+    )
+    .bind(i64::try_from(t.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(t.completed_at.map(ts))
     .bind(ts(t.created_at))
     .execute(&storage.pool).await?;
@@ -275,6 +282,34 @@ pub(super) async fn heartbeat(
     .execute(&storage.pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+pub(super) async fn checkpoint(
+    storage: &SqliteStorage,
+    task_id: Uuid,
+    worker_id: &str,
+    expected_seq: u64,
+    checkpoint: &serde_json::Value,
+) -> Result<Option<u64>, StorageError> {
+    let expected = i64::try_from(expected_seq)
+        .map_err(|_| StorageError::Query("checkpoint sequence exceeds INTEGER".into()))?;
+    let next = expected
+        .checked_add(1)
+        .ok_or_else(|| StorageError::Query("checkpoint sequence overflow".into()))?;
+    let result = sqlx::query(
+        "UPDATE worker_tasks
+         SET heartbeat_at=?4, resume_checkpoint=?5, checkpoint_seq=?6
+         WHERE id=?1 AND worker_id=?2 AND state='claimed' AND checkpoint_seq=?3",
+    )
+    .bind(task_id.to_string())
+    .bind(worker_id)
+    .bind(expected)
+    .bind(ts(Utc::now()))
+    .bind(serde_json::to_string(checkpoint)?)
+    .bind(next)
+    .execute(&storage.pool)
+    .await?;
+    Ok((result.rows_affected() == 1).then_some(next as u64))
 }
 
 pub(super) async fn delete(storage: &SqliteStorage, task_id: Uuid) -> Result<(), StorageError> {

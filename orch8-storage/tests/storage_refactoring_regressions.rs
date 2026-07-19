@@ -87,6 +87,8 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

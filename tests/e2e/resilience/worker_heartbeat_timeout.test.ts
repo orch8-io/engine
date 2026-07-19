@@ -77,7 +77,11 @@ describe("Worker Heartbeat Timeout", () => {
       const claimA = await client.pollWorkerTasks(handler, "worker-A");
       assert.equal(claimA.length, 1, "expected a single claimed task");
       const originalTaskId = claimA[0]!.id;
-      await client.heartbeatWorkerTask(originalTaskId, "worker-A");
+      const heartbeat = await client.heartbeatWorkerTask(originalTaskId, "worker-A", {
+        checkpoint: { completed_batches: 4, cursor: "resume-here" },
+        checkpointSeq: 0,
+      });
+      assert.equal(heartbeat.checkpoint_seq, 1);
 
       // Wait for the reaper to reclaim the stale claim. Observable signal:
       // a fresh poll from worker-B eventually succeeds for the same
@@ -96,6 +100,11 @@ describe("Worker Heartbeat Timeout", () => {
       );
       assert.equal(reclaimed.worker_id, "worker-B");
       assert.equal(reclaimed.state, "claimed");
+      assert.equal(reclaimed.checkpoint_seq, 1);
+      assert.deepEqual(reclaimed.resume_checkpoint, {
+        completed_batches: 4,
+        cursor: "resume-here",
+      });
 
       // worker-B finishes the job normally.
       await client.completeWorkerTask(reclaimed.id, "worker-B", { ok: true });

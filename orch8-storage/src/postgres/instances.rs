@@ -9,6 +9,26 @@ use orch8_types::ids::{InstanceId, SequenceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 
 use super::PostgresStorage;
+
+pub(super) async fn has_due_higher_priority(
+    store: &PostgresStorage,
+    now: DateTime<Utc>,
+    priority: orch8_types::instance::Priority,
+) -> Result<bool, StorageError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM task_instances
+            WHERE state = 'scheduled'
+              AND (next_fire_at IS NULL OR next_fire_at <= $1)
+              AND priority > $2
+        )",
+    )
+    .bind(now)
+    .bind(priority as i16)
+    .fetch_one(&store.pool)
+    .await
+    .map_err(Into::into)
+}
 use super::rows::InstanceRow;
 
 /// Canonical `task_instances` INSERT statement. Kept as a single string so

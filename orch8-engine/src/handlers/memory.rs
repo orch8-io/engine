@@ -1,19 +1,16 @@
 //! Built-in agent-memory handlers — `embed`, `memory_store`, `memory_search`.
 //!
 //! Durable, semantically-searchable memory for agents, built on the engine's
-//! existing instance key-value store (the same persistence as `set_state`).
-//! Memories survive crashes and replay like any other instance state.
+//! existing instance key-value store (the same persistence as `set_state`) or
+//! a tenant-isolated shared knowledge namespace. Memories survive crashes and
+//! replay like any other durable engine state.
 //!
 //! Ranking is a cosine-similarity scan in plain Rust — **no pgvector,
 //! sqlite-vec, or any database extension**. That keeps the engine a single
 //! binary and, critically, lets agent memory work **offline on a phone**
 //! (`SQLite` backend), where a vector-DB extension is not an option. Brute-force
 //! scan is appropriate for the hundreds-to-thousands of memories an agent
-//! accumulates within an instance/session.
-//!
-//! Scope: memories are instance-scoped (an agent's working memory across its
-//! own steps). Tenant-scoped long-term recall across instances is a
-//! storage-backed follow-on.
+//! accumulates within an instance/session or bounded shared namespace.
 //!
 //! ## Handlers
 //!
@@ -46,6 +43,9 @@ const DEFAULT_EMBED_MODEL: &str = "text-embedding-3-small";
 const DEFAULT_EMBED_BASE: &str = "https://api.openai.com/v1";
 /// Default number of results returned by `memory_search`.
 const DEFAULT_TOP_K: u64 = 5;
+const DEFAULT_NAMESPACE: &str = "default";
+const MAX_SHARED_RECORDS: u32 = 10_000;
+const MAX_TOP_K: u64 = 100;
 
 // ===========================================================================
 // embed
@@ -94,6 +94,8 @@ pub async fn handle_embed(ctx: StepContext) -> Result<Value, StepError> {
 // ===========================================================================
 
 pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
+    let scope = memory_scope(&ctx.params)?;
+    let namespace = memory_namespace(&ctx.params)?;
     let text = ctx
         .params
         .get("text")
@@ -106,10 +108,11 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
             || content_key(text.as_deref().unwrap_or("")),
             str::to_string,
         );
+        validate_memory_key(&key)?;
         return Ok(super::util::dry_run_stub(
             "memory_store",
             Value::Null,
-            json!({ "key": key, "stored": false, "dimensions": 0 }),
+            json!({ "key": key, "stored": false, "dimensions": 0, "scope": scope, "namespace": namespace }),
         ));
     }
 
@@ -133,17 +136,28 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
         || content_key(text.as_deref().unwrap_or("")),
         str::to_string,
     );
+    validate_memory_key(&key)?;
 
     let record = memory_record(text.as_deref(), &embedding, &metadata);
-    let storage_key = format!("{MEMORY_KEY_PREFIX}{key}");
-
-    ctx.storage
-        .set_instance_kv(ctx.instance_id, &storage_key, &record)
-        .await
-        .map_err(|e| retryable(format!("memory_store storage error: {e}")))?;
+    match scope {
+        MemoryScope::Instance => {
+            let storage_key = format!("{MEMORY_KEY_PREFIX}{key}");
+            ctx.storage
+                .set_instance_kv(ctx.instance_id, &storage_key, &record)
+                .await
+        }
+        MemoryScope::Tenant => {
+            ctx.storage
+                .set_shared_knowledge(ctx.tenant_id.as_str(), &namespace, &key, &record)
+                .await
+        }
+    }
+    .map_err(|e| retryable(format!("memory_store storage error: {e}")))?;
 
     debug!(key = %key, dimensions = embedding.len(), "memory_store: persisted");
-    Ok(json!({ "key": key, "stored": true, "dimensions": embedding.len() }))
+    Ok(
+        json!({ "key": key, "stored": true, "dimensions": embedding.len(), "scope": scope, "namespace": namespace }),
+    )
 }
 
 // ===========================================================================
@@ -151,13 +165,15 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
 // ===========================================================================
 
 pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> {
+    let scope = memory_scope(&ctx.params)?;
+    let namespace = memory_namespace(&ctx.params)?;
     // Dry-run: skip the embedding-provider call (the query vector would
     // otherwise be embedded via an external API). Return an empty result set.
     if ctx.is_dry_run() {
         return Ok(super::util::dry_run_stub(
             "memory_search",
             Value::Null,
-            json!({ "results": [], "count": 0 }),
+            json!({ "results": [], "count": 0, "scope": scope, "namespace": namespace }),
         ));
     }
 
@@ -166,7 +182,7 @@ pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> 
         .get("top_k")
         .and_then(Value::as_u64)
         .unwrap_or(DEFAULT_TOP_K)
-        .max(1);
+        .clamp(1, MAX_TOP_K);
     let top_k = usize::try_from(top_k_u64).unwrap_or(usize::MAX);
 
     // The query vector: precomputed `query_embedding`, or embed `query`.
@@ -187,16 +203,28 @@ pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> 
             .ok_or_else(|| retryable("memory_search: embedding provider returned no vector"))?
     };
 
-    let kv = ctx
-        .storage
-        .get_all_instance_kv(ctx.instance_id)
-        .await
-        .map_err(|e| retryable(format!("memory_search storage error: {e}")))?;
-
-    let records = extract_memory_records(&kv);
+    let records = match scope {
+        MemoryScope::Instance => {
+            let kv = ctx
+                .storage
+                .get_all_instance_kv(ctx.instance_id)
+                .await
+                .map_err(|e| retryable(format!("memory_search storage error: {e}")))?;
+            extract_memory_records(&kv)
+        }
+        MemoryScope::Tenant => ctx
+            .storage
+            .list_shared_knowledge(ctx.tenant_id.as_str(), &namespace, MAX_SHARED_RECORDS)
+            .await
+            .map_err(|e| retryable(format!("memory_search storage error: {e}")))?
+            .into_iter()
+            .collect(),
+    };
     let results = rank_memories(&query_embedding, records, top_k);
 
-    Ok(json!({ "results": results, "count": results_len(&results) }))
+    Ok(
+        json!({ "results": results, "count": results_len(&results), "scope": scope, "namespace": namespace }),
+    )
 }
 
 // ===========================================================================
@@ -285,6 +313,54 @@ fn resolve_api_key(params: &Value) -> Result<String, StepError> {
 // ===========================================================================
 // Pure helpers (unit-tested without network or storage)
 // ===========================================================================
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MemoryScope {
+    Instance,
+    Tenant,
+}
+
+fn memory_scope(params: &Value) -> Result<MemoryScope, StepError> {
+    match params
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("instance")
+    {
+        "instance" => Ok(MemoryScope::Instance),
+        "tenant" => Ok(MemoryScope::Tenant),
+        other => Err(permanent(format!(
+            "memory: unsupported scope `{other}`; expected `instance` or `tenant`"
+        ))),
+    }
+}
+
+fn memory_namespace(params: &Value) -> Result<String, StepError> {
+    let namespace = params
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_NAMESPACE);
+    if namespace.is_empty()
+        || namespace.len() > 128
+        || !namespace
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
+    {
+        return Err(permanent(
+            "memory: namespace must be 1-128 characters using letters, digits, '-', '_', '.', or '/'",
+        ));
+    }
+    Ok(namespace.to_string())
+}
+
+fn validate_memory_key(key: &str) -> Result<(), StepError> {
+    if key.is_empty() || key.len() > 256 || key.chars().any(char::is_control) {
+        return Err(permanent(
+            "memory: key must be 1-256 characters and contain no control characters",
+        ));
+    }
+    Ok(())
+}
 
 /// Normalize `input` (a string or array of strings) into a list of strings.
 fn to_input_list(input: &Value) -> Result<Vec<String>, StepError> {
@@ -615,6 +691,20 @@ mod tests {
             vec![1.5, 0.0, 2.0]
         );
     }
+
+    #[test]
+    fn memory_scope_and_namespace_are_bounded() {
+        assert!(matches!(
+            memory_scope(&json!({"scope": "tenant"})),
+            Ok(MemoryScope::Tenant)
+        ));
+        assert!(memory_scope(&json!({"scope": "global"})).is_err());
+        assert_eq!(
+            memory_namespace(&json!({"namespace": "support/product-a"})).unwrap(),
+            "support/product-a"
+        );
+        assert!(memory_namespace(&json!({"namespace": "bad namespace"})).is_err());
+    }
 }
 
 /// Tests that drive the async network (`embed`) and storage-backed
@@ -815,6 +905,63 @@ mod net_tests {
         assert_eq!(found["count"], 1);
         assert_eq!(found["results"][0]["key"], "sky");
         assert!(found["results"][0]["score"].as_f64().unwrap() > 0.99);
+    }
+
+    #[tokio::test]
+    async fn tenant_memory_is_shared_across_instances_but_not_tenants() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let context = Arc::new(ExecutionContext::default());
+        let base = |tenant: &str, instance_id: InstanceId, params: Value| StepContext {
+            instance_id,
+            tenant_id: TenantId::unchecked(tenant),
+            block_id: BlockId::new("memory"),
+            params,
+            context: Arc::clone(&context),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+
+        handle_memory_store(base(
+            "tenant-a",
+            InstanceId::new(),
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "key": "shared-fact",
+                "text": "shared across agents",
+                "embedding": [1.0, 0.0]
+            }),
+        ))
+        .await
+        .unwrap();
+
+        let found = handle_memory_search(base(
+            "tenant-a",
+            InstanceId::new(),
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "query_embedding": [1.0, 0.0]
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(found["count"], 1);
+        assert_eq!(found["results"][0]["key"], "shared-fact");
+
+        let isolated = handle_memory_search(base(
+            "tenant-b",
+            InstanceId::new(),
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "query_embedding": [1.0, 0.0]
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(isolated["count"], 0);
     }
 
     #[tokio::test]

@@ -569,6 +569,97 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
     });
 }
 
+/// Regression benchmark for in-process `Parallel` latency.
+///
+/// Each branch performs 25 ms of asynchronous work. A serial evaluator takes
+/// roughly 50 ms; a dispatcher that runs both independent leaves together
+/// should complete in roughly 25 ms. The storage/setup work is outside the
+/// timed section so the result isolates evaluator dispatch latency.
+fn bench_parallel_in_process_latency(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    c.bench_function("parallel_in_process_two_25ms_branches", |b| {
+        b.to_async(&rt).iter_batched(
+            || {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let storage = SqliteStorage::in_memory().await.unwrap();
+                        let sequence = SequenceDefinition {
+                            id: SequenceId::new(),
+                            tenant_id: TenantId::unchecked("bench"),
+                            namespace: Namespace::new("default"),
+                            name: "parallel_latency".into(),
+                            version: 1,
+                            deprecated: false,
+                            status: SequenceStatus::default(),
+                            blocks: vec![BlockDefinition::Parallel(Box::new(
+                                orch8_types::sequence::ParallelDef {
+                                    id: BlockId::new("parallel"),
+                                    branches: ["left", "right"]
+                                        .into_iter()
+                                        .map(|id| {
+                                            vec![BlockDefinition::Step(Box::new(StepDef {
+                                                id: BlockId::new(id),
+                                                handler: "bench_sleep".into(),
+                                                params: json!({}),
+                                                delay: None,
+                                                retry: None,
+                                                timeout: None,
+                                                rate_limit_key: None,
+                                                send_window: None,
+                                                context_access: None,
+                                                cancellable: true,
+                                                wait_for_input: None,
+                                                queue_name: None,
+                                                deadline: None,
+                                                on_deadline_breach: None,
+                                                fallback_handler: None,
+                                                cache_key: None,
+                                                output_schema: None,
+                                                when: None,
+                                                compensation: None,
+                                            }))]
+                                        })
+                                        .collect(),
+                                },
+                            ))],
+                            interceptors: None,
+                            input_schema: None,
+                            sla: None,
+                            on_failure: None,
+                            on_cancel: None,
+                            created_at: Utc::now(),
+                        };
+                        storage.create_sequence(&sequence).await.unwrap();
+                        let mut instance = make_instance(sequence.id);
+                        instance.state = InstanceState::Running;
+                        storage.create_instance(&instance).await.unwrap();
+
+                        let mut handlers = orch8_engine::handlers::HandlerRegistry::new();
+                        handlers.register("bench_sleep", |_ctx| async {
+                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                            Ok(json!({"slept": true}))
+                        });
+                        (storage, instance, sequence, handlers)
+                    })
+                })
+            },
+            |(storage, instance, sequence, handlers)| async move {
+                let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+                orch8_engine::evaluator::evaluate(
+                    black_box(&storage),
+                    black_box(&handlers),
+                    black_box(&instance),
+                    black_box(&sequence),
+                )
+                .await
+                .unwrap()
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 // ---- Scheduler tick throughput benchmark -----------------------------------
 
 fn bench_scheduler_tick(c: &mut Criterion) {
@@ -774,6 +865,7 @@ criterion_group!(
     bench_preload,
     bench_flatten_blocks,
     bench_evaluate_deep_tree,
+    bench_parallel_in_process_latency,
     bench_scheduler_tick,
     bench_tick_once,
     bench_step_context_clone,

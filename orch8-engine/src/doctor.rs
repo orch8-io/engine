@@ -887,6 +887,8 @@ mod tests {
             worker_id: Some("w-1".into()),
             claimed_at: Some(t0() - Duration::seconds(age_secs)),
             heartbeat_at: Some(t0() - Duration::seconds(age_secs)),
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
             completed_at: None,
             output: None,
             error_message: None,

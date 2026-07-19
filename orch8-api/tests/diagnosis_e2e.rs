@@ -187,6 +187,8 @@ fn mk_task(instance_id: &str, block: &str, handler: &str, state: WorkerTaskState
         worker_id: Some("w-1".into()),
         claimed_at: Some(Utc::now() - Duration::seconds(5)),
         heartbeat_at: Some(Utc::now() - Duration::seconds(5)),
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

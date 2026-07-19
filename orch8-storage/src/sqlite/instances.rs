@@ -11,6 +11,26 @@ use orch8_types::ids::*;
 use orch8_types::instance::{InstanceState, TaskInstance};
 
 use super::SqliteStorage;
+
+pub(super) async fn has_due_higher_priority(
+    store: &SqliteStorage,
+    now: DateTime<Utc>,
+    priority: orch8_types::instance::Priority,
+) -> Result<bool, StorageError> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM task_instances
+            WHERE state = 'scheduled'
+              AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+              AND priority > ?2
+        )",
+    )
+    .bind(now.to_rfc3339())
+    .bind(priority as i16)
+    .fetch_one(&store.pool)
+    .await?;
+    Ok(exists != 0)
+}
 use super::helpers::{apply_filter_sql, row_to_instance, ts};
 
 /// SQL for a full `task_instances` insert. Kept as a single canonical string so

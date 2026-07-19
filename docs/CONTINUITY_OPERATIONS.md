@@ -84,6 +84,15 @@ export ORCH8_FEDERATION_PEERS='[{"id":"...","name":"partner-a","trust_root_sha25
 
 The list is bounded to 128 unique peers; each peer requires a bounded HTTPS endpoint, a non-empty tenant allowlist, and a SHA-256 trust-root digest. Any invalid entry disables federation rather than retaining a partially trusted configuration.
 
+Create an outbound payload-bound envelope with
+`POST /continuity/federation/sign`. The request supplies the local peer ID
+known by the receiver, live continuity ID, destination runtime, base64 payload,
+and a TTL of at most 300 seconds. The engine checks the tenant, current epoch,
+and destination liveness, signs with the continuity Ed25519 key, and records a
+provenance boundary. Deliver the returned envelope and unchanged payload to the
+remote peer's `POST /continuity/federation/verify` endpoint. Transport is
+explicit: signing does not silently perform an outbound network request.
+
 Verification uses that configured key—not a request-supplied key—and binds peer, tenant, continuity ID, epoch, destination, payload digest, issue time, and expiry. Envelopes have a maximum five-minute lifetime. A durable database receipt admits exactly one concurrent delivery for each tenant/peer/message tuple; expired receipts are pruned at ingestion because their envelopes can no longer verify. Accepted envelope digests enter provenance while contents remain encrypted or referenced.
 
 ## Verify execution provenance
@@ -345,6 +354,13 @@ endpoints. A different capsule or instance cannot reuse that idempotency slot.
 
 ## Unknown external effects
 
+Effect receipts are universal for side-effecting steps. An ordinary local
+instance is assigned a deterministic durable ledger scope on its first effect;
+explicit continuity enrollment is not required. Pure built-ins do not create
+an empty scope. Inspect a runtime-local instance directly with
+`GET /instances/{instance_id}/effects?tenant_id={tenant_id}`. Portable
+continuity tooling may continue to use the continuity-scoped endpoint below.
+
 An effect receipt enters `unknown` when dispatch was durable but the engine did
 not receive conclusive success or failure evidence. This can happen after a
 timeout, worker failure callback, process crash, or lost provider response.
@@ -364,6 +380,28 @@ until an operator resolves the uncertainty.
 Never blindly retry an `unknown` effect. Orch8 provides at-most-once dispatch
 protection, not a universal exactly-once guarantee; a provider-side idempotency
 key is still the strongest protection against duplicated external effects.
+
+## Durable stream windows
+
+Continuity stream frames can be evaluated as event-time windows without
+copying them into a separate stream processor:
+
+```text
+GET /continuity/streams/{stream_id}/windows?tenant_id={tenant_id}&kind=tumbling&width_ms=60000
+GET /continuity/streams/{stream_id}/windows?tenant_id={tenant_id}&kind=sliding&width_ms=300000&slide_ms=60000
+GET /continuity/streams/{stream_id}/windows?tenant_id={tenant_id}&kind=session&gap_ms=30000
+```
+
+Tumbling windows accept an optional signed `offset_ms`. All variants accept an
+`after_sequence` reconnect cursor and a bounded `frame_limit` (default 1,000;
+maximum 10,000). Window membership uses the durable server-assigned frame
+timestamp. Retracted frames are excluded. Sliding fan-out is limited to 100
+windows per frame and total output to 10,000 windows, so an invalid width/slide
+combination fails instead of causing unbounded memory growth.
+
+The response carries each window's start/end, first/last sequence, and source
+frames. Re-running the same query over unchanged frames is deterministic; use
+frame retraction plus the same cursor to recompute corrected windows.
 
 ## External workers
 

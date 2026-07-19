@@ -563,6 +563,25 @@ pub struct StreamCursor {
     pub last_committed_sequence: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamWindowKind {
+    Tumbling,
+    Sliding,
+    Session,
+}
+
+/// A deterministic event-time window over committed durable stream frames.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct StreamWindow {
+    pub kind: StreamWindowKind,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub frames: Vec<StreamFrame>,
+}
+
 impl CapsuleManifest {
     pub fn validate_for_import(
         &self,

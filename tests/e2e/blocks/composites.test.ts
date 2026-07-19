@@ -94,6 +94,48 @@ describe("Composite Blocks", () => {
     assert.equal(completed.state, "completed");
   });
 
+  it("parallel: in-process handlers execute concurrently", async () => {
+    const tenantId = `par-concurrent-${uuid().slice(0, 8)}`;
+    const durationMs = 1000;
+    const seq = testSequence(
+      "par-concurrent",
+      [
+        parallel("p1", [
+          [step("left", "sleep", { duration_ms: durationMs })],
+          [step("right", "sleep", { duration_ms: durationMs })],
+        ]) as Block,
+      ],
+      { tenantId, namespace: "default" },
+    );
+    await client.createSequence(seq);
+
+    const started = Date.now();
+    const { id } = await client.createInstance({
+      sequence_id: seq.id,
+      tenant_id: tenantId,
+      namespace: "default",
+    });
+    const completed = await client.waitForState(id, "completed", {
+      timeoutMs: 10_000,
+      intervalMs: 25,
+    });
+    const elapsed = Date.now() - started;
+
+    assert.equal(completed.state, "completed");
+    assert.ok(
+      elapsed < 1750,
+      `two 1000ms in-process branches should overlap; completed in ${elapsed}ms`,
+    );
+    const outputs = await client.getOutputs(id);
+    assert.deepEqual(
+      outputs
+        .filter((output) => output.block_id === "left" || output.block_id === "right")
+        .map((output) => (output.output as { slept_ms?: unknown }).slept_ms)
+        .sort(),
+      [durationMs, durationMs],
+    );
+  });
+
   it("parallel: multi-step branches", async () => {
     const seq = testSequence("par-multi", [
       parallel("p1", [

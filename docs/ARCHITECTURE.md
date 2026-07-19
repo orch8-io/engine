@@ -144,8 +144,8 @@ Blocks are recursive — a Parallel can contain TryCatch, which can contain Step
 | `mcp_call` | Invoke an MCP server tool (JSON-RPC over stdio/HTTP) |
 | `agent` | Autonomous agent loop — LLM + tool dispatch with durable checkpointing |
 | `embed` | Generate vector embeddings for text via configured provider |
-| `memory_store` | Store a vector embedding + payload into semantic memory |
-| `memory_search` | Search semantic memory by similarity |
+| `memory_store` | Store a vector embedding + payload in instance memory or a durable tenant/namespace knowledge store |
+| `memory_search` | Search instance memory or tenant-shared knowledge by similarity |
 | `blob_put` | Store a binary artifact in the configured artifact backend |
 | `blob_get` | Retrieve a binary artifact by key |
 

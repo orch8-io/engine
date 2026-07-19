@@ -1115,6 +1115,8 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -1143,6 +1145,36 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
+
+    storage
+        .checkpoint_worker_task(
+            task_id,
+            "worker-1",
+            0,
+            &json!({"cursor": "secret-progress"}),
+        )
+        .await
+        .unwrap();
+    let raw_checkpoint = inner
+        .get_worker_task(task_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .resume_checkpoint
+        .expect("checkpoint must be stored");
+    assert!(
+        FieldEncryptor::is_encrypted(&raw_checkpoint),
+        "activity checkpoint must be encrypted at rest"
+    );
+    assert_eq!(
+        storage
+            .get_worker_task(task_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .resume_checkpoint,
+        Some(json!({"cursor": "secret-progress"}))
+    );
 
     // complete_worker_task's bare `output` argument must be encrypted too.
     storage
@@ -1268,6 +1300,40 @@ async fn instance_kv_encrypted_at_rest_and_decrypted_on_read() {
         .unwrap()
         .unwrap();
     assert_eq!(got, value);
+}
+
+#[tokio::test]
+async fn shared_agent_knowledge_is_encrypted_and_tenant_scoped() {
+    let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let value = json!({"text": "private fact", "embedding": [1.0, 0.0]});
+
+    storage
+        .set_shared_knowledge("tenant-a", "research", "fact-1", &value)
+        .await
+        .unwrap();
+
+    let raw = inner
+        .list_shared_knowledge("tenant-a", "research", 10)
+        .await
+        .unwrap();
+    assert!(FieldEncryptor::is_encrypted(&raw["fact-1"]));
+
+    let clear = storage
+        .list_shared_knowledge("tenant-a", "research", 10)
+        .await
+        .unwrap();
+    assert_eq!(clear["fact-1"], value);
+    assert!(
+        storage
+            .list_shared_knowledge("tenant-b", "research", 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// #10: under concurrent writers to the same instance, `merge_context_data`

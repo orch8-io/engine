@@ -377,6 +377,8 @@ async fn worker_task_full_lifecycle() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -422,6 +424,77 @@ async fn worker_task_full_lifecycle() {
 }
 
 #[tokio::test]
+async fn worker_activity_checkpoint_survives_lease_recovery() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+    let task = WorkerTask {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId::new("resumable"),
+        handler_name: "long_activity".into(),
+        queue_name: None,
+        params: json!({}),
+        context: json!({}),
+        attempt: 0,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task).await.unwrap();
+    s.claim_worker_tasks("long_activity", "worker-1", 1)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        s.checkpoint_worker_task(task.id, "worker-1", 0, &json!({"offset": 42}))
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        s.checkpoint_worker_task(task.id, "worker-1", 0, &json!({"offset": 99}))
+            .await
+            .unwrap(),
+        None,
+        "stale checkpoint sequence must not overwrite newer progress"
+    );
+
+    s.reap_stale_worker_tasks(std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let resumed = s
+        .claim_worker_tasks("long_activity", "worker-2", 1)
+        .await
+        .unwrap();
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].resume_checkpoint, Some(json!({"offset": 42})));
+    assert_eq!(resumed[0].checkpoint_seq, 1);
+    assert_eq!(
+        s.checkpoint_worker_task(task.id, "worker-1", 1, &json!({"offset": 50}))
+            .await
+            .unwrap(),
+        None,
+        "previous lease owner must not advance progress"
+    );
+    assert_eq!(
+        s.checkpoint_worker_task(task.id, "worker-2", 1, &json!({"offset": 50}))
+            .await
+            .unwrap(),
+        Some(2)
+    );
+}
+
+#[tokio::test]
 async fn worker_task_fail_and_cancel() {
     let s = store().await;
     let inst_id = InstanceId::new();
@@ -441,6 +514,8 @@ async fn worker_task_fail_and_cancel() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -478,6 +553,8 @@ async fn worker_task_fail_and_cancel() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -522,6 +599,8 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -563,6 +642,8 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -603,6 +684,8 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -643,6 +726,8 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -693,6 +778,8 @@ async fn worker_task_queue_routing() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,
@@ -2274,6 +2361,8 @@ async fn worker_task_list_and_stats() {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
             completed_at: None,
             output: None,
             error_message: None,
@@ -2464,6 +2553,8 @@ async fn perf_concurrent_worker_claims() {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            resume_checkpoint: None,
+            checkpoint_seq: 0,
             completed_at: None,
             output: None,
             error_message: None,
@@ -3618,6 +3709,8 @@ async fn retry_worker_task_atomically_replaces_task() {
         worker_id: Some("w1".into()),
         claimed_at: Some(Utc::now()),
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: Some(Utc::now()),
         output: None,
         error_message: Some("boom".into()),
@@ -3640,6 +3733,8 @@ async fn retry_worker_task_atomically_replaces_task() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

@@ -391,6 +391,14 @@ impl crate::InstanceStore for PostgresStorage {
         instances::claim_due(self, now, limit, max_per_tenant).await
     }
 
+    async fn has_due_higher_priority(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        priority: orch8_types::instance::Priority,
+    ) -> Result<bool, StorageError> {
+        instances::has_due_higher_priority(self, now, priority).await
+    }
+
     async fn update_instance_state(
         &self,
         id: InstanceId,
@@ -1067,6 +1075,16 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
     ) -> Result<bool, StorageError> {
         workers::heartbeat(self, task_id, worker_id).await
+    }
+
+    async fn checkpoint_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        expected_seq: u64,
+        checkpoint: &serde_json::Value,
+    ) -> Result<Option<u64>, StorageError> {
+        workers::checkpoint(self, task_id, worker_id, expected_seq, checkpoint).await
     }
 
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
@@ -1932,6 +1950,37 @@ impl crate::ResourceStore for PostgresStorage {
         key: &str,
     ) -> Result<(), StorageError> {
         self.delete_instance_kv_impl(instance_id, key).await
+    }
+
+    async fn set_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.set_shared_knowledge_impl(tenant_id, namespace, key, value)
+            .await
+    }
+
+    async fn list_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        limit: u32,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        self.list_shared_knowledge_impl(tenant_id, namespace, limit)
+            .await
+    }
+
+    async fn delete_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        self.delete_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
     }
 
     async fn save_externalized_state(

@@ -1018,6 +1018,8 @@ pub(crate) async fn fail_task(
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                resume_checkpoint: task.resume_checkpoint.clone(),
+                checkpoint_seq: task.checkpoint_seq,
                 completed_at: None,
                 output: None,
                 error_message: None,
@@ -1103,6 +1105,8 @@ pub(crate) async fn fail_task(
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                resume_checkpoint: task.resume_checkpoint.clone(),
+                checkpoint_seq: task.checkpoint_seq,
                 completed_at: None,
                 output: None,
                 error_message: None,
@@ -1185,14 +1189,19 @@ pub(crate) async fn fail_task(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct HeartbeatRequest {
     worker_id: String,
+    #[serde(default)]
+    checkpoint: Option<serde_json::Value>,
+    #[serde(default)]
+    checkpoint_seq: Option<u64>,
 }
 
 #[utoipa::path(post, path = "/workers/tasks/{id}/heartbeat", tag = "workers",
     params(("id" = Uuid, Path, description = "Worker task ID")),
     request_body = HeartbeatRequest,
     responses(
-        (status = 200, description = "Heartbeat updated"),
-        (status = 404, description = "Worker task not found"),
+        (status = 200, description = "Heartbeat/checkpoint updated; response contains checkpoint_seq"),
+        (status = 404, description = "Worker task is not currently owned by this worker"),
+        (status = 409, description = "Worker lost ownership or checkpoint sequence is stale"),
     )
 )]
 pub(crate) async fn heartbeat_task(
@@ -1220,17 +1229,47 @@ pub(crate) async fn heartbeat_task(
         &format!("worker_task {task_id}"),
     )?;
 
-    let updated = state
-        .storage
-        .heartbeat_worker_task(task_id, &req.worker_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    let checkpoint_requested = req.checkpoint.is_some();
+    let next_checkpoint_seq = if let Some(checkpoint) = req.checkpoint {
+        const MAX_ACTIVITY_CHECKPOINT_BYTES: usize = 256 * 1024;
+        let checkpoint_bytes = serde_json::to_vec(&checkpoint)
+            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?
+            .len();
+        if checkpoint_bytes > MAX_ACTIVITY_CHECKPOINT_BYTES {
+            return Err(ApiError::PayloadTooLarge(format!(
+                "activity checkpoint is {checkpoint_bytes} bytes; maximum is {MAX_ACTIVITY_CHECKPOINT_BYTES}"
+            )));
+        }
+        let expected_seq = req.checkpoint_seq.ok_or_else(|| {
+            ApiError::InvalidArgument("checkpoint_seq is required with checkpoint".into())
+        })?;
+        state
+            .storage
+            .checkpoint_worker_task(task_id, &req.worker_id, expected_seq, &checkpoint)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+    } else {
+        let updated = state
+            .storage
+            .heartbeat_worker_task(task_id, &req.worker_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        updated.then_some(task.checkpoint_seq)
+    };
 
-    if !updated {
-        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
-    }
+    let Some(checkpoint_seq) = next_checkpoint_seq else {
+        return if checkpoint_requested {
+            Err(ApiError::Conflict(
+                "worker task ownership or checkpoint sequence changed".into(),
+            ))
+        } else {
+            Err(ApiError::NotFound(format!("worker_task {task_id}")))
+        };
+    };
 
-    Ok(StatusCode::OK)
+    Ok(Json(
+        serde_json::json!({ "checkpoint_seq": checkpoint_seq }),
+    ))
 }
 
 #[derive(Deserialize)]

@@ -393,6 +393,10 @@ impl EncryptingStorage {
                 .output
                 .as_ref()
                 .is_none_or(FieldEncryptor::is_encrypted)
+            && task
+                .resume_checkpoint
+                .as_ref()
+                .is_none_or(FieldEncryptor::is_encrypted)
         {
             return Ok(Cow::Borrowed(task));
         }
@@ -401,6 +405,9 @@ impl EncryptingStorage {
         t.context = self.encrypt_json_value(&t.context)?;
         if let Some(ref output) = t.output {
             t.output = Some(self.encrypt_json_value(output)?);
+        }
+        if let Some(ref checkpoint) = t.resume_checkpoint {
+            t.resume_checkpoint = Some(self.encrypt_json_value(checkpoint)?);
         }
         Ok(Cow::Owned(t))
     }
@@ -414,6 +421,9 @@ impl EncryptingStorage {
         task.context = self.decrypt_json_value(&task.context)?;
         if let Some(ref output) = task.output {
             task.output = Some(self.decrypt_json_value(output)?);
+        }
+        if let Some(ref checkpoint) = task.resume_checkpoint {
+            task.resume_checkpoint = Some(self.decrypt_json_value(checkpoint)?);
         }
         Ok(())
     }
@@ -847,6 +857,14 @@ passthrough_impl! {
             .await?;
         self.decrypt_instances(&mut instances)?;
         Ok(instances)
+    }
+
+    async fn has_due_higher_priority(
+        &self,
+        now: DateTime<Utc>,
+        priority: orch8_types::instance::Priority,
+    ) -> Result<bool, StorageError> {
+        self.inner.has_due_higher_priority(now, priority).await
     }
 
     async fn update_instance_context(
@@ -1475,6 +1493,18 @@ passthrough_impl! {
     }
     async fn fail_worker_task(&self, task_id: Uuid, worker_id: &str, message: &str, retryable: bool) -> Result<bool, StorageError>;
     async fn heartbeat_worker_task(&self, task_id: Uuid, worker_id: &str) -> Result<bool, StorageError>;
+    async fn checkpoint_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        expected_seq: u64,
+        checkpoint: &serde_json::Value,
+    ) -> Result<Option<u64>, StorageError> {
+        let encrypted = self.encrypt_json_value(checkpoint)?;
+        self.inner
+            .checkpoint_worker_task(task_id, worker_id, expected_seq, &encrypted)
+            .await
+    }
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
 
     async fn retry_worker_task(
@@ -1946,6 +1976,39 @@ passthrough_impl! {
             .collect()
     }
     async fn delete_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<(), StorageError>;
+
+    async fn set_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let encrypted = self.encrypt_json_value(value)?;
+        self.inner
+            .set_shared_knowledge(tenant_id, namespace, key, &encrypted)
+            .await
+    }
+    async fn list_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        limit: u32,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        let raw = self
+            .inner
+            .list_shared_knowledge(tenant_id, namespace, limit)
+            .await?;
+        raw.into_iter()
+            .map(|(key, value)| self.decrypt_json_value(&value).map(|value| (key, value)))
+            .collect()
+    }
+    async fn delete_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<(), StorageError>;
 
     // --- Externalized State ---
     // Payloads pulled out of `context.data` by the externalization path carry

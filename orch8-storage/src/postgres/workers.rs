@@ -11,8 +11,8 @@ pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result
     sqlx::query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, params, context,
-             attempt, timeout_ms, state, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(task.id)
@@ -25,6 +25,8 @@ pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result
     .bind(task.attempt as i16)
     .bind(task.timeout_ms)
     .bind(task.state.to_string())
+    .bind(&task.resume_checkpoint)
+    .bind(i64::try_from(task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(task.created_at)
     .execute(&store.pool)
     .await?;
@@ -38,6 +40,7 @@ pub(super) async fn get(
     let row = sqlx::query_as::<_, WorkerTaskRow>(
         r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                 resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at
           FROM worker_tasks WHERE id = $1",
     )
@@ -65,6 +68,7 @@ pub(super) async fn claim(
           )
           RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                    resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
     )
     .bind(handler_name)
@@ -103,6 +107,7 @@ pub(super) async fn claim_for_tenant(
           )
           RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                    resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
     )
     .bind(handler_name)
@@ -169,6 +174,33 @@ pub(super) async fn heartbeat(
     Ok(result.rows_affected() > 0)
 }
 
+pub(super) async fn checkpoint(
+    store: &PostgresStorage,
+    task_id: Uuid,
+    worker_id: &str,
+    expected_seq: u64,
+    checkpoint: &serde_json::Value,
+) -> Result<Option<u64>, StorageError> {
+    let expected = i64::try_from(expected_seq)
+        .map_err(|_| StorageError::Query("checkpoint sequence exceeds BIGINT".into()))?;
+    let next = expected
+        .checked_add(1)
+        .ok_or_else(|| StorageError::Query("checkpoint sequence overflow".into()))?;
+    let result = sqlx::query(
+        "UPDATE worker_tasks
+         SET heartbeat_at = NOW(), resume_checkpoint = $4, checkpoint_seq = $5
+         WHERE id = $1 AND worker_id = $2 AND state = 'claimed' AND checkpoint_seq = $3",
+    )
+    .bind(task_id)
+    .bind(worker_id)
+    .bind(expected)
+    .bind(checkpoint)
+    .bind(next)
+    .execute(&store.pool)
+    .await?;
+    Ok((result.rows_affected() == 1).then_some(next as u64))
+}
+
 pub(super) async fn delete(store: &PostgresStorage, task_id: Uuid) -> Result<(), StorageError> {
     sqlx::query("DELETE FROM worker_tasks WHERE id = $1")
         .bind(task_id)
@@ -231,8 +263,8 @@ pub(super) async fn retry(
     sqlx::query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, params, context,
-             attempt, timeout_ms, state, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(new_task.id)
@@ -245,6 +277,8 @@ pub(super) async fn retry(
     .bind(new_task.attempt as i16)
     .bind(new_task.timeout_ms)
     .bind(new_task.state.to_string())
+    .bind(&new_task.resume_checkpoint)
+    .bind(i64::try_from(new_task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(new_task.created_at)
     .execute(&mut *tx)
     .await?;
@@ -312,6 +346,7 @@ pub(super) async fn list(
     let mut qb = sqlx::QueryBuilder::new(
         r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
+                 resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at
            FROM worker_tasks WHERE 1=1",
     );

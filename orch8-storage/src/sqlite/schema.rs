@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     timeout_ms INTEGER,
     claimed_at TEXT,
     heartbeat_at TEXT,
+    resume_checkpoint TEXT,
+    checkpoint_seq INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_seq >= 0),
     completed_at TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(instance_id, block_id),
@@ -359,6 +361,17 @@ CREATE TABLE IF NOT EXISTS instance_kv_state (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (instance_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS shared_agent_knowledge (
+    tenant_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tenant_id, namespace, key)
+);
+CREATE INDEX IF NOT EXISTS idx_shared_agent_knowledge_updated
+    ON shared_agent_knowledge(tenant_id, namespace, updated_at DESC);
 
 -- Mobile-specific tables (orch8-mobile) ──────────────────────────────────────
 
@@ -1033,4 +1046,4 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 35;
+pub(super) const SCHEMA_VERSION: i64 = 37;

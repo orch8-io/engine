@@ -103,6 +103,12 @@ export class Orch8Client {
     return this.#get<Instance>(`/instances/${id}`);
   }
 
+  async getInstanceEffects(id: string, tenantId: string): Promise<ApiResponse[]> {
+    return this.#get<ApiResponse[]>(
+      `/instances/${id}/effects${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
   async listInstances(query: ListInstancesQuery = {}): Promise<Instance[]> {
     const res = await this.#get<{ items: Instance[]; has_more: boolean }>(
       `/instances${toQuery(query)}`,
@@ -442,6 +448,21 @@ export class Orch8Client {
       `/continuity/streams/${streamId}/frames${toQuery({
         tenant_id: tenantId,
         after_sequence: afterSequence,
+      })}`,
+    );
+  }
+
+  async listContinuityWindows(
+    streamId: string,
+    tenantId: string,
+    kind: "tumbling" | "sliding" | "session",
+    options: Record<string, string | number | undefined>,
+  ): Promise<ApiResponse[]> {
+    return this.#get(
+      `/continuity/streams/${streamId}/windows${toQuery({
+        tenant_id: tenantId,
+        kind,
+        ...options,
       })}`,
     );
   }
@@ -800,9 +821,19 @@ export class Orch8Client {
     });
   }
 
-  async heartbeatWorkerTask(taskId: string, workerId: string): Promise<ApiResponse> {
+  async heartbeatWorkerTask(
+    taskId: string,
+    workerId: string,
+    progress?: { checkpoint: unknown; checkpointSeq: number },
+  ): Promise<ApiResponse> {
     return this.#post(`/workers/tasks/${taskId}/heartbeat`, {
       worker_id: workerId,
+      ...(progress == null
+        ? {}
+        : {
+            checkpoint: progress.checkpoint,
+            checkpoint_seq: progress.checkpointSeq,
+          }),
     });
   }
 

@@ -751,10 +751,57 @@ async fn phase_running_steps(
 ) -> Result<IterAction, EngineError> {
     let node_index = build_node_index(&ctx.tree);
 
-    // Find the running step; extract the index so we can drop the borrows
-    // into ctx.tree before dispatching.
-    let found_idx = find_running_step_index(&ctx.tree, block_map, handlers, &node_index);
-    let Some(idx) = found_idx else {
+    // A Parallel may expose several runnable leaves at once. Execute at most
+    // two in-process leaves from distinct branches in the same poll. Keeping
+    // the bound here prevents a wide fan-out from creating unbounded futures.
+    if let Some([left_idx, right_idx]) =
+        find_parallel_step_pair(&ctx.tree, block_map, handlers, &node_index)
+    {
+        let left_node = &ctx.tree[left_idx];
+        let right_node = &ctx.tree[right_idx];
+        let Some(left_block) = block_map.get(&left_node.block_id).copied() else {
+            return Ok(IterAction::FallThrough);
+        };
+        let Some(right_block) = block_map.get(&right_node.block_id).copied() else {
+            return Ok(IterAction::FallThrough);
+        };
+
+        // Wait for both futures even if one fails. Dropping the sibling on the
+        // first error could interrupt a handler after it has committed an
+        // external side effect but before its durable completion is recorded.
+        let (left_result, right_result) = Box::pin(async {
+            tokio::join!(
+                dispatch_block(
+                    storage,
+                    handlers,
+                    &ctx.instance,
+                    left_node,
+                    left_block,
+                    &ctx.tree,
+                    sequence.interceptors.as_ref(),
+                    outputs_snapshot,
+                ),
+                dispatch_block(
+                    storage,
+                    handlers,
+                    &ctx.instance,
+                    right_node,
+                    right_block,
+                    &ctx.tree,
+                    sequence.interceptors.as_ref(),
+                    outputs_snapshot,
+                ),
+            )
+        })
+        .await;
+        left_result?;
+        right_result?;
+        ctx.tree_stale = true;
+        ctx.instance_stale = true;
+        return Ok(IterAction::Continue);
+    }
+
+    let Some(idx) = find_running_step_index(&ctx.tree, block_map, handlers, &node_index) else {
         return Ok(IterAction::FallThrough);
     };
 
@@ -779,6 +826,69 @@ async fn phase_running_steps(
     ctx.tree_stale = true;
     ctx.instance_stale = true;
     Ok(IterAction::Continue)
+}
+
+/// Find two runnable, registered (in-process) steps that belong to distinct
+/// branches of the same nearest `Parallel` ancestor.
+///
+/// The nearest-ancestor rule also handles leaves nested below transparent
+/// composites while ensuring two sequential leaves in one branch are never
+/// dispatched together.
+fn find_parallel_step_pair(
+    tree: &[ExecutionNode],
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    handlers: &HandlerRegistry,
+    node_index: &NodeIndex<'_>,
+) -> Option<[usize; 2]> {
+    let mut first_by_parallel: HashMap<ExecutionNodeId, (usize, i16)> = HashMap::new();
+
+    for (idx, node) in tree.iter().enumerate() {
+        let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() else {
+            continue;
+        };
+        if node.state != NodeState::Running
+            || !handlers.contains(&step_def.handler)
+            || is_inside_decided_race(tree, block_map, node, node_index)
+            || has_racing_composite_sibling(tree, block_map, node, node_index)
+        {
+            continue;
+        }
+        let Some((parallel_id, branch_index)) =
+            nearest_parallel_branch(node, block_map, node_index)
+        else {
+            continue;
+        };
+
+        if let Some((first_idx, first_branch_index)) = first_by_parallel.get(&parallel_id) {
+            if branch_index != *first_branch_index {
+                return Some([*first_idx, idx]);
+            }
+        } else {
+            first_by_parallel.insert(parallel_id, (idx, branch_index));
+        }
+    }
+
+    None
+}
+
+fn nearest_parallel_branch(
+    node: &ExecutionNode,
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    node_index: &NodeIndex<'_>,
+) -> Option<(ExecutionNodeId, i16)> {
+    let mut child = node;
+    while let Some(parent_id) = child.parent_id {
+        let parent = get_node(node_index, parent_id)?;
+        if block_map
+            .get(&parent.block_id)
+            .copied()
+            .is_some_and(|block| matches!(block, BlockDefinition::Parallel(_)))
+        {
+            return child.branch_index.map(|branch| (parent_id, branch));
+        }
+        child = parent;
+    }
+    None
 }
 
 /// Phase 3: re-evaluate Running composite nodes (parents check child

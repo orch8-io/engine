@@ -227,7 +227,7 @@ Before opening traffic:
 - [ ] Replicas ≥ 2 behind a load balancer with health checks — unless you use NATS/file triggers (see the warning in [High availability](#high-availability)).
 - [ ] Retention is configured — set `instance_retention_secs` (e.g. 30–90 days) so terminal instances are swept; `0` (the default) keeps them forever. Trade-off: the sweep deletes queryable instance history (`orch8 instance get`, outputs, execution tree), so pick a window your debugging/audit needs can live with.
 - [ ] Table growth is monitored — track `pg_total_relation_size` on `task_instances`, `block_outputs`, `audit_log`, and `step_logs`; they grow with every execution and dominate storage.
-- [ ] Partitioning is planned for volume — once `block_outputs` or `audit_log` pass ~10M rows, partition by `created_at` (monthly) so retention drops and vacuum stay cheap.
+- [ ] PostgreSQL migration 074 has been applied — it proactively creates 16 fixed hash partitions for `block_outputs` (by instance) and `audit_log` (by tenant), avoiding a high-risk conversion after those tables reach millions of rows. Monitor partition skew; fixed hash partitions require no monthly maintenance.
 - [ ] Backlog/lag alerts — alert when `orch8_queue_depth` sits at the `batch_size` ceiling for several minutes (work is arriving faster than it is claimed) and on `orch8_recovery_stale_instances_total` increments (a node died holding work).
 - [ ] Graceful shutdown verified — send SIGTERM, in-flight steps complete, no orphaned tasks.
 

@@ -486,6 +486,7 @@ POST /instances/{id}/signals
 
 ```
 GET /instances/{id}/outputs
+GET /instances/{id}/effects?tenant_id={tenant_id}
 ```
 
 **Response:** `200 OK`
@@ -853,6 +854,11 @@ POST /workers/tasks/{task_id}/heartbeat
 
 Send heartbeats every 15-30 seconds for long-running tasks. Tasks without a heartbeat for 60 seconds are reclaimed by the reaper and returned to the queue.
 
+An activity may make the heartbeat durable and resumable by also sending
+`checkpoint_seq` plus a JSON `checkpoint` (maximum 256 KiB). The response
+returns the incremented sequence. A reclaimed worker receives the latest value
+as `resume_checkpoint` on the polled task; stale writers receive `409`.
+
 ---
 
 ## Metrics
@@ -946,8 +952,8 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `mcp_call` | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms` | _(MCP tool result, or tool list for `"list"`)_ |
 | `agent` | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }` |
 | `embed` | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`) | `{ "embedding"\|"embeddings", "model", "dimensions" }` |
-| `memory_store` | `text`, optional `embedding`, `key`, `metadata` | `{ "key": "...", "dimensions": N }` |
-| `memory_search` | `query` or `query_embedding`, optional `top_k` | `{ "results": [{ key, text, score, metadata }], "count": N }` |
+| `memory_store` | `text`, optional `embedding`, `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "..." }` |
+| `memory_search` | `query` or `query_embedding`, optional `top_k` (max 100), `scope`, `namespace` | `{ "results": [{ key, text, score, metadata }], "count": N, "scope": "...", "namespace": "..." }` |
 | `blob_put` | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB) | _(an `ArtifactRef` to pass between steps)_ |
 | `blob_get` | `ref` (ArtifactRef), `encoding` | _(the stored content)_ |
 | `human_review` | `prompt`, `timeout_ms`, `escalation_handler` | `{ "approved": bool, "reviewer": "...", "comments": "..." }` |
@@ -1310,6 +1316,14 @@ Mobile sync endpoints require `ORCH8_MOBILE_SYNC_ENABLED=true`. All endpoints ar
 
 **`POST /mobile/devices/register`** — Register a mobile device for push notifications.
 
+**`POST /mobile/devices/{device_id}/runtime`** — Advertise the registered
+device as a live `mobile` runtime in the capability-placement mesh. The body is
+`{ "capabilities": RuntimeCapabilities }`; normal five-minute liveness,
+trust, battery, signing-key, and bounded-fact validation applies. The server
+adds a non-secret `device:{device_id}` hardware fact and enforces device tenant
+ownership, allowing placement policy to target the exact device without
+sharing mutable workflow state.
+
 ### List Devices
 
 **`GET /mobile/devices`** — List registered mobile devices.
@@ -1404,6 +1418,15 @@ A rule body is `{ tenant_id, handler_name, queue_override, match_queue?, priorit
 ---
 
 ## Additional Endpoints
+
+### Durable continuity stream windows
+
+`GET /continuity/streams/{id}/windows` groups durable, committed stream frames
+into `tumbling`, `sliding`, or `session` event-time windows. Required query
+parameters are `tenant_id`, `kind`, and respectively `width_ms`,
+`width_ms` + `slide_ms`, or `gap_ms`. Optional `after_sequence`, `frame_limit`,
+and tumbling `offset_ms` support bounded replay and aligned windows. Retracted
+frames do not contribute.
 
 ### Safe workflow releases
 

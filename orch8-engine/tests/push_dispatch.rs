@@ -30,6 +30,8 @@ fn mk_task(queue: Option<&str>) -> WorkerTask {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

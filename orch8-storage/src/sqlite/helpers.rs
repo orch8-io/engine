@@ -236,6 +236,12 @@ pub(super) fn row_to_worker_task(
         worker_id: row.get::<Option<String>, _>("worker_id"),
         claimed_at: parse_ts_opt(row.get::<Option<String>, _>("claimed_at"))?,
         heartbeat_at: parse_ts_opt(row.get::<Option<String>, _>("heartbeat_at"))?,
+        resume_checkpoint: row
+            .get::<Option<String>, _>("resume_checkpoint")
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
+        checkpoint_seq: u64::try_from(row.get::<i64, _>("checkpoint_seq"))
+            .map_err(|_| StorageError::Query("negative worker checkpoint_seq".into()))?,
         completed_at: parse_ts_opt(row.get::<Option<String>, _>("completed_at"))?,
         output: row
             .get::<Option<String>, _>("output")

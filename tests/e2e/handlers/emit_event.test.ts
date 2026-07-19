@@ -93,6 +93,11 @@ describe("emit_event / query_instance / dedupe E2E", () => {
     assert.ok(emitOut.instance_id, "emit step output missing instance_id");
     assert.equal(emitOut.sequence_name, consumer.name);
     assert.equal(emitOut.deduped, false);
+    const effects = await client.getInstanceEffects(producerId, tenantId);
+    assert.equal(effects.length, 1, "emit_event should create one durable effect receipt");
+    assert.equal(effects[0]?.block_id, "emit");
+    assert.equal(effects[0]?.kind, "message");
+    assert.equal(effects[0]?.state, "committed");
     const childId = emitOut.instance_id;
 
     // Child reaches terminal state.

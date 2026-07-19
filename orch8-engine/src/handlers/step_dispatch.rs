@@ -243,6 +243,8 @@ pub(crate) async fn dispatch_step_to_external_worker(
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

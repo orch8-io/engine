@@ -33,12 +33,12 @@ use orch8_types::continuity_advanced::{
     CompensationRunRecord, CompensationRunState, CompensationStepState, DeviceDelegation,
     DurableWritePhase, EvaluationId, EvaluationOutcome, EvaluationScope, EvaluationScore,
     ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
-    FaultProfile, FederationEnvelope, ForkEffectMode, GeneratedScenario, InvariantId,
-    InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState,
-    MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule, OptimizationRecommendation,
-    OwnershipTransition, ProviderCandidate, RecommendationId, ReservationState, ResidencyEvidence,
-    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
-    WhatIfScenario, WorkflowInvariant,
+    FaultProfile, FederationEnvelope, FederationPeerId, ForkEffectMode, GeneratedScenario,
+    InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
+    LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
+    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
+    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
+    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
@@ -75,6 +75,7 @@ pub fn routes() -> Router<AppState> {
             post(consume_continuation_grant),
         )
         .route("/continuity/executions/{id}/effects", get(list_effects))
+        .route("/instances/{id}/effects", get(list_instance_effects))
         .route("/continuity/effects/{id}/resolve", post(resolve_effect))
         .route(
             "/continuity/executions/{id}/provenance",
@@ -95,6 +96,7 @@ pub fn routes() -> Router<AppState> {
             "/continuity/streams/{id}/frames",
             get(list_stream_frames).post(append_stream_frame),
         )
+        .route("/continuity/streams/{id}/windows", get(list_stream_windows))
         .route(
             "/continuity/streams/{id}/retract",
             post(retract_stream_frames),
@@ -207,6 +209,7 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/residency/evaluate", post(evaluate_residency))
         .route("/continuity/disclosure/minimize", post(minimize_disclosure))
         .route("/continuity/federation/verify", post(verify_federation))
+        .route("/continuity/federation/sign", post(sign_federation))
         .route("/continuity/delegations/claim", post(claim_delegation))
 }
 
@@ -588,33 +591,29 @@ fn validate_runtime_facts(capabilities: &RuntimeCapabilities) -> Result<(), ApiE
     Ok(())
 }
 
-async fn register_runtime(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    Json(body): Json<RuntimeRegistrationRequest>,
-) -> Result<impl IntoResponse, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    validate_runtime_facts(&body.capabilities)?;
-    let now = Utc::now();
-    if body.capabilities.expires_at <= now {
+pub(crate) fn validate_runtime_registration(
+    capabilities: &RuntimeCapabilities,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ApiError> {
+    validate_runtime_facts(capabilities)?;
+    if capabilities.expires_at <= now {
         return Err(ApiError::InvalidArgument(
             "runtime capability expiry must be in the future".into(),
         ));
     }
-    if body.capabilities.observed_at > now + Duration::seconds(30) {
+    if capabilities.observed_at > now + Duration::seconds(30) {
         return Err(ApiError::InvalidArgument(
             "runtime capability observation is too far in the future".into(),
         ));
     }
-    if body.capabilities.expires_at <= body.capabilities.observed_at
-        || body.capabilities.expires_at - body.capabilities.observed_at > Duration::minutes(5)
+    if capabilities.expires_at <= capabilities.observed_at
+        || capabilities.expires_at - capabilities.observed_at > Duration::minutes(5)
     {
         return Err(ApiError::InvalidArgument(
             "runtime capability lifetime must be positive and no longer than five minutes".into(),
         ));
     }
-    if body
-        .capabilities
+    if capabilities
         .battery_percent
         .is_some_and(|percentage| percentage > 100)
     {
@@ -622,12 +621,12 @@ async fn register_runtime(
             "runtime battery_percent must be at most 100".into(),
         ));
     }
-    if body.capabilities.trust > RuntimeTrustLevel::Registered {
+    if capabilities.trust > RuntimeTrustLevel::Registered {
         return Err(ApiError::InvalidArgument(
             "signed or attested runtime trust requires a verified attestation flow".into(),
         ));
     }
-    if let Some(public_key) = &body.capabilities.capsule_signing_public_key {
+    if let Some(public_key) = &capabilities.capsule_signing_public_key {
         let bytes: [u8; 32] = BASE64
             .decode(public_key)
             .map_err(|_| {
@@ -643,6 +642,17 @@ async fn register_runtime(
             ApiError::InvalidArgument("capsule signing public key is invalid".into())
         })?;
     }
+    Ok(())
+}
+
+async fn register_runtime(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<RuntimeRegistrationRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let now = Utc::now();
+    validate_runtime_registration(&body.capabilities, now)?;
     state
         .storage
         .upsert_runtime_capabilities(&tenant_id, &body.capabilities)
@@ -1732,6 +1742,31 @@ async fn list_effects(
     Ok(Json(receipts))
 }
 
+async fn list_instance_effects(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<InstanceId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<Vec<EffectReceipt>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let instance = state
+        .storage
+        .get_instance(id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(&tenant_ctx, &instance.tenant_id, "instance")?;
+    if instance.tenant_id != tenant_id {
+        return Err(ApiError::NotFound("instance".into()));
+    }
+    let receipts = state
+        .storage
+        .list_instance_effect_receipts(&tenant_id, id, 10_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
+    Ok(Json(receipts))
+}
+
 #[derive(Debug, Deserialize)]
 struct ResolveEffectRequest {
     tenant_id: TenantId,
@@ -2107,6 +2142,76 @@ async fn list_stream_frames(
         .await
         .map_err(|error| ApiError::from_storage(error, "stream frames"))?;
     Ok(Json(frames))
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamWindowsQuery {
+    tenant_id: String,
+    kind: String,
+    width_ms: Option<u64>,
+    slide_ms: Option<u64>,
+    gap_ms: Option<u64>,
+    offset_ms: Option<i64>,
+    after_sequence: Option<u64>,
+    frame_limit: Option<u32>,
+}
+
+async fn list_stream_windows(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<StreamId>,
+    Query(query): Query<StreamWindowsQuery>,
+) -> Result<Json<Vec<orch8_types::continuity::StreamWindow>>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    if state
+        .storage
+        .get_continuity_stream(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity stream"))?
+        .is_none()
+    {
+        return Err(ApiError::NotFound(format!("continuity stream {id}")));
+    }
+    let spec = match query.kind.as_str() {
+        "tumbling" => orch8_engine::stream_windows::WindowSpec::Tumbling {
+            width_ms: query.width_ms.ok_or_else(|| {
+                ApiError::InvalidArgument("tumbling windows require width_ms".into())
+            })?,
+            offset_ms: query.offset_ms.unwrap_or(0),
+        },
+        "sliding" => orch8_engine::stream_windows::WindowSpec::Sliding {
+            width_ms: query.width_ms.ok_or_else(|| {
+                ApiError::InvalidArgument("sliding windows require width_ms".into())
+            })?,
+            slide_ms: query.slide_ms.ok_or_else(|| {
+                ApiError::InvalidArgument("sliding windows require slide_ms".into())
+            })?,
+        },
+        "session" => orch8_engine::stream_windows::WindowSpec::Session {
+            gap_ms: query.gap_ms.ok_or_else(|| {
+                ApiError::InvalidArgument("session windows require gap_ms".into())
+            })?,
+        },
+        _ => {
+            return Err(ApiError::InvalidArgument(
+                "window kind must be tumbling, sliding, or session".into(),
+            ));
+        }
+    };
+    let frames = state
+        .storage
+        .list_stream_frames(
+            &tenant_id,
+            id,
+            query.after_sequence,
+            Utc::now(),
+            query.frame_limit.unwrap_or(1_000).min(10_000),
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "stream frames"))?;
+    let windows =
+        orch8_engine::stream_windows::evaluate(&frames, spec).map_err(ApiError::InvalidArgument)?;
+    Ok(Json(windows))
 }
 
 #[derive(Debug, Deserialize)]
@@ -6037,6 +6142,92 @@ struct VerifyFederationRequest {
 #[derive(Debug, Serialize)]
 struct VerifyFederationResponse {
     valid: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SignFederationRequest {
+    tenant_id: TenantId,
+    peer_id: FederationPeerId,
+    continuity_id: ContinuityId,
+    destination_runtime_id: RuntimeId,
+    payload_base64: String,
+    ttl_seconds: u32,
+}
+
+#[derive(Debug, Serialize)]
+struct SignFederationResponse {
+    envelope: FederationEnvelope,
+    payload_base64: String,
+}
+
+async fn sign_federation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<SignFederationRequest>,
+) -> Result<Json<SignFederationResponse>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
+        ApiError::Conflict(
+            "federation signing is disabled without a configured engine encryption key".into(),
+        )
+    })?;
+    if !(1..=300).contains(&body.ttl_seconds) {
+        return Err(ApiError::InvalidArgument(
+            "federation ttl_seconds must be between 1 and 300".into(),
+        ));
+    }
+    if body.payload_base64.len() > 16 * 1024 * 1024 {
+        return Err(ApiError::PayloadTooLarge(
+            "federation payload exceeds the encoded 16 MiB limit".into(),
+        ));
+    }
+    let payload = BASE64
+        .decode(&body.payload_base64)
+        .map_err(|_| ApiError::InvalidArgument("payload_base64 is invalid".into()))?;
+    let execution = state
+        .storage
+        .get_continuity_execution(&tenant_id, body.continuity_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "federation execution"))?
+        .ok_or_else(|| ApiError::NotFound("federation execution".into()))?;
+    let destination_exists = state
+        .storage
+        .list_runtime_capabilities(&tenant_id, Utc::now(), 1_000)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?
+        .into_iter()
+        .any(|runtime| runtime.runtime_id == body.destination_runtime_id && !runtime.draining);
+    if !destination_exists {
+        return Err(ApiError::Conflict(
+            "destination runtime is unavailable or draining".into(),
+        ));
+    }
+    let issued_at = Utc::now();
+    let envelope = orch8_engine::continuity_advanced::sign_federation_envelope(
+        &crypto.signing_key,
+        orch8_engine::continuity_advanced::FederationSigningRequest {
+            peer_id: body.peer_id,
+            tenant_id,
+            continuity_id: body.continuity_id,
+            epoch: execution.epoch,
+            destination_runtime_id: body.destination_runtime_id,
+            payload: &payload,
+            issued_at,
+            expires_at: issued_at + Duration::seconds(i64::from(body.ttl_seconds)),
+        },
+    );
+    append_provenance_boundary(
+        &state,
+        &execution,
+        "federation_signed",
+        "outbound federation envelope signed",
+        &envelope,
+    )
+    .await?;
+    Ok(Json(SignFederationResponse {
+        envelope,
+        payload_base64: body.payload_base64,
+    }))
 }
 
 async fn verify_federation(

@@ -372,6 +372,14 @@ pub trait InstanceStore: Send + Sync + 'static {
         max_per_tenant: u32,
     ) -> Result<Vec<TaskInstance>, StorageError>;
 
+    /// True when runnable scheduled work exists above `priority`. Used for
+    /// cooperative preemption at durable step boundaries.
+    async fn has_due_higher_priority(
+        &self,
+        now: DateTime<Utc>,
+        priority: orch8_types::instance::Priority,
+    ) -> Result<bool, StorageError>;
+
     async fn update_instance_state(
         &self,
         id: InstanceId,
@@ -1302,6 +1310,17 @@ pub trait WorkerStore: Send + Sync + 'static {
         worker_id: &str,
     ) -> Result<bool, StorageError>;
 
+    /// Atomically persist resumable activity progress and heartbeat the lease.
+    /// Returns the next checkpoint sequence, or `None` when ownership/state or
+    /// the caller's expected sequence no longer matches.
+    async fn checkpoint_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        expected_seq: u64,
+        checkpoint: &serde_json::Value,
+    ) -> Result<Option<u64>, StorageError>;
+
     /// Delete a worker task (used when retryable failure needs re-dispatch).
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
 
@@ -2143,6 +2162,34 @@ pub trait ResourceStore: Send + Sync + 'static {
         key: &str,
     ) -> Result<(), StorageError>;
 
+    // === Shared agent knowledge ===
+    //
+    // Tenant-isolated, namespace-scoped records shared by workflows and agent
+    // instances. The value is opaque to storage; the agent-memory handlers
+    // persist text, embeddings, metadata, and provenance in it.
+
+    async fn set_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError>;
+
+    async fn list_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        limit: u32,
+    ) -> Result<HashMap<String, serde_json::Value>, StorageError>;
+
+    async fn delete_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<(), StorageError>;
+
     // === Artifacts (durable binary blobs) ===
     //
     // Backed by an object-store backend (local FS / S3-compatible) wired into
@@ -2578,6 +2625,39 @@ pub trait ContinuityStore: Send + Sync + 'static {
         execution: &ContinuityExecution,
     ) -> Result<(), StorageError>;
 
+    /// Return the durable execution scope for an instance, creating the
+    /// supplied candidate when absent.
+    ///
+    /// `create_continuity_execution` is protected by unique constraints on
+    /// both continuity ID and current instance. If concurrent dispatchers race
+    /// to create the same scope, the loser re-reads the winner. A create error
+    /// is only suppressed when that durable winner is observable.
+    async fn ensure_continuity_execution(
+        &self,
+        candidate: &ContinuityExecution,
+    ) -> Result<ContinuityExecution, StorageError> {
+        if let Some(existing) = self
+            .get_continuity_execution_by_instance(
+                &candidate.tenant_id,
+                candidate.current_instance_id,
+            )
+            .await?
+        {
+            return Ok(existing);
+        }
+
+        match self.create_continuity_execution(candidate).await {
+            Ok(()) => Ok(candidate.clone()),
+            Err(create_error) => self
+                .get_continuity_execution_by_instance(
+                    &candidate.tenant_id,
+                    candidate.current_instance_id,
+                )
+                .await?
+                .ok_or(create_error),
+        }
+    }
+
     async fn get_continuity_execution(
         &self,
         tenant_id: &TenantId,
@@ -2742,6 +2822,23 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    /// List the universal effect ledger for one runtime-local instance.
+    async fn list_instance_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        limit: u32,
+    ) -> Result<Vec<EffectReceipt>, StorageError> {
+        let Some(execution) = self
+            .get_continuity_execution_by_instance(tenant_id, instance_id)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        self.list_effect_receipts(tenant_id, execution.continuity_id, limit)
+            .await
+    }
 
     async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
 

@@ -235,6 +235,8 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
         completed_at: None,
         output: None,
         error_message: None,

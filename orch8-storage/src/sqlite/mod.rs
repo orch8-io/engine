@@ -624,6 +624,14 @@ impl crate::InstanceStore for SqliteStorage {
         instances::claim_due(self, now, limit, max_per_tenant).await
     }
 
+    async fn has_due_higher_priority(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        priority: orch8_types::instance::Priority,
+    ) -> Result<bool, StorageError> {
+        instances::has_due_higher_priority(self, now, priority).await
+    }
+
     async fn update_instance_state(
         &self,
         id: InstanceId,
@@ -1315,6 +1323,16 @@ impl crate::WorkerStore for SqliteStorage {
         workers::heartbeat(self, task_id, worker_id).await
     }
 
+    async fn checkpoint_worker_task(
+        &self,
+        task_id: Uuid,
+        worker_id: &str,
+        expected_seq: u64,
+        checkpoint: &serde_json::Value,
+    ) -> Result<Option<u64>, StorageError> {
+        workers::checkpoint(self, task_id, worker_id, expected_seq, checkpoint).await
+    }
+
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
         workers::delete(self, task_id).await
     }
@@ -1337,8 +1355,8 @@ impl crate::WorkerStore for SqliteStorage {
         sqlx::query(
             r"INSERT INTO worker_tasks
                 (id, instance_id, block_id, handler_name, queue_name, params, context,
-                 attempt, timeout_ms, state, created_at)
-              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                 attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
+              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         )
         .bind(new_task.id.to_string())
         .bind(new_task.instance_id.into_uuid().to_string())
@@ -1350,6 +1368,14 @@ impl crate::WorkerStore for SqliteStorage {
         .bind(new_task.attempt as i64)
         .bind(new_task.timeout_ms)
         .bind(new_task.state.to_string())
+        .bind(
+            new_task
+                .resume_checkpoint
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
+        .bind(i64::try_from(new_task.checkpoint_seq).unwrap_or(i64::MAX))
         .bind(new_task.created_at.to_rfc3339())
         .execute(&mut *tx)
         .await?;
@@ -2363,6 +2389,37 @@ impl crate::ResourceStore for SqliteStorage {
         self.delete_instance_kv_impl(instance_id, key).await
     }
 
+    async fn set_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.set_shared_knowledge_impl(tenant_id, namespace, key, value)
+            .await
+    }
+
+    async fn list_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        limit: u32,
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
+        self.list_shared_knowledge_impl(tenant_id, namespace, limit)
+            .await
+    }
+
+    async fn delete_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<(), StorageError> {
+        self.delete_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
+    }
+
     // === Externalized State ===
 
     async fn save_externalized_state(
@@ -2873,6 +2930,56 @@ mod tests {
         // Should not be claimed again.
         let claimed2 = storage.claim_due_instances(now, 10, 0).await.unwrap();
         assert_eq!(claimed2.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn detects_only_due_higher_priority_work() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        let mut inst = TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("t1"),
+            namespace: Namespace::new("default"),
+            state: InstanceState::Scheduled,
+            next_fire_at: Some(now),
+            priority: Priority::High,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&inst).await.unwrap();
+        assert!(
+            storage
+                .has_due_higher_priority(now, Priority::Normal)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !storage
+                .has_due_higher_priority(now, Priority::High)
+                .await
+                .unwrap()
+        );
+
+        inst.id = InstanceId::new();
+        inst.priority = Priority::Critical;
+        inst.next_fire_at = Some(now + chrono::Duration::minutes(1));
+        storage.create_instance(&inst).await.unwrap();
+        assert!(
+            !storage
+                .has_due_higher_priority(now, Priority::High)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -3568,6 +3675,8 @@ mod tests {
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                resume_checkpoint: None,
+                checkpoint_seq: 0,
                 completed_at: None,
                 output: None,
                 error_message: None,

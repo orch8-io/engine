@@ -8,7 +8,8 @@ use chrono::Utc;
 use orch8_publisher::manifest::canonical_json;
 use orch8_storage::StorageBackend;
 use orch8_types::continuity::{
-    EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt, EffectState,
+    ContinuityExecution, ContinuityId, EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt,
+    EffectState, ExecutionEpoch, OwnershipState, RuntimeId,
 };
 use orch8_types::continuity_advanced::{InvariantRule, WorkflowInvariant};
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
@@ -37,12 +38,7 @@ impl<'a> EffectGuard<'a> {
         if !crate::release_diff::handler_has_side_effects(handler) {
             return Ok(None);
         }
-        let Some(execution) = storage
-            .get_continuity_execution_by_instance(tenant_id, instance_id)
-            .await?
-        else {
-            return Ok(None);
-        };
+        let execution = ensure_effect_scope(storage, tenant_id, instance_id).await?;
 
         if let Some(mut unresolved) = storage
             .find_unresolved_effect_receipt(
@@ -177,6 +173,46 @@ impl<'a> EffectGuard<'a> {
         self.receipt = updated;
         Ok(())
     }
+}
+
+/// Every side-effecting instance needs a durable receipt namespace, including
+/// ordinary local runs that were never explicitly enrolled in portable
+/// continuity. Deriving both IDs from the instance makes concurrent first
+/// effects converge on one scope across processes and runtimes.
+async fn ensure_effect_scope(
+    storage: &dyn StorageBackend,
+    tenant_id: &TenantId,
+    instance_id: InstanceId,
+) -> Result<ContinuityExecution, EngineError> {
+    let now = Utc::now();
+    let candidate = ContinuityExecution {
+        continuity_id: ContinuityId::from_uuid(deterministic_scope_uuid(
+            b"orch8-effect-scope-v1\0",
+            instance_id,
+        )),
+        tenant_id: tenant_id.clone(),
+        current_instance_id: instance_id,
+        owner_runtime_id: RuntimeId::from_uuid(deterministic_scope_uuid(
+            b"orch8-effect-runtime-v1\0",
+            instance_id,
+        )),
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Owned,
+        updated_at: now,
+    };
+    Ok(storage.ensure_continuity_execution(&candidate).await?)
+}
+
+fn deterministic_scope_uuid(domain: &[u8], instance_id: InstanceId) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(instance_id.into_uuid().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 async fn load_effect_commit_guards(
@@ -482,6 +518,33 @@ mod tests {
         (storage, instance, execution)
     }
 
+    async fn ordinary_storage() -> (SqliteStorage, TaskInstance) {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        let instance = TaskInstance {
+            id: InstanceId::new(),
+            sequence_id: SequenceId::new(),
+            tenant_id: TenantId::unchecked("tenant-effect"),
+            namespace: Namespace::new("default"),
+            state: InstanceState::Running,
+            next_fire_at: None,
+            priority: Priority::Normal,
+            timezone: "UTC".into(),
+            metadata: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            concurrency_key: None,
+            max_concurrency: None,
+            idempotency_key: None,
+            session_id: None,
+            parent_instance_id: None,
+            budget: None,
+            created_at: now,
+            updated_at: now,
+        };
+        storage.create_instance(&instance).await.unwrap();
+        (storage, instance)
+    }
+
     async fn add_sequence_and_effect_guard(
         storage: &SqliteStorage,
         instance: &TaskInstance,
@@ -584,6 +647,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_instance_gets_a_universal_effect_ledger() {
+        let (storage, instance) = ordinary_storage().await;
+        assert!(
+            storage
+                .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let guard = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("charge"),
+            "custom_charge",
+            &serde_json::json!({"amount": 100}),
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        guard
+            .commit(&serde_json::json!({"receipt_id": "provider-ordinary"}))
+            .await
+            .unwrap();
+
+        let execution = storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await
+            .unwrap()
+            .expect("side-effecting execution must have a durable ledger scope");
+        let receipts = storage
+            .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].state, EffectState::Committed);
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_effects_converge_on_one_ledger_scope() {
+        let (storage, instance) = ordinary_storage().await;
+        let left_block = BlockId::new("left");
+        let right_block = BlockId::new("right");
+        let left_params = serde_json::json!({"value": 1});
+        let right_params = serde_json::json!({"value": 2});
+        let left = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &left_block,
+            "custom_left",
+            &left_params,
+            0,
+        );
+        let right = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &right_block,
+            "custom_right",
+            &right_params,
+            0,
+        );
+        let (left, right) = tokio::join!(left, right);
+        left.unwrap()
+            .unwrap()
+            .commit(&serde_json::json!({}))
+            .await
+            .unwrap();
+        right
+            .unwrap()
+            .unwrap()
+            .commit(&serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let execution = storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let receipts = storage
+            .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| receipt.state == EffectState::Committed)
+        );
+    }
+
+    #[tokio::test]
+    async fn pure_step_does_not_create_a_ledger_scope() {
+        let (storage, instance) = ordinary_storage().await;
+        let guard = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("transform"),
+            "transform",
+            &serde_json::json!({}),
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(guard.is_none());
+        assert!(
+            storage
+                .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn abandoned_dispatch_is_classified_unknown_and_blocks_redispatch() {
         let (storage, instance, execution) = continuity_storage().await;
         let block = BlockId::new("charge");
@@ -657,7 +840,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_side_effect_handler_is_guarded_in_the_real_dispatch_path() {
-        let (storage, instance, execution) = continuity_storage().await;
+        let (storage, instance) = ordinary_storage().await;
         let storage: Arc<dyn StorageBackend> = Arc::new(storage);
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
@@ -697,6 +880,11 @@ mod tests {
             })
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let execution = storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await
+            .unwrap()
+            .expect("real dispatch must create a ledger scope");
         let receipts = storage
             .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
             .await

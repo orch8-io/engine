@@ -344,6 +344,8 @@ fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        resume_checkpoint: task.resume_checkpoint.clone(),
+        checkpoint_seq: task.checkpoint_seq,
         completed_at: None,
         output: None,
         error_message: None,

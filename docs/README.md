@@ -31,6 +31,7 @@ health probes and inbound webhook routes are intentionally public.
 
 ## Reference
 
+- [Engine capability priorities](ENGINE_FEATURE_PRIORITIES.md) — engine-only roadmap, estimates, and proposals deliberately not pursued.
 - [REST API](API.md) — curated guide to the most-used routes and payloads.
 - [Live OpenAPI](http://localhost:8080/swagger-ui) — complete generated request/response reference for a running engine.
 - [Configuration](CONFIGURATION.md) — TOML and environment variables.
