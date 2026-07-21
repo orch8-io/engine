@@ -985,7 +985,12 @@ pub(super) async fn delete_terminal_instances(
     // doesn't. All three are deleted explicitly here so the divergence
     // doesn't leave orphans on this backend.
     for table in ["step_logs", "audit_log", "usage_events"] {
-        let sql = format!("DELETE FROM {table} WHERE instance_id IN (");
+        let sql = match table {
+            "step_logs" => "DELETE FROM step_logs WHERE instance_id IN (",
+            "audit_log" => "DELETE FROM audit_log WHERE instance_id IN (",
+            "usage_events" => "DELETE FROM usage_events WHERE instance_id IN (",
+            _ => unreachable!(),
+        };
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);
         let mut separated = qb.separated(",");
         for id in &ids {

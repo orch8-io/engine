@@ -1,3 +1,4 @@
+-- Reverses 074_partition_high_volume_tables
 ALTER TABLE block_outputs RENAME TO block_outputs_partitioned_074;
 ALTER TABLE block_outputs_partitioned_074
     DROP CONSTRAINT IF EXISTS block_outputs_pkey;
