@@ -52,13 +52,16 @@ const SUITES: Suite[] = SELF_MANAGED_SUITES.map((s, i) => ({
 // connection slots. A small pool keeps wall time low (≈ceil(N/limit) waves)
 // without thrashing. Override with ORCH8_E2E_CONCURRENCY (1 = fully serial).
 //
-// Default is lower under `CI` (GitHub Actions sets this automatically):
-// a standard `ubuntu-latest` runner doesn't reliably have headroom for 6
-// concurrent debug-build servers + Postgres connections — observed as a
-// synchronized burst of "Server failed to start within 15 seconds" /
-// "cancelledByParent" across most of the pool, not any one suite being
-// broken. Local dev machines keep the faster default.
-const DEFAULT_CONCURRENCY = process.env.CI ? 2 : 6;
+// Fully serial under `CI` (GitHub Actions sets this automatically): a
+// standard `ubuntu-latest` runner doesn't reliably have headroom for even 2
+// concurrent debug-build servers + Postgres connections — both 6 and 2 were
+// tried and produced the same synchronized burst of "Server failed to start
+// within 15 seconds" / "cancelledByParent" failures across a large chunk of
+// the pool (fewer at 2 than at 6, but still far from clean), so this backs
+// off all the way rather than guessing at a number in between. Local dev
+// machines keep the faster parallel default — this was never a problem
+// there.
+const DEFAULT_CONCURRENCY = process.env.CI ? 1 : 6;
 const CONCURRENCY = Math.max(
   1,
   Number(process.env.ORCH8_E2E_CONCURRENCY) || DEFAULT_CONCURRENCY,
