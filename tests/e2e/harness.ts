@@ -234,6 +234,18 @@ export async function startServer(
   }
 
   const httpAddr = `0.0.0.0:${port}`;
+  // The server's gRPC listener defaults to a fixed 127.0.0.1:50051
+  // regardless of the HTTP port — harmless when only one server is ever
+  // running, but every server this harness spawns bound the SAME gRPC
+  // port. That's normally invisible (suites don't run more than one
+  // server at a time), but a test that starts a *second* server while its
+  // suite's own default-port server is still up (continuity_handoffs'
+  // "import fails closed" case) hit "Failed to bind gRPC listener:
+  // Address already in use" and crashed within a few hundred ms — which
+  // then just looked like a slow-startup timeout from the caller's side.
+  // Derive a per-server port from the HTTP one so concurrent servers in
+  // the same process tree never collide.
+  const grpcAddr = `127.0.0.1:${port + 10_000}`;
 
   const spawnStart = Date.now();
   const child = spawn(binaryPath, ["--insecure"], {
@@ -243,6 +255,7 @@ export async function startServer(
       ORCH8_STORAGE_BACKEND: STORAGE_BACKEND,
       ORCH8_DATABASE_URL: DB_URL,
       ORCH8_HTTP_ADDR: httpAddr,
+      ORCH8_GRPC_ADDR: grpcAddr,
       ORCH8_LOG_LEVEL: SERVER_LOG_LEVEL,
       ORCH8_TICK_INTERVAL_MS: "100",
       ORCH8_CRON_TICK_SECS: "1",
