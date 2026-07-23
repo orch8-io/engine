@@ -159,7 +159,21 @@ impl TickController {
                             continue;
                         }
 
-                        if memory::exceeds_budget(memory_budget) {
+                        // The RSS probe blocks (fork/exec of `ps` on Darwin,
+                        // std::fs on Linux) and this runtime has a single
+                        // worker thread — run it off-thread so a slow probe
+                        // can't stall the whole tick loop. A join failure is
+                        // treated as "not exceeded" to keep ticks flowing.
+                        let budget_exceeded = if memory_budget == 0 {
+                            false
+                        } else {
+                            tokio::task::spawn_blocking(move || {
+                                memory::exceeds_budget(memory_budget)
+                            })
+                            .await
+                            .unwrap_or(false)
+                        };
+                        if budget_exceeded {
                             warn!(
                                 budget = memory_budget,
                                 rss = memory::current_rss_bytes().unwrap_or(0),
@@ -220,10 +234,12 @@ impl TickController {
                         }
 
                         tick_count += 1;
-                        if tick_count.is_multiple_of(60) {
-                            let _ = lifecycle
+                        if tick_count.is_multiple_of(60)
+                            && let Err(e) = lifecycle
                                 .gc_expired_instances(max_instance_lifetime_secs)
-                                .await;
+                                .await
+                        {
+                            warn!(error = %e, "periodic instance GC failed");
                         }
                     }
                 }

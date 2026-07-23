@@ -67,8 +67,11 @@ const MAX_SYNC_RESPONSE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Read a response body, rejecting it if it exceeds [`MAX_SYNC_RESPONSE_BYTES`].
 /// Checks the advertised `Content-Length` up front (cheap rejection of honest
-/// large bodies) and re-checks the buffered length (catches a lying/absent
-/// header). `what` names the resource for error messages.
+/// large bodies), then streams the body chunk-by-chunk and aborts as soon as
+/// the running total exceeds the cap — buffering the full body first (e.g.
+/// `Response::bytes()`) would let a server that omits or lies about
+/// `Content-Length` defeat the cap and OOM the device. `what` names the
+/// resource for error messages.
 async fn read_body_capped(resp: reqwest::Response, what: &str) -> Result<Vec<u8>, MobileError> {
     if let Some(len) = resp.content_length()
         && len > MAX_SYNC_RESPONSE_BYTES
@@ -78,16 +81,21 @@ async fn read_body_capped(resp: reqwest::Response, what: &str) -> Result<Vec<u8>
         }
         .into());
     }
-    let bytes = resp.bytes().await.map_err(|e| SyncError::Network {
-        message: format!("failed to read {what} body: {e}"),
-    })?;
-    if bytes.len() as u64 > MAX_SYNC_RESPONSE_BYTES {
-        return Err(SyncError::Network {
-            message: format!("{what} too large: {} bytes exceeds limit", bytes.len()),
-        }
-        .into());
-    }
-    Ok(bytes.to_vec())
+    orch8_engine::handlers::builtin::read_body_capped(
+        resp,
+        usize::try_from(MAX_SYNC_RESPONSE_BYTES).unwrap_or(usize::MAX),
+    )
+        .await
+        .map_err(|error| match error {
+            orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => SyncError::Network {
+                message: format!("{what} too large: exceeds {MAX_SYNC_RESPONSE_BYTES} byte limit"),
+            }
+            .into(),
+            orch8_engine::handlers::builtin::BodyReadError::Io(message) => SyncError::Network {
+                message: format!("failed to read {what} body: {message}"),
+            }
+            .into(),
+        })
 }
 
 /// Root of trust: embedded Ed25519 public key for verifying manifest signatures.
@@ -273,11 +281,15 @@ impl SyncOrchestrator {
                     warn!(attempt, %display_url, "request timeout, retrying");
                     tokio::time::sleep(delay).await;
                     delay = jittered_backoff(delay);
-                    last_err = Some(e.to_string());
+                    // `without_url`: reqwest errors embed the full request URL
+                    // (including the query string), which carries the auth
+                    // token in `SyncAuth::UrlToken` signed-URL mode — never
+                    // propagate that into errors returned to the host app.
+                    last_err = Some(e.without_url().to_string());
                 }
                 Err(e) => {
                     return Err(SyncError::Network {
-                        message: format!("request failed: {e}"),
+                        message: format!("request failed: {}", e.without_url()),
                     }
                     .into());
                 }
@@ -908,8 +920,15 @@ impl SyncOrchestrator {
 
     #[allow(clippy::unused_self)]
     fn version_meets_min(&self, sdk: &str, min: &str) -> bool {
-        let sdk_parts: Vec<u32> = sdk.split('.').filter_map(|s| s.parse().ok()).collect();
-        let min_parts: Vec<u32> = min.split('.').filter_map(|s| s.parse().ok()).collect();
+        // Fail closed: a version string with an unparseable component must not
+        // silently compare as if the component were absent (`filter_map` would
+        // parse "0.4.x" as [0, 4]).
+        let parse = |v: &str| -> Option<Vec<u32>> {
+            v.split('.').map(|s| s.parse::<u32>().ok()).collect()
+        };
+        let (Some(sdk_parts), Some(min_parts)) = (parse(sdk), parse(min)) else {
+            return false;
+        };
         for i in 0..min_parts.len().max(sdk_parts.len()) {
             let s = sdk_parts.get(i).copied().unwrap_or(0);
             let m = min_parts.get(i).copied().unwrap_or(0);
@@ -980,6 +999,28 @@ mod tests {
         assert!(!orch.version_meets_min("0.3.0", "0.4.0"));
         assert!(orch.version_meets_min("1.0.0", "0.9.9"));
         assert!(!orch.version_meets_min("0.4.0", "0.4.1"));
+    }
+
+    /// Unparseable version components must fail closed: `filter_map`-style
+    /// parsing would silently treat "0.4.x" as [0, 4], i.e. as if the garbage
+    /// component were absent.
+    #[tokio::test]
+    async fn version_meets_min_fails_closed_on_garbage() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        assert!(!orch.version_meets_min("0.4.x", "0.3.0"));
+        assert!(!orch.version_meets_min("0.4.0", "0.4.x"));
+        assert!(!orch.version_meets_min("", "0.1.0"));
     }
 
     #[test]

@@ -28,6 +28,7 @@ mod step_exec;
 mod tests;
 
 pub use step_exec::{check_human_input, check_human_input_at};
+pub(crate) use step_exec::clamped_fire_at;
 
 /// Result of a single tick execution, suitable for mobile/embedded callers
 /// that drive the engine manually rather than via the continuous tick loop.
@@ -1034,7 +1035,11 @@ const HOOK_DISPATCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Await a hook handler future with [`HOOK_DISPATCH_TIMEOUT`], mapping an
 /// elapsed timeout to a `Permanent` error so callers treat it exactly like any
 /// other swallowed hook failure.
-async fn dispatch_hook_bounded<F>(
+///
+/// `pub(crate)`: shared with the tree-path SLA escalation dispatch
+/// (`evaluator::sla`), which runs inline in the per-instance evaluate loop and
+/// needs the same bound.
+pub(crate) async fn dispatch_hook_bounded<F>(
     fut: F,
 ) -> Result<serde_json::Value, orch8_types::error::StepError>
 where
@@ -1843,7 +1848,23 @@ async fn process_instance(
         };
 
         if completed_blocks.binary_search(&step_def.id).is_ok() {
-            continue;
+            // A `wait_for_input` step can land in the completed set on gate
+            // acceptance ALONE (the acceptance row is stored with
+            // `output_ref: None`). Skipping it here would advance the
+            // instance while the step's side-effecting handler never finished
+            // after a mid-handler crash or retryable failure. Consult the
+            // step's latest output and re-execute unless it proves the
+            // handler actually completed (at-least-once, same contract as the
+            // `__in_progress__` sentinel).
+            if step_def.wait_for_input.is_some()
+                && step_exec::gated_step_incomplete(storage.as_ref(), instance_id, &step_def.id)
+                    .await?
+            {
+                // Fall through — re-execute the step. Its gate check finds
+                // the persisted acceptance and goes straight to the handler.
+            } else {
+                continue;
+            }
         }
 
         // Interceptor: before_step

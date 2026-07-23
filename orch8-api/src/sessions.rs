@@ -156,6 +156,18 @@ async fn update_session_data(
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
+    // Session data gets the same serialized-size ceiling as instance
+    // contexts (`max_context_bytes == 0` disables the check).
+    if state.max_context_bytes > 0 {
+        // Fail-safe: an unserializable value counts as over the limit.
+        let actual = serde_json::to_vec(&body.data).map_or(usize::MAX, |v| v.len());
+        if actual > state.max_context_bytes as usize {
+            return Err(ApiError::PayloadTooLarge(format!(
+                "session data is {actual} bytes, max is {}",
+                state.max_context_bytes
+            )));
+        }
+    }
     state
         .storage
         .update_session_data(id, &body.data)

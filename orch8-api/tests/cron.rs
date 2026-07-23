@@ -289,6 +289,80 @@ async fn next_fires_returns_n_ascending_instants() {
 }
 
 #[tokio::test]
+async fn create_cron_with_invalid_timezone_returns_400() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    let body = json!({
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "sequence_id": seq_id,
+        "cron_expr": "0 * * * *",
+        "timezone": "Amercia/New_York",
+        "enabled": true,
+        "metadata": {}
+    });
+
+    let resp = client
+        .post(format!("{}/cron", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn update_cron_with_invalid_timezone_returns_400() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+
+    let body = json!({
+        "tenant_id": "t1",
+        "namespace": "ns1",
+        "sequence_id": seq_id,
+        "cron_expr": "0 * * * *",
+        "timezone": "UTC",
+        "enabled": true,
+        "metadata": {}
+    });
+    let resp = client
+        .post(format!("{}/cron", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let cron_id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .put(format!("{}/cron/{cron_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({ "timezone": "Not/A_Real_Zone" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // The stored schedule must be untouched.
+    let resp = client
+        .get(format!("{}/cron/{cron_id}", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let fetched: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(fetched["timezone"], "UTC");
+}
+
+#[tokio::test]
 async fn next_fires_unknown_id_returns_404() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

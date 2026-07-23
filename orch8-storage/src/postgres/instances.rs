@@ -317,7 +317,9 @@ async fn filter_by_concurrency_pg(
     let mut keys: Vec<&str> = keyed.keys().copied().collect();
     keys.sort_unstable();
     for key in &keys {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        // hashtextextended: 64-bit key — the 32-bit hashtext() collided often
+        // enough to falsely serialize unrelated concurrency keys.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(*key)
             .execute(&mut **tx)
             .await?;
@@ -1102,13 +1104,13 @@ pub(super) async fn delete_terminal_instances(
         return Ok(0);
     }
 
-    // `step_logs` and `usage_events` have no FK to `task_instances` on
-    // Postgres, so they are not covered by the `ON DELETE CASCADE` the
-    // instance row deletion below relies on for execution_tree /
-    // block_outputs / signal_inbox / worker_tasks / checkpoints /
-    // externalized_state / audit_log (all cascade -- see migrations 016 and
-    // 034).
-    for table in ["step_logs", "usage_events"] {
+    // `step_logs`, `usage_events` and `instance_kv_state` have no FK to
+    // `task_instances` on Postgres, so they are not covered by the
+    // `ON DELETE CASCADE` the instance row deletion below relies on for
+    // execution_tree / block_outputs / signal_inbox / worker_tasks /
+    // checkpoints / externalized_state / audit_log (all cascade -- see
+    // migrations 016 and 034).
+    for table in ["step_logs", "usage_events", "instance_kv_state"] {
         let sql = format!("DELETE FROM {table} WHERE instance_id = ANY($1)");
         sqlx::query(&sql).bind(&ids).execute(&mut *tx).await?;
     }

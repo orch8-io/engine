@@ -36,6 +36,8 @@ use uuid::Uuid;
 use orch8_types::context::RuntimeContext;
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::output::BlockOutput;
+use orch8_types::sequence::SequenceDefinition;
 
 use super::lifecycle::{collect_block_ids, top_level_block_id};
 use super::types::ForkRequest;
@@ -109,63 +111,26 @@ pub async fn fork_instance(
             ApiError::NotFound(format!("sequence {}", source.sequence_id.into_uuid()))
         })?;
 
-    let target_idx = sequence
-        .blocks
-        .iter()
-        .position(|b| top_level_block_id(b).as_str() == req.from_block_id)
-        .ok_or_else(|| {
-            ApiError::InvalidArgument(format!(
-                "block '{}' is not a top-level block of sequence {}",
-                req.from_block_id,
-                source.sequence_id.into_uuid()
-            ))
-        })?;
+    let target_idx = fork_target_idx(&sequence, &req.from_block_id).ok_or_else(|| {
+        ApiError::InvalidArgument(format!(
+            "block '{}' is not a top-level block of sequence {}",
+            req.from_block_id,
+            source.sequence_id.into_uuid()
+        ))
+    })?;
 
     // Partition the pre-fork top-level blocks into the copy set and the
-    // re-run set. A block group (top-level block + everything nested in it)
-    // is copyable iff it executed and every member's LATEST row is inline:
-    // an externalized payload or a trailing sentinel makes the snapshot
-    // unusable on another instance, so the whole group re-runs instead.
-    // Older `__retry__` markers behind a real inline output do not block the
-    // copy — the storage copy skips non-inline rows, which merely resets the
-    // block's attempt counter on the fork.
+    // re-run set (see `partition_fork_blocks`; the fork preview uses the
+    // same helper so it can never diverge from the real fork).
     let source_outputs = state
         .storage
         .get_all_outputs(source_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "outputs"))?;
 
-    let mut copy_ids: Vec<BlockId> = Vec::new();
-    let mut copied_blocks = 0usize;
-    let mut rerun_blocks: Vec<String> = Vec::new();
-    for block in &sequence.blocks[..target_idx] {
-        let mut group_ids: Vec<BlockId> = Vec::new();
-        collect_block_ids(block, &mut group_ids);
-
-        let mut executed = false;
-        let mut copyable = true;
-        for block_id in &group_ids {
-            // Rows are in created_at ASC order, so the last match is the
-            // latest snapshot for this block.
-            let latest = source_outputs.iter().rfind(|o| &o.block_id == block_id);
-            if let Some(latest) = latest {
-                executed = true;
-                if latest.output_ref.is_some() {
-                    // Trailing sentinel (mid-flight / error) or externalized
-                    // payload — either way the snapshot cannot be cloned.
-                    copyable = false;
-                    break;
-                }
-            }
-        }
-
-        if executed && copyable {
-            copy_ids.extend(group_ids);
-            copied_blocks += 1;
-        } else {
-            rerun_blocks.push(top_level_block_id(block).as_str().to_owned());
-        }
-    }
+    let (copy_groups, rerun_blocks) = partition_fork_blocks(&sequence, &source_outputs, target_idx);
+    let copied_blocks = copy_groups.len();
+    let copy_ids: Vec<BlockId> = copy_groups.into_iter().flatten().collect();
 
     // Assemble the fork: same sequence/tenant/namespace, fresh identity and
     // runtime state, source context with the optional patch applied.
@@ -241,41 +206,67 @@ pub async fn fork_instance(
         .await
         .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
-    // Seed the fork with the source's pre-fork snapshots. Inline rows only —
-    // see the module docs for why externalized references are not shared.
-    let copied_rows = state
-        .storage
-        .copy_block_outputs(source_id, fork.id, &copy_ids)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
-
-    // Enqueue injected signals while the fork is still un-claimable, so they
-    // are pending before its first claim — the atomic alternative to the
-    // racy "fork, then signal" two-call pattern.
+    // The fork row now exists with `next_fire_at: None`. Every step below is
+    // fallible; returning early here would leave an un-claimable zombie, so
+    // on any error the fork is first cancelled (best effort) and only then
+    // is the error propagated.
     let signals_enqueued = req.signals.len();
-    for injected in req.signals {
-        let signal = orch8_types::signal::Signal {
-            id: Uuid::now_v7(),
-            instance_id: fork.id,
-            signal_type: injected.signal_type,
-            payload: injected.payload,
-            delivered: false,
-            created_at: Utc::now(),
-            delivered_at: None,
-        };
+    let finalize = async {
+        // Seed the fork with the source's pre-fork snapshots. Inline rows
+        // only — see the module docs for why externalized references are not
+        // shared.
+        let copied_rows = state
+            .storage
+            .copy_block_outputs(source_id, fork.id, &copy_ids)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
+        // Enqueue injected signals while the fork is still un-claimable, so
+        // they are pending before its first claim — the atomic alternative
+        // to the racy "fork, then signal" two-call pattern.
+        for injected in req.signals {
+            let signal = orch8_types::signal::Signal {
+                id: Uuid::now_v7(),
+                instance_id: fork.id,
+                signal_type: injected.signal_type,
+                payload: injected.payload,
+                delivered: false,
+                created_at: Utc::now(),
+                delivered_at: None,
+            };
+            state
+                .storage
+                .enqueue_signal(&signal)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "signal"))?;
+        }
+
+        // Arm the fork: outputs and signals are in place, make it claimable.
         state
             .storage
-            .enqueue_signal(&signal)
+            .update_instance_state(fork.id, InstanceState::Scheduled, Some(Utc::now()))
             .await
-            .map_err(|e| ApiError::from_storage(e, "signal"))?;
-    }
+            .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
-    // Arm the fork: outputs and signals are in place, make it claimable.
-    state
-        .storage
-        .update_instance_state(fork.id, InstanceState::Scheduled, Some(Utc::now()))
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?;
+        Ok::<_, ApiError>(copied_rows)
+    };
+    let copied_rows = match finalize.await {
+        Ok(rows) => rows,
+        Err(e) => {
+            if let Err(cleanup) = state
+                .storage
+                .update_instance_state(fork.id, InstanceState::Cancelled, None)
+                .await
+            {
+                tracing::error!(
+                    error = %cleanup,
+                    fork_id = %fork.id,
+                    "fork finalization failed and the zombie-fork cleanup did too"
+                );
+            }
+            return Err(e);
+        }
+    };
 
     tracing::info!(
         source_id = %source_id,
@@ -300,4 +291,64 @@ pub async fn fork_instance(
             dry_run: req.dry_run,
         }),
     ))
+}
+
+/// Resolve `from_block_id` to a top-level block index of the sequence — the
+/// same validation the real fork applies. Shared with
+/// `workbench::fork_preview` so the preview rejects exactly the requests the
+/// fork would reject.
+pub(crate) fn fork_target_idx(sequence: &SequenceDefinition, from_block_id: &str) -> Option<usize> {
+    sequence
+        .blocks
+        .iter()
+        .position(|b| top_level_block_id(b).as_str() == from_block_id)
+}
+
+/// Partition the pre-fork top-level blocks into the copy set and the
+/// re-run set. A block group (top-level block + everything nested in it)
+/// is copyable iff it executed and every member's LATEST row is inline:
+/// an externalized payload or a trailing sentinel makes the snapshot
+/// unusable on another instance, so the whole group re-runs instead.
+/// Older `__retry__` markers behind a real inline output do not block the
+/// copy — the storage copy skips non-inline rows, which merely resets the
+/// block's attempt counter on the fork.
+///
+/// Shared with `workbench::fork_preview` so the preview always matches the
+/// fork it previews. Returns one `Vec<BlockId>` per copied top-level group
+/// plus the ids of the re-run top-level blocks.
+pub(crate) fn partition_fork_blocks(
+    sequence: &SequenceDefinition,
+    source_outputs: &[BlockOutput],
+    target_idx: usize,
+) -> (Vec<Vec<BlockId>>, Vec<String>) {
+    let mut copy_groups: Vec<Vec<BlockId>> = Vec::new();
+    let mut rerun_blocks: Vec<String> = Vec::new();
+    for block in &sequence.blocks[..target_idx] {
+        let mut group_ids: Vec<BlockId> = Vec::new();
+        collect_block_ids(block, &mut group_ids);
+
+        let mut executed = false;
+        let mut copyable = true;
+        for block_id in &group_ids {
+            // Rows are in created_at ASC order, so the last match is the
+            // latest snapshot for this block.
+            let latest = source_outputs.iter().rfind(|o| &o.block_id == block_id);
+            if let Some(latest) = latest {
+                executed = true;
+                if latest.output_ref.is_some() {
+                    // Trailing sentinel (mid-flight / error) or externalized
+                    // payload — either way the snapshot cannot be cloned.
+                    copyable = false;
+                    break;
+                }
+            }
+        }
+
+        if executed && copyable {
+            copy_groups.push(group_ids);
+        } else {
+            rerun_blocks.push(top_level_block_id(block).as_str().to_owned());
+        }
+    }
+    (copy_groups, rerun_blocks)
 }

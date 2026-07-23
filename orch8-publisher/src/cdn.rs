@@ -14,7 +14,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// AWS Signature Version 4 spec (`UriEncode`).
 fn sigv4_uri_encode(s: &str) -> String {
     use std::fmt::Write;
-    let mut out = String::new();
+    let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         let c = b as char;
         if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
@@ -91,8 +91,42 @@ pub enum CdnError {
     Delete(String),
     #[error("etag fetch failed: {0}")]
     Etag(String),
+    #[error("request signing failed: {0}")]
+    Signing(String),
     #[error("optimistic concurrency conflict")]
     Conflict,
+}
+
+/// Total attempts for a single CDN operation (1 initial + 2 retries).
+/// Upload/delete are idempotent (content-addressed PUT, DELETE, HEAD), so
+/// retrying transient failures is safe.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// Send a request, retrying transient failures (5xx responses, connect and
+/// timeout errors) with a short linear backoff. Returns the final response —
+/// including non-5xx error statuses, which the caller maps to an error — or
+/// the last transport error.
+async fn send_with_retry(
+    request: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let Some(req) = request.try_clone() else {
+            // Non-cloneable (streaming) body: single attempt, no retry.
+            return request.send().await;
+        };
+        match req.send().await {
+            Ok(resp) if resp.status().is_server_error() && attempt < MAX_ATTEMPTS => {
+                debug!(status = %resp.status(), attempt, "transient 5xx from CDN, retrying");
+            }
+            Err(e) if (e.is_connect() || e.is_timeout()) && attempt < MAX_ATTEMPTS => {
+                debug!(error = %e, attempt, "transient connection error, retrying");
+            }
+            other => return other,
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100 * u64::from(attempt))).await;
+    }
 }
 
 /// S3-compatible CDN backend.
@@ -149,6 +183,7 @@ impl S3CdnBackend {
         &self,
         method: &str,
         url: &reqwest::Url,
+        raw_path: &str,
         headers: &mut reqwest::header::HeaderMap,
         payload_hash: &str,
     ) -> Result<(), CdnError> {
@@ -158,17 +193,17 @@ impl S3CdnBackend {
 
         headers.insert(
             "x-amz-date",
-            HeaderValue::from_str(&amz_date).map_err(|e| CdnError::Upload(e.to_string()))?,
+            HeaderValue::from_str(&amz_date).map_err(|e| CdnError::Signing(e.to_string()))?,
         );
         headers.insert(
             "x-amz-content-sha256",
-            HeaderValue::from_str(payload_hash).map_err(|e| CdnError::Upload(e.to_string()))?,
+            HeaderValue::from_str(payload_hash).map_err(|e| CdnError::Signing(e.to_string()))?,
         );
 
         let host = url.host_str().unwrap_or("");
         headers.insert(
             "host",
-            HeaderValue::from_str(host).map_err(|e| CdnError::Upload(e.to_string()))?,
+            HeaderValue::from_str(host).map_err(|e| CdnError::Signing(e.to_string()))?,
         );
 
         let content_type = headers
@@ -192,9 +227,19 @@ impl S3CdnBackend {
             )
         };
 
+        // SigV4's canonical URI must be the *single*-encoded form of the raw
+        // path. `url.path()` is already percent-encoded by the `url` crate, so
+        // feeding it through `canonical_uri` would double-encode (`%20` ->
+        // `%2520`) while the request line keeps the single-encoded form and
+        // S3 rejects the signature. Rebuild the canonical URI from the raw
+        // object path instead.
         let canonical_request = format!(
             "{method}\n{uri}\n{query_string}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
-            uri = canonical_uri(url.path()),
+            uri = canonical_uri(&format!(
+                "/{}/{}",
+                self.bucket,
+                raw_path.trim_start_matches('/')
+            )),
             query_string = canonical_query(url.query()),
         );
 
@@ -213,7 +258,7 @@ impl S3CdnBackend {
         );
         headers.insert(
             "authorization",
-            HeaderValue::from_str(&auth_header).map_err(|e| CdnError::Upload(e.to_string()))?,
+            HeaderValue::from_str(&auth_header).map_err(|e| CdnError::Signing(e.to_string()))?,
         );
 
         Ok(())
@@ -246,14 +291,9 @@ impl CdnBackend for S3CdnBackend {
                 HeaderValue::from_str(cc).map_err(|e| CdnError::Upload(e.to_string()))?,
             );
         }
-        self.sign_request("PUT", &url, &mut headers, &payload_hash)?;
+        self.sign_request("PUT", &url, path, &mut headers, &payload_hash)?;
 
-        let response = self
-            .http
-            .put(url)
-            .headers(headers)
-            .body(bytes)
-            .send()
+        let response = send_with_retry(self.http.put(url).headers(headers).body(bytes))
             .await
             .map_err(|e| CdnError::Upload(e.to_string()))?;
 
@@ -271,13 +311,9 @@ impl CdnBackend for S3CdnBackend {
         let empty_hash = hex::encode(Sha256::digest(b""));
 
         let mut headers = reqwest::header::HeaderMap::new();
-        self.sign_request("DELETE", &url, &mut headers, &empty_hash)?;
+        self.sign_request("DELETE", &url, path, &mut headers, &empty_hash)?;
 
-        let response = self
-            .http
-            .delete(url)
-            .headers(headers)
-            .send()
+        let response = send_with_retry(self.http.delete(url).headers(headers))
             .await
             .map_err(|e| CdnError::Delete(e.to_string()))?;
 
@@ -295,13 +331,9 @@ impl CdnBackend for S3CdnBackend {
         let empty_hash = hex::encode(Sha256::digest(b""));
 
         let mut headers = reqwest::header::HeaderMap::new();
-        self.sign_request("HEAD", &url, &mut headers, &empty_hash)?;
+        self.sign_request("HEAD", &url, path, &mut headers, &empty_hash)?;
 
-        let response = self
-            .http
-            .head(url)
-            .headers(headers)
-            .send()
+        let response = send_with_retry(self.http.head(url).headers(headers))
             .await
             .map_err(|e| CdnError::Etag(e.to_string()))?;
 
@@ -330,7 +362,7 @@ fn format_date(timestamp: u64) -> String {
 fn signing_timestamp(now: SystemTime) -> Result<u64, CdnError> {
     now.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
-        .map_err(|_| CdnError::Upload("system clock is before UNIX epoch".to_string()))
+        .map_err(|_| CdnError::Signing("system clock is before UNIX epoch".to_string()))
 }
 
 fn format_amz_date(timestamp: u64) -> String {
@@ -478,7 +510,7 @@ mod tests {
     fn signing_timestamp_rejects_pre_epoch_clock() {
         let before_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
         let err = signing_timestamp(before_epoch).unwrap_err();
-        assert!(matches!(err, CdnError::Upload(message) if message.contains("before UNIX epoch")));
+        assert!(matches!(err, CdnError::Signing(message) if message.contains("before UNIX epoch")));
     }
 
     #[test]
@@ -487,6 +519,57 @@ mod tests {
         assert_eq!(
             signing_timestamp(UNIX_EPOCH + std::time::Duration::from_secs(42)).unwrap(),
             42
+        );
+    }
+
+    // Regression: the canonical URI must be single-encoded from the raw
+    // object path. `url.path()` is already percent-encoded by the `url`
+    // crate; re-encoding it turned `%20` into `%2520` while the request line
+    // kept the single-encoded form, so S3 rejected the signature.
+    #[test]
+    fn sign_request_single_encodes_reserved_path_characters() {
+        let backend = S3CdnBackend::new(
+            "https://s3.example.com".to_string(),
+            "bucket".to_string(),
+            "us-east-1".to_string(),
+            "AKID".to_string(),
+            "secret".to_string(),
+        );
+        let raw_path = "tenant x/sequences/v1 (draft).json";
+        let url = reqwest::Url::parse(&backend.url(raw_path)).unwrap();
+        let payload_hash = hex::encode(Sha256::digest(b""));
+        let mut headers = reqwest::header::HeaderMap::new();
+        backend
+            .sign_request("PUT", &url, raw_path, &mut headers, &payload_hash)
+            .unwrap();
+
+        // Recompute the expected signature independently, using the
+        // single-encoded canonical URI.
+        let amz_date = headers
+            .get("x-amz-date")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let date_stamp = &amz_date[..8];
+        let canonical_headers = format!(
+            "host:s3.example.com\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"
+        );
+        let canonical_request = format!(
+            "PUT\n/bucket/tenant%20x/sequences/v1%20%28draft%29.json\n\n{canonical_headers}\nhost;x-amz-content-sha256;x-amz-date\n{payload_hash}"
+        );
+        let scope = format!("{date_stamp}/us-east-1/s3/aws4_request");
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+            hex::encode(Sha256::digest(canonical_request.as_bytes()))
+        );
+        let signing_key = get_signing_key("secret", date_stamp, "us-east-1", "s3");
+        let expected_signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+
+        let auth = headers.get("authorization").unwrap().to_str().unwrap();
+        assert!(
+            auth.contains(&format!("Signature={expected_signature}")),
+            "authorization header used a different canonical request: {auth}"
         );
     }
 }

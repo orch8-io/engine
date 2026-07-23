@@ -13,6 +13,13 @@ use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 
+/// Bounds for the server-suggested sync interval. A buggy (or malicious, if
+/// the API key/channel is ever abused) response must not be able to turn the
+/// device into a sync hot-loop (`0` → a POST every tick) or stop syncing
+/// entirely (a huge value).
+const MIN_SYNC_INTERVAL_SECS: u32 = 5;
+const MAX_SYNC_INTERVAL_SECS: u32 = 3600;
+
 /// Batched status + approval reporter that syncs with the server on a
 /// configurable tick cadence. Receives commands from the server and executes
 /// them locally.
@@ -57,6 +64,17 @@ struct CommandEntry {
     payload: serde_json::Value,
 }
 
+/// Outcome of executing a server command. Drives whether the command is
+/// acked (server stops redelivering) or left un-acked for redelivery.
+enum CommandOutcome {
+    /// Side effects applied, or the command is permanently invalid (bad
+    /// payload, unknown type) — ack it so the server stops redelivering.
+    Done,
+    /// Transient failure (storage error, resource limit, sequence not synced
+    /// yet) — do not ack; the server will redeliver and we re-execute.
+    Retryable,
+}
+
 impl SyncReporter {
     pub fn new(
         pool: SqlitePool,
@@ -96,16 +114,23 @@ impl SyncReporter {
 
     /// Check if it's time to sync. Called from the tick loop.
     pub fn should_sync(&self) -> bool {
-        if self.force_sync.load(Ordering::Relaxed) {
-            return true;
-        }
         let count = self.tick_counter.fetch_add(1, Ordering::Relaxed);
+        if self.force_sync.load(Ordering::Relaxed) {
+            // A forced sync retries promptly, but not in a hot loop: space
+            // attempts ~5s apart so a push-triggered sync while offline
+            // doesn't hammer the radio every tick.
+            let retry_ticks = (5_000 / self.tick_interval_ms.max(1)).max(1);
+            return count >= retry_ticks;
+        }
         count >= self.sync_interval_ticks.load(Ordering::Relaxed)
     }
 
+    /// Reset the tick counter after a sync attempt. Deliberately does NOT
+    /// clear `force_sync`: a push-triggered sync that fails (offline, server
+    /// error) must stay pending so the wakeup isn't wasted — the flag is
+    /// cleared only after a successful round-trip in `sync_once`.
     fn reset_counter(&self) {
         self.tick_counter.store(0, Ordering::Relaxed);
-        self.force_sync.store(false, Ordering::Relaxed);
     }
 
     /// Initialize the outbox tables. Called once on engine startup.
@@ -469,17 +494,37 @@ impl SyncReporter {
             .execute(&self.pool)
             .await;
 
-            match insert_result {
-                Ok(_) => {
-                    self.execute_command(cmd, storage, lifecycle).await;
-                }
+            let outcome = match insert_result {
+                Ok(_) => Some(self.execute_command(cmd, storage, lifecycle).await),
                 Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                     debug!(command_id = %cmd.id, "command already executed — skipping duplicate delivery");
+                    // Already executed: fall through to re-record the ack so
+                    // the server stops redelivering.
+                    None
                 }
                 Err(e) => {
-                    warn!(error = %e, command_id = %cmd.id, "failed to record command idempotency marker; executing without dedupe guard");
-                    self.execute_command(cmd, storage, lifecycle).await;
+                    // Without the idempotency marker, executing is unsafe (a
+                    // redelivery would re-run side effects) — skip and let the
+                    // server redeliver once storage is healthy again.
+                    warn!(error = %e, command_id = %cmd.id, "failed to record command idempotency marker; skipping execution until redelivery");
+                    continue;
                 }
+            };
+
+            if let Some(CommandOutcome::Retryable) = outcome {
+                // Transient failure: roll back the idempotency marker so the
+                // server's redelivery re-executes the command, and don't ack —
+                // acking here would tell the server the side effects happened
+                // when they did not (e.g. a "start workflow" that never ran).
+                if let Err(e) =
+                    sqlx::query("DELETE FROM sync_executed_commands WHERE command_id = ?")
+                        .bind(&cmd.id)
+                        .execute(&self.pool)
+                        .await
+                {
+                    warn!(error = %e, command_id = %cmd.id, "failed to roll back idempotency marker after retryable command failure");
+                }
+                continue;
             }
 
             if let Err(e) =
@@ -502,9 +547,21 @@ impl SyncReporter {
             warn!(error = %e, "failed to prune old sync_executed_commands rows");
         }
 
-        // Update sync interval from server hint.
+        // Update sync interval from server hint, clamped to a sane range: a
+        // response of `0` would make `should_sync` true on every tick (a sync
+        // POST every ~100ms), and a huge value would effectively disable sync.
+        let clamped_secs = sync_resp
+            .sync_interval_secs
+            .clamp(MIN_SYNC_INTERVAL_SECS, MAX_SYNC_INTERVAL_SECS);
+        if clamped_secs != sync_resp.sync_interval_secs {
+            warn!(
+                requested = sync_resp.sync_interval_secs,
+                clamped = clamped_secs,
+                "server sync_interval_secs out of range — clamped"
+            );
+        }
         let new_interval_ticks =
-            u64::from(sync_resp.sync_interval_secs) * 1000 / self.tick_interval_ms.max(1);
+            (u64::from(clamped_secs) * 1000 / self.tick_interval_ms.max(1)).max(1);
         self.sync_interval_ticks
             .store(new_interval_ticks, Ordering::Relaxed);
 
@@ -513,10 +570,12 @@ impl SyncReporter {
             approvals_sent = sent_approval_ids.len(),
             delegations_sent = sent_delegation_ids.len(),
             commands_received = sync_resp.commands.len(),
-            next_sync_secs = sync_resp.sync_interval_secs,
+            next_sync_secs = clamped_secs,
             "sync complete"
         );
 
+        // Successful round-trip: clear any pending push-triggered forced sync.
+        self.force_sync.store(false, Ordering::Relaxed);
         self.reset_counter();
     }
 
@@ -526,7 +585,7 @@ impl SyncReporter {
         cmd: &CommandEntry,
         storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
-    ) {
+    ) -> CommandOutcome {
         match cmd.command_type.as_str() {
             "complete_step" => {
                 let instance_id = cmd.payload.get("instance_id").and_then(|v| v.as_str());
@@ -544,7 +603,7 @@ impl SyncReporter {
                         orch8_types::ids::InstanceId::from_uuid(u)
                     } else {
                         warn!(instance_id = %iid, "invalid UUID in complete_step command");
-                        return;
+                        return CommandOutcome::Done;
                     };
 
                     let signal = orch8_types::signal::Signal {
@@ -560,8 +619,12 @@ impl SyncReporter {
                     };
                     if let Err(e) = storage.enqueue_signal(&signal).await {
                         warn!(error = %e, "failed to enqueue complete_step signal");
+                        return CommandOutcome::Retryable;
                     }
+                } else {
+                    warn!("complete_step command missing instance_id or step_name");
                 }
+                CommandOutcome::Done
             }
             "cancel_instance" => {
                 let instance_id = cmd.payload.get("instance_id").and_then(|v| v.as_str());
@@ -571,15 +634,19 @@ impl SyncReporter {
                         orch8_types::ids::InstanceId::from_uuid(u)
                     } else {
                         warn!(instance_id = %iid, "invalid UUID in cancel_instance command");
-                        return;
+                        return CommandOutcome::Done;
                     };
                     if let Err(e) = storage
                         .update_instance_state(id, InstanceState::Cancelled, None)
                         .await
                     {
                         warn!(error = %e, "failed to cancel instance from server command");
+                        return CommandOutcome::Retryable;
                     }
+                } else {
+                    warn!("cancel_instance command missing instance_id");
                 }
+                CommandOutcome::Done
             }
             "start_workflow" => {
                 let sequence_name = cmd.payload.get("sequence_name").and_then(|v| v.as_str());
@@ -598,13 +665,19 @@ impl SyncReporter {
                         Ok(id) => {
                             debug!(instance_id = %id, sequence_name = %name, "workflow started from server command");
                         }
+                        // Permanently invalid input won't succeed on redelivery.
+                        Err(e @ crate::error::MobileError::InvalidInput { .. }) => {
+                            warn!(error = %e, sequence_name = %name, "start_workflow command has invalid input — not retrying");
+                        }
                         Err(e) => {
                             warn!(error = %e, sequence_name = %name, "failed to start workflow from server command");
+                            return CommandOutcome::Retryable;
                         }
                     }
                 } else {
                     warn!("start_workflow command missing sequence_name");
                 }
+                CommandOutcome::Done
             }
             "update_sequence" => {
                 let instance_id = cmd.payload.get("instance_id").and_then(|v| v.as_str());
@@ -624,7 +697,7 @@ impl SyncReporter {
                         orch8_types::ids::InstanceId::from_uuid(u)
                     } else {
                         warn!(instance_id = %iid, "invalid UUID in update_sequence");
-                        return;
+                        return CommandOutcome::Done;
                     };
 
                     match policy {
@@ -635,6 +708,7 @@ impl SyncReporter {
                                 .await
                             {
                                 warn!(error = %e, "update_sequence(restart): cancel failed");
+                                return CommandOutcome::Retryable;
                             } else if let Some(seq_name) =
                                 cmd.payload.get("sequence_name").and_then(|v| v.as_str())
                             {
@@ -648,6 +722,7 @@ impl SyncReporter {
                                     }
                                     Err(e) => {
                                         warn!(error = %e, "update_sequence(restart): start failed");
+                                        return CommandOutcome::Retryable;
                                     }
                                 }
                             }
@@ -658,6 +733,7 @@ impl SyncReporter {
                                 .await
                             {
                                 warn!(error = %e, "update_sequence(fail): failed");
+                                return CommandOutcome::Retryable;
                             }
                         }
                         "cancel" => {
@@ -666,6 +742,7 @@ impl SyncReporter {
                                 .await
                             {
                                 warn!(error = %e, "update_sequence(cancel): failed");
+                                return CommandOutcome::Retryable;
                             }
                         }
                         "graceful" => {
@@ -684,6 +761,7 @@ impl SyncReporter {
                                 .await
                             {
                                 warn!(error = %e, "update_sequence(skip_executed): cancel failed");
+                                return CommandOutcome::Retryable;
                             } else if let Some(seq_name) =
                                 cmd.payload.get("sequence_name").and_then(|v| v.as_str())
                             {
@@ -697,6 +775,7 @@ impl SyncReporter {
                                     }
                                     Err(e) => {
                                         warn!(error = %e, "update_sequence(skip_executed): start failed");
+                                        return CommandOutcome::Retryable;
                                     }
                                 }
                             }
@@ -708,6 +787,7 @@ impl SyncReporter {
                 } else {
                     warn!("update_sequence command missing instance_id");
                 }
+                CommandOutcome::Done
             }
             "step_result" => {
                 let request_id = cmd.payload.get("request_id").and_then(|v| v.as_str());
@@ -736,7 +816,7 @@ impl SyncReporter {
                             orch8_types::ids::InstanceId::from_uuid(u)
                         } else {
                             warn!(instance_id = %iid, "invalid UUID in step_result");
-                            return;
+                            return CommandOutcome::Done;
                         };
                         let signal = orch8_types::signal::Signal {
                             id: uuid::Uuid::now_v7(),
@@ -754,6 +834,7 @@ impl SyncReporter {
                         };
                         if let Err(e) = storage.enqueue_signal(&signal).await {
                             warn!(error = %e, "failed to enqueue step_result signal");
+                            return CommandOutcome::Retryable;
                         }
                     } else {
                         let error = cmd
@@ -768,10 +849,14 @@ impl SyncReporter {
                             "step_result: delegation failed"
                         );
                     }
+                } else {
+                    warn!("step_result command missing request_id, instance_id, or block_id");
                 }
+                CommandOutcome::Done
             }
             other => {
                 warn!(command_type = %other, "unknown command type from server");
+                CommandOutcome::Done
             }
         }
     }
@@ -810,17 +895,26 @@ async fn build_steps_payload(
     instance_id: InstanceId,
     seq: Option<&SequenceDefinition>,
 ) -> Option<serde_json::Value> {
-    let tree = storage.get_execution_tree(instance_id).await.ok()?;
+    let tree = match storage.get_execution_tree(instance_id).await {
+        Ok(tree) => tree,
+        Err(e) => {
+            debug!(instance_id = %instance_id, error = %e, "failed to load execution tree for steps payload");
+            return None;
+        }
+    };
 
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     if let Some(seq) = seq {
         let flat = flatten_blocks(&seq.blocks);
 
+        // Index tree nodes by block id so each block lookup is O(1) instead
+        // of a linear scan of the tree for every block.
+        let nodes_by_block: std::collections::HashMap<&str, _> =
+            tree.iter().map(|n| (n.block_id.as_str(), n)).collect();
+
         for (block_id, block_type, handler) in &flat {
-            let node = tree
-                .iter()
-                .find(|n| n.block_id.as_str() == block_id.as_str());
+            let node = nodes_by_block.get(block_id.as_str());
             let (state, started_at, completed_at) = match node {
                 Some(n) => (
                     n.state.to_string(),
@@ -1161,5 +1255,202 @@ mod tests {
                 .unwrap();
         assert_eq!(remaining_outbox, 1);
         assert_eq!(remaining_acks, vec!["a2"]);
+    }
+
+    /// Spawn a mock sync server that answers `count` requests, each with the
+    /// corresponding body from `bodies` (cycling the last one if short).
+    async fn spawn_mock_server(
+        bodies: Vec<String>,
+        count: usize,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/sync");
+        let server = tokio::spawn(async move {
+            for i in 0..count {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await.unwrap();
+                let body = &bodies[i.min(bodies.len() - 1)];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    async fn ack_count(pool: &SqlitePool, command_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_command_acks WHERE command_id = ?")
+            .bind(command_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn marker_count(pool: &SqlitePool, command_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_executed_commands WHERE command_id = ?")
+            .bind(command_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A command that fails with a transient error (here: sequence not synced
+    /// yet) must NOT be acked and must NOT keep its idempotency marker —
+    /// otherwise the server's redelivery would be deduped away and the command
+    /// would silently never execute.
+    #[tokio::test]
+    async fn retryable_command_failure_is_not_acked_and_reexecutes_on_redelivery() {
+        let body = serde_json::json!({
+            "commands": [{
+                "id": "cmd-retry",
+                "type": "start_workflow",
+                "payload": { "sequence_name": "wf-late", "input": "{}" }
+            }],
+            "sync_interval_secs": 30
+        })
+        .to_string();
+        let (sync_url, server) = spawn_mock_server(vec![body], 2).await;
+
+        let (reporter, storage, lifecycle) = setup(sync_url).await;
+        // NOTE: sequence "wf-late" is deliberately not seeded yet.
+
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        assert_eq!(ack_count(&reporter.pool, "cmd-retry").await, 0, "failed command must not be acked");
+        assert_eq!(
+            marker_count(&reporter.pool, "cmd-retry").await,
+            0,
+            "idempotency marker must be rolled back so redelivery re-executes"
+        );
+        assert_eq!(count_instances(&storage).await, 0);
+
+        // The server redelivers the un-acked command; now it can succeed.
+        seed_sequence(&storage, "wf-late").await;
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        server.await.unwrap();
+
+        assert_eq!(count_instances(&storage).await, 1, "redelivered command must execute");
+        assert_eq!(ack_count(&reporter.pool, "cmd-retry").await, 1);
+        assert_eq!(marker_count(&reporter.pool, "cmd-retry").await, 1);
+    }
+
+    /// A permanently invalid command (unknown type, malformed payload) must
+    /// be acked immediately — redelivering it would never succeed — and the
+    /// idempotency marker must be retained so a redelivery is skipped rather
+    /// than re-executed.
+    #[tokio::test]
+    async fn permanently_invalid_command_is_acked_and_not_retried() {
+        let body = serde_json::json!({
+            "commands": [
+                {
+                    "id": "cmd-unknown",
+                    "type": "bogus_command",
+                    "payload": {}
+                },
+                {
+                    "id": "cmd-malformed",
+                    "type": "cancel_instance",
+                    "payload": { "instance_id": "not-a-uuid" }
+                }
+            ],
+            "sync_interval_secs": 30
+        })
+        .to_string();
+        let (sync_url, server) = spawn_mock_server(vec![body], 2).await;
+
+        let (reporter, storage, lifecycle) = setup(sync_url).await;
+
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        // Permanently invalid commands are acked so the server stops
+        // redelivering, and their markers are retained.
+        assert_eq!(ack_count(&reporter.pool, "cmd-unknown").await, 1);
+        assert_eq!(ack_count(&reporter.pool, "cmd-malformed").await, 1);
+        assert_eq!(marker_count(&reporter.pool, "cmd-unknown").await, 1);
+        assert_eq!(marker_count(&reporter.pool, "cmd-malformed").await, 1);
+
+        // Redelivery (server never confirmed the ack): deduped by the marker,
+        // ack re-recorded, still exactly one marker row each.
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        server.await.unwrap();
+
+        assert_eq!(marker_count(&reporter.pool, "cmd-unknown").await, 1);
+        assert_eq!(marker_count(&reporter.pool, "cmd-malformed").await, 1);
+        assert_eq!(ack_count(&reporter.pool, "cmd-unknown").await, 1);
+        assert_eq!(ack_count(&reporter.pool, "cmd-malformed").await, 1);
+    }
+
+    /// A buggy or malicious server must not be able to set a sync interval of
+    /// 0 (a sync POST every tick) or an absurdly large one (sync never runs).
+    #[tokio::test]
+    async fn server_sync_interval_hint_is_clamped() {
+        let bodies = vec![
+            serde_json::json!({ "sync_interval_secs": 0 }).to_string(),
+            serde_json::json!({ "sync_interval_secs": 100_000 }).to_string(),
+        ];
+        let (sync_url, server) = spawn_mock_server(bodies, 2).await;
+
+        // setup() uses tick_interval_ms = 1000, so ticks == seconds.
+        let (reporter, storage, lifecycle) = setup(sync_url).await;
+
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert_eq!(
+            reporter.sync_interval_ticks.load(Ordering::Relaxed),
+            u64::from(MIN_SYNC_INTERVAL_SECS),
+            "zero interval must clamp up to the floor"
+        );
+
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert_eq!(
+            reporter.sync_interval_ticks.load(Ordering::Relaxed),
+            u64::from(MAX_SYNC_INTERVAL_SECS),
+            "huge interval must clamp down to the ceiling"
+        );
+
+        server.await.unwrap();
+    }
+
+    /// A push-triggered forced sync that fails (offline) must stay pending so
+    /// the wakeup isn't wasted; it clears only after a successful round-trip.
+    #[tokio::test]
+    async fn force_sync_survives_failed_sync_and_clears_after_success() {
+        // Unreachable server: the sync attempt fails.
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        reporter.on_push_received();
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert!(
+            reporter.force_sync.load(Ordering::Relaxed),
+            "force_sync must survive a failed sync attempt"
+        );
+
+        // Reachable server: the forced sync succeeds and the flag clears.
+        let body = serde_json::json!({ "sync_interval_secs": 30 }).to_string();
+        let (sync_url, server) = spawn_mock_server(vec![body], 1).await;
+        let (reporter2, storage2, lifecycle2) = setup(sync_url).await;
+        reporter2.on_push_received();
+        reporter2.sync_once(&storage2, &lifecycle2).await;
+        server.await.unwrap();
+        assert!(
+            !reporter2.force_sync.load(Ordering::Relaxed),
+            "force_sync must clear after a successful sync"
+        );
+    }
+
+    /// Forced (push-triggered) syncs retry promptly but not in a hot loop:
+    /// attempts are spaced ~5s apart. `setup()` uses `tick_interval_ms` = 1000,
+    /// so the retry floor is 5 ticks.
+    #[tokio::test]
+    async fn should_sync_throttles_forced_retries() {
+        let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        reporter.on_push_received();
+        let results: Vec<bool> = (0..6).map(|_| reporter.should_sync()).collect();
+        assert_eq!(results, vec![false, false, false, false, false, true]);
     }
 }

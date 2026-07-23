@@ -21,6 +21,14 @@ use crate::handlers::param_resolve::IN_PROGRESS_SENTINEL;
 
 use super::{StepOutcome, wake_parent_if_child};
 
+/// Marker key inside a `wait_for_input` gate-acceptance output payload
+/// (`{"value": …, "_orch8_human_gate": true}`). Distinguishes a gate
+/// acceptance from a real handler output: both are stored with
+/// `output_ref: None`, but only the acceptance carries this key. Used by the
+/// gate-durability recovery scan in [`check_human_input_at`] and by the
+/// fast-path completed-set skip in `scheduler::process_instance_flat`.
+pub(crate) const HUMAN_GATE_MARKER: &str = "_orch8_human_gate";
+
 /// Check if a step's SLA deadline has been breached (fast path).
 /// Delegates to the shared `handle_deadline_breach` with `from_state = Running`.
 /// Returns `true` if the deadline was breached and the instance was failed.
@@ -271,9 +279,11 @@ pub(super) async fn check_step_rate_limit(
 /// can drive the signal-validation path directly without stringing up the full
 /// tick loop. Still called exclusively from `process_step_block` in-crate.
 /// Accept a human-input `value` for a gated step: persist the canonical
-/// `{ "value": <choice> }` block output and merge it into
-/// `context.data[store_key]`. Shared by the real signal path and the dry-run
-/// auto-approve path so both produce identical post-approval state.
+/// `{ "value": <choice> }` block output (tagged with [`HUMAN_GATE_MARKER`]
+/// so durability recovery can tell it apart from a completed handler
+/// output) and merge it into `context.data[store_key]`. Shared by the real
+/// signal path and the dry-run auto-approve path so both produce identical
+/// post-approval state.
 async fn accept_human_input(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
@@ -285,7 +295,12 @@ async fn accept_human_input(
         .store_as
         .clone()
         .unwrap_or_else(|| step_def.id.as_str().to_owned());
-    let output_json = serde_json::json!({ "value": value.clone() });
+    let output_json = serde_json::json!({
+        "value": value.clone(),
+        // Marks this row as a gate acceptance rather than a completed
+        // handler output — see HUMAN_GATE_MARKER.
+        HUMAN_GATE_MARKER: true,
+    });
 
     let output = orch8_types::output::BlockOutput {
         id: uuid::Uuid::now_v7(),
@@ -395,6 +410,29 @@ pub async fn check_human_input_at(
         }
     }
 
+    // Durability recovery: the gate may already have been accepted on a
+    // previous attempt whose handler then crashed or failed retryably. The
+    // acceptance row (marked with `HUMAN_GATE_MARKER`) survives — but the
+    // `human_input:` signal was already marked delivered, so scanning pending
+    // signals alone would park the instance forever (or, on the fast path,
+    // skip the step as "completed" without its handler ever finishing).
+    // Treat the step's latest non-bookkeeping output carrying the marker as
+    // a satisfied gate so the handler (re-)runs.
+    //
+    // Rows are scanned newest-first skipping `__in_progress__`/`__retry__`
+    // bookkeeping; a real handler output (or timeout-escalation marker) as
+    // the latest effective row means the step genuinely completed — e.g. a
+    // gated step inside a loop body must wait for FRESH input on the next
+    // iteration, not auto-pass on the previous iteration's acceptance.
+    if gate_previously_accepted(storage, instance.id, &step_def.id).await? {
+        debug!(
+            instance_id = %instance.id,
+            block_id = %step_def.id,
+            "human input: previous acceptance recovered from outputs, gate satisfied"
+        );
+        return Ok(false); // Continue execution
+    }
+
     // No response yet. Check timeout.
     if let Some(timeout) = human_def.timeout {
         let baseline = instance
@@ -461,6 +499,62 @@ pub async fn check_human_input_at(
         "waiting for human input, deferring"
     );
     Ok(true) // Deferred
+}
+
+/// [`check_human_input_at`] recovery scan: does the step's latest effective
+/// output (ignoring `__in_progress__` sentinels and `__retry__` markers) show
+/// a prior gate acceptance?
+///
+/// Fetches the instance's outputs only when no pending `human_input:` signal
+/// matched — i.e. once per park evaluation, not per tick.
+async fn gate_previously_accepted(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+    block_id: &orch8_types::ids::BlockId,
+) -> Result<bool, EngineError> {
+    let outputs = storage.get_all_outputs(instance_id).await?;
+    let mut latest: Option<&orch8_types::output::BlockOutput> = None;
+    for o in &outputs {
+        if o.block_id != *block_id
+            || matches!(
+                o.output_ref.as_deref(),
+                Some(IN_PROGRESS_SENTINEL | "__retry__")
+            )
+        {
+            continue;
+        }
+        if latest.is_none_or(|l| (o.created_at, o.id) >= (l.created_at, l.id)) {
+            latest = Some(o);
+        }
+    }
+    Ok(latest.is_some_and(|o| o.output.get(HUMAN_GATE_MARKER).is_some()))
+}
+
+/// Fast-path completed-set guard for `wait_for_input` steps. A gated step can
+/// land in `get_completed_block_ids` on gate acceptance ALONE (the acceptance
+/// row has `output_ref: None`). Skipping it in the flat loop would advance
+/// the instance while the step's side-effecting handler never finished (after
+/// a mid-handler crash or retryable failure). Consult the step's latest
+/// output and re-execute unless it proves the handler actually completed
+/// (at-least-once, same contract as the `__in_progress__` sentinel).
+pub(super) async fn gated_step_incomplete(
+    storage: &dyn StorageBackend,
+    instance_id: orch8_types::ids::InstanceId,
+    block_id: &orch8_types::ids::BlockId,
+) -> Result<bool, EngineError> {
+    let Some(latest) = storage.get_block_output(instance_id, block_id).await? else {
+        return Ok(true);
+    };
+    Ok(match latest.output_ref.as_deref() {
+        // Inline row: a real handler output or a timeout-escalation marker
+        // means the step finished; the gate-acceptance marker key means only
+        // the GATE completed — the handler must still (re-)run.
+        None => latest.output.get(HUMAN_GATE_MARKER).is_some(),
+        // Bookkeeping rows never prove completion.
+        Some(IN_PROGRESS_SENTINEL | "__retry__") => true,
+        // Any other ref is an externalized real output — completed.
+        Some(_) => false,
+    })
 }
 
 /// Execute a single step block within an instance.
@@ -852,13 +946,19 @@ pub(super) async fn execute_step_block(
                 cb.record_failure(&instance.tenant_id, &step_def.handler);
             }
             // Handler returned cleanly with a retryable error — the side
-            // effect either didn't happen or is idempotent. Clear the
-            // in-progress sentinel so the block is eligible for retry, then
-            // persist a retry marker so the attempt counter advances.
+            // effect either didn't happen or is idempotent. Clear ONLY the
+            // in-progress sentinel (by row id) so the block is eligible for
+            // retry, then persist a retry marker so the attempt counter
+            // advances. Deleting the whole block's outputs here previously
+            // also wiped a `wait_for_input` gate-acceptance row — and since
+            // the `human_input:` signal was already marked delivered, the
+            // next attempt found no signal and parked the instance forever
+            // (the acceptance recovery scan in `check_human_input_at` needs
+            // that row to survive).
             //
             // The marker is essential: `compute_attempt` derives the next
             // attempt from the most-recent `BlockOutput`. The sentinel we
-            // just deleted carried `attempt = u16::MAX`, and without a
+            // just deleted carried the in-flight attempt, and without a
             // replacement marker `get_block_output` would return `None` on
             // the next tick → `attempt` resets to 0 → `handle_retryable_failure`
             // never sees `attempt >= max_attempts` → the step retries forever
@@ -869,10 +969,7 @@ pub(super) async fn execute_step_block(
             // Log failures rather than silently dropping them: a failed
             // delete leaks an orphan sentinel row, and a failed marker save
             // stalls the attempt counter (worst case: a few extra retries).
-            if let Err(err) = storage
-                .delete_block_outputs(instance_id, &step_def.id)
-                .await
-            {
+            if let Err(err) = storage.delete_block_output_by_id(sentinel.id).await {
                 tracing::warn!(
                     instance_id = %instance_id,
                     block_id = %step_def.id,
@@ -1120,8 +1217,7 @@ pub(super) async fn handle_retryable_failure(
             retry.max_backoff,
             retry.backoff_multiplier,
         );
-        let fire_at = clock.now()
-            + chrono::Duration::from_std(backoff).unwrap_or_else(|_| chrono::Duration::zero());
+        let fire_at = clamped_fire_at(clock.now(), backoff);
 
         warn!(
             instance_id = %instance_id,
@@ -1167,6 +1263,18 @@ pub(super) async fn handle_retryable_failure(
     wake_parent_if_child(storage, instance).await;
 
     Ok(())
+}
+
+/// Add a retry backoff to `now`, clamping a pathological duration instead of
+/// collapsing it to zero (immediate hot retry, the old fallback) or panicking
+/// when the sum overflows the representable range.
+///
+/// `pub(crate)`: shared with the tree path (`handlers::step_block`) so both
+/// dispatch paths clamp retry backoffs identically.
+pub(crate) fn clamped_fire_at(now: DateTime<Utc>, backoff: std::time::Duration) -> DateTime<Utc> {
+    let delta = chrono::Duration::from_std(backoff).unwrap_or(chrono::Duration::MAX);
+    now.checked_add_signed(delta)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// Transition the instance to `Failed` and emit an `instance.failed`
@@ -1266,7 +1374,7 @@ pub(super) async fn dispatch_to_external_worker(
             tracing::warn!(
                 instance_id = %instance.id,
                 attempt = %attempt,
-                "attempt counter exceeds u16::MAX, saturating"
+                "attempt counter exceeds u16::MAX, rejecting dispatch"
             );
             orch8_types::error::StorageError::Query("attempt counter overflow".into())
         })?,

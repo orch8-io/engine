@@ -594,7 +594,10 @@ fn is_block_object(map: &serde_json::Map<String, Value>) -> bool {
                 | "router"
                 | "try_catch"
                 | "sub_sequence"
-                | "ab_split"
+                // Serde tag for `BlockDefinition::ABSplit` (`rename_all =
+                // "snake_case"`) — `preflight.rs`/`release_diff.rs` use the
+                // same spelling.
+                | "a_b_split"
                 | "cancellation_scope"
                 | "saga"
         )
@@ -785,7 +788,13 @@ fn schema_path_status(schema: &Value, path: &[String]) -> SchemaPathStatus {
     let mut current = schema;
     let mut optional = false;
     for segment in path {
-        if let Ok(index) = segment.parse::<usize>() {
+        // A segment that names a real property is a property, never an array
+        // index — numeric property names are legal in JSON Schema.
+        let is_property = current
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.contains_key(segment));
+        if !is_property && let Ok(index) = segment.parse::<usize>() {
             let Some(items) = current.get("items") else {
                 return SchemaPathStatus::Missing;
             };
@@ -899,6 +908,20 @@ mod tests {
         ));
         assert!(!report.is_compatible());
         assert_eq!(report.findings[0].code, "SCHEMA_PATH_MISSING");
+    }
+
+    #[test]
+    fn numeric_property_names_are_properties_not_indices() {
+        let report = compile(&sequence(
+            &json!([
+                {"type":"step","id":"source","handler":"noop","params":{},"output_schema":{
+                    "type":"object","properties":{"0":{"type":"string"}},"required":["0"],"additionalProperties":false
+                }},
+                {"type":"step","id":"use","handler":"noop","params":{"x":"{{ outputs.source.0 }}"}}
+            ]),
+            None,
+        ));
+        assert!(report.is_compatible(), "{:?}", report.findings);
     }
 
     #[test]

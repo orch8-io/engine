@@ -36,6 +36,11 @@ use crate::error::EngineError;
 ///   - `__in_progress__`: crash-mid-step sentinel — its `{"_sentinel":
 ///     true, ...}` payload is garbage to downstream templates.
 ///   - `__retry__`: attempt-counter marker — likewise not a real result.
+///   - `_interceptor:*` block ids: interceptor trace artifacts
+///     (`interceptors.rs`) — with interceptors enabled they add two rows per
+///     step execution and have no business in user templates.
+///   - `_sla:*` block ids: SLA breach sentinels (`scheduler.rs`) — internal
+///     diagnostics, not step results.
 ///
 /// `__error__` rows are kept deliberately: they are genuine failure evidence
 /// a compensation / `try_catch` path may legitimately reference.
@@ -55,7 +60,11 @@ pub(crate) async fn build_outputs_shape(
         ) {
             continue;
         }
-        map.insert(o.block_id.as_str().to_owned(), o.output);
+        let block_id = o.block_id.as_str();
+        if block_id.starts_with("_interceptor:") || block_id.starts_with("_sla:") {
+            continue;
+        }
+        map.insert(block_id.to_owned(), o.output);
     }
     Ok(serde_json::Value::Object(map))
 }
@@ -408,6 +417,23 @@ mod tests {
         save_output(&s, inst.id, "b1", json!({"result": 42})).await;
         let shape = build_outputs_shape(&s, inst.id).await.unwrap();
         assert_eq!(shape, json!({"b1": {"result": 42}}));
+    }
+
+    // PR3e (audit): interceptor trace artifacts and SLA breach sentinels are
+    // internal bookkeeping rows — they must never leak into
+    // `{{ outputs.* }}` templates.
+    #[tokio::test]
+    async fn build_outputs_shape_filters_interceptor_and_sla_rows() {
+        let s = mk_storage().await;
+        let inst = mk_instance(InstanceId::new());
+        s.create_instance(&inst).await.unwrap();
+        save_output(&s, inst.id, "_interceptor:before:b1", json!({"p": 1})).await;
+        save_output(&s, inst.id, "_interceptor:after:b1", json!({"p": 2})).await;
+        save_output(&s, inst.id, "_sla:runtime", json!({"breach": true})).await;
+        save_output(&s, inst.id, "_sla:step:b1", json!({"breach": true})).await;
+        save_output(&s, inst.id, "b1", json!({"ok": true})).await;
+        let shape = build_outputs_shape(&s, inst.id).await.unwrap();
+        assert_eq!(shape, json!({"b1": {"ok": true}}));
     }
 
     #[tokio::test]

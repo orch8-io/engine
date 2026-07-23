@@ -8,7 +8,7 @@ use uuid::Uuid;
 use orch8_storage::StorageBackend;
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
-use orch8_types::sequence::{BlockDefinition, StepDef};
+use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
@@ -57,6 +57,25 @@ impl Orch8GrpcService {
         caller_tenant: Option<&TenantId>,
         instance: &mut TaskInstance,
     ) -> Result<(), Status> {
+        // Verify the referenced sequence exists and belongs to the caller.
+        let sequence = self
+            .storage
+            .get_sequence(instance.sequence_id)
+            .await
+            .map_err(storage_err)?
+            .ok_or_else(|| Status::not_found("sequence not found"))?;
+        self.sanitize_new_instance_with_sequence(caller_tenant, instance, &sequence)
+    }
+
+    /// [`Self::sanitize_new_instance`] with the sequence already fetched, so
+    /// batch creation can look up each distinct sequence once instead of one
+    /// round trip per instance.
+    fn sanitize_new_instance_with_sequence(
+        &self,
+        caller_tenant: Option<&TenantId>,
+        instance: &mut TaskInstance,
+        sequence: &SequenceDefinition,
+    ) -> Result<(), Status> {
         if let Some(caller) = caller_tenant {
             if !instance.tenant_id.as_str().is_empty() && instance.tenant_id != *caller {
                 return Err(Status::permission_denied(
@@ -66,13 +85,6 @@ impl Orch8GrpcService {
             instance.tenant_id = caller.clone();
         }
 
-        // Verify the referenced sequence exists and belongs to the caller.
-        let sequence = self
-            .storage
-            .get_sequence(instance.sequence_id)
-            .await
-            .map_err(storage_err)?
-            .ok_or_else(|| Status::not_found("sequence not found"))?;
         if sequence.tenant_id != instance.tenant_id {
             return Err(Status::not_found("sequence not found"));
         }
@@ -478,15 +490,31 @@ impl Orch8Service for Orch8GrpcService {
                 req.get_ref().instances_json.len()
             )));
         }
-        let mut instances: Vec<orch8_types::instance::TaskInstance> = req
-            .get_ref()
-            .instances_json
-            .iter()
-            .map(|s| from_json_str(s))
-            .collect::<Result<_, _>>()?;
+        let mut instances: Vec<orch8_types::instance::TaskInstance> =
+            Vec::with_capacity(req.get_ref().instances_json.len());
+        for s in &req.get_ref().instances_json {
+            instances.push(from_json_str(s)?);
+        }
         let caller = caller_tenant(&req);
+        // Fetch each distinct sequence once (single round trip) instead of one
+        // `get_sequence` per instance — a 10k-instance batch would otherwise
+        // serialize 10k lookups before the batch insert even starts.
+        let sequence_ids: std::collections::HashSet<SequenceId> =
+            instances.iter().map(|i| i.sequence_id).collect();
+        let sequence_ids: Vec<SequenceId> = sequence_ids.into_iter().collect();
+        let sequences: std::collections::HashMap<SequenceId, SequenceDefinition> = self
+            .storage
+            .get_sequences(&sequence_ids)
+            .await
+            .map_err(storage_err)?
+            .into_iter()
+            .map(|s| (s.id, s))
+            .collect();
         for inst in &mut instances {
-            self.sanitize_new_instance(caller, inst).await?;
+            let sequence = sequences
+                .get(&inst.sequence_id)
+                .ok_or_else(|| Status::not_found("sequence not found"))?;
+            self.sanitize_new_instance_with_sequence(caller, inst, sequence)?;
         }
         let created = self
             .storage
@@ -574,6 +602,29 @@ impl Orch8Service for Orch8GrpcService {
             .update_instance_state(id, new_state, None)
             .await
             .map_err(storage_err)?;
+
+        // If this instance is a SubSequence child and the external transition
+        // drove it to a terminal state, wake the parent so its SubSequence
+        // node can observe the child's final state on the next tick. Without
+        // this, cancelling a child via gRPC leaves the parent stuck in
+        // Waiting indefinitely — the scheduler's `wake_parent_if_child` only
+        // runs on engine-driven transitions. Mirrors the HTTP twin in
+        // `orch8-api/src/instances/lifecycle.rs`.
+        if new_state.is_terminal()
+            && let Some(parent_id) = inst.parent_instance_id
+            && let Ok(Some(parent)) = self.storage.get_instance(parent_id).await
+            && parent.state == InstanceState::Waiting
+            && let Err(e) = self
+                .storage
+                .update_instance_state(parent_id, InstanceState::Scheduled, Some(chrono::Utc::now()))
+                .await
+        {
+            tracing::warn!(
+                parent_id = %parent_id.into_uuid(),
+                error = %e,
+                "failed to wake parent instance after child terminal transition"
+            );
+        }
         Ok(Response::new(proto::Empty {}))
     }
 
@@ -607,6 +658,17 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::SendSignalRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let signal: orch8_types::signal::Signal = from_json_str(&req.get_ref().signal_json)?;
+        // Cross-validate the top-level `instance_id` field against the one
+        // embedded in the signal JSON — a client that fills both with
+        // different values would otherwise be silently redirected to the
+        // JSON value's target.
+        if !req.get_ref().instance_id.is_empty()
+            && parse_uuid(&req.get_ref().instance_id)? != signal.instance_id.into_uuid()
+        {
+            return Err(Status::invalid_argument(
+                "instance_id field does not match signal_json instance_id",
+            ));
+        }
         // Signals target a specific instance — look it up so we can refuse
         // cross-tenant signal delivery.
         let inst = self
@@ -681,10 +743,12 @@ impl Orch8Service for Orch8GrpcService {
         //      re-fail or deadlock)
         //   3. clear sentinel block outputs so permanently-failed steps can
         //      re-run, but keep real outputs so successful steps are skipped
-        //   4. move the instance back to `Scheduled` with a fresh fire time
-        // Previously the gRPC path only did step 4 — retrying an instance
-        // over gRPC silently left stale tree state, producing divergent
-        // behaviour from the HTTP client for the same operation.
+        //   4. reset the run identity (`run_id`, step counters, started_at)
+        //      so the new run isn't correlated to the failed one
+        //   5. move the instance back to `Scheduled` with a fresh fire time
+        // Previously the gRPC path only did the last step — retrying an
+        // instance over gRPC silently left stale tree state, producing
+        // divergent behaviour from the HTTP client for the same operation.
         let id = InstanceId::from_uuid(parse_uuid(&req.get_ref().id)?);
 
         let inst = self
@@ -708,6 +772,13 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(storage_err)?;
         self.storage
             .delete_sentinel_block_outputs(id)
+            .await
+            .map_err(storage_err)?;
+        // Reset the run identity and step counters so the new run's
+        // outputs/events aren't correlated to the failed run (mirrors the
+        // HTTP retry path's `reset_instance_run`).
+        self.storage
+            .reset_instance_run(id, &Uuid::now_v7().to_string())
             .await
             .map_err(storage_err)?;
         self.storage
@@ -841,7 +912,7 @@ impl Orch8Service for Orch8GrpcService {
         enforce_tenant_match(&req, &existing.tenant_id, "cron schedule")?;
         // Pin the tenant_id to the existing row's tenant so the update cannot
         // reparent the schedule to a different tenant.
-        schedule.tenant_id = existing.tenant_id.clone();
+        schedule.tenant_id = existing.tenant_id;
         self.storage
             .update_cron_schedule(&schedule)
             .await
@@ -964,14 +1035,16 @@ impl Orch8Service for Orch8GrpcService {
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
 
-        let output_json = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
+        // `Value` implements `Display` via infallible serialization, so the
+        // size estimate needs no error fallback.
+        let output_size = u32::try_from(output.to_string().len()).unwrap_or(u32::MAX);
         let block_output = orch8_types::output::BlockOutput {
             id: Uuid::now_v7(),
             instance_id: task.instance_id,
             block_id: task.block_id.clone(),
             output,
             output_ref: None,
-            output_size: u32::try_from(output_json.len()).unwrap_or(u32::MAX),
+            output_size,
             attempt: task.attempt,
             created_at: chrono::Utc::now(),
         };
@@ -1066,11 +1139,11 @@ impl Orch8Service for Orch8GrpcService {
         else {
             return Ok(Response::new(proto::Empty {}));
         };
-        if inst.state.is_terminal() {
+        if inst.state.is_terminal() || inst.state == InstanceState::Paused {
             tracing::info!(
                 instance_id = %task.instance_id,
                 state = %inst.state,
-                "gRPC worker failure for terminal instance; task accepted, transition skipped"
+                "gRPC worker failure for terminal/paused instance; task accepted, transition skipped"
             );
             return Ok(Response::new(proto::Empty {}));
         }
@@ -1095,20 +1168,21 @@ impl Orch8Service for Orch8GrpcService {
 
         if inner.retryable && worker_task_can_retry(&self.storage, &task).await? {
             let retry_task = retry_worker_task(&task);
+            // Single storage op (delete + create + node reset + instance
+            // reschedule in one transaction): a crash between the separate
+            // calls would strand the node in Running with no task to poll.
+            // Mirrors the HTTP fail path in `orch8-api/src/workers.rs`.
             self.storage
-                .delete_worker_task(task_id)
+                .retry_worker_task(
+                    task_id,
+                    &retry_task,
+                    active_node_id,
+                    task.instance_id,
+                    chrono::Utc::now(),
+                )
                 .await
                 .map_err(storage_err)?;
-            self.storage
-                .create_worker_task(&retry_task)
-                .await
-                .map_err(storage_err)?;
-            if let Some(node_id) = active_node_id {
-                self.storage
-                    .update_node_state(node_id, orch8_types::execution::NodeState::Pending)
-                    .await
-                    .map_err(storage_err)?;
-            }
+            return Ok(Response::new(proto::Empty {}));
         } else if has_tree {
             if let Some(node_id) = active_node_id {
                 self.storage

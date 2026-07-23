@@ -4190,3 +4190,209 @@ async fn get_plugin_is_tenant_scoped() {
         "global plugin must be visible to any tenant"
     );
 }
+
+
+// ===========================================================================
+// Audit regression tests (2026-07): manifest lock reclaim, rate-limit
+// max_count=0, block-output tiebreak, terminal-delete KV cleanup, cron cap
+// ===========================================================================
+
+/// A `manifest_locks` row abandoned by a crashed holder (no release ever ran)
+/// must be reclaimed by the next acquire instead of wedging the tenant.
+#[tokio::test]
+async fn manifest_lock_reclaims_stale_row() {
+    let s = store().await;
+
+    // Simulate a crashed holder: a lock row far older than the staleness
+    // threshold, with no guard that will ever release it.
+    let stale_locked_at = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    sqlx::query("INSERT INTO manifest_locks (tenant_id, locked_at) VALUES (?1, ?2)")
+        .bind("tenant_stale")
+        .bind(&stale_locked_at)
+        .execute(s.pool())
+        .await
+        .unwrap();
+
+    // Must succeed immediately (not after the 5s poll timeout).
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        s.acquire_manifest_lock("tenant_stale"),
+    )
+    .await
+    .expect("stale lock row must be reclaimed, not polled out")
+    .unwrap();
+
+    // Dropping the guard releases the row so a subsequent acquire succeeds.
+    drop(guard);
+    let guard2 = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        s.acquire_manifest_lock("tenant_stale"),
+    )
+    .await
+    .expect("released lock must be re-acquirable")
+    .unwrap();
+    drop(guard2);
+}
+
+/// A lock row that is still fresh (held by a live holder) must NOT be
+/// reclaimed by another acquirer.
+#[tokio::test]
+async fn manifest_lock_does_not_reclaim_fresh_row() {
+    let s = store().await;
+
+    let _guard = s.acquire_manifest_lock("tenant_live").await.unwrap();
+
+    // A competing acquire for the same tenant must time out quickly here --
+    // the full retry budget is 5s, so bound the wait generously below the
+    // stale-reclaim path (which never triggers for a fresh row).
+    let start = std::time::Instant::now();
+    let result = s.acquire_manifest_lock("tenant_live").await;
+    assert!(result.is_err(), "fresh lock must block competing acquires");
+    assert!(
+        start.elapsed() >= std::time::Duration::from_secs(4),
+        "competing acquire should have polled, not stolen the fresh lock"
+    );
+}
+
+/// Regression: a rate limit with `max_count = 0` must deny every request,
+/// including the first request of a freshly-reset window (the reset branch
+/// used to set `current_count = 1` unconditionally, allowing one through).
+#[tokio::test]
+async fn rate_limit_max_count_zero_denies_even_after_window_reset() {
+    let s = store().await;
+    let now = Utc::now();
+    let tenant = TenantId::unchecked("t_rl_zero");
+    let key = ResourceKey::new("api:blocked");
+
+    let rl = RateLimit {
+        id: Uuid::now_v7(),
+        tenant_id: tenant.clone(),
+        resource_key: key.clone(),
+        max_count: 0,
+        window_seconds: 60,
+        current_count: 0,
+        window_start: now,
+    };
+    s.upsert_rate_limit(&rl).await.unwrap();
+
+    // Within the window: denied.
+    let check = s.check_rate_limit(&tenant, &key, now).await.unwrap();
+    assert!(matches!(check, RateLimitCheck::Exceeded { .. }));
+
+    // After the window has expired: still denied (this used to be Allowed).
+    let later = now + Duration::seconds(120);
+    let check = s.check_rate_limit(&tenant, &key, later).await.unwrap();
+    assert!(matches!(check, RateLimitCheck::Exceeded { .. }));
+}
+
+/// Regression: with the write-append model, rows for one
+/// `(instance_id, block_id)` can share a `created_at` (e.g. copied by
+/// fork-from). `get_block_output` must deterministically return the row with
+/// the largest (`UUIDv7`) id, not a planner-dependent pick.
+#[tokio::test]
+async fn get_block_output_tiebreaks_same_timestamp_by_id() {
+    let s = store().await;
+    let inst_id = InstanceId::new();
+    seed_instance(&s, inst_id).await;
+
+    let created_at = Utc::now();
+    let first = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId::new("step_1"),
+        output: json!({"attempt": 1}),
+        output_ref: None,
+        output_size: 10,
+        attempt: 1,
+        created_at,
+    };
+    // Ensure a strictly later UUIDv7 id.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let second = BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: inst_id,
+        block_id: BlockId::new("step_1"),
+        output: json!({"attempt": 2}),
+        output_ref: None,
+        output_size: 10,
+        attempt: 2,
+        created_at,
+    };
+    assert!(second.id > first.id, "test requires increasing UUIDv7 ids");
+
+    s.save_block_output(&first).await.unwrap();
+    s.save_block_output(&second).await.unwrap();
+
+    let fetched = s
+        .get_block_output(inst_id, &BlockId::new("step_1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fetched.id, second.id,
+        "same-timestamp rows must resolve to the latest id"
+    );
+    assert_eq!(fetched.attempt, 2);
+}
+
+/// Regression: terminal-instance retention GC must also clear
+/// `instance_kv_state` (no FK/cascade on `SQLite`) instead of leaking it.
+#[tokio::test]
+async fn delete_terminal_instances_clears_kv_state() {
+    let s = store().await;
+    let now = Utc::now();
+
+    let mut inst = make_instance_in_state("t_kv_gc", InstanceState::Completed);
+    inst.updated_at = now - Duration::hours(1);
+    s.create_instance(&inst).await.unwrap();
+
+    s.set_instance_kv(inst.id, "scratch", &json!({"x": 1}))
+        .await
+        .unwrap();
+    assert!(
+        s.get_instance_kv(inst.id, "scratch").await.unwrap().is_some(),
+        "kv row must exist before GC"
+    );
+
+    let deleted = s.delete_terminal_instances(now, 100).await.unwrap();
+    assert_eq!(deleted, 1);
+    assert!(
+        s.get_all_instance_kv(inst.id).await.unwrap().is_empty(),
+        "kv state must be deleted with the terminal instance"
+    );
+}
+
+/// Regression: one cron claim tick must not burst-claim an unbounded backlog
+/// after an outage — it is capped, with stragglers left for later ticks.
+#[tokio::test]
+async fn claim_due_cron_schedules_is_capped_per_tick() {
+    let s = store().await;
+    let now = Utc::now();
+
+    for _ in 0..105 {
+        let schedule = CronSchedule {
+            id: Uuid::now_v7(),
+            tenant_id: TenantId::unchecked("t_cron_cap"),
+            namespace: Namespace::new("default"),
+            sequence_id: SequenceId::new(),
+            cron_expr: "* * * * *".into(),
+            timezone: "UTC".into(),
+            enabled: true,
+            metadata: json!({}),
+            overlap_policy: orch8_types::cron::OverlapPolicy::default(),
+            skipped_fires: 0,
+            last_skipped_at: None,
+            last_triggered_at: None,
+            next_fire_at: Some(now - Duration::seconds(5)),
+            created_at: now,
+            updated_at: now,
+        };
+        s.create_cron_schedule(&schedule).await.unwrap();
+    }
+
+    let first = s.claim_due_cron_schedules(now).await.unwrap();
+    assert_eq!(first.len(), 100, "one tick must claim at most 100 schedules");
+
+    let second = s.claim_due_cron_schedules(now).await.unwrap();
+    assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");
+}

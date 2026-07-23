@@ -53,6 +53,9 @@ pub struct SignedManifest {
 pub struct ManifestGenerator {
     signing_key: SigningKey,
     key_id: String,
+    /// Last manifest version handed out, used to keep versions strictly
+    /// increasing even for two `generate` calls inside the same millisecond.
+    last_version: std::sync::atomic::AtomicI64,
 }
 
 impl ManifestGenerator {
@@ -60,6 +63,7 @@ impl ManifestGenerator {
         Self {
             signing_key,
             key_id,
+            last_version: std::sync::atomic::AtomicI64::new(0),
         }
     }
 
@@ -72,14 +76,14 @@ impl ManifestGenerator {
     ) -> Result<SignedManifest, ManifestError> {
         let mut seen_keys = std::collections::HashSet::new();
         for key in &other_keys {
-            if !seen_keys.insert(key.key_id.clone()) {
+            if !seen_keys.insert(key.key_id.as_str()) {
                 return Err(ManifestError::Serialization(format!(
                     "duplicate signing key_id {}",
                     key.key_id
                 )));
             }
         }
-        if !seen_keys.insert(self.key_id.clone()) {
+        if !seen_keys.insert(self.key_id.as_str()) {
             return Err(ManifestError::Serialization(format!(
                 "duplicate signing key_id {}",
                 self.key_id
@@ -95,16 +99,32 @@ impl ManifestGenerator {
         // Derive a monotonic version from the generation time (epoch millis).
         // Clients reject any manifest whose version is not strictly greater than
         // the last one applied, so a replayed older manifest — which necessarily
-        // carries an earlier timestamp — is refused. A wall-clock regression
-        // (NTP step back) is the only way to emit a non-increasing version;
-        // that is operationally rare and fails safe (the client keeps the newer
-        // manifest it already has).
+        // carries an earlier timestamp — is refused. Two `generate` calls within
+        // the same millisecond (e.g. an immediate retry) would collide on the
+        // raw timestamp, so clamp to one above the last version handed out. A
+        // wall-clock regression (NTP step back) also fails safe this way: the
+        // version keeps increasing from the high-water mark instead of going
+        // backwards and being refused by clients.
         let generated_at = Utc::now();
+        let now_millis = generated_at.timestamp_millis();
+        let mut prev = self.last_version.load(std::sync::atomic::Ordering::Relaxed);
+        let manifest_version = loop {
+            let candidate = now_millis.max(prev.saturating_add(1));
+            match self.last_version.compare_exchange_weak(
+                prev,
+                candidate,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break candidate,
+                Err(observed) => prev = observed,
+            }
+        };
         let body = ManifestBody {
             signing_keys,
             sequences,
             removed,
-            manifest_version: generated_at.timestamp_millis(),
+            manifest_version,
             generated_at,
         };
 
@@ -232,6 +252,21 @@ mod tests {
         prune_removed(&mut removed);
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].name, "recent");
+    }
+
+    // Clients require strictly-greater versions, so two generations within
+    // the same millisecond must not collide on the timestamp.
+    #[test]
+    fn manifest_versions_are_strictly_increasing() {
+        let r#gen = ManifestGenerator::new(test_key(), "key1".to_string());
+        let a = r#gen.generate(vec![], vec![], vec![]).unwrap();
+        let b = r#gen.generate(vec![], vec![], vec![]).unwrap();
+        assert!(
+            b.body.manifest_version > a.body.manifest_version,
+            "versions must be strictly increasing: {} then {}",
+            a.body.manifest_version,
+            b.body.manifest_version
+        );
     }
 
     #[test]

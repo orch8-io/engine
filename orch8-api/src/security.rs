@@ -39,8 +39,14 @@ pub fn validate_public_url(url: &str) -> Result<(), ApiUrlValidationError> {
         return Err(ApiUrlValidationError::InternalAddress(host));
     }
 
-    // If the host is a literal IP, classify it.
-    if let Ok(ip) = host.parse::<IpAddr>()
+    // If the host is a literal IP, classify it. `host_str` keeps the
+    // brackets around IPv6 literals ("[::1]"), so strip them before parsing —
+    // otherwise every literal IPv6 target would skip classification entirely.
+    let ip_str = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host.as_str());
+    if let Ok(ip) = ip_str.parse::<IpAddr>()
         && is_non_public_ip(ip)
     {
         return Err(ApiUrlValidationError::InternalAddress(host));
@@ -59,11 +65,19 @@ fn is_non_public_ip(ip: IpAddr) -> bool {
                 || v4.is_multicast()
                 || v4.is_broadcast()
                 || v4.is_documentation()
+                // 100.64.0.0/10 CGNAT space is not publicly routable.
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64
                 // 192.0.0.0/24 contains IANA reserved addresses including
                 // 192.0.0.170/171 (NAT64/DNS64 well-known prefixes).
                 || v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0
         }
         IpAddr::V6(v6) => {
+            // IPv4-mapped IPv6 (`::ffff:a.b.c.d`) must pass the same checks
+            // as the literal V4 form — otherwise `::ffff:127.0.0.1` or
+            // `::ffff:a9fe:a9fe` (169.254.169.254) bypass the guard.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_ip(IpAddr::V4(v4));
+            }
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
@@ -139,6 +153,43 @@ mod tests {
             validate_public_url("http:///"),
             Err(ApiUrlValidationError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_loopback_and_metadata() {
+        // Literal IPv6 loopback (brackets included by `host_str`).
+        assert!(matches!(
+            validate_public_url("http://[::1]/hook"),
+            Err(ApiUrlValidationError::InternalAddress(_))
+        ));
+        assert!(matches!(
+            validate_public_url("http://[::ffff:127.0.0.1]/hook"),
+            Err(ApiUrlValidationError::InternalAddress(_))
+        ));
+        // ::ffff:a9fe:a9fe == 169.254.169.254 (cloud metadata endpoint).
+        assert!(matches!(
+            validate_public_url("http://[::ffff:a9fe:a9fe]/latest/meta-data/"),
+            Err(ApiUrlValidationError::InternalAddress(_))
+        ));
+        // ::ffff:10.0.0.1 — private range in mapped form.
+        assert!(matches!(
+            validate_public_url("http://[::ffff:10.0.0.1]/hook"),
+            Err(ApiUrlValidationError::InternalAddress(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_cgnat_shared_space() {
+        assert!(matches!(
+            validate_public_url("http://100.64.0.1/hook"),
+            Err(ApiUrlValidationError::InternalAddress(_))
+        ));
+    }
+
+    #[test]
+    fn allows_public_ipv6_literal() {
+        // Cloudflare DNS — a public global-unicast V6 literal must pass.
+        assert!(validate_public_url("https://[2606:4700:4700::1111]/hook").is_ok());
     }
 
     #[test]

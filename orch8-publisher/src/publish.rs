@@ -122,9 +122,14 @@ impl SequencePublisher {
     pub async fn publish_manifest(
         &self,
         sequences: Vec<ManifestSequence>,
-        removed: Vec<crate::manifest::ManifestRemoved>,
+        mut removed: Vec<crate::manifest::ManifestRemoved>,
         other_keys: Vec<ManifestSigningKey>,
     ) -> Result<(), PublishError> {
+        // Enforce the documented 30-day retention for removed entries so the
+        // signed manifest — pulled by every client on a 60s cache window —
+        // does not grow without bound.
+        manifest::prune_removed(&mut removed);
+
         // Trust-boundary checks: every sequence URL must live under this
         // publisher's tenant prefix, and no caller-supplied key may shadow the
         // generator's own key_id.

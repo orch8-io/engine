@@ -24,7 +24,7 @@ use orch8_types::contract::{
     UnmockedHandlerPolicy, check_call_counts, check_path, evaluate_assertion,
 };
 use orch8_types::error::StepError;
-use orch8_types::sequence::SequenceDefinition;
+use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 use orch8_types::signal::SignalType;
 
 use crate::engine::CreateInstanceOptions;
@@ -114,6 +114,17 @@ pub async fn run_case(
     case: &ContractCase,
     opts: &RunOptions,
 ) -> Result<CaseReport, Error> {
+    // The sandbox only registers this one sequence, so a `sub_sequence`
+    // block would fail to resolve its child (or run it unmocked). Fail fast
+    // with a clear message instead of a confusing NotFound mid-run.
+    if let Some(block_id) = first_sub_sequence_block(&seq.blocks) {
+        return Err(Error::Config(format!(
+            "contract runner does not support sub_sequence blocks \
+             (block '{block_id}'): child sequences cannot be registered and \
+             mocked in the sandbox"
+        )));
+    }
+
     let mut initial_outputs = opts.initial_outputs.clone();
     initial_outputs.extend(
         case.initial_outputs
@@ -149,7 +160,7 @@ pub async fn run_case(
         .tenant(seq.tenant_id.as_str())
         .clock(shared);
 
-    let handler_names = sequence_handlers(seq);
+    let handler_names = seq.handler_names();
     for handler_name in &handler_names {
         let handler_name = handler_name.clone();
         let by_handler = Arc::clone(&by_handler);
@@ -182,10 +193,18 @@ pub async fn run_case(
                         mock_failure(message, *retryable)
                     }
                     Some(MockPolicy::Attempts { attempts }) => {
-                        let outcome = attempts
-                            .get(attempt_index)
-                            .or_else(|| attempts.last())
-                            .expect("validated: attempts non-empty");
+                        // `run_suite` validates non-empty attempts, but
+                        // `run_case` is public and accepts unvalidated cases —
+                        // fail the step instead of panicking the process.
+                        let Some(outcome) = attempts.get(attempt_index).or_else(|| attempts.last())
+                        else {
+                            return Err(StepError::Permanent {
+                                message: format!(
+                                    "contract: attempts mock for block '{block_id}' has an empty attempts list"
+                                ),
+                                details: None,
+                            });
+                        };
                         match outcome {
                             MockOutcome::Success { output } => Ok(output.clone()),
                             MockOutcome::Failure { message, retryable } => {
@@ -228,11 +247,16 @@ pub async fn run_case(
     let engine = builder.build().await?;
     let seq_id = engine.upsert_sequence(seq.clone()).await?;
 
-    let context = ExecutionContext {
+    let mut context = ExecutionContext {
         data: case.input.clone(),
         config: case.config.clone().unwrap_or(Value::Null),
         ..Default::default()
     };
+    // Contract handlers are deterministic test doubles, not externally
+    // visible effects. Mark the sandbox as a dry run so the universal effect
+    // ledger does not turn an intentional retryable mock failure into an
+    // ambiguous effect that blocks the next attempt.
+    context.runtime.dry_run = true;
     let instance_id = engine
         .create_instance(
             seq_id,
@@ -338,16 +362,17 @@ pub async fn run_case(
 
     let raw_outputs = engine.block_outputs(instance_id).await?;
     let mut executed_blocks: Vec<String> = Vec::new();
+    let mut seen_blocks: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut outputs: BTreeMap<String, Value> = BTreeMap::new();
     for o in &raw_outputs {
-        let block = o.block_id.as_str().to_string();
+        let block = o.block_id.as_str();
         if block.starts_with('_') {
             continue; // engine-internal sentinel rows
         }
-        if !initial_outputs.contains_key(&block) && !executed_blocks.contains(&block) {
-            executed_blocks.push(block.clone());
+        if !initial_outputs.contains_key(block) && seen_blocks.insert(block) {
+            executed_blocks.push(block.to_string());
         }
-        outputs.insert(block, o.output.clone()); // last attempt wins
+        outputs.insert(block.to_string(), o.output.clone()); // last attempt wins
     }
 
     let mock_state = {
@@ -445,36 +470,59 @@ fn mock_failure(message: &str, retryable: bool) -> Result<Value, StepError> {
     }
 }
 
-/// Every handler name used by any step in the sequence, discovered by
-/// walking the serialized definition (covers steps nested in composites
-/// without matching every DSL variant).
-fn sequence_handlers(seq: &SequenceDefinition) -> Vec<String> {
-    fn walk(value: &Value, out: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                if let (Some(Value::String(_)), Some(Value::String(handler))) =
-                    (map.get("id"), map.get("handler"))
-                    && !out.contains(handler)
-                {
-                    out.push(handler.clone());
-                }
-                for child in map.values() {
-                    walk(child, out);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    walk(item, out);
-                }
-            }
-            _ => {}
+/// Id of the first `sub_sequence` block in the definition, if any. The
+/// contract runner cannot resolve or mock child sequences in its sandbox, so
+/// callers fail fast (mirrors the recursion of
+/// `SequenceDefinition::handler_names`).
+fn first_sub_sequence_block(blocks: &[BlockDefinition]) -> Option<String> {
+    for block in blocks {
+        let found = match block {
+            BlockDefinition::Step(_) => None,
+            BlockDefinition::SubSequence(s) => Some(s.id.as_str().to_string()),
+            BlockDefinition::Parallel(p) => p
+                .branches
+                .iter()
+                .find_map(|branch| first_sub_sequence_block(branch)),
+            BlockDefinition::Race(r) => r
+                .branches
+                .iter()
+                .find_map(|branch| first_sub_sequence_block(branch)),
+            BlockDefinition::Loop(l) => first_sub_sequence_block(&l.body),
+            BlockDefinition::ForEach(fe) => first_sub_sequence_block(&fe.body),
+            BlockDefinition::Router(r) => r
+                .routes
+                .iter()
+                .find_map(|route| first_sub_sequence_block(&route.blocks))
+                .or_else(|| {
+                    r.default
+                        .as_ref()
+                        .and_then(|blocks| first_sub_sequence_block(blocks))
+                }),
+            BlockDefinition::TryCatch(tc) => first_sub_sequence_block(&tc.try_block)
+                .or_else(|| first_sub_sequence_block(&tc.catch_block))
+                .or_else(|| {
+                    tc.finally_block
+                        .as_ref()
+                        .and_then(|blocks| first_sub_sequence_block(blocks))
+                }),
+            BlockDefinition::ABSplit(ab) => ab
+                .variants
+                .iter()
+                .find_map(|variant| first_sub_sequence_block(&variant.blocks)),
+            BlockDefinition::CancellationScope(cs) => first_sub_sequence_block(&cs.blocks),
+            BlockDefinition::Saga(saga) => saga.steps.iter().find_map(|step| {
+                first_sub_sequence_block(std::slice::from_ref(&step.action)).or_else(|| {
+                    step.compensation
+                        .as_ref()
+                        .and_then(|comp| first_sub_sequence_block(std::slice::from_ref(comp)))
+                })
+            }),
+        };
+        if found.is_some() {
+            return found;
         }
     }
-    let mut out = Vec::new();
-    if let Ok(v) = serde_json::to_value(seq) {
-        walk(&v, &mut out);
-    }
-    out
+    None
 }
 
 #[cfg(test)]
@@ -855,8 +903,57 @@ mod tests {
                 [{"type": "step", "id": "in_par2", "handler": "h1", "params": {}}]
             ]}
         ]));
-        let mut handlers = sequence_handlers(&seq_def);
-        handlers.sort();
-        assert_eq!(handlers, vec!["h1", "h2"]);
+        assert_eq!(seq_def.handler_names(), vec!["h1", "h2"]);
+    }
+
+    /// Typed discovery must not register spurious mocks for step *params*
+    /// that merely contain `id`/`handler` string keys.
+    #[test]
+    fn handler_discovery_ignores_params_shaped_like_steps() {
+        let seq_def = seq(json!([
+            {"type": "step", "id": "s", "handler": "real", "params": {
+                "nested": {"id": "fake", "handler": "not_a_handler"}
+            }}
+        ]));
+        assert_eq!(seq_def.handler_names(), vec!["real"]);
+    }
+
+    /// A `sub_sequence` block cannot be resolved or mocked in the sandbox —
+    /// the runner must fail fast with an explicit message (audit M-6).
+    #[tokio::test]
+    async fn sub_sequence_block_fails_fast() {
+        let seq_def = seq(json!([
+            {"type": "sub_sequence", "id": "child", "sequence_name": "other-seq"}
+        ]));
+        let s = suite(json!([{
+            "name": "has-sub",
+            "input": {},
+            "expect": {"terminal_state": "completed"}
+        }]));
+        let err = run_suite(&seq_def, &s, &RunOptions::default())
+            .await
+            .expect_err("sub_sequence blocks are unsupported in contract runs");
+        assert!(err.to_string().contains("sub_sequence"), "{err}");
+        assert!(err.to_string().contains("child"), "{err}");
+    }
+
+    /// Nested composites are scanned too: a `sub_sequence` hidden inside a
+    /// parallel branch must also fail fast.
+    #[tokio::test]
+    async fn nested_sub_sequence_block_fails_fast() {
+        let seq_def = seq(json!([
+            {"type": "parallel", "id": "par", "branches": [
+                [{"type": "sub_sequence", "id": "nested-child", "sequence_name": "other-seq"}]
+            ]}
+        ]));
+        let s = suite(json!([{
+            "name": "nested-sub",
+            "input": {},
+            "expect": {"terminal_state": "completed"}
+        }]));
+        let err = run_suite(&seq_def, &s, &RunOptions::default())
+            .await
+            .expect_err("nested sub_sequence blocks are unsupported");
+        assert!(err.to_string().contains("nested-child"), "{err}");
     }
 }

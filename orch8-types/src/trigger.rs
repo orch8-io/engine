@@ -117,7 +117,7 @@ pub struct TriggerDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub secret: Option<crate::config::SecretString>,
-    /// Trigger type: `webhook`, `nats`, `file_watch`.
+    /// Trigger type: `webhook`, `nats`, `file_watch`, `event`, `activepieces_poll`.
     #[serde(default)]
     pub trigger_type: TriggerType,
     /// Type-specific configuration (JSON).
@@ -257,9 +257,20 @@ mod tests {
             Some("s3cret")
         );
         let json = serde_json::to_string(&def).unwrap();
-        // SecretString serializes as "[REDACTED]" — round-trip produces the redacted value.
+        // SecretString serializes as "[REDACTED]" — feeding that back must
+        // fail loudly instead of silently adopting the placeholder as the
+        // live HMAC secret.
         assert!(json.contains("\"[REDACTED]\""));
-        let back: TriggerDef = serde_json::from_str(&json).unwrap();
+        let err = serde_json::from_str::<TriggerDef>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("redaction placeholder"),
+            "unexpected error: {err}"
+        );
+        // The rest of the definition round-trips once a real secret (or none)
+        // is supplied.
+        let mut value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        value["secret"] = serde_json::Value::String("s3cret".into());
+        let back: TriggerDef = serde_json::from_value(value).unwrap();
         assert_eq!(back.slug, "on-push");
         assert_eq!(back.trigger_type, TriggerType::Nats);
         assert!(!back.enabled);
@@ -268,7 +279,7 @@ mod tests {
             back.secret
                 .as_ref()
                 .map(crate::config::SecretString::expose),
-            Some("[REDACTED]")
+            Some("s3cret")
         );
     }
 

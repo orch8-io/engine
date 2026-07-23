@@ -1,6 +1,6 @@
 use std::{fmt::Write as _, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{Client, header};
 use serde_json::Value;
@@ -292,6 +292,25 @@ fn build_client(api_key: Option<&str>, tenant_id: Option<&str>) -> Result<Client
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .build()?)
+}
+
+/// Atomically replace `path` with `contents`: write to a temp file in the
+/// same directory, fsync, then rename so a crash never leaves a torn file.
+pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("create temporary file beside {}", path.display()))?;
+    file.write_all(contents)?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("atomically replace {}", path.display()))?;
+    Ok(())
 }
 
 #[tokio::main]

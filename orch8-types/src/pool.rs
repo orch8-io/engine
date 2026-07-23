@@ -112,7 +112,14 @@ impl PoolResource {
 
         // Linear ramp from warmup_start_cap to daily_cap over warmup_days.
         let range = self.daily_cap.saturating_sub(self.warmup_start_cap);
-        self.warmup_start_cap + (range * days_active / self.warmup_days)
+        // Widen to u64 for the multiply: `range * days_active` can overflow
+        // u32 for extreme (DB-stored) caps. The quotient is < `range`
+        // (days_active < warmup_days here), so the cast back is exact and
+        // the final addition stays within `daily_cap`.
+        #[allow(clippy::cast_possible_truncation)]
+        let ramped =
+            (u64::from(range) * u64::from(days_active) / u64::from(self.warmup_days)) as u32;
+        self.warmup_start_cap + ramped
     }
 
     /// Check if this resource has capacity remaining today.
@@ -232,6 +239,15 @@ mod tests {
         r.daily_usage_date = Some(yesterday);
         // New day — usage resets to 0
         assert!(r.has_capacity(today));
+    }
+
+    #[test]
+    fn warmup_ramp_extreme_cap_does_not_overflow() {
+        // range * days_active would overflow u32 arithmetic here; the
+        // widened intermediate keeps the ramp exact.
+        let r = make_resource(u32::MAX, 100, 0);
+        let today = NaiveDate::from_ymd_opt(2024, 2, 20).unwrap(); // day 50
+        assert_eq!(r.effective_daily_cap(today), u32::MAX / 2);
     }
 
     #[test]

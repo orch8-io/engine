@@ -165,9 +165,17 @@ pub fn build_package(
         return Err(PackageError::Invalid("package has no files".into()));
     }
     for path in files.keys() {
-        if path.starts_with('/') || path.split('/').any(|seg| seg == "..") {
+        // Reject anything that could escape the extraction root on any
+        // platform: absolute paths, `..` segments, backslashes (a path
+        // separator on Windows, so `..\evil` is traversal there), empty
+        // segments, and NUL bytes.
+        let invalid = path.is_empty()
+            || path.starts_with('/')
+            || path.contains(['\\', '\0'])
+            || path.split('/').any(|seg| seg.is_empty() || seg == "..");
+        if invalid {
             return Err(PackageError::Invalid(format!(
-                "file path '{path}' must be relative without '..'"
+                "file path '{path}' must be relative without '..', '\\', NUL, or empty segments"
             )));
         }
     }

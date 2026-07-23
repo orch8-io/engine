@@ -6,7 +6,10 @@ use tracing::{debug, warn};
 
 use crate::{FcmConfig, PushError, PushProvider};
 
-const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55 * 60);
+/// Fallback access-token lifetime used when the token endpoint omits
+/// `expires_in` (Google currently returns 3600s). The cached token is
+/// refreshed at 90% of the lifetime so it never expires mid-send.
+const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
 const FCM_SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 /// Allowed OAuth token URI for FCM service accounts.
 const FCM_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
@@ -15,10 +18,10 @@ const FCM_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const MAX_TOKEN_LEN: usize = 512;
 /// Maximum error response body we will include in a `PushError::Delivery`.
 const MAX_ERROR_BODY_LEN: usize = 4 * 1024;
-/// M-21: retries beyond the first attempt for a transient failure (network
-/// error, 5xx) or an auth rejection (401/403 — invalid/expired OAuth token)
-/// that a fresh token can resolve. An unregistered/not-found device token
-/// never retries.
+/// M-21: total delivery attempts (the initial try plus retries) for a
+/// transient failure (network error, 429/quota, 5xx) or an auth rejection
+/// (401/403 — invalid/expired OAuth token) that a fresh token can resolve.
+/// An unregistered device token never retries.
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 
 const fn retry_backoff(attempt: u32) -> Duration {
@@ -31,14 +34,14 @@ const fn retry_backoff(attempt: u32) -> Duration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FcmOutcome {
     Success,
-    /// `UNREGISTERED`/`NOT_FOUND` (or error code 404/410): the device token
-    /// itself is gone -- never retry.
+    /// The structured per-token error (`error.details[].errorCode ==
+    /// "UNREGISTERED"`): the device token itself is gone -- never retry.
     InvalidToken,
     /// 401/403: FCM rejected the OAuth access token (expired/revoked/wrong
     /// scope), not the device token -- invalidate the cached token and retry
     /// with a fresh one.
     AuthRejected,
-    /// 5xx: transient server-side failure -- retry with backoff.
+    /// 429/quota exhaustion or 5xx: transient failure -- retry with backoff.
     Retryable,
     /// Any other non-2xx: not retryable.
     Permanent,
@@ -48,18 +51,36 @@ fn classify_fcm_response(status: reqwest::StatusCode, body: &str) -> FcmOutcome 
     if status.is_success() {
         return FcmOutcome::Success;
     }
-    let is_invalid_token = body.contains("UNREGISTERED")
-        || body.contains("NOT_FOUND")
-        || serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .and_then(|v| v.get("error").and_then(|e| e.get("code")).cloned())
-            .and_then(|c| c.as_i64())
-            .is_some_and(|code| code == 404 || code == 410);
-    if is_invalid_token {
+    // Only the structured per-token error identifies a dead device token.
+    // A bare 404/410 (e.g. a mistyped project id, which FCM also answers
+    // with 404 "Requested entity was not found") is a project-level failure:
+    // treating it as InvalidToken would let one config typo wipe every
+    // registered device token.
+    let unregistered = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|v| {
+            v.get("error")
+                .and_then(|e| e.get("details"))
+                .and_then(|d| d.as_array())
+                .is_some_and(|details| {
+                    details.iter().any(|d| {
+                        d.get("errorCode").and_then(|c| c.as_str()) == Some("UNREGISTERED")
+                    })
+                })
+        });
+    if unregistered {
         return FcmOutcome::InvalidToken;
     }
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return FcmOutcome::AuthRejected;
+    }
+    // 429 / quota exhaustion is transient at any real fan-out volume: back
+    // off and retry rather than failing the push outright.
+    if status.as_u16() == 429
+        || body.contains("RESOURCE_EXHAUSTED")
+        || body.contains("QUOTA_EXCEEDED")
+    {
+        return FcmOutcome::Retryable;
     }
     if status.is_server_error() {
         return FcmOutcome::Retryable;
@@ -93,11 +114,16 @@ struct JwtClaims {
 #[derive(serde::Deserialize)]
 struct TokenResponse {
     access_token: String,
+    /// Lifetime in seconds; absent from non-Google token endpoints.
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 struct CachedToken {
     token: String,
     created_at: Instant,
+    /// How long the token may be served from cache (90% of its lifetime).
+    ttl: Duration,
 }
 
 impl Drop for CachedToken {
@@ -144,7 +170,7 @@ impl FcmProvider {
         // and this coalesces a burst of cache misses into one OAuth request.
         let mut cached = self.cached_token.lock().await;
         if let Some(ref ct) = *cached
-            && ct.created_at.elapsed() < TOKEN_REFRESH_INTERVAL
+            && ct.created_at.elapsed() < ct.ttl
         {
             return Ok(ct.token.clone());
         }
@@ -178,8 +204,16 @@ impl FcmProvider {
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
+            let preview = if body.len() > MAX_ERROR_BODY_LEN {
+                format!(
+                    "{}… (truncated)",
+                    crate::safe_prefix(&body, MAX_ERROR_BODY_LEN)
+                )
+            } else {
+                body
+            };
             return Err(PushError::Delivery(format!(
-                "FCM token exchange returned error: {body}"
+                "FCM token exchange returned error: {preview}"
             )));
         }
 
@@ -188,10 +222,18 @@ impl FcmProvider {
             .await
             .map_err(|e| PushError::Delivery(format!("FCM token parse failed: {e}")))?;
 
-        let access_token = token_resp.access_token.clone();
+        let access_token = token_resp.access_token;
+        let ttl = Duration::from_secs(
+            token_resp
+                .expires_in
+                .unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS)
+                .saturating_mul(9)
+                / 10,
+        );
         *cached = Some(CachedToken {
             token: access_token.clone(),
             created_at: Instant::now(),
+            ttl,
         });
         Ok(access_token)
     }
@@ -222,7 +264,23 @@ impl PushProvider for FcmProvider {
 
         let mut last_err = String::from("no attempts made");
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
-            let access_token = self.get_or_refresh_token().await?;
+            let access_token = match self.get_or_refresh_token().await {
+                Ok(token) => token,
+                // Misconfigured credentials will never succeed — fail fast.
+                Err(e @ PushError::Config(_)) => return Err(e),
+                // A transient exchange failure (network blip, Google 5xx) is
+                // one delivery attempt: back off and retry instead of
+                // aborting the push.
+                Err(e) => {
+                    last_err = e.to_string();
+                    warn!(attempt, error = %last_err, "FCM token exchange failed, will retry");
+                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                        tokio::time::sleep(retry_backoff(attempt)).await;
+                        continue;
+                    }
+                    break;
+                }
+            };
 
             let resp = match self
                 .client
@@ -313,21 +371,60 @@ mod tests {
         );
     }
 
-    /// M-21: an UNREGISTERED error body must be classified as an invalid
-    /// token even if it arrives with a generic error status, so it never
-    /// gets retried.
+    /// M-21: only the structured per-token error
+    /// (`error.details[].errorCode == "UNREGISTERED"`) identifies a dead
+    /// device token, so it never gets retried.
     #[test]
     fn classify_fcm_response_unregistered_body_is_invalid_token() {
-        let body =
-            r#"{"error":{"status":"NOT_FOUND","message":"Requested entity was not found."}}"#;
+        let body = r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}"#;
         assert_eq!(
             classify_fcm_response(StatusCode::NOT_FOUND, body),
             FcmOutcome::InvalidToken
         );
+    }
+
+    /// A bare 404/410 without the structured UNREGISTERED detail is a
+    /// project-level failure (e.g. mistyped project id, which FCM answers
+    /// with exactly this body) — it must NOT be treated as an invalid token,
+    /// or one config typo would wipe the whole device registry.
+    #[test]
+    fn classify_fcm_response_bare_404_is_permanent_not_invalid_token() {
+        let body =
+            r#"{"error":{"status":"NOT_FOUND","message":"Requested entity was not found."}}"#;
+        assert_eq!(
+            classify_fcm_response(StatusCode::NOT_FOUND, body),
+            FcmOutcome::Permanent
+        );
         let body2 = r#"{"error":{"code":404,"message":"UNREGISTERED"}}"#;
         assert_eq!(
-            classify_fcm_response(StatusCode::BAD_REQUEST, body2),
-            FcmOutcome::InvalidToken
+            classify_fcm_response(StatusCode::NOT_FOUND, body2),
+            FcmOutcome::Permanent
+        );
+    }
+
+    /// 429 / quota exhaustion is transient — the vendor rate limit lifts, so
+    /// it must retry with backoff rather than fail the push outright.
+    #[test]
+    fn classify_fcm_response_429_and_quota_are_retryable() {
+        assert_eq!(
+            classify_fcm_response(StatusCode::TOO_MANY_REQUESTS, "{}"),
+            FcmOutcome::Retryable
+        );
+        let body = r#"{"error":{"code":429,"message":"Quota exceeded for quota metric.","status":"RESOURCE_EXHAUSTED"}}"#;
+        assert_eq!(
+            classify_fcm_response(StatusCode::TOO_MANY_REQUESTS, body),
+            FcmOutcome::Retryable
+        );
+        let body2 = r#"{"error":{"code":403,"message":"quota","status":"PERMISSION_DENIED","details":[{"errorCode":"QUOTA_EXCEEDED"}]}}"#;
+        // Quota detail wins even on a 403 that would otherwise be auth.
+        assert_eq!(
+            classify_fcm_response(StatusCode::FORBIDDEN, body2),
+            FcmOutcome::AuthRejected
+        );
+        let body3 = r#"{"error":{"code":500,"status":"QUOTA_EXCEEDED"}}"#;
+        assert_eq!(
+            classify_fcm_response(StatusCode::INTERNAL_SERVER_ERROR, body3),
+            FcmOutcome::Retryable
         );
     }
 
@@ -359,9 +456,8 @@ mod tests {
         );
     }
 
-    /// Other 4xx (malformed request, quota exceeded via a non-UNREGISTERED
-    /// body, etc.) are permanent — retrying an unchanged request would just
-    /// fail identically.
+    /// Other 4xx (malformed request, etc.) are permanent — retrying an
+    /// unchanged request would just fail identically.
     #[test]
     fn classify_fcm_response_other_4xx_is_permanent() {
         let body = r#"{"error":{"code":400,"message":"INVALID_ARGUMENT"}}"#;

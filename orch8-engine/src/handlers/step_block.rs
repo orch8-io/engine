@@ -679,9 +679,9 @@ pub async fn execute_step_node(
                     retry.max_backoff,
                     retry.backoff_multiplier,
                 );
-                let fire_at = chrono::Utc::now()
-                    + chrono::Duration::from_std(backoff)
-                        .unwrap_or_else(|_| chrono::Duration::zero());
+                // Shared with the fast path: clamp a pathological backoff
+                // instead of collapsing it to zero (immediate hot retry).
+                let fire_at = crate::scheduler::clamped_fire_at(chrono::Utc::now(), backoff);
                 tracing::warn!(
                     instance_id = %instance.id,
                     block_id = %step_def.id,

@@ -55,7 +55,8 @@ fn next_sub_sequence_depth(parent_metadata: &serde_json::Value) -> u64 {
 }
 
 /// Dispatch a single execution node to the appropriate block handler.
-/// Returns `true` if the instance has more work to do.
+/// Returns `true` if the instance has more work to do. Note: all current
+/// call sites discard the return value and rely on the error channel only.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn dispatch_block(
     storage: &Arc<dyn StorageBackend>,

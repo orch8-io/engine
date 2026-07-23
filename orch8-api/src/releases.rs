@@ -352,7 +352,6 @@ pub(crate) struct ValidationReport {
         (status = 409, description = "Release is not in draft"),
     )
 )]
-#[allow(clippy::too_many_lines)] // CAS → sample → replay loop → summary → CAS, one linear pipeline
 pub(crate) async fn validate_release(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -391,16 +390,37 @@ pub(crate) async fn validate_release(
     )
     .await?;
 
+    // Any failure past this point must not strand the release in
+    // `Validating` — no API transition leads out of it. Roll back to
+    // `Draft` (best effort) so the operator can fix the cause and
+    // re-validate.
+    match run_validation(&state, &release, req.sample).await {
+        Ok(report) => Ok(Json(report)),
+        Err(e) => {
+            rollback_validating(&state, &release).await;
+            Err(e)
+        }
+    }
+}
+
+/// The replay pipeline that runs while the release is in `Validating`.
+/// Kept separate from `validate_release` so every error path funnels
+/// through the Validating → Draft rollback above.
+#[allow(clippy::too_many_lines)] // sample → replay loop → summary → CAS, one linear pipeline
+async fn run_validation(
+    state: &AppState,
+    release: &WorkflowRelease,
+    sample: Option<u32>,
+) -> Result<ValidationReport, ApiError> {
     let candidate = fetch_sequence(
-        &state,
+        state,
         release.candidate_sequence_id.into_uuid(),
         &release.tenant_id,
     )
     .await?;
 
     // Historical sample: terminal instances of the exact baseline version.
-    let sample_size = req
-        .sample
+    let sample_size = sample
         .unwrap_or(DEFAULT_VALIDATION_SAMPLE)
         .clamp(1, MAX_VALIDATION_SAMPLE);
     let history = state
@@ -510,9 +530,9 @@ pub(crate) async fn validate_release(
         .get_release(release.id)
         .await
         .map_err(|e| ApiError::from_storage(e, "release"))?
-        .ok_or_else(|| ApiError::NotFound(format!("release {id}")))?;
+        .ok_or_else(|| ApiError::NotFound(format!("release {}", release.id)))?;
     transition(
-        &state,
+        state,
         &fresh,
         ReleaseState::Validating,
         ReleaseState::Ready,
@@ -525,13 +545,59 @@ pub(crate) async fn validate_release(
     )
     .await?;
 
-    Ok(Json(ValidationReport {
+    Ok(ValidationReport {
         replayed,
         matches,
         divergences,
         inconclusive,
         release_state: ReleaseState::Ready,
-    }))
+    })
+}
+
+/// Best-effort recovery from a failed validation: CAS the release back to
+/// `Draft` so it can be re-validated. `Validating → Draft` is deliberately
+/// not part of the operator-facing state machine (`can_transition_to`) — it
+/// exists only as this internal recovery path, so it goes through the
+/// storage CAS directly. A failed rollback is logged, never propagated: the
+/// caller needs the original validation error.
+async fn rollback_validating(state: &AppState, release: &WorkflowRelease) {
+    match state
+        .storage
+        .cas_release_state(
+            release.id,
+            ReleaseState::Validating,
+            ReleaseState::Draft,
+            None,
+            None,
+        )
+        .await
+    {
+        Ok(true) => {
+            record_decision(
+                state,
+                release.id,
+                ReleaseState::Validating,
+                ReleaseState::Draft,
+                "validation",
+                "validation failed — returned to draft for re-validation",
+            )
+            .await;
+        }
+        Ok(false) => {
+            tracing::warn!(
+                release_id = %release.id,
+                "validation failed but release was no longer Validating — left as-is"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                release_id = %release.id,
+                "validation failed and the Validating → Draft rollback did too — \
+                 release is stranded in Validating"
+            );
+        }
+    }
 }
 
 /// Replay the candidate against one recorded run using the contract

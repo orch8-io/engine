@@ -1,7 +1,7 @@
 //! E2E tests for the safe workflow release control plane.
 
 use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::{InstanceStore, OutputStore};
+use orch8_storage::{InstanceStore, OutputStore, SequenceStore};
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
@@ -569,4 +569,51 @@ async fn illegal_transitions_are_conflicts_and_tenant_isolated() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn failed_validation_returns_release_to_draft() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let fx = publish_versions(&base, &client).await;
+    let release = create_release(&base, &client, &fx, json!([])).await;
+    let rid = release["id"].as_str().unwrap().to_string();
+
+    // Delete the candidate so validation fails AFTER the Draft→Validating
+    // CAS (the failure mode that used to strand the release in Validating).
+    srv.storage
+        .delete_sequence(orch8_types::ids::SequenceId::from_uuid(fx.candidate_id))
+        .await
+        .unwrap();
+
+    let (status, _) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The release must be back in draft — not stranded in validating.
+    let resp = client
+        .get(format!("{base}/releases/{rid}"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap();
+    let value: Value = resp.json().await.unwrap();
+    assert_eq!(value["state"], "draft", "{value}");
+
+    // And it is re-validatable: skip-validation works from draft.
+    let (status, report) = post(
+        &base,
+        &client,
+        &format!("/releases/{rid}/validate"),
+        json!({"skip": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["release_state"], "ready");
 }

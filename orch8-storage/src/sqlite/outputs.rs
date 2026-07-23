@@ -35,7 +35,11 @@ pub(super) async fn get(
     instance_id: InstanceId,
     block_id: &BlockId,
 ) -> Result<Option<BlockOutput>, StorageError> {
-    let row = sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 AND block_id=?2 ORDER BY created_at DESC LIMIT 1")
+    // `id DESC` tiebreaker: `copy_block_outputs` (fork-from) preserves
+    // `created_at` verbatim, so several rows can share one timestamp; without
+    // the second key the "latest" row is planner-dependent. UUIDv7 ids order
+    // lexicographically by insertion — same convention as `get_all`.
+    let row = sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 AND block_id=?2 ORDER BY created_at DESC, id DESC LIMIT 1")
         .bind(instance_id.into_uuid().to_string()).bind(block_id.as_str())
         .fetch_optional(&storage.pool).await?;
     row.as_ref().map(row_to_output).transpose()

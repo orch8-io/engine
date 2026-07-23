@@ -321,26 +321,40 @@ impl crate::SequenceStore for PostgresStorage {
         tenant_id: &str,
     ) -> Result<crate::ManifestLockGuard, StorageError> {
         let mut conn = self.pool.acquire().await?;
-        sqlx::query("SELECT pg_advisory_lock(hashtext($1))")
+        // hashtextextended: 64-bit key — the 32-bit hashtext() could falsely
+        // serialize two tenants whose ids hash-collide.
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
             .bind(tenant_id)
             .execute(&mut *conn)
             .await?;
         let tenant_owned = tenant_id.to_string();
         Ok(crate::ManifestLockGuard::new(move || {
-            tokio::spawn(async move {
-                if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(hashtext($1))")
-                    .bind(&tenant_owned)
-                    .execute(&mut *conn)
-                    .await
-                {
-                    tracing::warn!(
-                        error = %e,
-                        tenant_id = %tenant_owned,
-                        "failed to release manifest advisory lock; it will clear when the connection resets"
-                    );
-                }
-                // `conn` drops here either way, returning it to the pool.
-            });
+            // `Drop` is synchronous, so the unlock has to be spawned. Guard
+            // against being dropped outside a runtime (spawn would panic);
+            // if the unlock never runs, the pooled connection still holds
+            // the session lock until it is recycled, then it clears.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+                        .bind(&tenant_owned)
+                        .execute(&mut *conn)
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            tenant_id = %tenant_owned,
+                            "failed to release manifest advisory lock; it will clear when the connection resets"
+                        );
+                    }
+                    // `conn` drops here either way, returning it to the pool.
+                });
+            } else {
+                tracing::warn!(
+                    tenant_id = %tenant_owned,
+                    "manifest lock guard dropped outside a tokio runtime; \
+                     advisory lock clears when the connection is recycled"
+                );
+            }
         }))
     }
 }

@@ -533,11 +533,32 @@ impl crate::SequenceStore for SqliteStorage {
     ) -> Result<crate::ManifestLockGuard, StorageError> {
         const MAX_ATTEMPTS: u32 = 100;
         const POLL_INTERVAL_MS: u64 = 50;
+        // A lock row whose release never ran (process crash, or runtime
+        // shutdown before the spawned DELETE executed) would otherwise wedge
+        // the tenant permanently — every future acquire would poll out and
+        // hard-fail. Rows older than this are presumed abandoned and
+        // reclaimed below. Well above any realistic manifest-publish hold.
+        const STALE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
+        if let Err(e) = sqlx::query(
+            "DELETE FROM manifest_locks WHERE tenant_id = ?1 AND locked_at < ?2",
+        )
+        .bind(tenant_id)
+        .bind(helpers::ts(Utc::now() - STALE_AFTER))
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(
+                error = %e,
+                tenant_id = %tenant_id,
+                "failed to reclaim stale sqlite manifest lock rows"
+            );
+        }
         for attempt in 0..MAX_ATTEMPTS {
+            let locked_at = helpers::ts(Utc::now());
             let result =
                 sqlx::query("INSERT INTO manifest_locks (tenant_id, locked_at) VALUES (?1, ?2)")
                     .bind(tenant_id)
-                    .bind(helpers::ts(Utc::now()))
+                    .bind(&locked_at)
                     .execute(&self.pool)
                     .await;
             match result {
@@ -545,20 +566,36 @@ impl crate::SequenceStore for SqliteStorage {
                     let pool = self.pool.clone();
                     let tenant_owned = tenant_id.to_string();
                     return Ok(crate::ManifestLockGuard::new(move || {
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                sqlx::query("DELETE FROM manifest_locks WHERE tenant_id = ?1")
-                                    .bind(&tenant_owned)
-                                    .execute(&pool)
-                                    .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    tenant_id = %tenant_owned,
-                                    "failed to release sqlite manifest lock row"
-                                );
-                            }
-                        });
+                        // `Drop` is synchronous, so the release has to be
+                        // spawned. Guard against being dropped outside a
+                        // runtime (spawn would panic); if the release never
+                        // runs, the stale-row reclaim above heals the leak.
+                        // The DELETE matches `locked_at` so a reclaimed-then-
+                        // reacquired row is never deleted by the old holder.
+                        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                            handle.spawn(async move {
+                                if let Err(e) = sqlx::query(
+                                    "DELETE FROM manifest_locks WHERE tenant_id = ?1 AND locked_at = ?2",
+                                )
+                                .bind(&tenant_owned)
+                                .bind(&locked_at)
+                                .execute(&pool)
+                                .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        tenant_id = %tenant_owned,
+                                        "failed to release sqlite manifest lock row"
+                                    );
+                                }
+                            });
+                        } else {
+                            tracing::warn!(
+                                tenant_id = %tenant_owned,
+                                "sqlite manifest lock guard dropped outside a tokio runtime; \
+                                 lock row left for stale reclaim"
+                            );
+                        }
                     }));
                 }
                 Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {

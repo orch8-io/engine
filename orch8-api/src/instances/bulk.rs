@@ -13,11 +13,24 @@ use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::signal::{Signal, SignalType};
 
 use super::types::{
-    BatchAction, BatchActionRequest, BatchActionResponse, BulkRescheduleRequest,
+    BatchAction, BatchActionRequest, BatchActionResponse, BulkFilter, BulkRescheduleRequest,
     BulkUpdateStateRequest, CountResponse, ListQuery,
 };
 use crate::AppState;
 use crate::error::ApiError;
+
+/// Top-level metadata equality filters (reuses the indexed metadata path) —
+/// the same construction `batch_action` uses, shared by every bulk endpoint
+/// so a caller-supplied `metadata` filter is never silently ignored.
+fn metadata_filter(filter: &BulkFilter) -> Option<serde_json::Value> {
+    filter.metadata.as_ref().filter(|m| !m.is_empty()).map(|m| {
+        serde_json::Value::Object(
+            m.iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect(),
+        )
+    })
+}
 
 #[utoipa::path(patch, path = "/instances/bulk/state", tag = "instances",
     request_body = BulkUpdateStateRequest,
@@ -34,12 +47,13 @@ pub async fn bulk_update_state(
             "bulk operations require a tenant_id".into(),
         ));
     }
+    let metadata = metadata_filter(&req.filter);
     let filter = InstanceFilter {
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
         states: req.filter.states,
-        metadata_filter: None,
+        metadata_filter: metadata,
         priority: None,
     };
 
@@ -67,12 +81,13 @@ pub async fn bulk_reschedule(
             "bulk operations require a tenant_id".into(),
         ));
     }
+    let metadata = metadata_filter(&req.filter);
     let filter = InstanceFilter {
         tenant_id: scoped_tenant,
         namespace: req.filter.namespace.map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
         states: req.filter.states,
-        metadata_filter: None,
+        metadata_filter: metadata,
         priority: None,
     };
 
@@ -156,25 +171,14 @@ pub async fn batch_action(
     }
 
     // Top-level metadata equality filters (reuses the indexed metadata path).
-    let metadata_filter = req
-        .filter
-        .metadata
-        .as_ref()
-        .filter(|m| !m.is_empty())
-        .map(|m| {
-            serde_json::Value::Object(
-                m.iter()
-                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                    .collect(),
-            )
-        });
+    let metadata = metadata_filter(&req.filter);
 
     let filter = InstanceFilter {
         tenant_id: Some(tenant_id.clone()),
         namespace: req.filter.namespace.clone().map(Namespace::new),
         sequence_id: req.filter.sequence_id.map(SequenceId::from_uuid),
         states: req.filter.states.clone(),
-        metadata_filter,
+        metadata_filter: metadata,
         priority: None,
     };
 
@@ -237,10 +241,14 @@ async fn apply_batch_action(
                 return Ok(false);
             }
             // Mirror the single-instance retry: clear stale tree + sentinel
-            // outputs, then re-schedule.
+            // outputs, reset the run identity (run_id, step counters — a
+            // stale step budget would instantly re-exhaust), then re-schedule.
             let s = &state.storage;
             if s.delete_execution_tree(inst.id).await.is_err()
                 || s.delete_sentinel_block_outputs(inst.id).await.is_err()
+                || s.reset_instance_run(inst.id, &Uuid::now_v7().to_string())
+                    .await
+                    .is_err()
                 || s.update_instance_state(inst.id, InstanceState::Scheduled, Some(Utc::now()))
                     .await
                     .is_err()

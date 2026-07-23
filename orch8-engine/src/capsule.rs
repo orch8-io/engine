@@ -248,14 +248,9 @@ pub async fn export_paused_capsule_manifest(
             bytes: artifact.size,
         },
         provenance_head: storage
-            .list_provenance(
-                &instance.tenant_id,
-                request.continuity.continuity_id,
-                10_000,
-            )
+            .get_provenance_head(&instance.tenant_id, request.continuity.continuity_id)
             .await?
-            .last()
-            .map(|entry| entry.entry_sha256.clone()),
+            .map(|entry| entry.entry_sha256),
         issued_at: now,
         expires_at: request.expires_at,
         signing_key_id: request.signing_key_id,

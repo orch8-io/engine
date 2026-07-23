@@ -9,9 +9,11 @@
 //!
 //! ## Staleness & revocation
 //!
-//! Only *active* records are cached, and entries live for `CACHE_TTL`.
-//! Inactive/absent keys are never cached (no negative caching), so a *failed*
-//! auth always reflects current database state.
+//! Only *active* records are cached in the positive cache, and entries live for
+//! `CACHE_TTL`. Inactive/absent keys go into a *negative* cache with the much
+//! shorter `NEGATIVE_CACHE_TTL`, so a flood of bogus keys can't hammer the
+//! database while a newly-created key still becomes valid within a few
+//! seconds.
 //!
 //! This cache is **process-local** (a `static OnceLock`, not shared storage).
 //! Revocation is immediate *on the node that handles the revoke*: `revoke_api_key`

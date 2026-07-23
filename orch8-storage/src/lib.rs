@@ -1236,7 +1236,8 @@ pub trait SignalStore: Send + Sync + 'static {
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
 
     /// Return `(instance_id, current_state)` pairs for instances in a
-    /// non-scheduled state (`paused`, `waiting`) that have undelivered signals.
+    /// non-running state (`paused`, `waiting`, `scheduled`) that have
+    /// undelivered signals.
     ///
     /// The scheduler calls this on each tick so that resume/cancel signals
     /// queued against paused or waiting instances are processed promptly

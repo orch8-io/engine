@@ -68,15 +68,19 @@ fn verify_manifest_signature(signed: &SignedManifest, verifying_key: &VerifyingK
         .is_ok()
 }
 
+/// Captured uploads: `(path, bytes)` pairs.
+type UploadLog = std::sync::Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 /// In-memory mock CDN for `SequencePublisher` tests.
+#[derive(Clone)]
 struct MockCdn {
-    uploads: Mutex<Vec<(String, Vec<u8>)>>,
+    uploads: UploadLog,
 }
 
 impl MockCdn {
     fn new() -> Self {
         Self {
-            uploads: Mutex::new(Vec::new()),
+            uploads: UploadLog::default(),
         }
     }
 }
@@ -1259,4 +1263,37 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
     let entry = publisher.publish_sequence(&seq, &key).await.unwrap();
     // Should be deduplicated and sorted
     assert_eq!(entry.required_handlers, vec!["email", "http"]);
+}
+
+// Regression: publish_manifest must enforce the documented 30-day retention
+// on removed entries so the signed manifest does not grow without bound.
+#[tokio::test]
+async fn test_101_publish_manifest_prunes_old_removed_entries() {
+    let key = test_key();
+    let mock = MockCdn::new();
+    let handle = mock.clone();
+    let cdn_box: Box<dyn CdnBackend> = Box::new(mock);
+    let r#gen = ManifestGenerator::new(key.clone(), "key1".to_string());
+    let publisher =
+        SequencePublisher::new(cdn_box, r#gen, "prune_t".to_string(), "key1".to_string())
+            .expect("valid tenant_id");
+
+    let removed = vec![make_removed("old_seq", 31), make_removed("recent_seq", 1)];
+    publisher
+        .publish_manifest(vec![], removed, vec![])
+        .await
+        .unwrap();
+
+    let uploads = handle.uploads.lock().unwrap();
+    let (path, bytes) = uploads
+        .iter()
+        .find(|(p, _)| p == "prune_t/manifest.json")
+        .expect("manifest upload");
+    assert_eq!(path, "prune_t/manifest.json");
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.contains("recent_seq"), "recent entry must be kept");
+    assert!(
+        !text.contains("old_seq"),
+        "entry older than 30 days must be pruned"
+    );
 }

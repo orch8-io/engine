@@ -179,7 +179,10 @@ async fn valid_value_completes_block_and_writes_context_data() {
         .await
         .unwrap()
         .expect("block output written");
-    assert_eq!(out.output, json!({"value": "approve"}));
+    assert_eq!(
+        out.output,
+        json!({"value": "approve", "_orch8_human_gate": true})
+    );
 
     // Context data merged.
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
@@ -216,7 +219,10 @@ async fn dry_run_auto_approve_resolves_gate_with_default_choice() {
         .await
         .unwrap()
         .expect("block output written");
-    assert_eq!(out.output, json!({"value": "yes"}));
+    assert_eq!(
+        out.output,
+        json!({"value": "yes", "_orch8_human_gate": true})
+    );
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert_eq!(refreshed.context.data.get("review"), Some(&json!("yes")));
 }
@@ -313,7 +319,10 @@ async fn default_yes_no_accepts_yes() {
         .await
         .unwrap()
         .expect("block output");
-    assert_eq!(out.output, json!({"value": "yes"}));
+    assert_eq!(
+        out.output,
+        json!({"value": "yes", "_orch8_human_gate": true})
+    );
 
     // No store_as → key defaults to block id.
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
@@ -432,7 +441,10 @@ async fn allow_comment_true_accepts_value_with_extra_comment_field() {
         .await
         .unwrap()
         .expect("block output written");
-    assert_eq!(out.output, json!({"value": "approve"}));
+    assert_eq!(
+        out.output,
+        json!({"value": "approve", "_orch8_human_gate": true})
+    );
 
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert_eq!(
@@ -475,9 +487,102 @@ async fn custom_choices_with_no_store_as_uses_block_id_as_key() {
         .await
         .unwrap()
         .expect("block output written");
-    assert_eq!(out.output, json!({"value": "beta"}));
+    assert_eq!(
+        out.output,
+        json!({"value": "beta", "_orch8_human_gate": true})
+    );
 
     // store_as is None → key defaults to block id "picker".
     let refreshed = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert_eq!(refreshed.context.data.get("picker"), Some(&json!("beta")));
+}
+
+/// Regression (audit: human-gate durability). A gate accepted on a previous
+/// attempt whose handler then crashed or failed retryably leaves the
+/// acceptance row behind, but the `human_input:` signal is already delivered
+/// — the gate must treat the persisted acceptance as satisfied instead of
+/// parking forever waiting for a signal that will never arrive again.
+#[tokio::test]
+async fn previous_acceptance_is_recovered_without_pending_signal() {
+    let (storage, instance, step) = setup(mk_step("review", advanced_def())).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+
+    // Attempt 1: signal accepted, gate output persisted, signal delivered.
+    enqueue_human_signal(&storage, instance.id, "review", json!({"value": "approve"})).await;
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("first check ok");
+    assert!(!deferred);
+    assert!(
+        storage
+            .get_pending_signals(instance.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "signal consumed"
+    );
+
+    // Simulate the crash/retry: an `__in_progress__` sentinel row (written
+    // before the handler ran) is now the block's LATEST output. The gate
+    // must look past it and still recover the acceptance.
+    let sentinel = orch8_types::output::BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: step.id.clone(),
+        output: json!({"_sentinel": true, "_handler": "builtin.noop"}),
+        output_ref: Some("__in_progress__".into()),
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    storage.save_block_output(&sentinel).await.unwrap();
+
+    // Attempt 2: no pending signal — the recovered acceptance must satisfy
+    // the gate (handler re-runs; at-least-once) instead of deferring.
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("second check ok");
+    assert!(
+        !deferred,
+        "persisted gate acceptance must satisfy the gate without a pending signal"
+    );
+}
+
+/// Regression (audit: human-gate durability, loop semantics). Once the
+/// handler HAS completed after an acceptance, the latest effective output is
+/// the real handler result — a re-entered gate (e.g. next loop iteration)
+/// must wait for FRESH input, not auto-pass on the stale acceptance.
+#[tokio::test]
+async fn completed_handler_output_does_not_satisfy_reentered_gate() {
+    let (storage, instance, step) = setup(mk_step("review", advanced_def())).await;
+    let human_def = step.wait_for_input.clone().unwrap();
+
+    enqueue_human_signal(&storage, instance.id, "review", json!({"value": "approve"})).await;
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("first check ok");
+    assert!(!deferred);
+
+    // The step's handler ran to completion and saved its real output
+    // (inline, no gate marker) AFTER the acceptance row.
+    let real = orch8_types::output::BlockOutput {
+        id: Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: step.id.clone(),
+        output: json!({"reviewed": true}),
+        output_ref: None,
+        output_size: 0,
+        attempt: 0,
+        created_at: Utc::now(),
+    };
+    storage.save_block_output(&real).await.unwrap();
+
+    // Re-entering the gate (loop iteration 2) with no new signal must defer.
+    let deferred = check_human_input(&storage, &instance, &step, &human_def)
+        .await
+        .expect("second check ok");
+    assert!(
+        deferred,
+        "a completed handler output means the gate needs fresh input on re-entry"
+    );
 }

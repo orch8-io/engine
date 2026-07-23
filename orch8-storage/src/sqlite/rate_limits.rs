@@ -76,6 +76,7 @@ async fn check_rate_limit_inner(
             END
         WHERE tenant_id = ?1
           AND resource_key = ?2
+          AND max_count > 0
           AND (
                 (julianday(?3) - julianday(window_start)) * 86400 >= window_seconds
                 OR current_count < max_count

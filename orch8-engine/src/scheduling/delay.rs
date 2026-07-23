@@ -15,11 +15,10 @@ pub fn calculate_next_fire_at(
     // delay's timezone (falling back to the instance timezone).
     let mut target = if let Some(ref local_str) = delay.fire_at_local {
         let tz_name = delay.timezone.as_deref().unwrap_or(timezone);
-        resolve_fire_at_local(local_str, tz_name).unwrap_or_else(|| {
-            from + Duration::from_std(delay.duration).unwrap_or_else(|_| Duration::zero())
-        })
+        resolve_fire_at_local(local_str, tz_name)
+            .unwrap_or_else(|| add_duration_clamped(from, delay.duration))
     } else {
-        from + Duration::from_std(delay.duration).unwrap_or_else(|_| Duration::zero())
+        add_duration_clamped(from, delay.duration)
     };
 
     if delay.business_days_only {
@@ -31,11 +30,25 @@ pub fn calculate_next_fire_at(
         let jitter_ms = i64::try_from(jitter.as_millis()).unwrap_or(i64::MAX);
         if jitter_ms > 0 {
             let offset = rand::rng().random_range(-jitter_ms..=jitter_ms);
-            target += Duration::milliseconds(offset);
+            target = target
+                .checked_add_signed(Duration::milliseconds(offset))
+                .unwrap_or(DateTime::<Utc>::MAX_UTC);
         }
     }
 
     target
+}
+
+/// Add a `std` duration to a timestamp, clamping instead of panicking or
+/// collapsing to zero. `DateTime + Duration` panics when the sum overflows
+/// the representable range, and `from_std` rejects durations beyond
+/// chrono's range — both only reachable with an absurd user-configured
+/// delay, where "far in the future" is the safe direction (the old code
+/// fired *immediately* in the first case and panicked in the second).
+fn add_duration_clamped(from: DateTime<Utc>, duration: std::time::Duration) -> DateTime<Utc> {
+    let delta = Duration::from_std(duration).unwrap_or(Duration::MAX);
+    from.checked_add_signed(delta)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 /// Merge step-level holidays with tenant-level holidays from `context.config.holidays`.

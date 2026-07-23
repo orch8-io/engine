@@ -89,9 +89,17 @@ pub async fn send_signal(
     if let Ok(Some(fresh)) = state.storage.get_instance(instance_id).await
         && fresh.state == InstanceState::Scheduled
     {
+        // CAS on Scheduled: the instance may have transitioned (Running,
+        // terminal) between the re-fetch and this write — an unconditional
+        // update would resurrect it as Scheduled.
         let _ = state
             .storage
-            .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Scheduled,
+                Some(Utc::now()),
+            )
             .await;
     }
 

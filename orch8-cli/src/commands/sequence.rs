@@ -5,6 +5,7 @@ use clap::Subcommand;
 use reqwest::Client;
 use uuid::Uuid;
 
+use crate::atomic_write;
 use crate::{OutputFormat, print_response};
 
 #[derive(Subcommand)]
@@ -70,23 +71,6 @@ pub enum SequenceCmd {
     },
 }
 
-fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(std::path::Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary file beside {}", path.display()))?;
-    file.write_all(contents)?;
-    file.as_file().sync_all()?;
-    file.persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("atomically replace {}", path.display()))?;
-    Ok(())
-}
-
 /// The content fields that define a sequence's behavior — everything except
 /// server-assigned identity (`id`, `version`, `created_at`, `deprecated`,
 /// `status`). Two sequences with the same fingerprint are functionally equal.
@@ -132,7 +116,7 @@ fn decide(server: Option<&serde_json::Value>, local: &serde_json::Value) -> Appl
                     .as_i64()
                     .and_then(|v| i32::try_from(v).ok())
                     .unwrap_or(0);
-                ApplyDecision::Apply(cur + 1)
+                ApplyDecision::Apply(cur.saturating_add(1))
             }
         }
     }

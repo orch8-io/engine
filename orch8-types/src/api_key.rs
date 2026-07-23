@@ -19,10 +19,10 @@ use sha2::{Digest, Sha256};
 
 /// Hash an API key secret for storage and lookup.
 ///
-/// SHA-256 is sufficient here: keys are high-entropy random tokens (256 bits),
-/// not low-entropy human passwords, so a deliberately slow password hash buys
-/// nothing. The hash is the lookup key, so the stored value never reveals the
-/// secret even if the database leaks.
+/// SHA-256 is sufficient here: keys are high-entropy random tokens (244 bits —
+/// two `UUIDv4` at 122 bits each), not low-entropy human passwords, so a
+/// deliberately slow password hash buys nothing. The hash is the lookup key,
+/// so the stored value never reveals the secret even if the database leaks.
 #[must_use]
 pub fn hash_api_key(secret: &str) -> String {
     let digest = Sha256::digest(secret.as_bytes());

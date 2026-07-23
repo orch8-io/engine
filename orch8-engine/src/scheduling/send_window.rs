@@ -38,15 +38,11 @@ pub fn check_window(
     }
 
     // Calculate next window open time.
-    Some(next_window_open(local, window, tz))
+    Some(next_window_open(local, window))
 }
 
 /// Calculate the next time the send window opens.
-fn next_window_open(
-    local: chrono::DateTime<chrono_tz::Tz>,
-    window: &SendWindow,
-    _tz: chrono_tz::Tz,
-) -> DateTime<Utc> {
+fn next_window_open(local: chrono::DateTime<chrono_tz::Tz>, window: &SendWindow) -> DateTime<Utc> {
     let mut candidate = local;
 
     // Try up to 8 days ahead (handles full week + 1).

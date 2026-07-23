@@ -45,7 +45,10 @@ pub(super) async fn save(
 /// With the write-append model (migration 027) multiple rows can share the
 /// same `(instance_id, block_id)` pair. Every caller of this function wants
 /// "the current state" — the latest attempt / iteration — so we sort by
-/// `created_at DESC` and take the first. The supporting composite index
+/// `created_at DESC` and take the first. The `id DESC` tiebreak keeps the
+/// choice deterministic when `copy_block_outputs` (fork-from) produces rows
+/// with identical `created_at` (`UUIDv7` ids order by insertion). The
+/// supporting composite index
 /// `idx_block_outputs_instance_block_created` keeps this cheap.
 pub(super) async fn get(
     store: &PostgresStorage,
@@ -56,7 +59,7 @@ pub(super) async fn get(
         r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
            FROM block_outputs
            WHERE instance_id = $1 AND block_id = $2
-           ORDER BY created_at DESC
+           ORDER BY created_at DESC, id DESC
            LIMIT 1",
     )
     .bind(instance_id.into_uuid())

@@ -180,13 +180,27 @@ async fn sweep_externalized(storage: &dyn StorageBackend) {
     }
 }
 
+/// Convert a caller/config-supplied retention into a sweep cutoff. Returns
+/// `None` when the duration is unrepresentable as a `chrono::Duration`
+/// (> ~292M years) or the subtraction would overflow `chrono`'s date range
+/// (~±262k years). The caller must then skip the sweep: falling back to a
+/// zero cutoff would invert the semantics and delete every row (cutoff =
+/// now), and an unchecked subtraction would panic and kill the GC task.
+/// Compile-time-constant retentions (telemetry, webhook, inbox) can hit
+/// neither case and use `from_std` directly.
+fn retention_cutoff(retention: Duration) -> Option<chrono::DateTime<chrono::Utc>> {
+    let d = chrono::Duration::from_std(retention).ok()?;
+    chrono::Utc::now().checked_sub_signed(d)
+}
+
 async fn sweep_emit_dedupe(storage: &dyn StorageBackend, ttl: Duration) {
-    // `chrono::Duration::from_std` only fails if the std Duration overflows
-    // `i64` nanoseconds (~292 years) — well beyond any plausible TTL. Fall
-    // back to a zero cutoff on overflow so the sweep becomes a no-op rather
-    // than crashing the loop.
-    let chrono_ttl = chrono::Duration::from_std(ttl).unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - chrono_ttl;
+    let Some(cutoff) = retention_cutoff(ttl) else {
+        tracing::warn!(
+            ?ttl,
+            "emit_event_dedupe gc: TTL unrepresentable; skipping sweep"
+        );
+        return;
+    };
     match storage
         .delete_expired_emit_event_dedupe(cutoff, GC_BATCH_LIMIT)
         .await
@@ -351,9 +365,13 @@ async fn sweep_artifacts_opt(storage: &dyn StorageBackend, retention: Option<Dur
 /// errors are logged, the marker is only set after a successful delete so a
 /// failed instance retries next tick.
 async fn sweep_artifacts(storage: &dyn StorageBackend, retention: Duration) {
-    let chrono_ret =
-        chrono::Duration::from_std(retention).unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - chrono_ret;
+    let Some(cutoff) = retention_cutoff(retention) else {
+        tracing::warn!(
+            ?retention,
+            "artifact gc: retention unrepresentable; skipping sweep"
+        );
+        return;
+    };
 
     let candidates = match storage
         .list_artifact_gc_candidates(cutoff, GC_BATCH_LIMIT)
@@ -410,9 +428,13 @@ async fn sweep_terminal_instances_opt(storage: &dyn StorageBackend, retention: O
 /// non-test path that ever deleted a `task_instances` row outside of
 /// `delete_sequence`'s cascade.
 async fn sweep_terminal_instances(storage: &dyn StorageBackend, retention: Duration) {
-    let chrono_ret =
-        chrono::Duration::from_std(retention).unwrap_or_else(|_| chrono::Duration::zero());
-    let cutoff = chrono::Utc::now() - chrono_ret;
+    let Some(cutoff) = retention_cutoff(retention) else {
+        tracing::warn!(
+            ?retention,
+            "instance gc: retention unrepresentable; skipping sweep"
+        );
+        return;
+    };
 
     match storage
         .delete_terminal_instances(cutoff, GC_BATCH_LIMIT)
@@ -745,6 +767,34 @@ mod tests {
         assert!(
             storage.get_instance(inst.id).await.unwrap().is_some(),
             "terminal instance must survive when instance_retention is disabled (the default)"
+        );
+    }
+
+    /// An absurdly large retention (e.g. `instance_retention_secs =
+    /// u64::MAX`, meaning "effectively forever") must not delete anything:
+    /// `retention_cutoff` returns `None` and the sweep skips. Guards the
+    /// previous zero-cutoff fallback, which inverted the semantics and would
+    /// have deleted every terminal instance at once.
+    #[tokio::test]
+    async fn terminal_instance_sweep_skips_on_unrepresentable_retention() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let inst = old_terminal_instance();
+        storage.create_instance(&inst).await.unwrap();
+
+        // Overflows chrono's i64-millisecond Duration range.
+        sweep_terminal_instances(storage.as_ref(), Duration::from_secs(u64::MAX)).await;
+        // Representable as a chrono Duration (~317k years) but `now -
+        // retention` would overflow chrono's ~±262k-year date range
+        // (previously: panic).
+        sweep_terminal_instances(storage.as_ref(), Duration::from_secs(10_000_000_000_000)).await;
+
+        assert!(
+            storage.get_instance(inst.id).await.unwrap().is_some(),
+            "unrepresentable retention must skip the sweep, not delete everything"
         );
     }
 

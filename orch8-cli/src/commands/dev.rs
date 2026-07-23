@@ -374,8 +374,10 @@ pub enum StepOutcome {
 struct RunState {
     id: InstanceId,
     handlers_by_block: HashMap<String, String>,
-    /// `block_id#attempt` keys already printed.
-    seen: HashSet<String>,
+    /// High-water mark into the instance's output history: outputs are
+    /// append-only and ordered by `(created_at, id)`, so only the tail
+    /// beyond this index can be new since the last tick.
+    processed: usize,
 }
 
 /// Engine-driving core of `orch8 dev`: owns the embedded engine, the
@@ -440,7 +442,7 @@ impl DevSession {
         self.run = Some(RunState {
             id: instance_id,
             handlers_by_block: loaded.handlers_by_block.clone(),
-            seen: HashSet::new(),
+            processed: 0,
         });
         self.last_progress = Instant::now();
         self.stall_hinted = false;
@@ -467,17 +469,15 @@ impl DevSession {
 
         let outputs = self.engine.block_outputs(run.id).await?;
         let mut printed = false;
-        for output in &outputs {
-            let key = format!("{}#{}", output.block_id, output.attempt);
-            if run.seen.insert(key) {
-                let handler = run
-                    .handlers_by_block
-                    .get(output.block_id.as_str())
-                    .map_or("-", String::as_str);
-                print_block_line(output, handler);
-                printed = true;
-            }
+        for output in outputs.iter().skip(run.processed) {
+            let handler = run
+                .handlers_by_block
+                .get(output.block_id.as_str())
+                .map_or("-", String::as_str);
+            print_block_line(output, handler);
+            printed = true;
         }
+        run.processed = outputs.len();
         if printed {
             self.last_progress = Instant::now();
             self.stall_hinted = false;
@@ -577,7 +577,7 @@ fn preview(value: &Value) -> String {
 }
 
 fn print_block_line(output: &BlockOutput, handler: &str) {
-    let failed = output.output.get("error").is_some();
+    let failed = output.output.get("error").is_some_and(|e| !e.is_null());
     let mark = if failed {
         "✗".red().to_string()
     } else {
@@ -593,11 +593,12 @@ fn print_block_line(output: &BlockOutput, handler: &str) {
     );
 }
 
-/// Last `"error"` field recorded in the instance's outputs, if any.
+/// Last non-null `"error"` field recorded in the instance's outputs, if any.
 fn extract_error(outputs: &[BlockOutput]) -> Option<String> {
     outputs.iter().rev().find_map(|o| {
         o.output
             .get("error")
+            .filter(|e| !e.is_null())
             .map(|e| e.as_str().map_or_else(|| e.to_string(), String::from))
     })
 }
@@ -837,7 +838,7 @@ pub async fn run(cmd: DevCmd) -> Result<()> {
 /// The pacing loop: poll the sequence file every 500 ms, drive
 /// [`DevSession::step`], and sleep when the session reports idle. Returns the
 /// terminal state in `--once` mode, or runs until cancelled (ctrl-c).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn dev_loop(
     session: &mut DevSession,
     watch: &mut FileWatch,
@@ -858,15 +859,25 @@ async fn dev_loop(
             if watch.poll() {
                 match load_sequence(seq_path, *version + 1) {
                     Ok(loaded) => {
-                        *version += 1;
-                        println!(
-                            "{} {} reloaded {} as v{}",
-                            stamp(),
-                            "↻".cyan(),
-                            seq_path.display(),
-                            version,
-                        );
-                        session.start_instance(&loaded, opts.to_options()).await?;
+                        match session.start_instance(&loaded, opts.to_options()).await {
+                            Ok(_) => {
+                                *version += 1;
+                                println!(
+                                    "{} {} reloaded {} as v{}",
+                                    stamp(),
+                                    "↻".cyan(),
+                                    seq_path.display(),
+                                    version,
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{} reload failed ({e:#}) — keeping v{} running",
+                                    "error:".red().bold(),
+                                    version,
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!(
@@ -884,34 +895,56 @@ async fn dev_loop(
                 for path in changed {
                     match load_sequence(&path, *version + 1) {
                         Ok(loaded) => {
-                            *version += 1;
                             let name = path.file_name().map_or_else(
                                 || path.display().to_string(),
                                 |n| n.to_string_lossy().to_string(),
                             );
-                            println!(
-                                "{} {} reloaded workflow {} as v{}",
-                                stamp(),
-                                "↻".cyan(),
-                                name.bold(),
-                                version,
-                            );
-                            let seq_id = session
+                            match session
                                 .engine
                                 .upsert_sequence(loaded.definition.clone())
-                                .await?;
-                            if auto_run {
-                                let instance_id = session
-                                    .engine
-                                    .create_instance(seq_id, opts.to_options())
-                                    .await?;
-                                session.instances_run += 1;
-                                println!(
-                                    "{} {} auto-started instance {}",
-                                    stamp(),
-                                    "▶".green(),
-                                    instance_id.to_string().dimmed(),
-                                );
+                                .await
+                            {
+                                Ok(seq_id) => {
+                                    *version += 1;
+                                    println!(
+                                        "{} {} reloaded workflow {} as v{}",
+                                        stamp(),
+                                        "↻".cyan(),
+                                        name.bold(),
+                                        version,
+                                    );
+                                    if auto_run {
+                                        match session
+                                            .engine
+                                            .create_instance(seq_id, opts.to_options())
+                                            .await
+                                        {
+                                            Ok(instance_id) => {
+                                                session.instances_run += 1;
+                                                println!(
+                                                    "{} {} auto-started instance {}",
+                                                    stamp(),
+                                                    "▶".green(),
+                                                    instance_id.to_string().dimmed(),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "{} workflow auto-start failed: {} ({e:#})",
+                                                    "error:".red().bold(),
+                                                    path.display(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "{} workflow reload failed: {} ({e:#})",
+                                        "error:".red().bold(),
+                                        path.display(),
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -926,7 +959,21 @@ async fn dev_loop(
             }
         }
 
-        match session.step().await? {
+        let outcome = match session.step().await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                if once {
+                    return Err(e);
+                }
+                eprintln!(
+                    "{} step failed ({e:#}) — retrying",
+                    "error:".red().bold(),
+                );
+                tokio::time::sleep(tick).await;
+                continue;
+            }
+        };
+        match outcome {
             StepOutcome::Progress | StepOutcome::Advanced => {}
             StepOutcome::Terminal(state) => {
                 if once {
@@ -980,6 +1027,37 @@ mod tests {
     fn parse_mock_rejects_empty_name() {
         let err = parse_mock("={}").unwrap_err().to_string();
         assert!(err.contains("empty"), "got: {err}");
+    }
+
+    // -- extract_error --------------------------------------------------------
+
+    fn block_output(output: Value) -> BlockOutput {
+        BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: InstanceId::new(),
+            block_id: orch8_types::ids::BlockId::new("b"),
+            output,
+            output_ref: None,
+            output_size: 0,
+            attempt: 1,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn extract_error_ignores_null_error_field() {
+        let outputs = vec![block_output(serde_json::json!({"error": null, "ok": true}))];
+        assert_eq!(extract_error(&outputs), None);
+    }
+
+    #[test]
+    fn extract_error_returns_last_real_error() {
+        let outputs = vec![
+            block_output(serde_json::json!({"error": "first"})),
+            block_output(serde_json::json!({"error": null})),
+            block_output(serde_json::json!({"error": "last"})),
+        ];
+        assert_eq!(extract_error(&outputs), Some("last".to_string()));
     }
 
     // -- resolve_sequence_path ----------------------------------------------

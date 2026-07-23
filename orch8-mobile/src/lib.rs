@@ -35,7 +35,9 @@ use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::scheduler::{TickOnceResult, tick_once};
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
-use orch8_types::ids::{InstanceId, Namespace, TenantId};
+#[cfg(test)]
+use orch8_types::ids::InstanceId;
+use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
@@ -93,6 +95,9 @@ impl From<InstanceState> for InstanceStateKind {
             InstanceState::Paused => Self::Paused,
             InstanceState::Completed => Self::Completed,
             InstanceState::Cancelled => Self::Cancelled,
+            // `InstanceState` is #[non_exhaustive], so a wildcard arm is
+            // required. Currently only `Failed` reaches it; any *future*
+            // variant would also map here — revisit when adding variants.
             _ => Self::Failed,
         }
     }
@@ -863,14 +868,19 @@ impl MobileEngine {
     }
 
     async fn gc_expired_instances(&self) {
-        let _ = self
+        if let Err(e) = self
             .lifecycle
             .gc_expired_instances(self.config.max_instance_lifetime_secs)
-            .await;
+            .await
+        {
+            warn!(error = %e, "instance GC failed");
+        }
     }
 }
 
-#[allow(dead_code)]
+// Only referenced by unit tests; the runtime path uses
+// `lifecycle::parse_instance_id`.
+#[cfg(test)]
 pub(crate) fn parse_instance_id(s: &str) -> Result<InstanceId, MobileError> {
     let uuid = uuid::Uuid::parse_str(s).map_err(|e| MobileError::InvalidInput {
         message: format!("invalid instance ID '{s}': {e}"),

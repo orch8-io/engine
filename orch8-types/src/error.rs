@@ -94,12 +94,32 @@ impl From<sqlx::Error> for StorageError {
                     sqlx::error::ErrorKind::UniqueViolation => {
                         Self::Conflict(db_err.message().to_string())
                     }
+                    // Deadlocks (SQLSTATE 40P01), serialization failures
+                    // (40001), and SQLite lock contention (BUSY/LOCKED) are
+                    // routine under scheduler concurrency and are *transient*:
+                    // mapping them to `Query` would classify them as permanent
+                    // and fail/DLQ healthy instances instead of rescheduling.
+                    _ if is_transient_db_code(db_err.code().as_deref()) => {
+                        Self::Connection(err.to_string())
+                    }
                     _ => Self::Query(err.to_string()),
                 }
             }
             other => Self::Query(other.to_string()),
         }
     }
+}
+
+/// `true` for backend error codes that indicate a transient, retryable
+/// conflict rather than a logic error: Postgres serialization failures
+/// (`40001`) and deadlocks (`40P01`), and `SQLite` `SQLITE_BUSY`/`SQLITE_LOCKED`
+/// (primary codes 5/6 and their extended variants — sqlx-sqlite reports the
+/// extended result code).
+fn is_transient_db_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("40001" | "40P01" | "5" | "6" | "261" | "262" | "517" | "518")
+    )
 }
 
 impl From<sqlx::migrate::MigrateError> for StorageError {
@@ -208,6 +228,26 @@ mod tests {
         let err: StorageError = sqlx::Error::PoolTimedOut.into();
         assert!(matches!(err, StorageError::PoolExhausted));
         assert!(err.is_transient());
+    }
+
+    /// Deadlocks (40P01), serialization failures (40001), and `SQLite` lock
+    /// contention (BUSY/LOCKED, incl. extended codes) must classify as
+    /// transient so the scheduler reschedules instead of DLQ-ing.
+    #[test]
+    fn transient_db_error_codes_are_recognised() {
+        for code in ["40001", "40P01", "5", "6", "261", "262", "517", "518"] {
+            assert!(
+                is_transient_db_code(Some(code)),
+                "{code} must be transient"
+            );
+        }
+        for code in ["23505", "22001", "42601", "999"] {
+            assert!(
+                !is_transient_db_code(Some(code)),
+                "{code} must not be transient"
+            );
+        }
+        assert!(!is_transient_db_code(None));
     }
 
     /// Every variant's retryability classification, pinned in one table —

@@ -436,6 +436,7 @@ pub(crate) struct ForkPreviewQuery {
     responses(
         (status = 200, description = "What a fork from this block would do — nothing is mutated",
             body = ForkPreview),
+        (status = 400, description = "Block is not a top-level block of the sequence"),
         (status = 404, description = "Instance or block not found"),
     )
 )]
@@ -471,11 +472,31 @@ pub(crate) async fn fork_preview(
         return Err(ApiError::NotFound(format!("block '{}'", q.from_block_id)));
     };
 
-    let recorded: std::collections::HashSet<String> = state
+    // Mirror the real fork exactly: `from_block_id` must be a top-level
+    // block, and the copy/re-run partition comes from the same helper the
+    // fork uses — a block counts as "copied" only when its whole top-level
+    // group is copyable (executed, and every member's latest row inline).
+    let target_idx =
+        crate::instances::fork_target_idx(&sequence, &q.from_block_id).ok_or_else(|| {
+            ApiError::InvalidArgument(format!(
+                "block '{}' is not a top-level block of sequence {}",
+                q.from_block_id,
+                instance.sequence_id.into_uuid()
+            ))
+        })?;
+    let source_outputs = state
         .storage
         .get_all_outputs(instance_id)
         .await
-        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?
+        .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+    let (copy_groups, _rerun) =
+        crate::instances::partition_fork_blocks(&sequence, &source_outputs, target_idx);
+    let copy_set: std::collections::HashSet<&str> = copy_groups
+        .iter()
+        .flatten()
+        .map(orch8_types::ids::BlockId::as_str)
+        .collect();
+    let recorded: std::collections::HashSet<String> = source_outputs
         .iter()
         .filter(|o| !o.block_id.as_str().starts_with('_'))
         .map(|o| o.block_id.as_str().to_string())
@@ -485,7 +506,7 @@ pub(crate) async fn fork_preview(
     let mut re_executed = Vec::new();
     let mut side_effects = Vec::new();
     for (i, (block, handler)) in block_order.iter().enumerate() {
-        if i < fork_pos && recorded.contains(block) {
+        if i < fork_pos && copy_set.contains(block.as_str()) && recorded.contains(block) {
             copied.push(block.clone());
         } else {
             re_executed.push(block.clone());

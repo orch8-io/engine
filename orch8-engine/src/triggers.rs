@@ -22,6 +22,10 @@ use orch8_types::trigger::{TriggerDef, TriggerType};
 /// `trigger_type`/`config`) and restart the listener instead of leaving it
 /// running against stale configuration.
 struct ActiveListener {
+    /// Unique per spawned listener task — lets the task deregister itself on
+    /// exit WITHOUT removing a newer registration for the same slug (config
+    /// edit → cancel old → spawn new before the old task notices).
+    id: uuid::Uuid,
     cancel: CancellationToken,
     trigger_type: TriggerType,
     config: serde_json::Value,
@@ -75,14 +79,25 @@ pub async fn run_trigger_loop(
     }
 }
 
+// The start/stop reconciliation is one cohesive pass over the desired set;
+// splitting it would scatter the listener-registration invariant.
+#[allow(clippy::too_many_lines)]
 async fn sync_triggers(
     storage: &Arc<dyn StorageBackend>,
     active: &Arc<RwLock<ActiveTriggers>>,
     parent_cancel: &CancellationToken,
 ) -> Result<(), orch8_types::error::StorageError> {
     let triggers = storage.list_triggers(None, 1000).await?;
+    if triggers.len() == 1000 {
+        warn!(
+            "trigger list hit the 1000-row page limit — enabled triggers beyond it have no listeners"
+        );
+    }
 
     {
+        // Cloned BEFORE the write guard shadows the `active` parameter — the
+        // spawned listener tasks need the Arc to deregister themselves.
+        let active_shared = Arc::clone(active);
         let mut active = active.write().await;
 
         // Build set of slugs that should be active. `Webhook` and `Event` triggers
@@ -125,14 +140,42 @@ async fn sync_triggers(
             }
 
             let child_cancel = parent_cancel.child_token();
+            let listener_id = uuid::Uuid::now_v7();
             active.listeners.insert(
                 slug.clone(),
                 ActiveListener {
+                    id: listener_id,
                     cancel: child_cancel.clone(),
                     trigger_type: trigger.trigger_type.clone(),
                     config: trigger.config.clone(),
                 },
             );
+
+            // Every spawned listener deregisters itself on exit: a listener
+            // that fails at startup (NATS broker down, watch path missing)
+            // must not linger in `active.listeners` — subsequent syncs would
+            // see the slug as active and never restart it, leaving the
+            // trigger silently dead until its config is edited. The id guard
+            // keeps a cancelled OLD task from removing a NEWER registration
+            // for the same slug (config-edit restart race).
+            macro_rules! spawn_listener {
+                ($run:expr, $kind:literal) => {{
+                    let active = Arc::clone(&active_shared);
+                    let slug = slug.clone();
+                    tokio::spawn(async move {
+                        ($run).await;
+                        let mut active = active.write().await;
+                        if active
+                            .listeners
+                            .get(&slug)
+                            .is_some_and(|l| l.id == listener_id)
+                        {
+                            info!(slug, listener = $kind, "trigger listener exited, deregistering");
+                            active.listeners.remove(&slug);
+                        }
+                    });
+                }};
+            }
 
             match trigger.trigger_type {
                 #[cfg(feature = "nats")]
@@ -140,30 +183,39 @@ async fn sync_triggers(
                     let storage = Arc::clone(storage);
                     let trigger = (*trigger).clone();
                     let cancel = child_cancel;
-                    tokio::spawn(async move {
-                        if let Err(e) = run_nats_listener(storage, trigger, cancel).await {
-                            error!(error = %e, "NATS trigger listener failed");
-                        }
-                    });
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) = run_nats_listener(storage, trigger, cancel).await {
+                                error!(error = %e, "NATS trigger listener failed");
+                            }
+                        },
+                        "nats"
+                    );
                 }
                 #[cfg(feature = "file-watch")]
                 TriggerType::FileWatch => {
                     let storage = Arc::clone(storage);
                     let trigger = (*trigger).clone();
                     let cancel = child_cancel;
-                    tokio::spawn(async move {
-                        if let Err(e) = run_file_watch_listener(storage, trigger, cancel).await {
-                            error!(error = %e, "file watch trigger listener failed");
-                        }
-                    });
+                    spawn_listener!(
+                        async move {
+                            if let Err(e) =
+                                run_file_watch_listener(storage, trigger, cancel).await
+                            {
+                                error!(error = %e, "file watch trigger listener failed");
+                            }
+                        },
+                        "file-watch"
+                    );
                 }
                 TriggerType::ActivepiecesPoll => {
                     let storage = Arc::clone(storage);
                     let trigger = (*trigger).clone();
                     let cancel = child_cancel;
-                    tokio::spawn(async move {
-                        crate::ap_poll::run_ap_poll_listener(storage, trigger, cancel).await;
-                    });
+                    spawn_listener!(
+                        crate::ap_poll::run_ap_poll_listener(storage, trigger, cancel),
+                        "activepieces-poll"
+                    );
                 }
                 _ => {
                     warn!(

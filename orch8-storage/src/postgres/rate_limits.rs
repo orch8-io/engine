@@ -63,7 +63,9 @@ pub(super) async fn check_rate_limit(
     match row {
         // No row: no rate limit configured for this (tenant, resource) pair.
         None => Ok(RateLimitCheck::Allowed),
-        Some(r) if r.window_expired || r.current_count < r.max_count => Ok(RateLimitCheck::Allowed),
+        Some(r) if (r.window_expired && r.max_count > 0) || r.current_count < r.max_count => {
+            Ok(RateLimitCheck::Allowed)
+        }
         Some(r) => {
             let window_end =
                 r.window_start + chrono::Duration::seconds(i64::from(r.window_seconds));

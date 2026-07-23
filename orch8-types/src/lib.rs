@@ -138,8 +138,10 @@ pub mod serde_duration_opt {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
         // Accept both integer (milliseconds) and float (seconds) values.
-        // Integers ≥ 1 are treated as milliseconds for backwards compatibility.
-        // Floats < 1.0 are treated as fractional seconds (e.g., 0.2 = 200ms).
+        // Integers are treated as milliseconds; ALL floats are treated as
+        // seconds (e.g. `0.2` = 200 ms, `1.5` = 1500 ms, `3000.0` = 50 min) —
+        // see `serde_duration::ms_from_number` for the backwards-compat
+        // rationale. Write integer milliseconds to avoid the ambiguity.
         //
         // Ref#14: delegate to the shared validator in `serde_duration` so
         // negative values are rejected consistently (previously negative

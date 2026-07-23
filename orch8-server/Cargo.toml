@@ -21,6 +21,7 @@ orch8-api = { path = "../orch8-api" }
 orch8-grpc = { path = "../orch8-grpc" }
 orch8-push = { path = "../orch8-push" }
 tokio.workspace = true
+tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

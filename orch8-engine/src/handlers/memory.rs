@@ -231,6 +231,12 @@ pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> 
 // Embedding provider call
 // ===========================================================================
 
+/// Hard cap on the `/embeddings` response body: `base_url` is
+/// workflow-controlled (SSRF-checked, but any public URL is allowed), so a
+/// hostile endpoint must not stream an unbounded body and OOM the worker.
+/// Same 10 MB cap `http_request` uses.
+const MAX_EMBED_RESPONSE_BYTES: usize = 10_485_760; // 10 MB
+
 /// Resolve config and POST to the `/embeddings` endpoint, returning one vector
 /// per input string (in order).
 async fn embed_inputs(params: &Value, inputs: &[String]) -> Result<Vec<Vec<f64>>, StepError> {
@@ -274,10 +280,17 @@ async fn embed_inputs(params: &Value, inputs: &[String]) -> Result<Vec<Vec<f64>>
         })?;
 
     let status = resp.status().as_u16();
-    let bytes = resp
-        .bytes()
+    // Stream with the hard cap instead of buffering the whole response.
+    let bytes = super::builtin::read_body_capped(resp, MAX_EMBED_RESPONSE_BYTES)
         .await
-        .map_err(|e| retryable(format!("embed body read error: {e}")))?;
+        .map_err(|e| match e {
+            super::builtin::BodyReadError::TooLarge(cap) => {
+                permanent(format!("embed response body exceeded {cap} bytes"))
+            }
+            super::builtin::BodyReadError::Io(msg) => {
+                retryable(format!("embed body read error: {msg}"))
+            }
+        })?;
     parse_embedding_response(status, &bytes)
 }
 

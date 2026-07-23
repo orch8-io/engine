@@ -151,7 +151,8 @@ pub struct BulkFilter {
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchAction {
-    /// Re-run a `Failed` instance (clears the stale tree + sentinel outputs).
+    /// Re-run a `Failed` instance (clears the stale tree + sentinel outputs,
+    /// resets the run identity and step counters, then re-schedules).
     Retry,
     /// Enqueue a `pause` control signal.
     Pause,

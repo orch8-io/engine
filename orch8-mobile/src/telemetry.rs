@@ -12,7 +12,6 @@ use crate::storage::MobileStorage;
 /// Maximum events stored in the local `SQLite` buffer.
 const MAX_BUFFER_SIZE: u32 = 1000;
 /// Auto-flush when buffer reaches this percentage of capacity.
-#[allow(dead_code)]
 const AUTO_FLUSH_PCT: u32 = 80;
 /// Minimum time between automatic flush attempts triggered by `record()`'s
 /// over-threshold check (H-17). Without this, once the buffer crosses the

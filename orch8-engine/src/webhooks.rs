@@ -271,8 +271,15 @@ pub async fn run_outbox_loop(
             _ = ticker.tick() => {}
         }
 
-        let stale_before =
-            Utc::now() - chrono::Duration::from_std(stale_after).unwrap_or(chrono::TimeDelta::MAX);
+        // `from_std` rejects durations beyond chrono's range (absurd config),
+        // and subtracting even an in-range huge lease from `now()` can
+        // underflow the representable range — `DateTime - TimeDelta` panics on
+        // overflow. Clamp to the epoch floor instead: nothing is stale enough
+        // to recover, which is the safe direction for a pathological lease.
+        let stale_before = chrono::Duration::from_std(stale_after)
+            .ok()
+            .and_then(|lease| Utc::now().checked_sub_signed(lease))
+            .unwrap_or(chrono::DateTime::<Utc>::MIN_UTC);
         if let Err(error) = storage.recover_stale_webhook_claims(stale_before).await {
             warn!(%error, "failed to recover stale webhook outbox claims");
         }
@@ -382,7 +389,7 @@ async fn try_send(
 
     let mut last_error = String::from("no attempts made");
     for attempt in 0..=max_retries {
-        let attempt_number = i32::try_from(attempt + 1).unwrap_or(i32::MAX);
+        let attempt_number = i32::try_from(attempt.saturating_add(1)).unwrap_or(i32::MAX);
         let started = std::time::Instant::now();
         match send_request(url, &body, timeout, secret).await {
             Ok(status) if status < 400 => {

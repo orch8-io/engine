@@ -75,17 +75,18 @@ pub(crate) async fn ingest_telemetry(
     let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
         .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
 
+    let total = req.events.len();
     let events: Vec<orch8_storage::TelemetryEvent> = req
         .events
-        .iter()
+        .into_iter()
         .map(|e| orch8_storage::TelemetryEvent {
-            event_type: e.event_type.clone(),
-            payload: e.payload.clone(),
-            device_id: e.device.device_id.clone(),
-            os_name: e.device.os_name.clone(),
-            os_version: e.device.os_version.clone(),
-            app_version: e.device.app_version.clone(),
-            sdk_version: e.device.sdk_version.clone(),
+            event_type: e.event_type,
+            payload: e.payload,
+            device_id: e.device.device_id,
+            os_name: e.device.os_name,
+            os_version: e.device.os_version,
+            app_version: e.device.app_version,
+            sdk_version: e.device.sdk_version,
             tenant_id: tenant.clone(),
             created_at: e.timestamp.parse().unwrap_or_else(|_| Utc::now()),
         })
@@ -103,7 +104,7 @@ pub(crate) async fn ingest_telemetry(
     #[allow(clippy::cast_possible_truncation)]
     let accepted = accepted as usize;
 
-    debug!(accepted, total = req.events.len(), "telemetry ingested");
+    debug!(accepted, total, "telemetry ingested");
     Ok((StatusCode::ACCEPTED, Json(IngestResponse { accepted })))
 }
 

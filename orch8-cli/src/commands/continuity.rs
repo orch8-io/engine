@@ -299,10 +299,13 @@ fn read_bounded_file(path: &Path) -> Result<Vec<u8>> {
 
 async fn response_json(response: reqwest::Response, action: &str) -> Result<Value> {
     let status = response.status();
-    let body: Value = response.json().await.context("decode server response")?;
     if !status.is_success() {
+        // Error bodies are often not JSON (proxy pages, plain-text panics);
+        // surface them verbatim instead of a decode error.
+        let body = response.text().await.unwrap_or_default();
         bail!("{action} failed ({status}): {body}");
     }
+    let body: Value = response.json().await.context("decode server response")?;
     Ok(body)
 }
 

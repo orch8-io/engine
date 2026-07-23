@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration: TOML file (optional) -> env vars -> defaults.
     // This is synchronous filesystem I/O; run it off the async runtime thread.
     let config_path = cli.config.clone();
-    let config = tokio::task::spawn_blocking(move || load_config(&config_path))
+    let mut config = tokio::task::spawn_blocking(move || load_config(&config_path))
         .await
         .context("config loader panicked")??;
     if let Err(errors) = config.validate() {
@@ -137,11 +137,14 @@ async fn main() -> anyhow::Result<()> {
         &config.api.cors_origins,
     )?;
 
-    // Precompute the root-key digest once and never retain the cleartext key
-    // in a long-lived String. The digest is moved into the HTTP middleware and
-    // gRPC interceptor; the original secret is dropped after this block.
+    // Precompute the root-key digest once, then drop the cleartext key from
+    // the long-lived config so the secret does not sit in memory for the
+    // whole process lifetime. The digest is moved into the HTTP middleware
+    // and gRPC interceptor; every later consumer uses the digest or the
+    // `has_api_key` flag captured above (the startup banner already ran).
     let root_key_digest = has_api_key
         .then(|| orch8_types::auth::precompute_secret_digest(config.api.api_key.expose()));
+    config.api.api_key = orch8_types::SecretString::default();
 
     // Spawn gRPC + signal handler before the HTTP middleware closure takes
     // ownership of the root-key digest.
@@ -151,7 +154,9 @@ async fn main() -> anyhow::Result<()> {
         shutdown_token.clone(),
         root_key_digest,
         require_tenant,
-    )?;
+        engine_ready.clone(),
+    )
+    .await?;
     spawn_signal_handler(shutdown_token.clone())?;
 
     // Circuit-breaker routes are merged separately (they need AppState with
@@ -276,10 +281,17 @@ fn build_app_state(
     let continuity_crypto = if master_key.is_empty() {
         None
     } else {
-        Some(Arc::new(
-            orch8_api::ContinuityCrypto::from_master_key(master_key)
-                .expect("master encryption key was validated before AppState construction"),
-        ))
+        match orch8_api::ContinuityCrypto::from_master_key(master_key) {
+            Ok(crypto) => Some(Arc::new(crypto)),
+            Err(error) => {
+                // `wrap_encryption` already validated this key during startup,
+                // so this is unreachable today — but the two key-resolution
+                // sites are independent; degrade to "continuity disabled"
+                // instead of panicking if they ever diverge.
+                tracing::error!(%error, "invalid master encryption key; continuity crypto disabled");
+                None
+            }
+        }
     };
     let federation_peers = configured_federation_peers();
 
@@ -621,18 +633,26 @@ fn spawn_signal_handler(
     Ok(handle)
 }
 
-fn spawn_grpc_server(
+async fn spawn_grpc_server(
     storage: Arc<dyn StorageBackend>,
     config: &EngineConfig,
     shutdown: CancellationToken,
     root_key_digest: Option<[u8; 32]>,
     require_tenant: bool,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let grpc_addr: std::net::SocketAddr = config
         .api
         .grpc_addr
         .parse()
         .context("Invalid gRPC listen address")?;
+
+    // Bind synchronously (mirroring the HTTP listener in `main`) so a port
+    // conflict or a grpc_addr == http_addr misconfiguration fails startup
+    // instead of leaving a half-dead node that still reports ready.
+    let listener = tokio::net::TcpListener::bind(grpc_addr)
+        .await
+        .context("Failed to bind gRPC listener")?;
 
     let grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
@@ -642,12 +662,19 @@ fn spawn_grpc_server(
         if let Err(e) = tonic::transport::Server::builder()
             .layer(auth_layer)
             .add_service(Orch8ServiceServer::new(grpc_service))
-            .serve_with_shutdown(grpc_addr, async move {
-                shutdown.cancelled().await;
-            })
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async move {
+                    shutdown.cancelled().await;
+                },
+            )
             .await
         {
             tracing::error!(error = %e, "gRPC server error");
+            // The gRPC surface is dead but the process keeps running — clear
+            // the readiness flag so `/health/ready` returns 503 and the load
+            // balancer drains this node instead of routing gRPC traffic to it.
+            engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     });
     Ok(handle)
@@ -702,13 +729,17 @@ async fn drain_shutdown(
         if let Err(error) = grpc_result {
             tracing::error!(%error, "gRPC task failed while draining shutdown");
         }
-        cb_registry.flush().await;
     })
     .await
     .is_err()
     {
         tracing::warn!("Shutdown drain timed out after {drain_timeout:?}, forcing exit");
     }
+    // Flush unconditionally, *after* the timed join: if a task hung and the
+    // timeout fired, this is exactly the pathological shutdown where the
+    // persisted breaker state matters most. Best-effort and non-blocking by
+    // design, so it is safe to run even after a forced drain.
+    cb_registry.flush().await;
 }
 
 /// Maximum config file size (1 MiB). Prevents local `DoS` from a maliciously
@@ -733,11 +764,6 @@ fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
             eprintln!("No config file found at {path}, using defaults + env vars");
             EngineConfig::default()
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Not an error — config file is optional.
-            eprintln!("No config file found at {path}, using defaults + env vars");
-            EngineConfig::default()
-        }
         Err(e) => {
             // File exists but can't be read — that's a real error.
             return Err(anyhow::anyhow!("Failed to read config file {path}: {e}"));
@@ -745,6 +771,24 @@ fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
     };
     apply_env_overrides(&mut config);
     Ok(config)
+}
+
+/// Parse a numeric env override. A set-but-unparseable value is warned about
+/// and ignored (keeping the configured/default value) instead of being
+/// silently swallowed — a typo like `ORCH8_BATCH_SIZE=50o` must be visible to
+/// the operator. Uses `eprintln!` because `load_config` runs before the
+/// tracing subscriber is installed, so a `tracing::warn!` here would be
+/// dropped (mirrors the "no config file" notice in `load_config`).
+fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
+    let val = std::env::var(name).ok()?;
+    if let Ok(n) = val.parse::<T>() {
+        Some(n)
+    } else {
+        eprintln!(
+            "Warning: {name}={val:?} is not a valid number; ignoring it and keeping the configured/default value"
+        );
+        None
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -773,14 +817,10 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_S3_ALLOW_HTTP") {
         config.artifacts.s3_allow_http = val == "true" || val == "1";
     }
-    if let Ok(val) = std::env::var("ORCH8_ARTIFACT_RETENTION_SECS")
-        && let Ok(secs) = val.parse::<u64>()
-    {
+    if let Some(secs) = env_parse("ORCH8_ARTIFACT_RETENTION_SECS") {
         config.engine.artifact_retention_secs = secs;
     }
-    if let Ok(val) = std::env::var("ORCH8_INSTANCE_RETENTION_SECS")
-        && let Ok(secs) = val.parse::<u64>()
-    {
+    if let Some(secs) = env_parse("ORCH8_INSTANCE_RETENTION_SECS") {
         config.engine.instance_retention_secs = secs;
     }
     if let Ok(val) = std::env::var("ORCH8_STORAGE_BACKEND") {
@@ -789,9 +829,7 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(url) = std::env::var("ORCH8_DATABASE_URL") {
         config.database.url = url.into();
     }
-    if let Ok(val) = std::env::var("ORCH8_DATABASE_MAX_CONNECTIONS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_DATABASE_MAX_CONNECTIONS") {
         config.database.max_connections = n;
     }
     if let Ok(val) = std::env::var("ORCH8_LOG_LEVEL") {
@@ -815,58 +853,38 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;
     }
-    if let Ok(val) = std::env::var("ORCH8_TICK_INTERVAL_MS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_TICK_INTERVAL_MS") {
         config.engine.tick_interval_ms = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_CRON_TICK_SECS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_CRON_TICK_SECS") {
         config.engine.cron_tick_secs = n;
     }
     // Reaper cadence/threshold overrides. Defaults (tick 30s / stale 60s for
     // worker tasks, 60s / 120s for nodes) are sane for production but make
     // reclamation tests wait minutes; the E2E harness sets these low so the
     // worker-reaper suites run in seconds.
-    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_TICK_SECS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_WORKER_REAPER_TICK_SECS") {
         config.engine.worker_reaper_tick_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_WORKER_REAPER_STALE_SECS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_WORKER_REAPER_STALE_SECS") {
         config.engine.worker_reaper_stale_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_TICK_SECS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_NODE_REAPER_TICK_SECS") {
         config.engine.node_reaper_tick_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_NODE_REAPER_STALE_SECS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_NODE_REAPER_STALE_SECS") {
         config.engine.node_reaper_stale_secs = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_BATCH_SIZE")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_BATCH_SIZE") {
         config.engine.batch_size = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_MAX_INSTANCES_PER_TENANT")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_MAX_INSTANCES_PER_TENANT") {
         config.engine.max_instances_per_tenant = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_STEPS")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_MAX_CONCURRENT_STEPS") {
         config.engine.max_concurrent_steps = n;
     }
-    if let Ok(val) = std::env::var("ORCH8_EXTERNALIZE_THRESHOLD")
-        && let Ok(n) = val.parse()
-    {
+    if let Some(n) = env_parse("ORCH8_EXTERNALIZE_THRESHOLD") {
         config.engine.externalize_output_threshold = n;
     }
     if let Ok(val) = std::env::var("ORCH8_WEBHOOK_URLS") {
@@ -879,10 +897,11 @@ fn apply_env_overrides(config: &mut EngineConfig) {
         config.api.api_key = val.into();
     }
     // `ORCH8_MAX_CONCURRENT_REQUESTS` is the preferred name; the older
-    // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10).
-    if let Ok(val) = std::env::var("ORCH8_MAX_CONCURRENT_REQUESTS")
-        .or_else(|_| std::env::var("ORCH8_RATE_LIMIT_RPS"))
-        && let Ok(n) = val.parse()
+    // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10). The
+    // alias is consulted when the preferred var is unset OR fails to parse
+    // (the parse failure itself is warned about inside `env_parse`).
+    if let Some(n) = env_parse("ORCH8_MAX_CONCURRENT_REQUESTS")
+        .or_else(|| env_parse("ORCH8_RATE_LIMIT_RPS"))
     {
         config.api.max_concurrent_requests = n;
     }
@@ -1031,7 +1050,15 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
     } else {
         let parsed: Vec<http::HeaderValue> = origins
             .split(',')
-            .filter_map(|o| o.trim().parse().ok())
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .filter_map(|o| match o.parse() {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    tracing::warn!(origin = %o, %error, "Ignoring unparseable CORS origin");
+                    None
+                }
+            })
             .collect();
         layer.allow_origin(parsed)
     }
@@ -1183,5 +1210,96 @@ mod tests {
         std::io::Write::write_all(&mut file, &oversized).unwrap();
         let result = load_config(file.path().to_str().unwrap());
         assert!(result.is_err(), "oversized config must be rejected");
+    }
+
+    /// Numeric env overrides: a set-but-unparseable value must be ignored
+    /// (keeping the configured/default value), and the legacy
+    /// `ORCH8_RATE_LIMIT_RPS` alias must be consulted when the preferred
+    /// `ORCH8_MAX_CONCURRENT_REQUESTS` fails to parse — not only when it is
+    /// unset. Shares the `otlp_env` serial key with the other env-touching
+    /// test in this binary so the two never race on process-global env vars.
+    #[test]
+    #[serial(otlp_env)]
+    fn apply_env_overrides_ignores_invalid_numeric_and_falls_back_to_alias() {
+        let default_batch = EngineConfig::default().engine.batch_size;
+        let default_max_concurrent = EngineConfig::default().api.max_concurrent_requests;
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            std::env::set_var("ORCH8_BATCH_SIZE", "50o");
+            std::env::set_var("ORCH8_MAX_CONCURRENT_REQUESTS", "abc");
+            std::env::remove_var("ORCH8_RATE_LIMIT_RPS");
+        }
+        let mut config = EngineConfig::default();
+        apply_env_overrides(&mut config);
+        assert_eq!(
+            config.engine.batch_size, default_batch,
+            "unparseable ORCH8_BATCH_SIZE must be ignored, keeping the default"
+        );
+        assert_eq!(
+            config.api.max_concurrent_requests, default_max_concurrent,
+            "unparseable preferred var with no alias set must keep the default"
+        );
+
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            std::env::set_var("ORCH8_RATE_LIMIT_RPS", "42");
+        }
+        let mut config = EngineConfig::default();
+        apply_env_overrides(&mut config);
+        assert_eq!(
+            config.api.max_concurrent_requests, 42,
+            "alias must be consulted when the preferred var fails to parse"
+        );
+
+        // A parseable preferred var always wins over the alias.
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            std::env::set_var("ORCH8_MAX_CONCURRENT_REQUESTS", "7");
+        }
+        let mut config = EngineConfig::default();
+        apply_env_overrides(&mut config);
+        assert_eq!(config.api.max_concurrent_requests, 7);
+
+        #[allow(unsafe_code)]
+        // SAFETY: serialized via #[serial(otlp_env)].
+        unsafe {
+            std::env::remove_var("ORCH8_BATCH_SIZE");
+            std::env::remove_var("ORCH8_MAX_CONCURRENT_REQUESTS");
+            std::env::remove_var("ORCH8_RATE_LIMIT_RPS");
+        }
+    }
+
+    /// Finding 1 regression: a gRPC bind failure (port already in use) must
+    /// fail startup fast instead of leaving a half-dead node that keeps
+    /// reporting ready.
+    #[tokio::test]
+    async fn spawn_grpc_server_fails_fast_when_port_in_use() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = blocker.local_addr().unwrap().port();
+        let mut config = EngineConfig::default();
+        config.api.grpc_addr = format!("127.0.0.1:{port}");
+        let engine_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let result = spawn_grpc_server(
+            storage,
+            &config,
+            CancellationToken::new(),
+            None,
+            false,
+            engine_ready,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "binding an occupied port must fail fast instead of spawning a dying task"
+        );
     }
 }

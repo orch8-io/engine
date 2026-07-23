@@ -57,19 +57,32 @@ pub fn resolve_with_state(
     if !contains_template(value) {
         return Ok(value.clone());
     }
+    resolve_inner(value, context, outputs, state)
+}
+
+/// Recursive worker for [`resolve_with_state`]. The `contains_template`
+/// pre-check runs once at the top level: strings without `{{` resolve to
+/// themselves anyway, so re-scanning every child's subtree would make
+/// deeply nested params quadratic.
+fn resolve_inner(
+    value: &serde_json::Value,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+    state: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, EngineError> {
     match value {
         serde_json::Value::String(s) => resolve_string(s, context, outputs, state),
         serde_json::Value::Object(map) => {
             let mut resolved = serde_json::Map::new();
             for (k, v) in map {
-                resolved.insert(k.clone(), resolve_with_state(v, context, outputs, state)?);
+                resolved.insert(k.clone(), resolve_inner(v, context, outputs, state)?);
             }
             Ok(serde_json::Value::Object(resolved))
         }
         serde_json::Value::Array(arr) => {
             let resolved: Result<Vec<_>, _> = arr
                 .iter()
-                .map(|v| resolve_with_state(v, context, outputs, state))
+                .map(|v| resolve_inner(v, context, outputs, state))
                 .collect();
             Ok(serde_json::Value::Array(resolved?))
         }
@@ -334,8 +347,11 @@ fn apply_pipe_filter_with_args(
     {
         let (n, suffix) = parse_truncate_args(inner)?;
         let s = value.as_str().unwrap_or("");
-        return Ok(serde_json::json!(if s.chars().count() > n {
-            format!("{}{suffix}", s.chars().take(n).collect::<String>())
+        // Single pass: stop after n chars and check whether anything remains.
+        let mut chars = s.chars();
+        let head: String = chars.by_ref().take(n).collect();
+        return Ok(serde_json::json!(if chars.next().is_some() {
+            format!("{head}{suffix}")
         } else {
             s.to_string()
         }));
@@ -345,7 +361,7 @@ fn apply_pipe_filter_with_args(
         .and_then(|s| s.strip_suffix(')'))
     {
         let sep = unquote(inner.trim());
-        let arr = value.as_array().cloned().unwrap_or_default();
+        let arr: &[serde_json::Value] = value.as_array().map_or(&[], Vec::as_slice);
         let joined: String = arr
             .iter()
             .map(|v| match v {
@@ -774,9 +790,9 @@ fn validate_block_templates(block: &BlockDefinition, warnings: &mut Vec<Template
             }
         }
         BlockDefinition::Loop(l) => {
-            validate_expr_string(l.id.as_str(), "condition", &l.condition, warnings);
+            validate_template_string(l.id.as_str(), "condition", &l.condition, warnings);
             if let Some(ref break_on) = l.break_on {
-                validate_expr_string(l.id.as_str(), "break_on", break_on, warnings);
+                validate_template_string(l.id.as_str(), "break_on", break_on, warnings);
             }
             for b in &l.body {
                 validate_block_templates(b, warnings);
@@ -790,7 +806,12 @@ fn validate_block_templates(block: &BlockDefinition, warnings: &mut Vec<Template
         }
         BlockDefinition::Router(r) => {
             for route in &r.routes {
-                validate_expr_string(r.id.as_str(), "route.condition", &route.condition, warnings);
+                validate_template_string(
+                    r.id.as_str(),
+                    "route.condition",
+                    &route.condition,
+                    warnings,
+                );
                 for b in &route.blocks {
                     validate_block_templates(b, warnings);
                 }
@@ -888,20 +909,14 @@ fn validate_template_string(
     }
 }
 
-fn validate_expr_string(block_id: &str, field: &str, s: &str, warnings: &mut Vec<TemplateWarning>) {
-    validate_template_string(block_id, field, s, warnings);
-}
-
 fn validate_template_expr(
     block_id: &str,
     field: &str,
     inner: &str,
     warnings: &mut Vec<TemplateWarning>,
 ) {
+    // `split_pipe_segments` always yields at least one segment.
     let segments = split_pipe_segments(inner);
-    if segments.is_empty() {
-        return;
-    }
 
     let first = segments[0].trim();
     if first.is_empty() {

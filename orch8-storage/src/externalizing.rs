@@ -129,7 +129,7 @@ pub fn externalize_fields(
         }
         let ref_key = context_data_ref_key(instance_id_str, &field);
         // Swap the payload out so we can return ownership without cloning.
-        if let Some(original) = obj.insert(field.clone(), marker(&ref_key)) {
+        if let Some(original) = obj.insert(field, marker(&ref_key)) {
             refs.push((ref_key, original));
         }
     }

@@ -830,7 +830,13 @@ impl<'a> Parser<'a> {
                     serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => {
                         let mut sorted = a.clone();
                         sorted.sort_by(|a, b| {
-                            let cmp = json_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal);
+                            // Total order is mandatory: Rust's sort panics on
+                            // a comparator that violates transitivity, and
+                            // `json_cmp` alone returns `None` for mixed types
+                            // (1 < 2, 2 == "x", 1 == "x" would be such a
+                            // violation) — a workflow expression must never be
+                            // able to panic the engine.
+                            let cmp = json_cmp_total(a, b);
                             if order == "desc" { cmp.reverse() } else { cmp }
                         });
                         serde_json::Value::Array(sorted)
@@ -997,6 +1003,28 @@ fn json_cmp(a: &serde_json::Value, b: &serde_json::Value) -> Option<std::cmp::Or
         (serde_json::Value::String(a), serde_json::Value::String(b)) => Some(a.cmp(b)),
         _ => None,
     }
+}
+
+/// Total-order variant of [`json_cmp`] used by `sort`: compare type ranks
+/// first (null < bool < number < string < array < object), then values within
+/// a rank. Same-rank types [`json_cmp`] can't order (bools, arrays, objects)
+/// all compare `Equal`, which stays transitive — the sort comparator never
+/// violates a total order, so mixed-type arrays sort deterministically
+/// instead of panicking the runtime thread.
+fn json_cmp_total(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
+    fn rank(v: &serde_json::Value) -> u8 {
+        match v {
+            serde_json::Value::Null => 0,
+            serde_json::Value::Bool(_) => 1,
+            serde_json::Value::Number(_) => 2,
+            serde_json::Value::String(_) => 3,
+            serde_json::Value::Array(_) => 4,
+            serde_json::Value::Object(_) => 5,
+        }
+    }
+    rank(a)
+        .cmp(&rank(b))
+        .then_with(|| json_cmp(a, b).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 fn to_f64(v: &serde_json::Value) -> Option<f64> {
@@ -2298,6 +2326,30 @@ mod tests {
         assert_eq!(
             evaluate("sort(nums, 'desc')", &ctx, &json!({})),
             json!([3, 2, 1])
+        );
+    }
+
+    #[test]
+    fn eval_sort_mixed_types_does_not_panic() {
+        // Regression: the old comparator collapsed `json_cmp`'s `None`
+        // (mixed types) to `Equal`, violating transitivity (1 < 2, 2 == "x",
+        // 1 == "x") — Rust's sort detects the broken total order and panics.
+        // The comparator now orders by type rank first (null < bool < number
+        // < string < array < object), so a workflow-authored mixed array
+        // sorts deterministically instead of panicking the engine thread.
+        let ctx = ExecutionContext {
+            data: json!({"mixed": ["x", 2, 1, true, null, [1], {"a": 1}, "a"]}),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate("sort(mixed)", &ctx, &json!({})),
+            json!([null, true, 1, 2, "a", "x", [1], {"a": 1}])
+        );
+        // desc reverses the total order.
+        assert_eq!(
+            evaluate("sort(mixed, 'desc')", &ctx, &json!({})),
+            json!([{"a": 1}, [1], "x", "a", 2, 1, true, null])
         );
     }
 

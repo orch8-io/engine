@@ -64,6 +64,7 @@ impl InstanceLifecycleManager {
     }
 
     /// Start a new workflow instance.
+    #[allow(clippy::too_many_lines)]
     pub async fn start(
         &self,
         sequence_name: &str,
@@ -158,7 +159,28 @@ impl InstanceLifecycleManager {
                     .ok_or_else(|| MobileError::Storage {
                         message: "dedup conflict without an instance".into(),
                     })?;
-                existing.id.to_string()
+                match existing.state {
+                    InstanceState::Completed | InstanceState::Failed | InstanceState::Cancelled => {
+                        // The previous run with this key reached a terminal
+                        // state and its mobile dedup entry was cleaned up, so
+                        // the host intends a fresh run. The storage-level
+                        // unique index on (tenant_id, idempotency_key) is
+                        // never cleared, so re-inserting under the same key
+                        // always conflicts — returning `existing.id` here
+                        // would hand back a dead instance and the host would
+                        // believe a workflow started while nothing ever runs.
+                        // Salt the storage-level key for the fresh instance;
+                        // the user-facing dedup key still maps to the new
+                        // instance id below.
+                        warn!(instance_id = %existing.id, dedup_key = %key, "dedup key belongs to a terminal instance — starting a fresh run");
+                        let mut fresh = instance.clone();
+                        fresh.idempotency_key =
+                            Some(format!("{key}#rerun-{}", uuid::Uuid::now_v7()));
+                        self.storage.create_instance(&fresh).await?;
+                        instance_id.to_string()
+                    }
+                    _ => existing.id.to_string(),
+                }
             }
             Err(e) => return Err(e.into()),
         };
@@ -732,5 +754,42 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"), "unexpected error: {err}");
+    }
+
+    /// After a run with a dedup key reaches a terminal state and its dedup
+    /// entry is cleaned up, reusing the key must start a FRESH run. The
+    /// storage-level unique index on `idempotency_key` is never cleared, so
+    /// without special handling the conflict path would return the dead
+    /// instance id and the host would believe a workflow started while
+    /// nothing ever runs.
+    #[tokio::test]
+    async fn start_with_dedup_key_after_terminal_starts_fresh_instance() {
+        let (lifecycle, _mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+
+        let id1 = lifecycle.start("seq", "{}", Some("dk-term")).await.unwrap();
+
+        // Simulate the run reaching a terminal state and the tick loop's
+        // dedup cleanup firing.
+        let parsed = parse_instance_id(&id1).unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(parsed, InstanceState::Completed, None)
+            .await
+            .unwrap();
+        lifecycle.cleanup_dedup(&id1).await;
+
+        let id2 = lifecycle.start("seq", "{}", Some("dk-term")).await.unwrap();
+        assert_ne!(
+            id1, id2,
+            "terminal dedup conflict must not return the dead instance id"
+        );
+
+        let (inst, _) = lifecycle.get_instance(&id2).await.unwrap();
+        assert_eq!(inst.state, InstanceState::Scheduled);
+
+        // While the fresh run is active, the key still dedupes against it.
+        let id3 = lifecycle.start("seq", "{}", Some("dk-term")).await.unwrap();
+        assert_eq!(id2, id3);
     }
 }

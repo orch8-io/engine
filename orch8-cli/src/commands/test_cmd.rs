@@ -26,6 +26,7 @@ use orch8_types::contract::{ContractSuite, SuiteReport};
 use orch8_types::redaction::RedactionPolicy;
 
 use crate::OutputFormat;
+use crate::atomic_write;
 use crate::commands::dev::{block_handlers, next_advance_target};
 
 #[derive(Subcommand)]
@@ -124,23 +125,6 @@ pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputForma
 }
 
 const MAX_EXTRACT_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
-
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary file beside {}", path.display()))?;
-    file.write_all(contents)?;
-    file.as_file().sync_all()?;
-    file.persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("atomically replace {}", path.display()))?;
-    Ok(())
-}
 
 async fn extract_fixture(
     client: &Client,
@@ -379,6 +363,7 @@ fn build_recorded_case(
 ) -> Value {
     let mut executed: Vec<String> = Vec::new();
     let mut mocks: Vec<Value> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for o in outputs {
         let Some(block_id) = o["block_id"].as_str() else {
             continue;
@@ -386,7 +371,7 @@ fn build_recorded_case(
         if block_id.starts_with('_') {
             continue;
         }
-        if !executed.iter().any(|b| b == block_id) {
+        if seen.insert(block_id) {
             executed.push(block_id.to_string());
             mocks.push(serde_json::json!({
                 "block": block_id,
@@ -441,12 +426,14 @@ async fn get_json(client: &Client, url: String) -> Result<Value> {
 /// Build an embedded engine (in-memory, virtual clock, a mock per handler the
 /// target uses that returns the recorded output for the block it runs), publish
 /// the target version, drive a dry-run instance with `context_data` to terminal
-/// under virtual time, and return the set of blocks it reached.
+/// under virtual time, and return the set of blocks it reached plus whether the
+/// instance actually reached a terminal state (`false` means the diff below is
+/// computed against a truncated replay).
 async fn run_replay(
     target_json: &Value,
     recorded: &Arc<HashMap<String, Value>>,
     context_data: Value,
-) -> Result<HashSet<String>> {
+) -> Result<(HashSet<String>, bool)> {
     let handler_names: HashSet<String> = block_handlers(target_json).into_values().collect();
     let clock = Arc::new(ManualClock::new(chrono::Utc::now()));
     let shared = SharedClock::from_arc(Arc::clone(&clock) as Arc<dyn Clock>);
@@ -489,10 +476,12 @@ async fn run_replay(
         )
         .await?;
 
+    let mut reached_terminal = false;
     for _ in 0..5000 {
         let tick = engine.tick_once().await?;
         let inst = engine.get_instance(replay_id).await?;
         if inst.state.is_terminal() {
+            reached_terminal = true;
             break;
         }
         if tick.steps_executed == 0 && tick.instances_advanced == 0 {
@@ -504,7 +493,7 @@ async fn run_replay(
         }
     }
 
-    Ok(engine
+    let blocks = engine
         .block_outputs(replay_id)
         .await?
         .into_iter()
@@ -512,7 +501,8 @@ async fn run_replay(
             let b = o.block_id.as_str().to_string();
             (!b.starts_with('_')).then_some(b)
         })
-        .collect())
+        .collect();
+    Ok((blocks, reached_terminal))
 }
 
 async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) -> Result<()> {
@@ -570,7 +560,14 @@ async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) ->
 
     // 3-5. Replay the target version under virtual time with the recorded
     //      outputs, and collect which blocks it reached.
-    let replayed = run_replay(&target_json, &recorded, context_data).await?;
+    let (replayed, reached_terminal) = run_replay(&target_json, &recorded, context_data).await?;
+    if !reached_terminal {
+        eprintln!(
+            "WARNING: replay never reached a terminal state (still waiting on a \
+             signal/input/timer?) — the diff below is computed from a TRUNCATED \
+             replay and may be misleading"
+        );
+    }
     let (added, removed, matched) = block_diff(&recorded_ids, &replayed);
 
     println!("replay of {instance_id} (recorded v{orig_version}) against v{against} of {name}\n");

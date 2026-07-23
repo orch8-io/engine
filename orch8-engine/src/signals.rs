@@ -293,9 +293,19 @@ async fn cancel_scoped(
         .map(|n| n.id)
         .collect();
     scope_node_ids.sort_unstable();
-    // ⚡ Bolt: Deduplicating the list of indices eliminates redundant comparisons
-    // during the `binary_search` filtering phase, improving hot path performance.
-    scope_node_ids.dedup();
+
+    // Children grouped by parent, so `is_inside_finally_branch` doesn't
+    // rescan the whole tree once per TryCatch node (O(n²) on TryCatch-heavy
+    // trees).
+    let mut children_of: std::collections::HashMap<
+        orch8_types::ids::ExecutionNodeId,
+        Vec<&orch8_types::execution::ExecutionNode>,
+    > = std::collections::HashMap::new();
+    for n in &tree {
+        if let Some(parent_id) = n.parent_id {
+            children_of.entry(parent_id).or_default().push(n);
+        }
+    }
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 
@@ -318,7 +328,7 @@ async fn cancel_scoped(
         // Nodes inside a try-catch `finally` branch (branch_index == 2) are
         // non-cancellable: the finally block must run to completion regardless
         // of external signals. This mirrors Java/Python try-finally semantics.
-        let inside_finally = is_inside_finally_branch(&node_index, node);
+        let inside_finally = is_inside_finally_branch(&node_index, &children_of, node);
 
         // Check per-step cancellable flag.
         let step_cancellable = block_map
@@ -355,36 +365,28 @@ async fn cancel_scoped(
 /// run to completion.
 fn is_inside_finally_branch(
     node_index: &[&orch8_types::execution::ExecutionNode],
+    children_of: &std::collections::HashMap<
+        orch8_types::ids::ExecutionNodeId,
+        Vec<&orch8_types::execution::ExecutionNode>,
+    >,
     node: &orch8_types::execution::ExecutionNode,
 ) -> bool {
     use orch8_types::execution::BlockType;
 
     // Case 1: The node itself is a TryCatch with active finally children.
-    // Cancelling it would orphan the finally branch.
+    // Cancelling it would orphan the finally branch. (A `Pending` child is
+    // active, so an all-pending finally branch is covered by the same check.)
     if node.block_type == BlockType::TryCatch {
-        let finally_children = node_index
-            .iter()
-            .filter(|c| c.parent_id == Some(node.id) && c.branch_index == Some(2));
-
-        let mut has_active = false;
-        let mut has_any = false;
-        let mut all_pending = true;
-
-        for c in finally_children {
-            has_any = true;
-            let is_active = matches!(
-                c.state,
-                NodeState::Pending | NodeState::Running | NodeState::Waiting
-            );
-            if is_active {
-                has_active = true;
-            }
-            if c.state != NodeState::Pending {
-                all_pending = false;
-            }
-        }
-
-        if has_active || (has_any && all_pending) {
+        let has_active_finally = children_of.get(&node.id).is_some_and(|children| {
+            children.iter().any(|c| {
+                c.branch_index == Some(2)
+                    && matches!(
+                        c.state,
+                        NodeState::Pending | NodeState::Running | NodeState::Waiting
+                    )
+            })
+        });
+        if has_active_finally {
             return true;
         }
     }

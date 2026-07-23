@@ -551,7 +551,14 @@ fn rule_open_breaker(
         let directly_involved = task_handlers.contains(&breaker.handler.as_str());
         let cooldown_left = breaker.opened_at.map(|opened| {
             let elapsed = now - opened;
-            Duration::seconds(i64::try_from(breaker.cooldown_secs).unwrap_or(i64::MAX)) - elapsed
+            // `Duration::seconds` panics for values above i64::MAX / 1000, so
+            // clamp absurd stored cooldowns instead of panicking in a
+            // diagnostics endpoint; `checked_sub` guards negative `elapsed`
+            // (clock skew) overflowing at the upper bound.
+            Duration::try_seconds(i64::try_from(breaker.cooldown_secs).unwrap_or(i64::MAX))
+                .unwrap_or(Duration::MAX)
+                .checked_sub(&elapsed)
+                .unwrap_or(Duration::MAX)
         });
         let mut finding = Finding::new(
             "OPEN_CIRCUIT_BREAKER",

@@ -85,47 +85,37 @@ pub(super) async fn delete(storage: &SqliteStorage, id: Uuid) -> Result<(), Stor
     Ok(())
 }
 
+/// Maximum schedules claimed in one tick. After a long outage an unbounded
+/// claim would burst-spawn every due schedule at once — the exact thundering
+/// herd the missed-fire policy exists to avoid. Stragglers are picked up on
+/// subsequent ticks.
+const MAX_CLAIM_PER_TICK: i64 = 100;
+
 async fn claim_due_inner(
     conn: &mut sqlx::SqliteConnection,
     now_str: &str,
 ) -> Result<Vec<CronSchedule>, StorageError> {
-    // SQLite lacks FOR UPDATE SKIP LOCKED, so we do a two-step approach:
-    // 1. SELECT ids that are due and haven't been claimed for this window
-    // 2. UPDATE those ids to mark them triggered
-    // 3. Return the matched schedules
-    let due_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM cron_schedules \
-         WHERE enabled = 1 AND next_fire_at <= ?1 \
-           AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)",
+    // SQLite lacks FOR UPDATE SKIP LOCKED, so claiming runs inside BEGIN
+    // IMMEDIATE (see `claim_due` below). One statement: mark the oldest due
+    // schedules triggered and return them, instead of the previous
+    // SELECT-then-2N-round-trips loop under the write lock.
+    let rows = sqlx::query(
+        "UPDATE cron_schedules SET last_triggered_at = ?1, updated_at = ?1
+         WHERE id IN (
+             SELECT id FROM cron_schedules
+             WHERE enabled = 1 AND next_fire_at <= ?1
+               AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)
+             ORDER BY next_fire_at
+             LIMIT ?2
+         )
+         RETURNING *",
     )
     .bind(now_str)
+    .bind(MAX_CLAIM_PER_TICK)
     .fetch_all(&mut *conn)
     .await?;
 
-    if due_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    for id in &due_ids {
-        sqlx::query(
-            "UPDATE cron_schedules SET last_triggered_at = ?2, updated_at = ?2 WHERE id = ?1",
-        )
-        .bind(id)
-        .bind(now_str)
-        .execute(&mut *conn)
-        .await?;
-    }
-
-    let mut result = Vec::with_capacity(due_ids.len());
-    for id in &due_ids {
-        let row = sqlx::query("SELECT * FROM cron_schedules WHERE id = ?1")
-            .bind(id)
-            .fetch_one(&mut *conn)
-            .await?;
-        result.push(row_to_cron(&row)?);
-    }
-
-    Ok(result)
+    rows.iter().map(row_to_cron).collect()
 }
 
 pub(super) async fn claim_due(

@@ -93,8 +93,14 @@ pub(super) async fn check_sla_deadlines(
                     storage: Arc::clone(storage),
                     wait_for_input: None,
                 };
-                // Fire-and-forget: escalation handler failure doesn't block the deadline fail.
-                if let Err(e) = handler(step_ctx).await {
+                // Failure-tolerant but bounded: an escalation error doesn't
+                // block the deadline fail below, and a hung handler must not
+                // stall the evaluate loop forever — the heartbeat task keeps
+                // touching `updated_at`, so the stale-instance reaper would
+                // never reclaim an instance wedged here (the flat-path
+                // equivalent in `scheduler::handle_deadline_breach` is
+                // bounded the same way).
+                if let Err(e) = crate::scheduler::dispatch_hook_bounded(handler(step_ctx)).await {
                     warn!(
                         instance_id = %instance.id,
                         block_id = %node.block_id,

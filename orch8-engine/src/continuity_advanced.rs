@@ -568,7 +568,7 @@ pub fn run_ownership_fault_lab(
         transition,
         phase,
         initial_epoch,
-        final_epoch: initial_epoch + u64::from(committed && advances_epoch),
+        final_epoch: initial_epoch.saturating_add(u64::from(committed && advances_epoch)),
         committed,
         retry_safe: true,
         virtual_time_ms: if profile == FaultProfile::DelayedApproval {

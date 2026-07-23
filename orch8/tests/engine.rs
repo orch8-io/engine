@@ -277,3 +277,78 @@ async fn facade_crud_semantics() {
     assert_eq!(all[0].id, a);
     assert_eq!(all[0].tenant_id, *engine.tenant());
 }
+
+/// Regression (audit M-3): an empty-string idempotency key is normalized to
+/// `None` — two creates with `Some("")` must both succeed with distinct ids
+/// instead of the second hitting the unique index on `""`.
+#[tokio::test]
+async fn empty_idempotency_key_is_not_deduped() {
+    let engine = build_engine().await;
+    let seq_id = engine
+        .upsert_sequence(two_step_sequence("empty-key-seq", "custom_step"))
+        .await
+        .expect("upsert");
+
+    let opts = CreateInstanceOptions {
+        idempotency_key: Some(String::new()),
+        ..Default::default()
+    };
+    let a = engine
+        .create_instance(seq_id, opts.clone())
+        .await
+        .expect("create a");
+    let b = engine
+        .create_instance(seq_id, opts)
+        .await
+        .expect("create b with an empty key must not hit the unique index");
+    assert_ne!(a, b, "empty key opts out of idempotency");
+}
+
+/// Regression (audit H-2): concurrent creates with the same idempotency key
+/// race the check-then-insert; the loser must resolve to the winner's id via
+/// the unique-index conflict path, not fail with a raw storage error.
+#[tokio::test]
+async fn concurrent_create_with_same_idempotency_key_dedupes() {
+    const TASKS: usize = 16;
+
+    let engine = build_engine().await;
+    let seq_id = engine
+        .upsert_sequence(two_step_sequence("race-seq", "custom_step"))
+        .await
+        .expect("upsert");
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(TASKS));
+    let mut handles = Vec::new();
+    for _ in 0..TASKS {
+        let engine = engine.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            engine
+                .create_instance(
+                    seq_id,
+                    CreateInstanceOptions {
+                        idempotency_key: Some("shared-key".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+        }));
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    for handle in handles {
+        let id = handle
+            .await
+            .expect("task panicked")
+            .expect("concurrent create must not fail");
+        ids.insert(id.to_string());
+    }
+    assert_eq!(ids.len(), 1, "all racing creates must return the same id");
+
+    let all = engine
+        .list_instances(&orch8::InstanceFilter::default())
+        .await
+        .expect("list");
+    assert_eq!(all.len(), 1, "exactly one instance must be stored");
+}

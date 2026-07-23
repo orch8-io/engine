@@ -196,6 +196,8 @@ async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<
             "signal_inbox",
             "worker_tasks",
             "externalized_state",
+            "instance_kv_state",
+            "injected_blocks",
         ] {
             let sql = match *table {
                 "block_outputs" => "DELETE FROM block_outputs WHERE instance_id IN (",
@@ -203,6 +205,8 @@ async fn delete_on(conn: &mut sqlx::SqliteConnection, id: SequenceId) -> Result<
                 "signal_inbox" => "DELETE FROM signal_inbox WHERE instance_id IN (",
                 "worker_tasks" => "DELETE FROM worker_tasks WHERE instance_id IN (",
                 "externalized_state" => "DELETE FROM externalized_state WHERE instance_id IN (",
+                "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id IN (",
+                "injected_blocks" => "DELETE FROM injected_blocks WHERE instance_id IN (",
                 _ => continue,
             };
             let mut qb = sqlx::QueryBuilder::new(sql);

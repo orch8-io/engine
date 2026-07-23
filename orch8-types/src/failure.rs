@@ -285,7 +285,17 @@ pub fn normalize_message(message: &str) -> String {
     while out.ends_with(' ') {
         out.pop();
     }
-    out.truncate(MAX_LEN);
+    // The loop above bounds on byte length *before* pushing, so a multi-byte
+    // char pushed at `out.len() = 254`/`255` can overshoot past `MAX_LEN`.
+    // Truncating at exactly `MAX_LEN` could then split a char and panic, so
+    // back off to the nearest char boundary.
+    if out.len() > MAX_LEN {
+        let mut end = MAX_LEN;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
     out
 }
 
@@ -371,7 +381,10 @@ pub fn envelope_from_message(
 /// "status 429", "returned 404 not found").
 fn extract_http_status(lower: &str) -> Option<u16> {
     for marker in ["http ", "status ", "returned "] {
-        if let Some(pos) = lower.find(marker) {
+        // Scan *every* occurrence of the marker: an early hit followed by
+        // non-status text ("http 2 streams failed, http 503") must not hide a
+        // later, valid status.
+        for (pos, _) in lower.match_indices(marker) {
             let rest = &lower[pos + marker.len()..];
             let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             if digits.len() == 3
@@ -658,6 +671,34 @@ mod tests {
     fn normalize_bounds_length() {
         let long = "word ".repeat(200);
         assert!(normalize_message(&long).len() <= 256);
+    }
+
+    #[test]
+    fn normalize_truncates_on_char_boundary_without_panic() {
+        // Regression: the loop bounds on byte length *before* pushing, so a
+        // multi-byte char pushed at len 255 overshoots to 257 bytes; a naive
+        // `truncate(256)` then panics ("not a char boundary"). 255 ascii
+        // bytes + a 2-byte `é` straddles byte 256 exactly.
+        let msg = format!("{}é", "x".repeat(255));
+        let out = normalize_message(&msg);
+        assert!(out.len() <= 256, "got {} bytes", out.len());
+        assert_eq!(out, "x".repeat(255));
+
+        // 4-byte emoji straddling the boundary must not panic either.
+        let msg = format!("{}🦀", "y".repeat(255));
+        let out = normalize_message(&msg);
+        assert!(out.len() <= 256, "got {} bytes", out.len());
+        assert_eq!(out, "y".repeat(255));
+    }
+
+    #[test]
+    fn http_status_rescans_after_non_status_marker_hit() {
+        // Regression: `find` returned only the first marker occurrence; when
+        // its trailing text wasn't a 3-digit status, later valid hits of the
+        // same marker were never examined and the message fell to "unknown".
+        let e = envelope_from_message("http 2 streams failed, http 503", true, t0());
+        assert_eq!(e.error_code, "HTTP_STATUS");
+        assert_eq!(e.external_status.as_deref(), Some("503"));
     }
 
     #[test]

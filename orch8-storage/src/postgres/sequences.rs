@@ -210,6 +210,7 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
             "signal_inbox",
             "worker_tasks",
             "externalized_state",
+            "instance_kv_state",
         ] {
             let sql = match *table {
                 "block_outputs" => "DELETE FROM block_outputs WHERE instance_id = ANY($1)",
@@ -219,6 +220,7 @@ async fn delete_on(conn: &mut sqlx::PgConnection, id: SequenceId) -> Result<(), 
                 "externalized_state" => {
                     "DELETE FROM externalized_state WHERE instance_id = ANY($1)"
                 }
+                "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
                 _ => continue,
             };
             sqlx::query(sql)

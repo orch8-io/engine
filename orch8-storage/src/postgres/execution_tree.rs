@@ -79,7 +79,7 @@ pub(super) async fn update_node_state(
     let now = Utc::now();
     let completed_at = if matches!(
         state,
-        NodeState::Completed | NodeState::Failed | NodeState::Cancelled
+        NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
     ) {
         Some(now)
     } else {

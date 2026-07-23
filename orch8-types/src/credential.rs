@@ -202,7 +202,18 @@ mod tests {
         let json = serde_json::to_string(&def).unwrap();
         // Real refresh token must be redacted.
         assert!(!json.contains("\"r\""));
-        let back: CredentialDef = serde_json::from_str(&json).unwrap();
+        // Feeding the redacted JSON back must fail loudly rather than adopt
+        // "[REDACTED]" as the live secret.
+        let err = serde_json::from_str::<CredentialDef>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("redaction placeholder"),
+            "unexpected error: {err}"
+        );
+        // With real secrets supplied, the rest of the definition round-trips.
+        let mut value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+        value["value"] = serde_json::Value::String(r#"{"access_token":"a"}"#.into());
+        value["refresh_token"] = serde_json::Value::String("r".into());
+        let back: CredentialDef = serde_json::from_value(value).unwrap();
         assert_eq!(back.id, "google");
         assert_eq!(back.kind, CredentialKind::Oauth2);
         assert_eq!(

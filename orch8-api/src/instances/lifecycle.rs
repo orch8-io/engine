@@ -132,10 +132,14 @@ pub async fn create_instance(
     // instantly returns all new traffic here to the baseline.
     let mut effective_sequence_id = req.sequence_id;
     let mut release_annotation: Option<serde_json::Value> = None;
-    if let Ok(Some(release)) = state
+    // A storage failure here must propagate (503) — treating it as "no
+    // release" would silently route all new instances to the baseline
+    // during a DB blip while the release still looks healthy.
+    if let Some(release) = state
         .storage
         .find_routing_release_for_sequence(req.sequence_id)
         .await
+        .map_err(|e| ApiError::from_storage(e, "release"))?
         && release.tenant_id == tenant_id
     {
         let cohort_key = req
@@ -168,20 +172,25 @@ pub async fn create_instance(
 
     // Resolve the target sequence up-front and surface "not found" as 404 —
     // otherwise the insert would bottom out on a Postgres FK violation and
-    // bubble up as a generic 500.
+    // bubble up as a generic 500. Report the id actually fetched: under
+    // canary routing that may be the candidate, not the requested baseline.
     let sequence = state
         .storage
         .get_sequence(effective_sequence_id)
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
-        .ok_or_else(|| ApiError::NotFound(format!("sequence {}", req.sequence_id.into_uuid())))?;
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("sequence {}", effective_sequence_id.into_uuid()))
+        })?;
 
     // Cross-tenant sequence IDOR guard: a caller must not instantiate a
-    // sequence that belongs to another tenant.
+    // sequence that belongs to another tenant. 404 (not 403) — the crate's
+    // anti-enumeration convention does not confirm the sequence exists.
     if sequence.tenant_id != tenant_id {
-        return Err(ApiError::Forbidden(
-            "sequence does not belong to the caller's tenant".into(),
-        ));
+        return Err(ApiError::NotFound(format!(
+            "sequence {}",
+            effective_sequence_id.into_uuid()
+        )));
     }
 
     // Validate input against the sequence's optional `input_schema` (422 on

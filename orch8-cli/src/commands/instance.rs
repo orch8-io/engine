@@ -141,6 +141,11 @@ pub async fn run(
                     // Clear screen for repaint.
                     print!("\x1b[2J\x1b[H");
                     let resp = client.get(format!("{base}/instances/{id}")).send().await?;
+                    if !resp.status().is_success() {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        anyhow::bail!("watch failed: server returned {status}: {body}");
+                    }
                     let body: Value = resp.json().await?;
                     let state = val_str(&body, "state");
                     println!("{}", serde_json::to_string_pretty(&body)?);

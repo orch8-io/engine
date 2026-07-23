@@ -39,6 +39,7 @@ pub(crate) use checkpoints::{
 pub use checkpoints::{PruneCheckpointsRequest, SaveCheckpointRequest};
 pub use fork::ForkResponse;
 pub(crate) use fork::{__path_fork_instance, fork_instance};
+pub(crate) use fork::{fork_target_idx, partition_fork_blocks};
 pub use inject::InjectBlocksRequest;
 pub(crate) use inject::{__path_inject_blocks, inject_blocks};
 pub(crate) use lifecycle::{

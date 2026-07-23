@@ -8,7 +8,7 @@
 //!
 //! Pure: no storage, no clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
 
@@ -57,8 +57,6 @@ struct StepFacts {
     output_schema: Option<serde_json::Value>,
     when: Option<String>,
     compensation: Option<serde_json::Value>,
-    /// DFS position for reorder detection.
-    position: usize,
 }
 
 #[derive(Debug, Default)]
@@ -88,7 +86,6 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                 if let Some(id) = id {
                     facts.order.push(id.to_string());
                     if let Some(Value::String(handler)) = map.get("handler") {
-                        let position = facts.order.len();
                         let params = map.get("params").cloned().unwrap_or(Value::Null);
                         collect_output_refs(id, &params, facts);
                         let compensation = map
@@ -125,7 +122,6 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
                                     .filter(|v| !v.is_null()),
                                 when: str_field(map, "when"),
                                 compensation,
-                                position,
                             },
                         );
                     }
@@ -177,8 +173,11 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
             Value::String(s) => {
                 if let Some(rest) = s.strip_prefix("credentials://") {
                     let id = rest.split('/').next().unwrap_or(rest);
-                    if !id.is_empty() && !facts.credentials.contains(&id.to_string()) {
-                        facts.credentials.push(id.to_string());
+                    if !id.is_empty() {
+                        let cred = id.to_string();
+                        if !facts.credentials.contains(&cred) {
+                            facts.credentials.push(cred);
+                        }
                     }
                 }
             }
@@ -186,10 +185,18 @@ fn collect(seq: &SequenceDefinition) -> SequenceFacts {
         }
     }
     let mut facts = SequenceFacts::default();
-    if let Ok(v) = serde_json::to_value(seq)
-        && let Some(blocks) = v.get("blocks")
-    {
-        walk(blocks, &mut facts);
+    match serde_json::to_value(seq) {
+        Ok(v) => {
+            if let Some(blocks) = v.get("blocks") {
+                walk(blocks, &mut facts);
+            }
+        }
+        // Practically infallible for `SequenceDefinition`; if it ever fails,
+        // don't silently diff empty facts (which would report every block as
+        // removed) without a trace.
+        Err(e) => {
+            tracing::warn!(error = %e, "release diff: failed to serialize sequence; facts are incomplete");
+        }
     }
     facts
 }
@@ -291,15 +298,17 @@ pub fn semantic_diff(
     }
 
     // --- reordering of common blocks ---
+    let new_ids: HashSet<&String> = new.order.iter().collect();
+    let old_ids: HashSet<&String> = old.order.iter().collect();
     let common_old: Vec<&String> = old
         .order
         .iter()
-        .filter(|id| new.order.contains(id))
+        .filter(|id| new_ids.contains(*id))
         .collect();
     let common_new: Vec<&String> = new
         .order
         .iter()
-        .filter(|id| old.order.contains(id))
+        .filter(|id| old_ids.contains(*id))
         .collect();
     if common_old != common_new {
         push(
@@ -470,7 +479,7 @@ pub fn semantic_diff(
 
     // --- dangling output references in the candidate ---
     for (referencing, referenced) in &new.output_refs {
-        let exists = new.order.iter().any(|b| b == referenced);
+        let exists = new_ids.contains(referenced);
         if !exists {
             push(
                 "missing_output_reference",

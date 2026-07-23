@@ -21,6 +21,7 @@ thiserror.workspace = true
 metrics-exporter-prometheus.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 utoipa.workspace = true
 jsonschema.workspace = true
 moka.workspace = true

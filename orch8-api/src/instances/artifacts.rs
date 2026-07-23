@@ -81,14 +81,16 @@ pub async fn list_instance_artifacts(
 pub struct ArtifactBytesQuery {
     /// Override the response `Content-Type` (the value isn't stored alongside
     /// the bytes; callers that know the type — e.g. from the producing step's
-    /// `ArtifactRef` — can pass it for inline rendering).
+    /// `ArtifactRef` — can pass it for an accurate download type). The bytes
+    /// are always served with `Content-Disposition: attachment` and
+    /// `X-Content-Type-Options: nosniff`, never rendered inline.
     pub content_type: Option<String>,
 }
 
 #[utoipa::path(
     get, path = "/artifacts/{key}", tag = "instances",
     params(
-        ("key" = String, Path, description = "Artifact object key (`<instance_id>/<artifact_id>`)"),
+        ("key" = String, Path, description = "Artifact object key (`<instance_id>/<artifact_id>`); the route is the wildcard `/artifacts/{*key}`, so the key keeps its slashes"),
         ("content_type" = Option<String>, Query, description = "Override response Content-Type"),
     ),
     responses(
@@ -139,9 +141,17 @@ pub async fn get_artifact_bytes(
         }
         _ => "application/octet-stream".to_string(),
     };
+    // Artifact bytes are workflow-produced and the `content_type` override is
+    // caller-chosen, so never let the browser render them inline from this
+    // origin: force a download and disable MIME sniffing. Together these
+    // defuse stored-XSS via e.g. `?content_type=text/html`.
     Ok((
         StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_DISPOSITION, "attachment".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
         bytes,
     )
         .into_response())

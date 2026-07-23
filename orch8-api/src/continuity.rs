@@ -3738,6 +3738,19 @@ fn evaluate_what_if_invariants(
         .collect()
 }
 
+/// True for rows that are real step outputs. Internal bookkeeping block ids
+/// (`_`-prefixed) and sentinel markers (`__in_progress__`, `__retry__`,
+/// `__error__` in `output_ref`) must never be fed to a what-if / migration
+/// simulation as recorded outputs — the contract runner would replay the
+/// marker JSON verbatim as if the step had produced it.
+fn is_real_output_row(output: &orch8_types::output::BlockOutput) -> bool {
+    !output.block_id.as_str().starts_with('_')
+        && !matches!(
+            output.output_ref.as_deref(),
+            Some("__in_progress__" | "__retry__" | "__error__")
+        )
+}
+
 #[allow(clippy::too_many_lines)] // assembles one bounded, effect-free simulation from durable evidence
 async fn run_what_if(
     State(state): State<AppState>,
@@ -3785,12 +3798,12 @@ async fn run_what_if(
     let initial_outputs = outputs
         .iter()
         .filter(|output| output.created_at <= checkpoint.created_at)
-        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .filter(|output| is_real_output_row(output))
         .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
     let recorded = outputs
         .into_iter()
-        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .filter(is_real_output_row)
         .map(|output| (output.block_id.as_str().to_owned(), output.output))
         .collect::<std::collections::HashMap<_, _>>();
     let overrides = body.output_overrides.as_object().ok_or_else(|| {
@@ -4250,13 +4263,13 @@ async fn validate_migration_history(
         .completed
         .iter()
         .filter(|output| output.created_at <= input.checkpoint.created_at)
-        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .filter(|output| is_real_output_row(output))
         .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
         .collect::<std::collections::BTreeMap<_, _>>();
     let recorded_outputs = input
         .completed
         .iter()
-        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .filter(|output| is_real_output_row(output))
         .map(|output| (output.block_id.as_str().to_owned(), output.output.clone()))
         .collect::<std::collections::HashMap<_, _>>();
     let source_input = input

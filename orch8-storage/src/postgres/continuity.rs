@@ -826,7 +826,9 @@ impl crate::ContinuityStore for PostgresStorage {
             "effect|{}|{}|{}|{}|{}",
             tenant_id, next.continuity_id, kind, next.destination_fingerprint, next.request_sha256
         );
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        // hashtextextended: 64-bit key — the 32-bit hashtext() collided often
+        // enough to falsely serialize unrelated guard keys.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(guard_key)
             .execute(&mut *tx)
             .await
@@ -1010,11 +1012,18 @@ impl crate::ContinuityStore for PostgresStorage {
         envelope_sha256: &str,
         accepted_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
-        sqlx::query("DELETE FROM federation_receipts WHERE expires_at <= $1")
-            .bind(accepted_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        // Bound the opportunistic cleanup so a backlog of expired receipts
+        // can't make a single ingest delete arbitrarily many rows; stragglers
+        // are cleaned by subsequent messages.
+        sqlx::query(
+            "DELETE FROM federation_receipts WHERE ctid IN (
+                 SELECT ctid FROM federation_receipts WHERE expires_at <= $1 LIMIT 100
+             )",
+        )
+        .bind(accepted_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
         let result = sqlx::query(
             "INSERT INTO federation_receipts
              (tenant_id, peer_id, message_id, continuity_id, epoch, envelope_sha256,

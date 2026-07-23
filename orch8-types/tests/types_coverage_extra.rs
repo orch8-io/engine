@@ -392,7 +392,13 @@ fn cfg_36_config_serde_with_all_sections() {
         telemetry: orch8_types::config::TelemetryConfig::default(),
     };
     let json = serde_json::to_string(&cfg).unwrap();
-    let back: EngineConfig = serde_json::from_str(&json).unwrap();
+    // Non-empty secrets serialize as "[REDACTED]"; feeding the dump straight
+    // back must fail loudly rather than adopt the placeholder as the live
+    // value. Restore the real url (as an operator would) before reloading.
+    assert!(json.contains("[REDACTED]"));
+    let mut value = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+    value["database"]["url"] = serde_json::Value::String("sqlite::memory:".into());
+    let back: EngineConfig = serde_json::from_value(value).unwrap();
     assert_eq!(back.database.backend, "sqlite");
     assert!(back.database.run_migrations);
     assert_eq!(back.database.search_path.as_deref(), Some("test_schema"));

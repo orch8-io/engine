@@ -282,7 +282,12 @@ async fn refresh_credential(
         credential.refresh_token = Some(SecretString::new(rt));
     }
     if let Some(expires_in) = token.expires_in {
-        credential.expires_at = Some(chrono::Utc::now() + chrono::Duration::seconds(expires_in));
+        // `DateTime + Duration` panics on overflow, and `expires_in` comes
+        // from the token endpoint's response — never let a hostile or buggy
+        // value kill the refresh loop. Keep the previous expiry in that case.
+        credential.expires_at = chrono::Duration::try_seconds(expires_in)
+            .and_then(|delta| chrono::Utc::now().checked_add_signed(delta))
+            .or(credential.expires_at);
     }
     credential.updated_at = chrono::Utc::now();
 

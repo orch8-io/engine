@@ -4,12 +4,29 @@ use zeroize::Zeroize;
 
 /// A wrapper for sensitive strings that redacts the value in Debug and Serialize output.
 /// Use `.expose()` to access the inner value when you actually need it.
-#[derive(Clone, Default, Deserialize)]
-#[serde(transparent)]
+///
+/// Deserialization rejects the [`REDACTED_PLACEHOLDER`] literal: a
+/// read→serialize→deserialize→persist cycle (echo-back update, config
+/// dump+reload) must fail loudly rather than silently adopt `[REDACTED]` as
+/// the live secret.
+#[derive(Clone, Default)]
 pub struct SecretString(String);
 
 /// Placeholder emitted by `Debug`, `Serialize`, and `redact()` for non-empty secrets.
 pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        if s == REDACTED_PLACEHOLDER {
+            return Err(serde::de::Error::custom(
+                "cannot deserialize the redaction placeholder \"[REDACTED]\" as a secret: \
+                 this value was redacted on output; supply the real secret or omit the field",
+            ));
+        }
+        Ok(Self(s))
+    }
+}
 
 impl SecretString {
     #[must_use]
@@ -746,6 +763,20 @@ mod tests {
         // this is how env/TOML values become SecretString at load time.
         let s: SecretString = serde_json::from_str("\"abc123\"").unwrap();
         assert_eq!(s.expose(), "abc123");
+    }
+
+    #[test]
+    fn secret_string_deserialize_rejects_redaction_placeholder() {
+        // A serialized-then-fed-back secret arrives as "[REDACTED]"; adopting
+        // it as the live secret would silently break HMAC/auth. Reject loudly.
+        let err = serde_json::from_str::<SecretString>("\"[REDACTED]\"").unwrap_err();
+        assert!(
+            err.to_string().contains("redaction placeholder"),
+            "unexpected error: {err}"
+        );
+        // Other bracketed strings are unaffected.
+        let s: SecretString = serde_json::from_str("\"[REDACTEDX]\"").unwrap();
+        assert_eq!(s.expose(), "[REDACTEDX]");
     }
 
     #[test]

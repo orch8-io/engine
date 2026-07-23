@@ -121,14 +121,21 @@ impl Engine {
 
     /// Spawn the scheduler tick loop as a background task on the **host's**
     /// tokio runtime. Idempotent — calling it while the loop is already
-    /// running is a no-op. Must be called from within a tokio runtime.
+    /// running is a no-op; if a previous loop died (e.g. panicked), a new one
+    /// is spawned so scheduling does not silently stop. Must be called from
+    /// within a tokio runtime.
     pub fn start(&self) {
         let mut guard = self
             .inner
             .tick_task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if guard.is_some() || self.inner.cancel.is_cancelled() {
+        if self.inner.cancel.is_cancelled() {
+            return;
+        }
+        if let Some(task) = guard.as_ref()
+            && !task.is_finished()
+        {
             return;
         }
         let storage = Arc::clone(&self.inner.storage);
@@ -194,7 +201,21 @@ impl Engine {
         {
             return Ok(existing.id);
         }
-        self.inner.storage.create_sequence(&seq).await?;
+        // Concurrent upserts of the same `(name, version)` can both miss the
+        // lookup above; on backends with a unique index the loser gets a
+        // conflict. Resolve it to the winner's id, matching the doc contract.
+        if let Err(error) = self.inner.storage.create_sequence(&seq).await {
+            if matches!(error, StorageError::Conflict(_))
+                && let Some(existing) = self
+                    .inner
+                    .storage
+                    .get_sequence_by_name(&seq.tenant_id, &seq.namespace, &seq.name, Some(seq.version))
+                    .await?
+            {
+                return Ok(existing.id);
+            }
+            return Err(error.into());
+        }
         Ok(seq.id)
     }
 
@@ -219,8 +240,14 @@ impl Engine {
             .await?
             .ok_or_else(|| Error::NotFound(format!("sequence {}", sequence_id.into_uuid())))?;
 
-        if let Some(ref key) = opts.idempotency_key
-            && !key.is_empty()
+        // Normalize an empty key to `None`: the unique index on
+        // `(tenant_id, idempotency_key)` includes every non-NULL value, so
+        // storing `""` would make a *second* create with an empty key fail
+        // with a constraint violation even though the caller opted out of
+        // idempotency.
+        let idempotency_key = opts.idempotency_key.filter(|k| !k.is_empty());
+
+        if let Some(ref key) = idempotency_key
             && let Some(existing) = self
                 .inner
                 .storage
@@ -243,7 +270,7 @@ impl Engine {
             context: opts.context,
             concurrency_key: None,
             max_concurrency: None,
-            idempotency_key: opts.idempotency_key,
+            idempotency_key: idempotency_key.clone(),
             session_id: None,
             parent_instance_id: None,
             budget: opts.budget,
@@ -251,7 +278,23 @@ impl Engine {
             updated_at: now,
         };
 
-        self.inner.storage.create_instance(&instance).await?;
+        // Two concurrent creates with the same key can both miss the lookup
+        // above; the loser then hits the unique index. Map that conflict
+        // back to the documented "returns the existing instance's id"
+        // behavior instead of surfacing a raw storage error.
+        if let Err(error) = self.inner.storage.create_instance(&instance).await {
+            if let Some(ref key) = idempotency_key
+                && matches!(error, StorageError::Conflict(_))
+                && let Some(existing) = self
+                    .inner
+                    .storage
+                    .find_by_idempotency_key(&self.inner.tenant, key)
+                    .await?
+            {
+                return Ok(existing.id);
+            }
+            return Err(error.into());
+        }
         Ok(instance.id)
     }
 
@@ -360,15 +403,32 @@ impl Engine {
 
         // Wake a Scheduled instance whose next_fire_at is in the future so
         // the signal is handled promptly (critical for human-input waits).
+        // Best-effort: a failure only delays handling until the scheduled
+        // fire time, so log instead of failing the send.
         if let Ok(Some(fresh)) = self.inner.storage.get_instance(id).await
             && fresh.state == InstanceState::Scheduled
         {
             let now = self.inner.config.clock.now();
-            let _ = self
+            // CAS on Scheduled: between the re-fetch above and this write the
+            // instance may have transitioned (e.g. to Running or a terminal
+            // state) — an unconditional update would clobber that transition
+            // and resurrect the row as Scheduled.
+            match self
                 .inner
                 .storage
-                .update_instance_state(id, InstanceState::Scheduled, Some(now))
-                .await;
+                .conditional_update_instance_state(
+                    id,
+                    InstanceState::Scheduled,
+                    InstanceState::Scheduled,
+                    Some(now),
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, instance_id = %id, "orch8: failed to wake instance for pending signal");
+                }
+            }
         }
 
         Ok(())

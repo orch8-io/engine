@@ -114,6 +114,9 @@ pub(super) async fn claim_due(
     store: &PostgresStorage,
     now: DateTime<Utc>,
 ) -> Result<Vec<CronSchedule>, StorageError> {
+    // `LIMIT 100` caps one tick's claim: after a long outage an unbounded
+    // claim would burst-spawn every due schedule at once. Stragglers are
+    // picked up on subsequent ticks.
     let rows = sqlx::query_as::<_, CronRow>(
         r"UPDATE cron_schedules
           SET last_triggered_at = $1, updated_at = NOW()
@@ -123,6 +126,7 @@ pub(super) async fn claim_due(
                 AND next_fire_at <= $1
                 AND (last_triggered_at IS NULL OR last_triggered_at < next_fire_at)
               ORDER BY next_fire_at
+              LIMIT 100
               FOR UPDATE SKIP LOCKED
           )
           RETURNING id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,

@@ -199,7 +199,7 @@ fn trace_expression(
     let resolved = template::resolve_with_state(&Value::String(single), context, outputs, state);
 
     // Provenance: which fallback segment fires first?
-    let (source, fallback_used, base_missing, base_null) =
+    let (source, fallback_used, base_missing) =
         analyze_fallback_chain(expression, context, outputs, state);
     entry.source = source;
     entry.fallback_used = fallback_used;
@@ -214,7 +214,6 @@ fn trace_expression(
                 } else {
                     // Explicit null (or a filter produced null): either
                     // way the caller sees a genuine null value.
-                    let _ = base_null;
                     ResolutionStatus::Null
                 };
                 entry.value = Some(Value::Null);
@@ -238,17 +237,15 @@ fn trace_expression(
 
 /// Walk the fallback chain the way `resolve_path` does and report:
 /// (source segment that supplied the value, whether it was a fallback,
-/// whether the first path segment was missing, whether it was explicit
-/// null).
+/// whether the first path segment was missing).
 fn analyze_fallback_chain(
     expression: &str,
     context: &ExecutionContext,
     outputs: &Value,
     state: Option<&Value>,
-) -> (Option<String>, bool, bool, bool) {
+) -> (Option<String>, bool, bool) {
     let segments = template::split_pipe_segments(expression);
     let mut first_missing = false;
-    let mut first_null = false;
 
     for (i, segment) in segments.iter().enumerate() {
         let seg = segment.trim();
@@ -258,13 +255,11 @@ fn analyze_fallback_chain(
         if template::is_template_path(seg) {
             match template::try_resolve_single(seg, context, outputs, state) {
                 Ok(Some(v)) if !v.is_null() => {
-                    return (Some(seg.to_string()), i > 0, first_missing, first_null);
+                    return (Some(seg.to_string()), i > 0, first_missing);
                 }
                 Ok(Some(_)) => {
-                    // Present but null.
-                    if i == 0 {
-                        first_null = true;
-                    }
+                    // Present but null: the fallback chain moves on, but a
+                    // null first segment is not "missing".
                 }
                 Ok(None) | Err(_) => {
                     if i == 0 {
@@ -274,15 +269,10 @@ fn analyze_fallback_chain(
             }
         } else {
             // A quoted/bare literal default.
-            return (
-                Some("literal".to_string()),
-                i > 0,
-                first_missing,
-                first_null,
-            );
+            return (Some("literal".to_string()), i > 0, first_missing);
         }
     }
-    (None, false, first_missing, first_null)
+    (None, false, first_missing)
 }
 
 /// Redact a single resolved value: by the param path it lands in (ANY

@@ -60,13 +60,14 @@ pub async fn run(client: &Client, base: &str, cmd: InspectCmd, format: OutputFor
             outputs,
         } => {
             let resp = if let Some(instance_id) = instance {
-                let mut url =
-                    format!("{base}/instances/{instance_id}/blocks/{block}/resolved-input");
+                let url = format!("{base}/instances/{instance_id}/blocks/{block}/resolved-input");
+                let mut request = client.get(url);
                 if let Some(at) = &at_block {
-                    use std::fmt::Write as _;
-                    let _ = write!(url, "?at_block={at}");
+                    // `.query()` percent-encodes the value; a block id with
+                    // `&`/`=` would otherwise corrupt the query string.
+                    request = request.query(&[("at_block", at)]);
                 }
-                client.get(url).send().await?
+                request.send().await?
             } else {
                 let seq_path =
                     sequence_file.context("pass --instance <id> or --sequence-file <path>")?;

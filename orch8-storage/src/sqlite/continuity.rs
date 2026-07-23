@@ -1029,11 +1029,19 @@ impl crate::ContinuityStore for SqliteStorage {
         envelope_sha256: &str,
         accepted_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
-        sqlx::query("DELETE FROM federation_receipts WHERE expires_at <= ?")
-            .bind(accepted_at.to_rfc3339())
-            .execute(&self.pool)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        // Bound the opportunistic cleanup so a backlog of expired receipts
+        // can't make a single ingest scan/delete arbitrarily many rows (the
+        // index on expires_at keeps each pass cheap; stragglers are cleaned
+        // by subsequent messages).
+        sqlx::query(
+            "DELETE FROM federation_receipts WHERE rowid IN (
+                 SELECT rowid FROM federation_receipts WHERE expires_at <= ? LIMIT 100
+             )",
+        )
+        .bind(accepted_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
         let result = sqlx::query(
             "INSERT OR IGNORE INTO federation_receipts
              (tenant_id, peer_id, message_id, continuity_id, epoch, envelope_sha256,

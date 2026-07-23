@@ -12,10 +12,10 @@ const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
 const MAX_TOKEN_LEN: usize = 512;
 /// Maximum error response body we will include in a `PushError::Delivery`.
 const MAX_ERROR_BODY_LEN: usize = 4 * 1024;
-/// M-21: retries beyond the first attempt for a transient failure (network
-/// error, 5xx) or an auth rejection (403 — invalid/expired JWT) that a fresh
-/// token can resolve. A permanently invalid device token (410) or any other
-/// client error never retries.
+/// M-21: total delivery attempts (the initial try plus retries) for a
+/// transient failure (network error, 429, 5xx) or an auth rejection
+/// (403 — invalid/expired JWT) that a fresh token can resolve. A permanently
+/// invalid device token (410) or any other client error never retries.
 const MAX_DELIVERY_ATTEMPTS: u32 = 3;
 
 const fn retry_backoff(attempt: u32) -> Duration {
@@ -33,7 +33,8 @@ enum ApnsOutcome {
     /// 403: APNs rejected the JWT (expired/wrong key/revoked), not the
     /// device token -- invalidate the cached token and retry with a fresh one.
     AuthRejected,
-    /// 5xx: transient server-side failure -- retry with backoff.
+    /// 429 or 5xx: transient server-side/rate-limit failure -- retry with
+    /// backoff.
     Retryable,
     /// Any other non-2xx: not retryable.
     Permanent,
@@ -46,7 +47,9 @@ fn classify_apns_status(status: reqwest::StatusCode) -> ApnsOutcome {
         ApnsOutcome::InvalidToken
     } else if status.as_u16() == 403 {
         ApnsOutcome::AuthRejected
-    } else if status.is_server_error() {
+    } else if status.as_u16() == 429 || status.is_server_error() {
+        // 429 (TooManyRequests) is APNs' most common transient failure at
+        // fan-out volume; like 5xx it resolves by backing off and retrying.
         ApnsOutcome::Retryable
     } else {
         ApnsOutcome::Permanent
@@ -281,6 +284,16 @@ mod tests {
         );
         assert_eq!(
             classify_apns_status(StatusCode::SERVICE_UNAVAILABLE),
+            ApnsOutcome::Retryable
+        );
+    }
+
+    /// 429 (`TooManyRequests`) is transient — the vendor rate limit lifts, so
+    /// it must retry with backoff rather than fail the push outright.
+    #[test]
+    fn classify_apns_status_429_is_retryable() {
+        assert_eq!(
+            classify_apns_status(StatusCode::TOO_MANY_REQUESTS),
             ApnsOutcome::Retryable
         );
     }

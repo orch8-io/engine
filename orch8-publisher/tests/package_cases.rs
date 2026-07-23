@@ -949,19 +949,41 @@ fn build_allows_dotdot_inside_filename() {
 }
 
 #[test]
-fn build_allows_empty_path_key() {
-    // Actual semantics: the empty path has no ".." segment and is not
-    // absolute, so validation lets it through.
+fn build_rejects_empty_path_key() {
     let mut f = BTreeMap::new();
     f.insert(String::new(), "ok".to_string());
-    build_package(manifest("acme/x", "1.0.0"), f, &key()).unwrap();
+    assert!(build_package(manifest("acme/x", "1.0.0"), f, &key()).is_err());
 }
 
 #[test]
-fn build_allows_double_slash_in_path() {
+fn build_rejects_double_slash_in_path() {
+    // An empty segment (`a//b`) is ambiguous across extraction targets.
     let mut f = BTreeMap::new();
     f.insert("a//b".to_string(), "ok".to_string());
-    build_package(manifest("acme/x", "1.0.0"), f, &key()).unwrap();
+    assert!(build_package(manifest("acme/x", "1.0.0"), f, &key()).is_err());
+}
+
+#[test]
+fn build_rejects_backslash_traversal() {
+    // `..\evil` is a single segment on Unix but parent-directory traversal
+    // when extracted on Windows.
+    let mut f = BTreeMap::new();
+    f.insert("..\\evil".to_string(), "evil".to_string());
+    assert!(build_package(manifest("acme/x", "1.0.0"), f, &key()).is_err());
+}
+
+#[test]
+fn build_rejects_backslash_separator() {
+    let mut f = BTreeMap::new();
+    f.insert("a\\b".to_string(), "evil".to_string());
+    assert!(build_package(manifest("acme/x", "1.0.0"), f, &key()).is_err());
+}
+
+#[test]
+fn build_rejects_nul_in_path() {
+    let mut f = BTreeMap::new();
+    f.insert("a\0b".to_string(), "evil".to_string());
+    assert!(build_package(manifest("acme/x", "1.0.0"), f, &key()).is_err());
 }
 
 #[test]

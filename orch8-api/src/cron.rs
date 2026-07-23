@@ -14,6 +14,18 @@ use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use crate::AppState;
 use crate::error::ApiError;
 
+/// Reject unparseable IANA timezone names at the API boundary: the engine's
+/// scheduler silently falls back to UTC for an invalid tz, so accepting a
+/// typo like `Amercia/New_York` here would quietly re-time the schedule.
+fn validate_timezone(tz: &str) -> Result<(), ApiError> {
+    tz.parse::<chrono_tz::Tz>().map_err(|_| {
+        ApiError::InvalidArgument(format!(
+            "invalid timezone: '{tz}' (expected an IANA name like 'America/New_York' or 'UTC')"
+        ))
+    })?;
+    Ok(())
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/cron", post(create_cron).get(list_cron))
@@ -120,6 +132,20 @@ mod tests {
     fn default_true_is_true() {
         assert!(default_true());
     }
+
+    #[test]
+    fn validate_timezone_rejects_typos_accepts_iana_names() {
+        assert!(validate_timezone("UTC").is_ok());
+        assert!(validate_timezone("America/New_York").is_ok());
+        assert!(matches!(
+            validate_timezone("Amercia/New_York"),
+            Err(ApiError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            validate_timezone(""),
+            Err(ApiError::InvalidArgument(_))
+        ));
+    }
 }
 
 #[utoipa::path(post, path = "/cron", tag = "cron",
@@ -138,6 +164,7 @@ pub(crate) async fn create_cron(
 
     orch8_engine::cron::validate_cron_expr(&req.cron_expr)
         .map_err(|e| ApiError::InvalidArgument(format!("invalid cron expression: {e}")))?;
+    validate_timezone(&req.timezone)?;
 
     // Verify the target sequence exists and belongs to the caller's tenant.
     let sequence = state
@@ -313,6 +340,7 @@ pub(crate) async fn update_cron(
         schedule.cron_expr = expr;
     }
     if let Some(tz) = req.timezone {
+        validate_timezone(&tz)?;
         schedule.timezone = tz;
     }
     if let Some(enabled) = req.enabled {

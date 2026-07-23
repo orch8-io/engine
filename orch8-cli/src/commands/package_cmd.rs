@@ -24,25 +24,9 @@ use orch8_publisher::package::{
 };
 
 use crate::OutputFormat;
+use crate::atomic_write;
 
 const LOCKFILE: &str = "orch8-packages.lock";
-
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("create temporary file beside {}", path.display()))?;
-    file.write_all(contents)?;
-    file.as_file().sync_all()?;
-    file.persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("atomically replace {}", path.display()))?;
-    Ok(())
-}
 
 #[derive(Subcommand)]
 pub enum PackageCmd {
@@ -263,7 +247,9 @@ fn verify(path: &Path, trusted_keys: &[String]) -> Result<()> {
         };
         match check_trust(&pkg, &policy) {
             Ok(TrustLevel::Trusted) => println!("trust:     TRUSTED publisher"),
-            Ok(TrustLevel::UntrustedAllowed) => unreachable!("allow_untrusted is false"),
+            Ok(TrustLevel::UntrustedAllowed) => {
+                bail!("package is untrusted (allow_untrusted is false)")
+            }
             Err(e) => {
                 println!("trust:     NOT TRUSTED — {e}");
                 std::process::exit(1);
@@ -338,11 +324,15 @@ async fn install(
     }
 
     let manifest = &pkg.archive.manifest;
-    // 3. Lockfile downgrade check.
-    let mut lock: BTreeMap<String, Value> = std::fs::read_to_string(LOCKFILE)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    // 3. Lockfile downgrade check. A missing lockfile is fine; a corrupt one
+    // must not silently disable the check (step 7 would then overwrite it).
+    let mut lock: BTreeMap<String, Value> = match std::fs::read_to_string(LOCKFILE) {
+        Ok(raw) => serde_json::from_str(&raw).with_context(|| {
+            format!("{LOCKFILE} is corrupt — fix or remove it before installing")
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => bail!("read {LOCKFILE}: {e}"),
+    };
     if let Some(entry) = lock.get(&manifest.name)
         && let Some(installed) = entry["version"].as_str()
     {
@@ -405,10 +395,19 @@ async fn install(
             ])
             .send()
             .await?;
-        if existing.status().is_success() {
+        // Only a genuine 404 means "does not exist"; any other non-success
+        // status (500, 401/403, …) must not silently degrade the
+        // never-overwrite guarantee.
+        let status = existing.status();
+        if status.is_success() {
             bail!(
                 "sequence {namespace}/{name} v{version} already exists — refusing to \
                  overwrite (uninstall or bump the package version)"
+            );
+        } else if status.as_u16() != 404 {
+            bail!(
+                "conflict check for {namespace}/{name} v{version} failed: server returned \
+                 {status} — refusing to install"
             );
         }
 

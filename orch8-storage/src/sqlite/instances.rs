@@ -190,11 +190,21 @@ async fn claim_due_inner(
 ) -> Result<Vec<TaskInstance>, StorageError> {
     let rows = if max_per_tenant > 0 {
         // Noisy-neighbor protection: cap instances per tenant using ROW_NUMBER().
+        // Pre-limit the window input to `limit * max_per_tenant` (the same
+        // over-select the Postgres twin uses for its `locked` CTE) so the
+        // window function doesn't rank the entire due backlog on every tick
+        // inside a BEGIN IMMEDIATE transaction that blocks all other writers.
+        // Rows trimmed by the pre-limit are claimed on a later tick.
+        let overselect = i64::from(limit).saturating_mul(i64::from(max_per_tenant));
         sqlx::query(
             "SELECT * FROM (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY priority DESC, next_fire_at ASC) AS rn
-                FROM task_instances
-                WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                FROM (
+                    SELECT * FROM task_instances
+                    WHERE state='scheduled' AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                    ORDER BY priority DESC, next_fire_at ASC
+                    LIMIT ?4
+                )
             ) ranked
             WHERE rn <= ?3
             ORDER BY priority DESC, next_fire_at ASC
@@ -203,6 +213,7 @@ async fn claim_due_inner(
         .bind(now_s)
         .bind(limit as i64)
         .bind(max_per_tenant as i64)
+        .bind(overselect)
         .fetch_all(&mut *conn)
         .await
         ?
@@ -979,12 +990,19 @@ pub(super) async fn delete_terminal_instances(
         return Ok(0);
     }
 
-    // Unlike Postgres, none of `step_logs`, `audit_log`, `usage_events`
-    // declare `ON DELETE CASCADE` (or any FK at all) to `task_instances` on
-    // SQLite -- Postgres's `audit_log` cascades (migration 016), SQLite's
-    // doesn't. All three are deleted explicitly here so the divergence
-    // doesn't leave orphans on this backend.
-    for table in ["step_logs", "audit_log", "usage_events"] {
+    // Unlike Postgres, none of `step_logs`, `audit_log`, `usage_events`,
+    // `instance_kv_state`, `injected_blocks` declare `ON DELETE CASCADE` (or
+    // any FK at all) to `task_instances` on SQLite -- Postgres's `audit_log`
+    // cascades (migration 016), SQLite's doesn't. All five are deleted
+    // explicitly here so the divergence doesn't leave orphans on this
+    // backend.
+    for table in [
+        "step_logs",
+        "audit_log",
+        "usage_events",
+        "instance_kv_state",
+        "injected_blocks",
+    ] {
         let sql = format!("DELETE FROM {table} WHERE instance_id IN (");
         let mut qb: sqlx::QueryBuilder<'_, sqlx::Sqlite> = sqlx::QueryBuilder::new(sql);
         let mut separated = qb.separated(",");

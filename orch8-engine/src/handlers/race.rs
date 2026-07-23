@@ -42,6 +42,25 @@ async fn cancel_non_terminal_siblings(
 
 /// Execute a race block: first branch to complete wins.
 /// Remaining branches are cancelled. Returns `true` if more work.
+///
+/// ## Per-branch cursor semantics
+///
+/// Like [`super::parallel::execute_parallel`], a branch is an ordered list of
+/// blocks and at most one block per branch is active at a time — branches
+/// race against each other, but blocks WITHIN a branch run sequentially.
+/// (Prior behaviour activated every pending child at once, so a later block
+/// in a branch could execute before its predecessors whenever an earlier one
+/// deferred — external-worker dispatch, delay, rate limit, or a human gate.)
+///
+/// Each direct child is tagged with `branch_index` by
+/// `evaluator::build_nodes`. On every tick this handler:
+///   1. Groups children by `branch_index`, preserving source order.
+///   2. Activates each branch's cursor (first non-terminal node) if Pending.
+///   3. A branch whose cursor node Failed is dead: under `FirstToResolve`
+///      the race fails fast; under `FirstToSucceed` the branch's remaining
+///      nodes are cancelled so `all_terminal` can still settle the race.
+///   4. The first branch to fully drain without a failure wins; every other
+///      non-terminal node is cancelled.
 pub async fn execute_race(
     storage: &dyn StorageBackend,
     _handlers: &HandlerRegistry,
@@ -57,11 +76,83 @@ pub async fn execute_race(
         return Ok(true);
     }
 
-    // Activate all pending children so they can race.
-    evaluator::activate_pending_children(storage, &children).await?;
+    // Group by branch_index (BTreeMap: deterministic branch order). Within a
+    // group, `children_of` preserves source order — see execute_parallel.
+    let mut branches: std::collections::BTreeMap<i16, Vec<&ExecutionNode>> =
+        std::collections::BTreeMap::new();
+    for c in &children {
+        let idx = c.branch_index.unwrap_or(0);
+        branches.entry(idx).or_default().push(*c);
+    }
 
-    // Check if any branch completed (winner).
-    if evaluator::any_completed(&children) {
+    let is_terminal = |n: &ExecutionNode| {
+        matches!(
+            n.state,
+            NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
+        )
+    };
+
+    let mut any_branch_won = false;
+    let mut any_branch_failed = false;
+
+    for (branch_idx, branch_nodes) in &branches {
+        let branch_failed = branch_nodes
+            .iter()
+            .any(|n| matches!(n.state, NodeState::Failed | NodeState::Cancelled));
+
+        if branch_failed {
+            any_branch_failed = true;
+            // The branch can never win. Cancel its not-yet-started remainder
+            // so the whole tree can reach all-terminal (under FirstToSucceed
+            // the race still waits for the surviving branches).
+            for n in branch_nodes.iter().filter(|n| !is_terminal(n)) {
+                if n.state == NodeState::Waiting {
+                    storage
+                        .cancel_worker_tasks_for_block(
+                            instance.id.into_uuid(),
+                            n.block_id.as_str(),
+                        )
+                        .await?;
+                }
+                evaluator::cancel_subtree(storage, instance.id, tree, n.id).await?;
+                storage.update_node_state(n.id, NodeState::Cancelled).await?;
+                debug!(
+                    instance_id = %instance.id,
+                    block_id = %race_def.id,
+                    branch = branch_idx,
+                    cursor_block = %n.block_id,
+                    "race: cancelling remainder of failed branch"
+                );
+            }
+            continue;
+        }
+
+        if branch_nodes.iter().all(|n| is_terminal(n)) {
+            // Fully drained with no failure (Completed/Skipped only) — winner.
+            any_branch_won = true;
+            continue;
+        }
+
+        // Cursor = first non-terminal node; activate it if still Pending so
+        // the branch advances one block at a time.
+        if let Some(cursor) = branch_nodes.iter().find(|n| !is_terminal(n))
+            && cursor.state == NodeState::Pending
+        {
+            storage
+                .update_node_state(cursor.id, NodeState::Running)
+                .await?;
+            debug!(
+                instance_id = %instance.id,
+                block_id = %race_def.id,
+                branch = branch_idx,
+                cursor_block = %cursor.block_id,
+                "race: activating branch cursor"
+            );
+        }
+    }
+
+    // A drained branch wins the race — cancel everything still in flight.
+    if any_branch_won {
         cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
         evaluator::complete_node(storage, node.id).await?;
         debug!(
@@ -76,9 +167,7 @@ pub async fn execute_race(
     // state decides the race, whether that's a success or a failure. If a
     // branch has already failed and no branch has won, fail fast instead of
     // waiting for every remaining branch to also fail.
-    if matches!(race_def.semantics, RaceSemantics::FirstToResolve)
-        && children.iter().any(|c| c.state == NodeState::Failed)
-    {
+    if matches!(race_def.semantics, RaceSemantics::FirstToResolve) && any_branch_failed {
         cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
         evaluator::fail_node(storage, node.id).await?;
         debug!(
@@ -751,5 +840,191 @@ mod tests {
             NodeState::Running,
             "the still-running sibling must not be touched"
         );
+    }
+
+    // R11 (audit: race flattening): blocks WITHIN a branch run sequentially —
+    // only each branch's cursor (first non-terminal node) is activated. The
+    // second block of branch 0 must stay Pending until the first completes,
+    // even though a sibling branch also activates.
+    #[tokio::test]
+    async fn r11_branch_cursor_activates_only_first_nonterminal() {
+        let inst_id = InstanceId::new();
+        let race = mk_node(
+            inst_id,
+            "race",
+            BlockType::Race,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let a1 = mk_node(
+            inst_id,
+            "a1",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Pending,
+        );
+        let a2 = mk_node(
+            inst_id,
+            "a2",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Pending,
+        );
+        let b1 = mk_node(
+            inst_id,
+            "b1",
+            BlockType::Step,
+            Some(race.id),
+            Some(1),
+            NodeState::Pending,
+        );
+        let (s, tree) = setup(vec![race.clone(), a1, a2, b1], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let race_node = node_by_block(&tree, "race").clone();
+
+        execute_race(&s, &registry, &inst, &race_node, &race_def("race"), &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(node_by_block(&after, "a1").state, NodeState::Running);
+        assert_eq!(
+            node_by_block(&after, "a2").state,
+            NodeState::Pending,
+            "a2 must wait for its branch predecessor a1 — no flattening"
+        );
+        assert_eq!(node_by_block(&after, "b1").state, NodeState::Running);
+        assert_eq!(node_by_block(&after, "race").state, NodeState::Running);
+    }
+
+    // R12 (audit: race flattening): a branch wins only when it has FULLY
+    // drained — a single Completed block with Pending successors must not
+    // decide the race.
+    #[tokio::test]
+    async fn r12_partial_branch_completion_does_not_win() {
+        let inst_id = InstanceId::new();
+        let race = mk_node(
+            inst_id,
+            "race",
+            BlockType::Race,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let a1 = mk_node(
+            inst_id,
+            "a1",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Completed,
+        );
+        let a2 = mk_node(
+            inst_id,
+            "a2",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Pending,
+        );
+        let b1 = mk_node(
+            inst_id,
+            "b1",
+            BlockType::Step,
+            Some(race.id),
+            Some(1),
+            NodeState::Running,
+        );
+        let (s, tree) = setup(vec![race.clone(), a1, a2, b1], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let race_node = node_by_block(&tree, "race").clone();
+
+        execute_race(&s, &registry, &inst, &race_node, &race_def("race"), &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(
+            node_by_block(&after, "race").state,
+            NodeState::Running,
+            "branch 0 has not drained (a2 pending) — no winner yet"
+        );
+        assert_eq!(
+            node_by_block(&after, "a2").state,
+            NodeState::Running,
+            "branch 0's cursor must be activated so the branch can finish"
+        );
+        assert_eq!(
+            node_by_block(&after, "b1").state,
+            NodeState::Running,
+            "sibling branch must NOT be cancelled before a real winner"
+        );
+    }
+
+    // R13 (audit: race flattening): under FirstToSucceed, a failed branch's
+    // not-yet-started remainder is cancelled so the race can still reach an
+    // all-terminal settlement instead of hanging on Pending nodes forever.
+    #[tokio::test]
+    async fn r13_failed_branch_remainder_cancelled_under_first_to_succeed() {
+        let inst_id = InstanceId::new();
+        let race = mk_node(
+            inst_id,
+            "race",
+            BlockType::Race,
+            None,
+            None,
+            NodeState::Running,
+        );
+        let f = mk_node(
+            inst_id,
+            "f",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Failed,
+        );
+        let next = mk_node(
+            inst_id,
+            "next",
+            BlockType::Step,
+            Some(race.id),
+            Some(0),
+            NodeState::Pending,
+        );
+        let b1 = mk_node(
+            inst_id,
+            "b1",
+            BlockType::Step,
+            Some(race.id),
+            Some(1),
+            NodeState::Running,
+        );
+        let (s, tree) = setup(vec![race.clone(), f, next, b1], inst_id).await;
+        let inst = mk_instance(inst_id);
+        let registry = HandlerRegistry::new();
+        let race_node = node_by_block(&tree, "race").clone();
+        let def = race_def_with_semantics("race", RaceSemantics::FirstToSucceed);
+
+        execute_race(&s, &registry, &inst, &race_node, &def, &tree)
+            .await
+            .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        assert_eq!(
+            node_by_block(&after, "next").state,
+            NodeState::Cancelled,
+            "dead branch's remainder must be cancelled"
+        );
+        assert_eq!(
+            node_by_block(&after, "b1").state,
+            NodeState::Running,
+            "surviving branch keeps racing"
+        );
+        assert_eq!(node_by_block(&after, "race").state, NodeState::Running);
     }
 }

@@ -17,15 +17,7 @@ pub struct Storage(pub(crate) StorageKind);
 
 impl std::fmt::Debug for Storage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            StorageKind::SqliteFile(path) => f.debug_tuple("SqliteFile").field(path).finish(),
-            StorageKind::SqliteInMemory => f.write_str("SqliteInMemory"),
-            StorageKind::Postgres(url) => {
-                f.write_str("Postgres(")?;
-                f.write_str(&redacted_connection_url(url))?;
-                f.write_str(")")
-            }
-        }
+        self.0.fmt(f)
     }
 }
 

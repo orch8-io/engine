@@ -1035,8 +1035,9 @@ CREATE INDEX IF NOT EXISTS idx_federation_receipts_expiry
 
 -- Backs `acquire_manifest_lock`/`release_manifest_lock`: SQLite has no
 -- advisory-lock primitive, so a real row keyed by tenant_id stands in for
--- one. `locked_at` is diagnostic only (helps spot a stuck lock); the row's
--- presence/absence is the actual lock state.
+-- one. The row's presence/absence is the actual lock state; `locked_at`
+-- identifies the holder (release deletes only its own row) and lets acquire
+-- reclaim rows abandoned by a crashed holder.
 CREATE TABLE IF NOT EXISTS manifest_locks (
     tenant_id TEXT PRIMARY KEY,
     locked_at TEXT NOT NULL

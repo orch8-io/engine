@@ -764,12 +764,25 @@ impl SequenceDefinition {
         // `seen` gained exactly one entry per unique block id visited above
         // (duplicates are rejected by `check_id`), so its size is the total
         // block count across the whole tree.
-        if seen.len() > MAX_TOTAL_BLOCKS {
+        let mut total_blocks = seen.len();
+        // The cleanup trees (`on_failure` / `on_cancel`) are dispatched
+        // independently of the main tree and of each other, so block ids may
+        // be reused across trees — each gets its own `seen` set. They still
+        // need the same per-block checks (nesting depth, branch/iteration
+        // caps, handler sanity) and still count toward the total-block cap,
+        // or the DoS bounds are trivially bypassed via these fields.
+        for cleanup_tree in [&self.on_failure, &self.on_cancel].into_iter().flatten() {
+            let mut cleanup_seen = std::collections::HashSet::new();
+            for block in cleanup_tree {
+                validate_block(block, &mut cleanup_seen, 0)?;
+            }
+            total_blocks += cleanup_seen.len();
+        }
+        if total_blocks > MAX_TOTAL_BLOCKS {
             return Err(SequenceValidationError::InvalidBlock {
                 block_id: "(root)".into(),
                 message: format!(
-                    "sequence has {} blocks, exceeding the maximum of {MAX_TOTAL_BLOCKS}",
-                    seen.len()
+                    "sequence has {total_blocks} blocks, exceeding the maximum of {MAX_TOTAL_BLOCKS}",
                 ),
             });
         }
@@ -1731,6 +1744,56 @@ mod tests {
         let seq = sample_seq(vec![step("dup"), step("dup")]);
         let err = seq.validate().unwrap_err();
         assert!(matches!(err, SequenceValidationError::DuplicateBlockId(ref s) if s == "dup"));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_ids_within_on_failure_tree() {
+        // The cleanup trees get the same per-tree checks as the main tree.
+        let mut seq = sample_seq(vec![step("main")]);
+        seq.on_failure = Some(vec![step("dup"), step("dup")]);
+        let err = seq.validate().unwrap_err();
+        assert!(matches!(err, SequenceValidationError::DuplicateBlockId(ref s) if s == "dup"));
+    }
+
+    #[test]
+    fn validate_allows_id_reuse_across_cleanup_trees() {
+        // Cleanup trees are dispatched independently of the main tree and of
+        // each other, so a block id may appear once per tree.
+        let mut seq = sample_seq(vec![step("shared")]);
+        seq.on_failure = Some(vec![step("shared")]);
+        seq.on_cancel = Some(vec![step("shared")]);
+        assert!(seq.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_pathological_nesting_in_on_cancel() {
+        // The nesting-depth cap must apply to cleanup trees too — otherwise a
+        // maliciously deep `on_cancel` bypasses the stack-overflow guard.
+        let mut seq = sample_seq(vec![step("main")]);
+        seq.on_cancel = Some(vec![nested_loops(MAX_NESTING_DEPTH + 20)]);
+        let err = seq.validate().expect_err("over-deep on_cancel must be rejected");
+        assert!(
+            format!("{err:?}").contains("nesting"),
+            "error should mention nesting depth, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_counts_cleanup_trees_toward_total_block_cap() {
+        // 1 main block + MAX_TOTAL_BLOCKS cleanup blocks = cap + 1.
+        let mut seq = sample_seq(vec![step("main")]);
+        seq.on_failure = Some(
+            (0..MAX_TOTAL_BLOCKS)
+                .map(|i| step(&format!("cleanup{i}")))
+                .collect(),
+        );
+        let err = seq
+            .validate()
+            .expect_err("cleanup blocks must count toward MAX_TOTAL_BLOCKS");
+        assert!(
+            format!("{err:?}").contains("exceeding the maximum"),
+            "error should mention the total-block cap, got: {err:?}"
+        );
     }
 
     #[test]
