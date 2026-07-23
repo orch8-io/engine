@@ -516,13 +516,18 @@ pub(super) async fn ensure_run_started(
     started_at: DateTime<Utc>,
 ) -> Result<(), StorageError> {
     let started_at_json = serde_json::to_value(started_at)?;
+    // `#>` on an existing-but-JSON-null field returns the jsonb `null`
+    // literal, not SQL NULL — COALESCE only skips SQL NULL, so without
+    // NULLIF a freshly created instance (whose `runtime.run_id` /
+    // `started_at` are present as JSON `null`, not absent) would never
+    // pick up the first-writer's value at all.
     sqlx::query(
         "UPDATE task_instances \
          SET context = jsonb_set( \
                  jsonb_set(context, ARRAY['runtime', 'run_id'], \
-                     COALESCE(context #> ARRAY['runtime', 'run_id'], to_jsonb($2::text)), true), \
+                     COALESCE(NULLIF(context #> ARRAY['runtime', 'run_id'], 'null'::jsonb), to_jsonb($2::text)), true), \
                  ARRAY['runtime', 'started_at'], \
-                 COALESCE(context #> ARRAY['runtime', 'started_at'], $3::jsonb), true), \
+                 COALESCE(NULLIF(context #> ARRAY['runtime', 'started_at'], 'null'::jsonb), $3::jsonb), true), \
              updated_at = NOW() \
          WHERE id = $1",
     )
