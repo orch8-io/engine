@@ -51,7 +51,18 @@ const SUITES: Suite[] = SELF_MANAGED_SUITES.map((s, i) => ({
 // server + Postgres DB; 20+ in parallel would exhaust a CI runner's RAM and
 // connection slots. A small pool keeps wall time low (≈ceil(N/limit) waves)
 // without thrashing. Override with ORCH8_E2E_CONCURRENCY (1 = fully serial).
-const CONCURRENCY = Math.max(1, Number(process.env.ORCH8_E2E_CONCURRENCY) || 6);
+//
+// Default is lower under `CI` (GitHub Actions sets this automatically):
+// a standard `ubuntu-latest` runner doesn't reliably have headroom for 6
+// concurrent debug-build servers + Postgres connections — observed as a
+// synchronized burst of "Server failed to start within 15 seconds" /
+// "cancelledByParent" across most of the pool, not any one suite being
+// broken. Local dev machines keep the faster default.
+const DEFAULT_CONCURRENCY = process.env.CI ? 2 : 6;
+const CONCURRENCY = Math.max(
+  1,
+  Number(process.env.ORCH8_E2E_CONCURRENCY) || DEFAULT_CONCURRENCY,
+);
 
 const BASE_DB_URL =
   process.env.ORCH8_DATABASE_URL ||
