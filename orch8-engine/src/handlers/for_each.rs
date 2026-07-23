@@ -276,7 +276,7 @@ pub async fn execute_for_each(
 
         // Reset the body subtree so the next tick re-runs it against
         // `items[next_index]`. The bind+activate happens on that tick.
-        reset_subtree_to_pending(storage, tree, instance.id, node.id).await?;
+        reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id).await?;
     }
 
     Ok(true)
@@ -341,6 +341,7 @@ async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId,
 async fn reset_subtree_to_pending(
     storage: &dyn StorageBackend,
     tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
     instance_id: InstanceId,
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
@@ -371,6 +372,22 @@ async fn reset_subtree_to_pending(
     if !composite_block_ids.is_empty() {
         storage
             .delete_block_outputs_batch(instance_id, &composite_block_ids)
+            .await?;
+    }
+
+    // Clear any effect receipt recorded for a `Step` descendant being reset
+    // to Pending — see `loop_block::reset_subtree_to_pending` for why: a
+    // step that permanently failed on the previous iteration re-enters this
+    // tick at the same attempt number, and without this a stale `unknown`
+    // receipt from that prior iteration would wrongly block the re-run.
+    let step_block_ids: Vec<BlockId> = descendants
+        .iter()
+        .filter(|(_, bt, _)| matches!(bt, BlockType::Step))
+        .map(|(_, _, bid)| bid.clone())
+        .collect();
+    if !step_block_ids.is_empty() {
+        storage
+            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
             .await?;
     }
 
@@ -753,7 +770,7 @@ mod tests {
             .await
             .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
         assert!(
@@ -815,7 +832,7 @@ mod tests {
             .unwrap();
 
         // Reset subtree must purge the completed worker_tasks row.
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -887,7 +904,7 @@ mod tests {
         .await
         .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 

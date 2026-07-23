@@ -219,7 +219,7 @@ pub async fn execute_loop(
 
         // Reset the entire body subtree (direct children plus every
         // descendant) back to Pending so the next tick re-activates it.
-        reset_subtree_to_pending(storage, tree, instance.id, node.id).await?;
+        reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id).await?;
 
         // poll_interval: defer re-execution by setting next_fire_at.
         // Use CAS (conditional_update_instance_state) so that a Cancel
@@ -272,6 +272,7 @@ pub async fn execute_loop(
 async fn reset_subtree_to_pending(
     storage: &dyn StorageBackend,
     tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
     instance_id: InstanceId,
     root_id: ExecutionNodeId,
 ) -> Result<(), EngineError> {
@@ -303,6 +304,25 @@ async fn reset_subtree_to_pending(
     if !composite_block_ids.is_empty() {
         storage
             .delete_block_outputs_batch(instance_id, &composite_block_ids)
+            .await?;
+    }
+
+    // Clear any effect receipt recorded for a `Step` descendant being reset
+    // to Pending. `compute_attempt` derives the next attempt purely from
+    // `block_outputs`, which this reset intentionally leaves untouched (see
+    // the doc comment above) — so a step that permanently failed last
+    // iteration re-enters this tick at the SAME attempt number. Without
+    // this, `EffectGuard::begin`'s per-attempt lookup would find the prior
+    // iteration's still-`unknown` receipt for that exact (block, attempt)
+    // pair and wrongly block the fresh re-run.
+    let step_block_ids: Vec<BlockId> = descendants
+        .iter()
+        .filter(|(_, bt, _)| matches!(bt, BlockType::Step))
+        .map(|(_, _, bid)| bid.clone())
+        .collect();
+    if !step_block_ids.is_empty() {
+        storage
+            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
             .await?;
     }
 
@@ -485,7 +505,7 @@ mod tests {
             .await
             .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -520,7 +540,7 @@ mod tests {
         .await
         .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -555,7 +575,7 @@ mod tests {
         .await
         .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -617,7 +637,7 @@ mod tests {
             .await
             .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -676,7 +696,7 @@ mod tests {
             .await
             .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, l1.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, l1.id)
             .await
             .unwrap();
 
@@ -713,7 +733,7 @@ mod tests {
             .unwrap();
 
         // Reset only branch lp_a — lp_b's marker must remain.
-        reset_subtree_to_pending(&s, &tree, inst, lp_a.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, lp_a.id)
             .await
             .unwrap();
 
@@ -739,11 +759,11 @@ mod tests {
             .await
             .unwrap();
 
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
         // Second call should not error.
-        reset_subtree_to_pending(&s, &tree, inst, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
             .await
             .unwrap();
 
@@ -826,7 +846,7 @@ mod tests {
 
         // Reset the inner_loop subtree as the outer for_each would.
         let tree = s.get_execution_tree(inst_id).await.unwrap();
-        reset_subtree_to_pending(&s, &tree, inst_id, outer.id)
+        reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst_id, outer.id)
             .await
             .unwrap();
 

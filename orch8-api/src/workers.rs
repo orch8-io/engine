@@ -1001,6 +1001,40 @@ pub(crate) async fn fail_task(
         };
 
         if can_retry {
+            // Persist a retry marker BEFORE creating the new task. Both the
+            // tree evaluator and the fast path derive the next dispatch
+            // attempt from `compute_attempt`, which reads the most recent
+            // `block_outputs` row — and an external-worker retryable
+            // failure otherwise never writes one. Without this marker the
+            // re-dispatch on the next tick recomputes the SAME (just
+            // failed) attempt number, which collides with that attempt's
+            // now-`unknown` effect receipt and gets wrongly blocked by
+            // `EffectGuard::begin`'s per-attempt lookup. Mirrors the
+            // in-process retry marker in
+            // `scheduler::step_exec::handle_retryable_failure` /
+            // `handlers::step_block`.
+            let retry_marker_output = serde_json::json!({
+                "_retry_marker": true,
+                "error": req.message,
+            });
+            let retry_marker_size = serde_json::to_vec(&retry_marker_output)
+                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
+            let retry_marker = orch8_types::output::BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: task.instance_id,
+                block_id: task.block_id.clone(),
+                output: retry_marker_output,
+                output_ref: Some("__retry__".into()),
+                output_size: retry_marker_size,
+                attempt: task.attempt,
+                created_at: chrono::Utc::now(),
+            };
+            state
+                .storage
+                .save_block_output(&retry_marker)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
             // Reset for retry: delete old task, create a new pending task
             // with incremented attempt, and reset the node to Pending so
             // the evaluator re-dispatches on the next tick.
@@ -1091,6 +1125,31 @@ pub(crate) async fn fail_task(
         };
 
         if can_retry {
+            // See the has_tree branch above for why this marker is required
+            // — same `compute_attempt`/`EffectGuard` collision applies to
+            // the fast path.
+            let retry_marker_output = serde_json::json!({
+                "_retry_marker": true,
+                "error": req.message,
+            });
+            let retry_marker_size = serde_json::to_vec(&retry_marker_output)
+                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
+            let retry_marker = orch8_types::output::BlockOutput {
+                id: Uuid::now_v7(),
+                instance_id: task.instance_id,
+                block_id: task.block_id.clone(),
+                output: retry_marker_output,
+                output_ref: Some("__retry__".into()),
+                output_size: retry_marker_size,
+                attempt: task.attempt,
+                created_at: chrono::Utc::now(),
+            };
+            state
+                .storage
+                .save_block_output(&retry_marker)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
+
             let retry_task = orch8_types::worker::WorkerTask {
                 id: Uuid::now_v7(),
                 instance_id: task.instance_id,
