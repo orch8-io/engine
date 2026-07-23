@@ -108,14 +108,13 @@ pub async fn execute_race(
             for n in branch_nodes.iter().filter(|n| !is_terminal(n)) {
                 if n.state == NodeState::Waiting {
                     storage
-                        .cancel_worker_tasks_for_block(
-                            instance.id.into_uuid(),
-                            n.block_id.as_str(),
-                        )
+                        .cancel_worker_tasks_for_block(instance.id.into_uuid(), n.block_id.as_str())
                         .await?;
                 }
                 evaluator::cancel_subtree(storage, instance.id, tree, n.id).await?;
-                storage.update_node_state(n.id, NodeState::Cancelled).await?;
+                storage
+                    .update_node_state(n.id, NodeState::Cancelled)
+                    .await?;
                 debug!(
                     instance_id = %instance.id,
                     block_id = %race_def.id,

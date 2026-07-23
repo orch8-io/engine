@@ -34,6 +34,8 @@ INSERT INTO block_outputs
     (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
 SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
 FROM block_outputs_unpartitioned_074;
+-- allow-destructive: rows were just copied into the new partitioned
+-- block_outputs above; this drops only the renamed pre-partition original.
 DROP TABLE block_outputs_unpartitioned_074;
 
 CREATE INDEX idx_block_outputs_id ON block_outputs (id);
@@ -76,6 +78,8 @@ INSERT INTO audit_log
     (id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at)
 SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
 FROM audit_log_unpartitioned_074;
+-- allow-destructive: rows were just copied into the new partitioned
+-- audit_log above; this drops only the renamed pre-partition original.
 DROP TABLE audit_log_unpartitioned_074;
 
 CREATE INDEX idx_audit_log_id ON audit_log (id);

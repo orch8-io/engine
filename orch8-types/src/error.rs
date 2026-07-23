@@ -236,10 +236,7 @@ mod tests {
     #[test]
     fn transient_db_error_codes_are_recognised() {
         for code in ["40001", "40P01", "5", "6", "261", "262", "517", "518"] {
-            assert!(
-                is_transient_db_code(Some(code)),
-                "{code} must be transient"
-            );
+            assert!(is_transient_db_code(Some(code)), "{code} must be transient");
         }
         for code in ["23505", "22001", "42601", "999"] {
             assert!(

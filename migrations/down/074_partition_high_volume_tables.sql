@@ -1,3 +1,5 @@
+-- Undo 074_partition_high_volume_tables: collapse the hash-partitioned
+-- block_outputs and audit_log tables back into single unpartitioned tables.
 ALTER TABLE block_outputs RENAME TO block_outputs_partitioned_074;
 ALTER TABLE block_outputs_partitioned_074
     DROP CONSTRAINT IF EXISTS block_outputs_pkey;

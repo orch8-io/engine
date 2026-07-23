@@ -760,23 +760,53 @@ impl crate::ContinuityStore for SqliteStorage {
         continuity_id: ContinuityId,
         instance_id: InstanceId,
         block_id: &orch8_types::ids::BlockId,
+        attempt: u32,
     ) -> Result<Option<EffectReceipt>, StorageError> {
         let row = sqlx::query(
             "SELECT record FROM effect_receipts
              WHERE tenant_id=? AND continuity_id=? AND instance_id=?
                AND state IN ('dispatched','unknown')
                AND json_extract(record, '$.block_id')=?
+               AND json_extract(record, '$.attempt')=?
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(tenant_id.as_str())
         .bind(continuity_id.to_string())
         .bind(instance_id.to_string())
         .bind(block_id.as_str())
+        .bind(i64::from(attempt))
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(&row.get::<String, _>("record")))
             .transpose()
+    }
+
+    async fn delete_effect_receipts_for_blocks(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+    ) -> Result<u64, StorageError> {
+        if block_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut qb = sqlx::QueryBuilder::new("DELETE FROM effect_receipts WHERE tenant_id=");
+        qb.push_bind(tenant_id.as_str());
+        qb.push(" AND instance_id=");
+        qb.push_bind(instance_id.to_string());
+        qb.push(" AND json_extract(record, '$.block_id') IN (");
+        let mut sep = qb.separated(", ");
+        for block_id in block_ids {
+            sep.push_bind(block_id.as_str());
+        }
+        sep.push_unseparated(")");
+        let result = qb
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected())
     }
 
     async fn get_effect_receipt(

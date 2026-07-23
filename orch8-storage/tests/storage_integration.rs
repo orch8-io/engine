@@ -4191,7 +4191,6 @@ async fn get_plugin_is_tenant_scoped() {
     );
 }
 
-
 // ===========================================================================
 // Audit regression tests (2026-07): manifest lock reclaim, rate-limit
 // max_count=0, block-output tiebreak, terminal-delete KV cleanup, cron cap
@@ -4350,7 +4349,10 @@ async fn delete_terminal_instances_clears_kv_state() {
         .await
         .unwrap();
     assert!(
-        s.get_instance_kv(inst.id, "scratch").await.unwrap().is_some(),
+        s.get_instance_kv(inst.id, "scratch")
+            .await
+            .unwrap()
+            .is_some(),
         "kv row must exist before GC"
     );
 
@@ -4391,7 +4393,11 @@ async fn claim_due_cron_schedules_is_capped_per_tick() {
     }
 
     let first = s.claim_due_cron_schedules(now).await.unwrap();
-    assert_eq!(first.len(), 100, "one tick must claim at most 100 schedules");
+    assert_eq!(
+        first.len(),
+        100,
+        "one tick must claim at most 100 schedules"
+    );
 
     let second = s.claim_due_cron_schedules(now).await.unwrap();
     assert_eq!(second.len(), 5, "stragglers are claimed on the next tick");

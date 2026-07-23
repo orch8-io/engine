@@ -858,27 +858,25 @@ async fn dev_loop(
             // Primary sequence file watch.
             if watch.poll() {
                 match load_sequence(seq_path, *version + 1) {
-                    Ok(loaded) => {
-                        match session.start_instance(&loaded, opts.to_options()).await {
-                            Ok(_) => {
-                                *version += 1;
-                                println!(
-                                    "{} {} reloaded {} as v{}",
-                                    stamp(),
-                                    "↻".cyan(),
-                                    seq_path.display(),
-                                    version,
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "{} reload failed ({e:#}) — keeping v{} running",
-                                    "error:".red().bold(),
-                                    version,
-                                );
-                            }
+                    Ok(loaded) => match session.start_instance(&loaded, opts.to_options()).await {
+                        Ok(_) => {
+                            *version += 1;
+                            println!(
+                                "{} {} reloaded {} as v{}",
+                                stamp(),
+                                "↻".cyan(),
+                                seq_path.display(),
+                                version,
+                            );
                         }
-                    }
+                        Err(e) => {
+                            eprintln!(
+                                "{} reload failed ({e:#}) — keeping v{} running",
+                                "error:".red().bold(),
+                                version,
+                            );
+                        }
+                    },
                     Err(e) => {
                         eprintln!(
                             "{} reload failed ({e:#}) — keeping v{} running",
@@ -965,10 +963,7 @@ async fn dev_loop(
                 if once {
                     return Err(e);
                 }
-                eprintln!(
-                    "{} step failed ({e:#}) — retrying",
-                    "error:".red().bold(),
-                );
+                eprintln!("{} step failed ({e:#}) — retrying", "error:".red().bold());
                 tokio::time::sleep(tick).await;
                 continue;
             }

@@ -299,11 +299,16 @@ mod tests {
     /// listener, otherwise the dedup tables grow unboundedly.
     #[tokio::test]
     async fn terminal_ids_returned_for_cleanup_without_listener() {
-        let (storage, id_str) = setup_storage_with_terminal_instance(InstanceState::Completed).await;
+        let (storage, id_str) =
+            setup_storage_with_terminal_instance(InstanceState::Completed).await;
         let notifier = MobileNotifier::new();
 
         let ids = notifier.fire_terminal_events(&storage).await;
-        assert_eq!(ids, vec![id_str], "terminal id must be returned for cleanup");
+        assert_eq!(
+            ids,
+            vec![id_str],
+            "terminal id must be returned for cleanup"
+        );
 
         // Second scan: already reported for cleanup — no repeat work.
         assert!(notifier.fire_terminal_events(&storage).await.is_empty());
@@ -325,11 +330,15 @@ mod tests {
             fn on_step_pending(&self, _instance_id: String, _step: String, _handler: String) {}
         }
 
-        let (storage, id_str) = setup_storage_with_terminal_instance(InstanceState::Completed).await;
+        let (storage, id_str) =
+            setup_storage_with_terminal_instance(InstanceState::Completed).await;
         let notifier = MobileNotifier::new();
 
         // Scan before any listener is registered (marks the id for cleanup).
-        assert_eq!(notifier.fire_terminal_events(&storage).await, vec![id_str.clone()]);
+        assert_eq!(
+            notifier.fire_terminal_events(&storage).await,
+            vec![id_str.clone()]
+        );
 
         let listener = Arc::new(RecordingListener {
             completed: tokio::sync::Mutex::new(Vec::new()),

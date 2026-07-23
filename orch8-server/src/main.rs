@@ -900,8 +900,8 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     // `ORCH8_RATE_LIMIT_RPS` is still accepted as an alias (Perf#10). The
     // alias is consulted when the preferred var is unset OR fails to parse
     // (the parse failure itself is warned about inside `env_parse`).
-    if let Some(n) = env_parse("ORCH8_MAX_CONCURRENT_REQUESTS")
-        .or_else(|| env_parse("ORCH8_RATE_LIMIT_RPS"))
+    if let Some(n) =
+        env_parse("ORCH8_MAX_CONCURRENT_REQUESTS").or_else(|| env_parse("ORCH8_RATE_LIMIT_RPS"))
     {
         config.api.max_concurrent_requests = n;
     }

@@ -1013,6 +1013,18 @@ pub async fn resume_from_block(
         .await
         .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
 
+    // Clear any effect receipts recorded for the wiped blocks. Wiping
+    // `block_outputs` resets `compute_attempt` back to 0 for these blocks,
+    // so without this a stale (often `unknown`) receipt from the wiped
+    // attempt would still be sitting in `effect_receipts` and
+    // `EffectGuard::begin`'s per-attempt lookup would block the fresh
+    // re-run before the handler even gets a chance to run again.
+    state
+        .storage
+        .delete_effect_receipts_for_blocks(&instance.tenant_id, instance_id, &wipe_ids)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "effect_receipts"))?;
+
     // Purge stale worker_tasks rows for the wiped blocks — the
     // `UNIQUE(instance_id, block_id)` constraint would otherwise swallow the
     // re-run's dispatch via `ON CONFLICT DO NOTHING` and strand the instance

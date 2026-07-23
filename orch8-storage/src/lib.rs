@@ -1458,7 +1458,7 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// them to `in_flight` with `now` as the claim timestamp. `Postgres` uses
     /// `FOR UPDATE SKIP LOCKED`; `SQLite` serializes the claim in a
     /// `BEGIN IMMEDIATE` transaction (the same analogue as
-    /// [`SchedulingStore::claim_due_instances`]).
+    /// [`InstanceStore::claim_due_instances`]).
     async fn claim_due_webhook_outbox(
         &self,
         now: DateTime<Utc>,
@@ -2786,13 +2786,35 @@ pub trait ContinuityStore: Send + Sync + 'static {
         receipt: &EffectReceipt,
     ) -> Result<EffectReceipt, StorageError>;
 
+    /// Find an unresolved (`dispatched` or `unknown`) receipt for this exact
+    /// retry attempt of a block. Scoped to `attempt` so a prior attempt that
+    /// ended `unknown` (ambiguous outcome, needs operator/verifier
+    /// resolution) blocks re-entry into *that* attempt — e.g. crash
+    /// recovery, or two workers racing the same attempt — without also
+    /// blocking every later attempt the retry policy legitimately creates.
     async fn find_unresolved_effect_receipt(
         &self,
         tenant_id: &TenantId,
         continuity_id: ContinuityId,
         instance_id: InstanceId,
         block_id: &orch8_types::ids::BlockId,
+        attempt: u32,
     ) -> Result<Option<EffectReceipt>, StorageError>;
+
+    /// Delete every effect receipt recorded for the given blocks of an
+    /// instance, regardless of state or attempt. Callers that wipe
+    /// `block_outputs` back to a clean, attempt-0 slate for a block (DLQ
+    /// "resume from block" surgery, fork-target reset) must pair it with
+    /// this call — otherwise a stale (often `unknown`) receipt from the
+    /// wiped attempt survives in `effect_receipts` and
+    /// `EffectGuard::begin`'s per-attempt lookup blocks the fresh re-run
+    /// before it can even start.
+    async fn delete_effect_receipts_for_blocks(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+    ) -> Result<u64, StorageError>;
 
     async fn get_effect_receipt(
         &self,

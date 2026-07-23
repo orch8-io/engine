@@ -46,6 +46,7 @@ impl<'a> EffectGuard<'a> {
                 execution.continuity_id,
                 instance_id,
                 block_id,
+                attempt,
             )
             .await?
         {
@@ -807,6 +808,7 @@ mod tests {
                 execution.continuity_id,
                 instance.id,
                 &block,
+                0,
             )
             .await
             .unwrap()

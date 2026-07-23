@@ -1771,7 +1771,9 @@ mod tests {
         // maliciously deep `on_cancel` bypasses the stack-overflow guard.
         let mut seq = sample_seq(vec![step("main")]);
         seq.on_cancel = Some(vec![nested_loops(MAX_NESTING_DEPTH + 20)]);
-        let err = seq.validate().expect_err("over-deep on_cancel must be rejected");
+        let err = seq
+            .validate()
+            .expect_err("over-deep on_cancel must be rejected");
         assert!(
             format!("{err:?}").contains("nesting"),
             "error should mention nesting depth, got: {err:?}"

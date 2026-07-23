@@ -721,10 +721,45 @@ pub async fn execute_step_node(
             Ok(false)
         }
         Err(EngineError::StepFailed {
-            retryable: false, ..
+            retryable: false,
+            ref message,
+            ..
         }) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_failure(&instance.tenant_id, &step_def.handler);
+            }
+            // Persist an error marker so `compute_attempt` advances past this
+            // attempt — mirrors the fast path's `persist_permanent_error`
+            // (`scheduler::step_exec`). Without it, a block that only ever
+            // fails permanently keeps reporting `attempt == 0` forever, so a
+            // container that re-enters the same block_id (a `Loop` with
+            // `continue_on_error: true` resetting the body to `Pending` for
+            // the next iteration) collides with the just-failed attempt's
+            // still-`Unknown` effect receipt and gets wrongly blocked.
+            let error_output = serde_json::json!({
+                "__error__": true,
+                "retryable": false,
+                "message": message,
+            });
+            let output_size = serde_json::to_vec(&error_output)
+                .map_or(0, |v| u32::try_from(v.len()).unwrap_or(u32::MAX));
+            let marker = orch8_types::output::BlockOutput {
+                id: uuid::Uuid::now_v7(),
+                instance_id: instance.id,
+                block_id: step_def.id.clone(),
+                output: error_output,
+                output_ref: Some("__error__".into()),
+                output_size,
+                attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+                created_at: chrono::Utc::now(),
+            };
+            if let Err(e) = storage.save_block_output(&marker).await {
+                tracing::warn!(
+                    instance_id = %instance.id,
+                    block_id = %step_def.id,
+                    error = %e,
+                    "tree path: failed to save permanent-error marker; attempt counter may not advance"
+                );
             }
             // Permanent failure - mark node as failed
             evaluator::fail_node(storage.as_ref(), node.id).await?;

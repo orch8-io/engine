@@ -1321,7 +1321,11 @@ mod tests {
 
         reporter.sync_once(&storage, &lifecycle).await;
 
-        assert_eq!(ack_count(&reporter.pool, "cmd-retry").await, 0, "failed command must not be acked");
+        assert_eq!(
+            ack_count(&reporter.pool, "cmd-retry").await,
+            0,
+            "failed command must not be acked"
+        );
         assert_eq!(
             marker_count(&reporter.pool, "cmd-retry").await,
             0,
@@ -1335,7 +1339,11 @@ mod tests {
 
         server.await.unwrap();
 
-        assert_eq!(count_instances(&storage).await, 1, "redelivered command must execute");
+        assert_eq!(
+            count_instances(&storage).await,
+            1,
+            "redelivered command must execute"
+        );
         assert_eq!(ack_count(&reporter.pool, "cmd-retry").await, 1);
         assert_eq!(marker_count(&reporter.pool, "cmd-retry").await, 1);
     }

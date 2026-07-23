@@ -209,7 +209,12 @@ impl Engine {
                 && let Some(existing) = self
                     .inner
                     .storage
-                    .get_sequence_by_name(&seq.tenant_id, &seq.namespace, &seq.name, Some(seq.version))
+                    .get_sequence_by_name(
+                        &seq.tenant_id,
+                        &seq.namespace,
+                        &seq.name,
+                        Some(seq.version),
+                    )
                     .await?
             {
                 return Ok(existing.id);

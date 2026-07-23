@@ -27,8 +27,8 @@ mod step_exec;
 #[cfg(test)]
 mod tests;
 
-pub use step_exec::{check_human_input, check_human_input_at};
 pub(crate) use step_exec::clamped_fire_at;
+pub use step_exec::{check_human_input, check_human_input_at};
 
 /// Result of a single tick execution, suitable for mobile/embedded callers
 /// that drive the engine manually rather than via the continuous tick loop.

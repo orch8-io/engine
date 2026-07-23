@@ -85,17 +85,17 @@ async fn read_body_capped(resp: reqwest::Response, what: &str) -> Result<Vec<u8>
         resp,
         usize::try_from(MAX_SYNC_RESPONSE_BYTES).unwrap_or(usize::MAX),
     )
-        .await
-        .map_err(|error| match error {
-            orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => SyncError::Network {
-                message: format!("{what} too large: exceeds {MAX_SYNC_RESPONSE_BYTES} byte limit"),
-            }
-            .into(),
-            orch8_engine::handlers::builtin::BodyReadError::Io(message) => SyncError::Network {
-                message: format!("failed to read {what} body: {message}"),
-            }
-            .into(),
-        })
+    .await
+    .map_err(|error| match error {
+        orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => SyncError::Network {
+            message: format!("{what} too large: exceeds {MAX_SYNC_RESPONSE_BYTES} byte limit"),
+        }
+        .into(),
+        orch8_engine::handlers::builtin::BodyReadError::Io(message) => SyncError::Network {
+            message: format!("failed to read {what} body: {message}"),
+        }
+        .into(),
+    })
 }
 
 /// Root of trust: embedded Ed25519 public key for verifying manifest signatures.
@@ -923,9 +923,8 @@ impl SyncOrchestrator {
         // Fail closed: a version string with an unparseable component must not
         // silently compare as if the component were absent (`filter_map` would
         // parse "0.4.x" as [0, 4]).
-        let parse = |v: &str| -> Option<Vec<u32>> {
-            v.split('.').map(|s| s.parse::<u32>().ok()).collect()
-        };
+        let parse =
+            |v: &str| -> Option<Vec<u32>> { v.split('.').map(|s| s.parse::<u32>().ok()).collect() };
         let (Some(sdk_parts), Some(min_parts)) = (parse(sdk), parse(min)) else {
             return false;
         };

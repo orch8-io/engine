@@ -539,13 +539,12 @@ impl crate::SequenceStore for SqliteStorage {
         // hard-fail. Rows older than this are presumed abandoned and
         // reclaimed below. Well above any realistic manifest-publish hold.
         const STALE_AFTER: chrono::Duration = chrono::Duration::minutes(5);
-        if let Err(e) = sqlx::query(
-            "DELETE FROM manifest_locks WHERE tenant_id = ?1 AND locked_at < ?2",
-        )
-        .bind(tenant_id)
-        .bind(helpers::ts(Utc::now() - STALE_AFTER))
-        .execute(&self.pool)
-        .await
+        if let Err(e) =
+            sqlx::query("DELETE FROM manifest_locks WHERE tenant_id = ?1 AND locked_at < ?2")
+                .bind(tenant_id)
+                .bind(helpers::ts(Utc::now() - STALE_AFTER))
+                .execute(&self.pool)
+                .await
         {
             tracing::warn!(
                 error = %e,

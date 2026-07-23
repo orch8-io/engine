@@ -347,9 +347,15 @@ mod tests {
     #[tokio::test]
     async fn open_when_no_key_configured() {
         let storage = empty_storage().await;
-        authenticate_request(&headers(&[]), &mut http::Extensions::new(), &storage, None, false)
-            .await
-            .unwrap();
+        authenticate_request(
+            &headers(&[]),
+            &mut http::Extensions::new(),
+            &storage,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

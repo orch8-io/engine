@@ -170,7 +170,11 @@ async fn sync_triggers(
                             .get(&slug)
                             .is_some_and(|l| l.id == listener_id)
                         {
-                            info!(slug, listener = $kind, "trigger listener exited, deregistering");
+                            info!(
+                                slug,
+                                listener = $kind,
+                                "trigger listener exited, deregistering"
+                            );
                             active.listeners.remove(&slug);
                         }
                     });
@@ -199,8 +203,7 @@ async fn sync_triggers(
                     let cancel = child_cancel;
                     spawn_listener!(
                         async move {
-                            if let Err(e) =
-                                run_file_watch_listener(storage, trigger, cancel).await
+                            if let Err(e) = run_file_watch_listener(storage, trigger, cancel).await
                             {
                                 error!(error = %e, "file watch trigger listener failed");
                             }

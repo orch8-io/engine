@@ -246,8 +246,7 @@ async fn grpc_retry_instance_resets_run_state() {
         .retry_instance(RetryInstanceRequest { id: INST.into() })
         .await
         .expect("retry instance");
-    let body: serde_json::Value =
-        serde_json::from_str(&resp.into_inner().instance_json).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&resp.into_inner().instance_json).unwrap();
     assert_eq!(body["state"], "scheduled");
     // reset_instance_run stamps a fresh run id and zeroes the step counter.
     assert!(

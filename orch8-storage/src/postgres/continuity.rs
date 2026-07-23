@@ -750,22 +750,52 @@ impl crate::ContinuityStore for PostgresStorage {
         continuity_id: ContinuityId,
         instance_id: InstanceId,
         block_id: &orch8_types::ids::BlockId,
+        attempt: u32,
     ) -> Result<Option<EffectReceipt>, StorageError> {
         let row = sqlx::query(
             "SELECT record FROM effect_receipts
              WHERE tenant_id=$1 AND continuity_id=$2 AND instance_id=$3
                AND state IN ('dispatched','unknown')
                AND record->>'block_id'=$4
+               AND (record->>'attempt')::bigint=$5
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(tenant_id.as_str())
         .bind(continuity_id.into_uuid())
         .bind(instance_id.into_uuid())
         .bind(block_id.as_str())
+        .bind(i64::from(attempt))
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn delete_effect_receipts_for_blocks(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+    ) -> Result<u64, StorageError> {
+        if block_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut qb = sqlx::QueryBuilder::new("DELETE FROM effect_receipts WHERE tenant_id=");
+        qb.push_bind(tenant_id.as_str());
+        qb.push(" AND instance_id=");
+        qb.push_bind(instance_id.into_uuid());
+        qb.push(" AND record->>'block_id' IN (");
+        let mut sep = qb.separated(", ");
+        for block_id in block_ids {
+            sep.push_bind(block_id.as_str());
+        }
+        sep.push_unseparated(")");
+        let result = qb
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(result.rows_affected())
     }
 
     async fn get_effect_receipt(

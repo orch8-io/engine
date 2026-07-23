@@ -49,6 +49,7 @@ async fn tick_until(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn resume_from_failed_block_with_context_patch_runs_to_completion() {
     // s1 counts its executions; s2 fails permanently while
     // `context.data.broken == true`; s3 is a plain noop.
@@ -120,6 +121,18 @@ async fn resume_from_failed_block_with_context_patch_runs_to_completion() {
         .await
         .unwrap();
     assert!(wiped >= 1, "s2's sentinel/marker rows must be wiped");
+    // Wiping s2's outputs resets `compute_attempt` back to 0 for it, so the
+    // stale (`unknown`) effect receipt from the permanently-failed first
+    // attempt must be cleared too — otherwise `EffectGuard::begin`'s
+    // per-attempt lookup blocks the fresh re-run before it can start.
+    storage
+        .delete_effect_receipts_for_blocks(
+            &inst.tenant_id,
+            inst.id,
+            &[BlockId::new("s2"), BlockId::new("s3")],
+        )
+        .await
+        .unwrap();
     storage
         .cancel_worker_tasks_for_blocks(inst.id.into_uuid(), &["s2".into(), "s3".into()])
         .await

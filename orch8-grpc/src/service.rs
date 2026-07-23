@@ -616,7 +616,11 @@ impl Orch8Service for Orch8GrpcService {
             && parent.state == InstanceState::Waiting
             && let Err(e) = self
                 .storage
-                .update_instance_state(parent_id, InstanceState::Scheduled, Some(chrono::Utc::now()))
+                .update_instance_state(
+                    parent_id,
+                    InstanceState::Scheduled,
+                    Some(chrono::Utc::now()),
+                )
                 .await
         {
             tracing::warn!(
