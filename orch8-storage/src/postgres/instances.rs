@@ -1116,8 +1116,13 @@ pub(super) async fn delete_terminal_instances(
     // checkpoints / externalized_state / audit_log (all cascade -- see
     // migrations 016 and 034).
     for table in ["step_logs", "usage_events", "instance_kv_state"] {
-        let sql = format!("DELETE FROM {table} WHERE instance_id = ANY($1)");
-        sqlx::query(&sql).bind(&ids).execute(&mut *tx).await?;
+        let sql = match table {
+            "step_logs" => "DELETE FROM step_logs WHERE instance_id = ANY($1)",
+            "usage_events" => "DELETE FROM usage_events WHERE instance_id = ANY($1)",
+            "instance_kv_state" => "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
+            _ => unreachable!(),
+        };
+        sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
     }
 
     let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
