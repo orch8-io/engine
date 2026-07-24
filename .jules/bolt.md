@@ -78,3 +78,6 @@
 ## 2025-11-01 - [Avoid Cloning Strings for Reference Passing]
 **Learning:** In the activepieces integration of the scheduler hot loop (`orch8-engine/src/scheduler.rs`), a `String` field (`step.handler`) was being cloned into a new local variable merely to pass its reference (`&handler_name`) to a downstream handler function. This caused an unnecessary heap allocation on an execution hot path.
 **Action:** When calling functions that require string references (`&str`), always pass a reference directly from the source struct (`&step.handler`) rather than cloning the `String` first.
+## 2025-11-04 - [Avoid HashMap Allocation for Parent-to-Child Grouping on Hot Paths]
+**Learning:** In the `cancel_scoped` function within `orch8-engine/src/signals.rs`, allocating a `HashMap<ExecutionNodeId, Vec<&ExecutionNode>>` inside a hot path loop across all tree nodes results in severe memory allocation and hashing overhead, negatively impacting CPU and scaling.
+**Action:** Always replace dynamic `HashMap` allocations inside tree processing loops with a `Vec<(ParentId, &ChildType)>`. Sort the vector by the parent ID using `.sort_unstable_by_key()` and retrieve matching children efficiently in O(log N) time using `.partition_point()` and bounded `.skip()` iteration, achieving completely zero-allocation queries inside nested functions like `is_inside_finally_branch`.

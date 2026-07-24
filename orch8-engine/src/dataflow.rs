@@ -798,7 +798,7 @@ fn schema_path_status(schema: &Value, path: &[String]) -> SchemaPathStatus {
             let Some(items) = current.get("items") else {
                 return SchemaPathStatus::Missing;
             };
-            let index = u64::try_from(index).map_or(u64::MAX, |value| value);
+            let index = u64::try_from(index).unwrap_or(u64::MAX);
             optional |= current
                 .get("minItems")
                 .and_then(Value::as_u64)
