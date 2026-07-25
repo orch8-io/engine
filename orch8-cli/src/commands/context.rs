@@ -43,8 +43,7 @@ pub enum ContextCmd {
 #[must_use]
 pub fn default_path() -> PathBuf {
     std::env::var_os("ORCH8_CONTEXTS_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".orch8-contexts.json"))
+        .map_or_else(|| PathBuf::from(".orch8-contexts.json"), PathBuf::from)
 }
 
 pub fn load(path: &Path) -> Result<ContextStore> {

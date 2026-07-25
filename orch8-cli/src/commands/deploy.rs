@@ -33,12 +33,12 @@ pub struct DeployCmd {
 struct DeployEvidence {
     release_id: Uuid,
     package_hash: String,
-    package_verified: bool,
-    semantic_diff_checked: bool,
-    historical_validation_passed: bool,
+    package_status: &'static str,
+    semantic_diff_status: &'static str,
+    historical_validation_status: &'static str,
     canary_percent: u8,
     evaluations: u8,
-    promoted: bool,
+    promotion_status: &'static str,
 }
 
 pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputFormat) -> Result<()> {
@@ -82,18 +82,18 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
     let evidence = DeployEvidence {
         release_id: cmd.release_id,
         package_hash: package.content_hash,
-        package_verified: true,
-        semantic_diff_checked: true,
-        historical_validation_passed: true,
+        package_status: "verified",
+        semantic_diff_status: "checked",
+        historical_validation_status: "passed",
         canary_percent: cmd.canary_percent,
         evaluations: cmd.observations,
-        promoted: cmd.promote,
+        promotion_status: if cmd.promote { "promoted" } else { "canary" },
     };
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&evidence)?),
         OutputFormat::Table => println!(
-            "release {}: verified package, validated history, observed {} canary evaluation(s), promoted={}",
-            evidence.release_id, evidence.evaluations, evidence.promoted
+            "release {}: verified package, validated history, observed {} canary evaluation(s), status={}",
+            evidence.release_id, evidence.evaluations, evidence.promotion_status
         ),
     }
     Ok(())

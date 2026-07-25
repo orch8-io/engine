@@ -217,9 +217,11 @@ impl ReleaseChannel {
         if release.requirements.requires_network
             && !matches!(
                 runtime.connectivity,
-                Some(orch8_types::continuity::RuntimeConnectivity::Metered)
-                    | Some(orch8_types::continuity::RuntimeConnectivity::Wifi)
-                    | Some(orch8_types::continuity::RuntimeConnectivity::Ethernet)
+                Some(
+                    orch8_types::continuity::RuntimeConnectivity::Metered
+                        | orch8_types::continuity::RuntimeConnectivity::Wifi
+                        | orch8_types::continuity::RuntimeConnectivity::Ethernet,
+                )
             )
         {
             return Err(DistributionError::Incompatible(
@@ -673,7 +675,11 @@ mod tests {
         assert_eq!(channel.rollback_to(&hash('a')).unwrap().version, "1.0.0");
         let key = SigningKey::from_bytes(&[9; 32]);
         let signed = SignedReleaseChannel::sign(channel, "channel-v1", &key).unwrap();
-        assert!(signed.verify(&[signed.public_key.clone()]).is_ok());
+        assert!(
+            signed
+                .verify(std::slice::from_ref(&signed.public_key))
+                .is_ok()
+        );
         let mut tampered = signed.clone();
         tampered.channel.head = Some(1);
         assert_eq!(

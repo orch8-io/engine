@@ -251,6 +251,31 @@ impl FcmProvider {
 }
 
 impl FcmProvider {
+    fn wake_payload(
+        token: &str,
+        metadata: Option<&SignedWakeMetadata>,
+    ) -> Result<serde_json::Value, PushError> {
+        let mut data =
+            serde_json::Map::from_iter([("type".into(), serde_json::Value::String("sync".into()))]);
+        if let Some(metadata) = metadata {
+            data.insert(
+                "orch8".into(),
+                serde_json::Value::String(serde_json::to_string(metadata).map_err(|error| {
+                    PushError::Permanent(format!("serialize signed wake: {error}"))
+                })?),
+            );
+        }
+        Ok(serde_json::json!({
+            "message": {
+                "token": token,
+                "data": data,
+                "android": {
+                    "priority": "normal"
+                }
+            }
+        }))
+    }
+
     async fn send(
         &self,
         token: &str,
@@ -264,25 +289,7 @@ impl FcmProvider {
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             self.project_id
         );
-        let mut data =
-            serde_json::Map::from_iter([("type".into(), serde_json::Value::String("sync".into()))]);
-        if let Some(metadata) = metadata {
-            data.insert(
-                "orch8".into(),
-                serde_json::Value::String(serde_json::to_string(metadata).map_err(|error| {
-                    PushError::Permanent(format!("serialize signed wake: {error}"))
-                })?),
-            );
-        }
-        let payload = serde_json::json!({
-            "message": {
-                "token": token,
-                "data": data,
-                "android": {
-                    "priority": "normal"
-                }
-            }
-        });
+        let payload = Self::wake_payload(token, metadata)?;
 
         let mut last_err = String::from("no attempts made");
         for attempt in 0..MAX_DELIVERY_ATTEMPTS {
@@ -395,7 +402,32 @@ impl PushProvider for FcmProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use ed25519_dalek::SigningKey;
     use reqwest::StatusCode;
+
+    #[test]
+    fn wake_payload_embeds_the_complete_signed_metadata() {
+        let issued_at = Utc::now();
+        let wake = SignedWakeMetadata::sign(
+            "tenant-a",
+            "device-a",
+            "command-a",
+            "wake-key-1",
+            &SigningKey::from_bytes(&[7_u8; 32]),
+            issued_at,
+            issued_at + ChronoDuration::minutes(5),
+        )
+        .expect("valid signed wake");
+
+        let payload = FcmProvider::wake_payload("token-a", Some(&wake)).expect("valid payload");
+        let encoded = payload["message"]["data"]["orch8"]
+            .as_str()
+            .expect("signed wake string");
+        let decoded: SignedWakeMetadata = serde_json::from_str(encoded).expect("signed wake JSON");
+
+        assert_eq!(decoded, wake);
+    }
 
     #[test]
     fn classify_fcm_response_success_on_2xx() {
