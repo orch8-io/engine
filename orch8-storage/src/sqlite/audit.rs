@@ -1,4 +1,4 @@
-use orch8_types::audit::AuditLogEntry;
+use orch8_types::audit::{AuditLogEntry, ChangeCursor};
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
@@ -49,5 +49,33 @@ pub(super) async fn list_by_tenant(
             .bind(limit as i64)
             .fetch_all(&storage.pool)
             .await?;
+    rows.iter().map(row_to_audit).collect()
+}
+
+pub(super) async fn list_changes(
+    storage: &SqliteStorage,
+    tenant_id: &TenantId,
+    after: Option<ChangeCursor>,
+    limit: u32,
+) -> Result<Vec<AuditLogEntry>, StorageError> {
+    let rows = if let Some(cursor) = after {
+        sqlx::query(
+            "SELECT * FROM audit_log WHERE tenant_id=?1 AND (created_at>?2 OR (created_at=?2 AND id>?3)) ORDER BY created_at ASC, id ASC LIMIT ?4",
+        )
+        .bind(tenant_id.as_str())
+        .bind(ts(cursor.created_at))
+        .bind(cursor.id.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&storage.pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT * FROM audit_log WHERE tenant_id=?1 ORDER BY created_at ASC, id ASC LIMIT ?2",
+        )
+        .bind(tenant_id.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(&storage.pool)
+        .await?
+    };
     rows.iter().map(row_to_audit).collect()
 }

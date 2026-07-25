@@ -81,6 +81,24 @@ diagnosis. `--strict` turns warnings into a non-zero exit status for CI.
 
 ---
 
+## Durable tenant change feed
+
+`GET /api/v1/changes` returns immutable audit-backed state changes in ascending
+`(created_at, id)` order. Pass its opaque `next_cursor` back as `cursor` to
+resume exclusively; same-timestamp batches cannot create gaps or duplicates.
+The tenant comes from `X-Tenant-Id` (and overrides a query value), so a feed is
+never cross-tenant.
+
+`GET /api/v1/changes/stream` exposes the same contract over bounded SSE. Each
+event's `id` is the next opaque cursor. Reconnect with `Last-Event-ID` (or an
+explicit `cursor`, which takes precedence) to replay only changes after the
+last committed client position. Streams are process-limited, use bounded
+backpressure, and emit a redacted error event before retrying transient storage
+failures. Audit entries are immutable, so rollback is represented as a later
+state-change event rather than cursor rewinding.
+
+---
+
 ## Sequences
 
 ### Create Sequence

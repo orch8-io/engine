@@ -1,3 +1,4 @@
+use orch8_types::audit::ChangeCursor;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 
@@ -55,5 +56,36 @@ pub(super) async fn list_by_tenant(
     .bind(i64::from(limit))
     .fetch_all(&store.pool)
     .await?;
+    Ok(rows.into_iter().map(AuditLogRow::into_entry).collect())
+}
+
+pub(super) async fn list_changes(
+    store: &PostgresStorage,
+    tenant_id: &TenantId,
+    after: Option<ChangeCursor>,
+    limit: u32,
+) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
+    let rows = if let Some(cursor) = after {
+        sqlx::query_as::<_, AuditLogRow>(
+            r"SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
+              FROM audit_log WHERE tenant_id = $1 AND (created_at, id) > ($2, $3)
+              ORDER BY created_at ASC, id ASC LIMIT $4",
+        )
+        .bind(tenant_id.as_str())
+        .bind(cursor.created_at)
+        .bind(cursor.id)
+        .bind(i64::from(limit))
+        .fetch_all(&store.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, AuditLogRow>(
+            r"SELECT id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at
+              FROM audit_log WHERE tenant_id = $1 ORDER BY created_at ASC, id ASC LIMIT $2",
+        )
+        .bind(tenant_id.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(&store.pool)
+        .await?
+    };
     Ok(rows.into_iter().map(AuditLogRow::into_entry).collect())
 }

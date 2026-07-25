@@ -1834,6 +1834,7 @@ passthrough_impl! {
     async fn append_audit_log(&self, entry: &orch8_types::audit::AuditLogEntry) -> Result<(), StorageError>;
     async fn list_audit_log(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
     async fn list_audit_log_by_tenant(&self, tenant_id: &orch8_types::ids::TenantId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
+    async fn list_tenant_changes(&self, tenant_id: &orch8_types::ids::TenantId, after: Option<orch8_types::audit::ChangeCursor>, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
 
     // --- Rollback policies (pass-through) ---
     async fn create_rollback_policy(&self, tenant_id: &str, sequence_name: &str, error_rate_threshold: f64, time_window_secs: i32, cooldown_secs: Option<i32>, confirmation_window_secs: Option<i32>, webhook_url: Option<&str>) -> Result<(), StorageError>;

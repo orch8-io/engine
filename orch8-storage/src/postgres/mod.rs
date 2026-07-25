@@ -1782,6 +1782,15 @@ impl crate::AdminStore for PostgresStorage {
         audit::list_by_tenant(self, tenant_id, limit).await
     }
 
+    async fn list_tenant_changes(
+        &self,
+        tenant_id: &TenantId,
+        after: Option<orch8_types::audit::ChangeCursor>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError> {
+        audit::list_changes(self, tenant_id, after, limit).await
+    }
+
     async fn create_rollback_policy(
         &self,
         tenant_id: &str,

@@ -28,6 +28,23 @@ pub struct AuditLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
+/// Exclusive position in the tenant audit feed. Ordering is total even when
+/// multiple changes share a timestamp because UUID is the tie-breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ChangeCursor {
+    pub created_at: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+impl From<&AuditLogEntry> for ChangeCursor {
+    fn from(entry: &AuditLogEntry) -> Self {
+        Self {
+            created_at: entry.created_at,
+            id: entry.id,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

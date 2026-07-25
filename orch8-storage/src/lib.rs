@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
-use orch8_types::audit::AuditLogEntry;
+use orch8_types::audit::{AuditLogEntry, ChangeCursor};
 use orch8_types::circuit_breaker::CircuitBreakerState;
 use orch8_types::continuity::{
     CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
@@ -1967,6 +1967,14 @@ pub trait AdminStore: Send + Sync + 'static {
     async fn list_audit_log_by_tenant(
         &self,
         tenant_id: &TenantId,
+        limit: u32,
+    ) -> Result<Vec<AuditLogEntry>, StorageError>;
+
+    /// Read tenant changes in ascending total order after an exclusive cursor.
+    async fn list_tenant_changes(
+        &self,
+        tenant_id: &TenantId,
+        after: Option<ChangeCursor>,
         limit: u32,
     ) -> Result<Vec<AuditLogEntry>, StorageError>;
 

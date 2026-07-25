@@ -6,6 +6,7 @@
 //! referential-integrity defect.
 
 use chrono::Utc;
+use orch8_types::audit::{AuditLogEntry, ChangeCursor};
 use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
@@ -65,6 +66,7 @@ pub async fn run_core_conformance(
     check_state_cas(storage, instance.id).await?;
     check_output(storage, instance.id).await?;
     check_signal(storage, instance.id).await?;
+    check_change_feed(storage, &tenant, instance.id).await?;
     finalize_evidence(storage, sequence.id, instance.id).await?;
     Ok(ConformanceReport {
         scope,
@@ -78,9 +80,66 @@ pub async fn run_core_conformance(
             "instance_state_cas",
             "output_round_trip",
             "signal_delivery",
+            "tenant_change_cursor",
             "terminal_evidence",
         ],
     })
+}
+
+async fn check_change_feed(
+    storage: &dyn StorageBackend,
+    tenant: &TenantId,
+    instance_id: InstanceId,
+) -> Result<(), ConformanceError> {
+    let created_at = Utc::now();
+    let mut entries = [0, 1].map(|index| AuditLogEntry {
+        id: Uuid::now_v7(),
+        instance_id,
+        tenant_id: tenant.clone(),
+        event_type: format!("conformance_change_{index}"),
+        from_state: None,
+        to_state: None,
+        block_id: None,
+        details: json!({"index": index}),
+        created_at,
+    });
+    entries.sort_by_key(|entry| entry.id);
+    for entry in &entries {
+        backend(
+            "tenant_change_cursor",
+            storage.append_audit_log(entry).await,
+        )?;
+    }
+    let first = backend(
+        "tenant_change_cursor",
+        storage.list_tenant_changes(tenant, None, 1).await,
+    )?;
+    require(
+        "tenant_change_cursor",
+        first.len() == 1 && first[0].id == entries[0].id,
+        "first ascending change page was not deterministic",
+    )?;
+    let second = backend(
+        "tenant_change_cursor",
+        storage
+            .list_tenant_changes(tenant, Some(ChangeCursor::from(&first[0])), 10)
+            .await,
+    )?;
+    require(
+        "tenant_change_cursor",
+        second.len() == 1 && second[0].id == entries[1].id,
+        "exclusive cursor skipped or repeated a same-timestamp change",
+    )?;
+    let other = TenantId::new("orch8-conformance-unrelated").expect("static tenant is valid");
+    let leaked = backend(
+        "tenant_change_cursor",
+        storage.list_tenant_changes(&other, None, 10).await,
+    )?;
+    require(
+        "tenant_change_cursor",
+        leaked.is_empty(),
+        "tenant change feed leaked another tenant's entries",
+    )
 }
 
 async fn check_sequence(
@@ -324,7 +383,7 @@ mod tests {
     async fn sqlite_passes_public_core_conformance() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let report = run_core_conformance(&storage).await.unwrap();
-        assert_eq!(report.checks.len(), 8);
+        assert_eq!(report.checks.len(), 9);
         assert_eq!(
             storage
                 .get_instance(report.instance_id)

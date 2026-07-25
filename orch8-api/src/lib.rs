@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod approvals;
 pub mod auth;
+pub mod changes;
 pub mod circuit_breakers;
 pub mod cluster;
 pub mod continuity;
@@ -211,6 +212,7 @@ fn api_routes() -> Router<AppState> {
         .merge(pools::routes())
         .merge(sessions::routes())
         .merge(cluster::routes())
+        .merge(changes::routes())
         .merge(continuity::routes())
         .merge(dataflow::routes())
         .merge(triggers::routes())
