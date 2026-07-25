@@ -347,8 +347,41 @@ Each row stores the original payload and its already-captured timestamp directly
 whole-record JSON duplication and a second clock read/string allocation for every event.
 Uploads drain at most 500 events per request—the ingestion API's accepted batch size—so a full
 offline buffer cannot waste radio time on an oversized request that the server will reject.
+Device metadata is serialized once per upload rather than once per event. A representative
+500-event request shrank from 104,393 to 49,013 bytes (53.1%), reducing serialization memory and
+radio-on time while the API continues accepting legacy per-event metadata. The serializer writes
+the queried event slice directly, avoiding a separate 24,000-byte staging vector for a full batch
+on 64-bit devices. Once the final request body and compact row IDs are prepared, the SDK releases
+the queried event strings before awaiting the network, so slow uploads do not retain both the
+SQLite result payloads and their serialized copy.
 Telemetry, manifest-sync, and device-sync HTTP clients are initialized only on their first real
 request, keeping offline and local-only engine instances free of retained networking state.
+Manifest minimum-SDK comparisons stream version components directly instead of allocating two
+component vectors per sequence before deciding whether a download is eligible.
+Manifest reconciliation and cache eviction query only sequence names, versions, identifiers, and
+counts. They never deserialize cached block definitions or schemas merely to compare or evict
+rows, keeping sync memory proportional to small metadata rather than workflow body size.
+After a downloaded sequence is parsed, its capped raw response buffer is released before SQLite
+reserializes the owned definition, preventing up to 5 MiB of avoidable transient buffer overlap.
+Direct sequence loads release their capped input after parsing. URL batch loads retain raw element
+lengths for validation, release the complete response before persistence, and avoid serializing
+each owned workflow tree merely to measure it.
+Device-sync uploads validate and borrow queued JSON payloads directly from their SQLite result
+buffers instead of materializing and then reserializing up to 170 nested JSON value trees.
+Status scans walk sequence blocks by reference while building their final payload, avoiding a
+temporary flattened tree and duplicate ID, block-type, and handler allocations for every block.
+Executed-command retention is pruned immediately on first contact and then at most daily instead
+of issuing an SQLite `DELETE` on every heartbeat; failed pruning remains due for the next sync.
+When storage contains no non-terminal instances, the one-minute instance-GC deadline no longer
+wakes SQLite. GC remains overdue and runs immediately when real activity wakes the engine; a
+sync-disabled, empty engine otherwise uses only a daily safety wake.
+Empty or failed device heartbeats skip the post-sync scheduler-state count because only server
+commands can mutate instances; command-bearing responses retain the immediate safety recheck.
+Once the local scheduler is known quiescent, sync-only timer wakeups bypass RSS sampling and the
+full scheduler pass. Local lifecycle changes retain a wake permit, including continuity
+activation, while command-bearing sync responses re-enable scheduling immediately. At the
+default 30-second heartbeat cadence, an inactive engine avoids up to 2,880 scheduler passes and,
+when memory budgeting is enabled, RSS probes per day.
 Burst SQLite reader connections retire after 30 seconds of inactivity instead of remaining
 resident for SQLx's ten-minute default; the pool keeps no minimum warm connections.
 

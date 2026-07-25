@@ -40,6 +40,58 @@ async fn ingest_telemetry_events() {
 }
 
 #[tokio::test]
+async fn ingest_telemetry_events_with_batch_device() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let body = json!({
+        "events": [{
+            "event_type": "SyncCompleted",
+            "payload": r#"{"version":1}"#,
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        }],
+        "device": {
+            "device_id": "dev-batch",
+            "os_name": "iOS",
+            "os_version": "17.0",
+            "app_version": "1.0.0",
+            "sdk_version": "0.7.0"
+        },
+        "tenant_id": "t1"
+    });
+
+    let response = client
+        .post(format!("{}/telemetry/mobile", srv.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["accepted"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn ingest_telemetry_events_requires_a_device_context() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/telemetry/mobile", srv.base_url))
+        .json(&json!({
+            "events": [{
+                "event_type": "SyncCompleted",
+                "payload": "{}",
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn ingest_telemetry_errors() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

@@ -29,7 +29,7 @@ pub struct TelemetryBatchItem {
     pub device: DeviceContext,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DeviceContext {
     pub device_id: String,
     pub os_name: String,
@@ -42,6 +42,23 @@ pub struct DeviceContext {
 pub struct IngestTelemetryRequest {
     pub events: Vec<TelemetryBatchItem>,
     pub tenant_id: Option<String>,
+}
+
+/// Backward-compatible wire model. New mobile clients send one batch-level
+/// device while older clients may continue sending a device on every event.
+#[derive(Debug, Deserialize)]
+pub(crate) struct IngestTelemetryWireRequest {
+    events: Vec<TelemetryBatchItemWire>,
+    device: Option<DeviceContext>,
+    tenant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelemetryBatchItemWire {
+    event_type: String,
+    payload: String,
+    timestamp: String,
+    device: Option<DeviceContext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,14 +81,15 @@ pub struct IngestResponse {
 pub(crate) async fn ingest_telemetry(
     State(state): State<AppState>,
     tenant_ctx: OptionalTenant,
-    Json(req): Json<IngestTelemetryRequest>,
+    Json(wire_request): Json<IngestTelemetryWireRequest>,
 ) -> Result<(StatusCode, Json<IngestResponse>), ApiError> {
-    if req.events.len() > MAX_BATCH_SIZE {
+    if wire_request.events.len() > MAX_BATCH_SIZE {
         return Err(ApiError::PayloadTooLarge(format!(
             "batch size {} exceeds maximum of {MAX_BATCH_SIZE}",
-            req.events.len()
+            wire_request.events.len()
         )));
     }
+    let req = normalize_ingest_request(wire_request)?;
     let tenant = scoped_tenant_id(&tenant_ctx, req.tenant_id.as_deref())
         .map_or_else(|| "default".to_string(), |t| t.as_str().to_string());
 
@@ -106,6 +124,36 @@ pub(crate) async fn ingest_telemetry(
 
     debug!(accepted, total, "telemetry ingested");
     Ok((StatusCode::ACCEPTED, Json(IngestResponse { accepted })))
+}
+
+fn normalize_ingest_request(
+    request: IngestTelemetryWireRequest,
+) -> Result<IngestTelemetryRequest, ApiError> {
+    let IngestTelemetryWireRequest {
+        events,
+        device: batch_device,
+        tenant_id,
+    } = request;
+    let events = events
+        .into_iter()
+        .map(|event| {
+            let device = event
+                .device
+                .or_else(|| batch_device.clone())
+                .ok_or_else(|| {
+                    ApiError::InvalidArgument(
+                        "device is required at batch or telemetry-event level".into(),
+                    )
+                })?;
+            Ok(TelemetryBatchItem {
+                event_type: event.event_type,
+                payload: event.payload,
+                timestamp: event.timestamp,
+                device,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(IngestTelemetryRequest { events, tenant_id })
 }
 
 /// Ingest a structured error report from a mobile device.
@@ -411,4 +459,45 @@ pub(crate) async fn dashboard_queries(
         .collect();
 
     Ok(Json(DashboardResponse { rows }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(device_id: &str) -> DeviceContext {
+        DeviceContext {
+            device_id: device_id.to_string(),
+            os_name: "iOS".to_string(),
+            os_version: "18".to_string(),
+            app_version: "1".to_string(),
+            sdk_version: "1".to_string(),
+        }
+    }
+
+    #[test]
+    fn event_device_overrides_batch_device() {
+        let request = IngestTelemetryWireRequest {
+            events: vec![
+                TelemetryBatchItemWire {
+                    event_type: "fallback".into(),
+                    payload: "{}".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    device: None,
+                },
+                TelemetryBatchItemWire {
+                    event_type: "override".into(),
+                    payload: "{}".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    device: Some(device("event")),
+                },
+            ],
+            device: Some(device("batch")),
+            tenant_id: None,
+        };
+
+        let normalized = normalize_ingest_request(request).unwrap();
+        assert_eq!(normalized.events[0].device.device_id, "batch");
+        assert_eq!(normalized.events[1].device.device_id, "event");
+    }
 }

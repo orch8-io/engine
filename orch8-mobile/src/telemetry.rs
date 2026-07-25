@@ -229,7 +229,13 @@ impl TelemetryManager {
             });
         }
 
-        let response = self.send_batch(endpoint_url, &events).await?;
+        let PreparedTelemetryBatch { body, ids } = self.prepare_batch(&events)?;
+        // The request body now owns the serialized data, so the SQLite row
+        // strings do not need to remain live throughout a potentially slow
+        // mobile DNS/TLS/upload round trip.
+        drop(events);
+
+        let response = self.send_batch(endpoint_url, body).await?;
         if !response.status().is_success() {
             return Err(flush_response_error(response).await);
         }
@@ -237,34 +243,34 @@ impl TelemetryManager {
             .last_endpoint
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(endpoint_url.to_string());
-        let deleted = self.delete_flushed_events(&events).await?;
+        let deleted = self.delete_flushed_events(&ids).await?;
         Ok(FlushResult {
             sent: deleted,
             dropped: 0,
         })
     }
 
-    async fn send_batch(
+    fn prepare_batch(
         &self,
-        endpoint_url: &str,
         events: &[crate::storage::TelemetryEvent],
-    ) -> Result<reqwest::Response, MobileError> {
+    ) -> Result<PreparedTelemetryBatch, MobileError> {
+        let ids = events.iter().map(|event| event.id).collect();
         let device_ctx = self
             .device_ctx
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let batch: Vec<TelemetryBatchItem> = events
-            .iter()
-            .map(|e| TelemetryBatchItem {
-                event_type: &e.event_type,
-                payload: &e.payload,
-                timestamp: &e.created_at,
-                device: &device_ctx,
-            })
-            .collect();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let body = serde_json::to_string(&TelemetryBatch {
+            events,
+            device: &device_ctx,
+        })?;
+        Ok(PreparedTelemetryBatch { body, ids })
+    }
 
-        let body = serde_json::to_string(&TelemetryBatch { events: batch })?;
+    async fn send_batch(
+        &self,
+        endpoint_url: &str,
+        body: String,
+    ) -> Result<reqwest::Response, MobileError> {
         self.http_client()
             .post(endpoint_url)
             .header("content-type", "application/json")
@@ -276,15 +282,11 @@ impl TelemetryManager {
             })
     }
 
-    async fn delete_flushed_events(
-        &self,
-        events: &[crate::storage::TelemetryEvent],
-    ) -> Result<u64, MobileError> {
-        let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
+    async fn delete_flushed_events(&self, ids: &[i64]) -> Result<u64, MobileError> {
         let mut state = self.buffer_state.lock().await;
         let deleted = self
             .storage
-            .delete_telemetry_events(&ids)
+            .delete_telemetry_events(ids)
             .await
             .map_err(mobile_storage_error)?;
         if let Some(count) = &mut state.count {
@@ -339,17 +341,15 @@ async fn flush_response_error(response: reqwest::Response) -> MobileError {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct TelemetryBatchItem<'a> {
-    event_type: &'a str,
-    payload: &'a str,
-    timestamp: &'a str,
+#[derive(Serialize)]
+struct TelemetryBatch<'a> {
+    events: &'a [crate::storage::TelemetryEvent],
     device: &'a DeviceContext,
 }
 
-#[derive(Serialize)]
-struct TelemetryBatch<'a> {
-    events: Vec<TelemetryBatchItem<'a>>,
+struct PreparedTelemetryBatch {
+    body: String,
+    ids: Vec<i64>,
 }
 
 /// Result of a telemetry flush operation.
@@ -430,6 +430,36 @@ mod tests {
         assert_eq!(stored[0].event_type, event.event_type);
         assert_eq!(stored[0].payload, event.payload);
         assert_eq!(stored[0].created_at, event.timestamp);
+    }
+
+    #[tokio::test]
+    async fn prepared_batch_keeps_ids_out_of_the_wire_payload() {
+        let (mgr, _storage, _dir) = setup().await;
+        let events = vec![
+            crate::storage::TelemetryEvent {
+                id: 41,
+                event_type: "Started".to_string(),
+                payload: r#"{"screen":"home"}"#.to_string(),
+                created_at: "2026-07-25T12:00:00Z".to_string(),
+            },
+            crate::storage::TelemetryEvent {
+                id: 42,
+                event_type: "Finished".to_string(),
+                payload: r#"{"ok":true}"#.to_string(),
+                created_at: "2026-07-25T12:00:01Z".to_string(),
+            },
+        ];
+
+        let prepared = mgr.prepare_batch(&events).unwrap();
+
+        assert_eq!(prepared.ids, [41, 42]);
+        let body: serde_json::Value = serde_json::from_str(&prepared.body).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+        assert_eq!(body["events"][0]["event_type"], "Started");
+        assert_eq!(body["events"][0]["timestamp"], "2026-07-25T12:00:00Z");
+        assert!(body["events"][0].get("id").is_none());
+        assert!(body["events"][0].get("device").is_none());
+        assert_eq!(body["device"]["device_id"], "dev-1");
     }
 
     #[tokio::test]
@@ -539,6 +569,9 @@ mod tests {
         server.await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_rx.await.unwrap()).unwrap();
         assert_eq!(body["events"].as_array().unwrap().len(), 3);
+        assert_eq!(body["device"]["device_id"], "dev-1");
+        assert!(body["events"][0].get("device").is_none());
+        assert!(body["events"][0].get("id").is_none());
 
         // Events should be deleted after successful flush.
         let count = storage.count_telemetry_events().await.unwrap();
@@ -563,7 +596,14 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let (mut socket, _) = listener.accept().await.unwrap();
             let body = read_http_body(&mut socket).await;
+            assert!(
+                body.len() < 60_000,
+                "500-event telemetry request unexpectedly grew to {} bytes",
+                body.len()
+            );
             let batch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(batch["device"]["device_id"], "dev-1");
+            assert!(batch["events"][0].get("device").is_none());
             count_tx
                 .send(batch["events"].as_array().unwrap().len())
                 .unwrap();

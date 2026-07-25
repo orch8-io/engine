@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::error::StorageError;
-use orch8_types::ids::{BlockId, InstanceId, SequenceId};
+use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 
 /// Mobile-specific storage wrapper.
@@ -24,6 +24,61 @@ impl MobileStorage {
 
     fn pool(&self) -> &sqlx::SqlitePool {
         self.inner.pool()
+    }
+
+    /// Return only the latest version number for each locally cached sequence.
+    /// Manifest reconciliation does not inspect blocks or schemas, so loading
+    /// complete definitions here would retain potentially megabytes per row.
+    pub(crate) async fn list_local_sequence_versions(
+        &self,
+        tenant_id: &TenantId,
+        namespace: &Namespace,
+        limit: u32,
+    ) -> Result<Vec<(String, i32)>, StorageError> {
+        sqlx::query_as(
+            "SELECT name, MAX(version)
+             FROM sequences
+             WHERE tenant_id = ?1 AND namespace = ?2
+             GROUP BY name
+             ORDER BY name
+             LIMIT ?3",
+        )
+        .bind(tenant_id.as_str())
+        .bind(namespace.as_str())
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Select the oldest rows exceeding `retain`, using one statement so the
+    /// count and candidate set come from the same `SQLite` snapshot.
+    pub(crate) async fn list_excess_oldest_local_sequences(
+        &self,
+        tenant_id: &TenantId,
+        namespace: &Namespace,
+        retain: u32,
+    ) -> Result<Vec<(SequenceId, String)>, StorageError> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, name
+             FROM sequences
+             WHERE tenant_id = ?1 AND namespace = ?2
+             ORDER BY created_at ASC, id ASC
+             LIMIT (
+                 SELECT CASE WHEN COUNT(*) > ?3 THEN COUNT(*) - ?3 ELSE 0 END
+                 FROM sequences
+                 WHERE tenant_id = ?1 AND namespace = ?2
+             )",
+        )
+        .bind(tenant_id.as_str())
+        .bind(namespace.as_str())
+        .bind(i64::from(retain))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, name)| parse_sequence_id(&id).map(|id| (id, name)))
+            .collect()
     }
 
     // ── Telemetry ──
@@ -532,13 +587,15 @@ fn projection_error(field: &str, value: &str, error: impl std::fmt::Display) -> 
 }
 
 /// A telemetry event stored in the local `SQLite` buffer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TelemetryEvent {
+    #[serde(skip)]
     pub id: i64,
     pub event_type: String,
     pub payload: String,
     /// Already stored as RFC 3339; keeping it borrowed-ready avoids parsing
     /// and formatting every timestamp again during a telemetry flush.
+    #[serde(rename = "timestamp")]
     pub created_at: String,
 }
 
