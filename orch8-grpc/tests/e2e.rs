@@ -9,9 +9,9 @@ use orch8_grpc::proto::{
     SendSignalRequest,
 };
 use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
-use orch8_storage::InstanceStore;
 use orch8_storage::WorkerStore;
 use orch8_storage::sqlite::SqliteStorage;
+use orch8_storage::{InstanceStore, ResourceStore};
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
@@ -20,7 +20,14 @@ use orch8_types::worker::{WorkerTask, WorkerTaskState};
 /// a handle to the storage so tests can force states the RPC surface
 /// validates against (e.g. driving an instance to `Failed`).
 async fn spawn_test_server() -> (SocketAddr, Arc<SqliteStorage>) {
-    let storage = Arc::new(SqliteStorage::in_memory().await.expect("in-memory sqlite"));
+    let storage = Arc::new(
+        SqliteStorage::in_memory()
+            .await
+            .expect("in-memory sqlite")
+            .with_artifact_store(Arc::new(
+                orch8_storage::artifacts::ObjectArtifactStore::memory(),
+            )),
+    );
     let service = Orch8GrpcService::new(storage.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -396,4 +403,81 @@ async fn grpc_worker_stream_rejects_unsupported_protocol() {
     ))]);
     let error = client.worker_stream(outbound).await.unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn grpc_artifact_transfer_resumes_with_chunk_acknowledgements() {
+    use orch8_grpc::proto::artifact_transfer_client::Payload as ClientPayload;
+    use orch8_grpc::proto::artifact_transfer_server::Payload as ServerPayload;
+    use sha2::{Digest, Sha256};
+
+    let (addr, storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let sequence_id = "00000000-0000-0000-0000-000000000021";
+    let instance_id = "00000000-0000-0000-0000-000000000022";
+    create_seq_and_instance(&mut client, sequence_id, instance_id).await;
+    let instance_id = InstanceId::from_uuid(uuid::Uuid::parse_str(instance_id).unwrap());
+    let original: Vec<u8> = (0_u32..10_000)
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .collect();
+    let artifact = storage
+        .put_artifact(
+            instance_id,
+            "application/octet-stream",
+            original.clone().into(),
+        )
+        .await
+        .unwrap();
+
+    let (ack_sender, outbound_frames) = tokio::sync::mpsc::channel(2);
+    ack_sender
+        .send(orch8_grpc::proto::ArtifactTransferClient {
+            payload: Some(ClientPayload::Open(
+                orch8_grpc::proto::ArtifactTransferOpen {
+                    object_key: artifact.key,
+                    resume_offset: 4096,
+                    chunk_bytes: 4096,
+                    expected_sha256: Sha256::digest(&original).to_vec(),
+                    transfer_kind: "continuity".into(),
+                },
+            )),
+        })
+        .await
+        .unwrap();
+    let mut inbound = client
+        .artifact_transfer(tokio_stream::wrappers::ReceiverStream::new(outbound_frames))
+        .await
+        .unwrap()
+        .into_inner();
+    let hello = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Hello(hello)) = hello.payload else {
+        panic!("first transfer frame must be hello");
+    };
+    assert_eq!(hello.resume_offset, 4096);
+    assert_eq!(hello.total_bytes, 10_000);
+
+    let mut reconstructed = Vec::new();
+    loop {
+        let frame = inbound.message().await.unwrap().unwrap();
+        let Some(ServerPayload::Chunk(chunk)) = frame.payload else {
+            panic!("expected chunk");
+        };
+        assert_eq!(chunk.sha256, Sha256::digest(&chunk.data).to_vec());
+        reconstructed.extend_from_slice(&chunk.data);
+        let next_offset = chunk.offset + u64::try_from(chunk.data.len()).unwrap();
+        ack_sender
+            .send(orch8_grpc::proto::ArtifactTransferClient {
+                payload: Some(ClientPayload::Ack(orch8_grpc::proto::ArtifactTransferAck {
+                    next_offset,
+                })),
+            })
+            .await
+            .unwrap();
+        if chunk.final_chunk {
+            break;
+        }
+    }
+    assert_eq!(reconstructed, original[4096..]);
 }

@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status};
 use tracing;
 use uuid::Uuid;
@@ -161,6 +162,8 @@ const WORKER_STREAM_PROTOCOL_VERSION: u32 = 1;
 const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
 const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
+const MIN_TRANSFER_CHUNK_BYTES: u32 = 4 * 1024;
+const MAX_TRANSFER_CHUNK_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_FEATURES: [&str; 5] = [
     "task_delivery",
     "completion",
@@ -201,7 +204,82 @@ fn worker_server_frame(payload: proto::worker_stream_server::Payload) -> proto::
     }
 }
 
+fn artifact_server_frame(
+    payload: proto::artifact_transfer_server::Payload,
+) -> proto::ArtifactTransferServer {
+    proto::ArtifactTransferServer {
+        payload: Some(payload),
+    }
+}
+
+struct PreparedArtifactTransfer {
+    bytes: Vec<u8>,
+    object_digest: Vec<u8>,
+    total_bytes: u64,
+    resume_offset: u64,
+    chunk_bytes: u32,
+    transfer_kind: String,
+}
+
 impl Orch8GrpcService {
+    async fn prepare_artifact_transfer(
+        &self,
+        open: proto::ArtifactTransferOpen,
+        tenant: Option<&TenantId>,
+    ) -> Result<PreparedArtifactTransfer, Status> {
+        if open.object_key.is_empty()
+            || open.object_key.len() > 1024
+            || !matches!(open.transfer_kind.as_str(), "artifact" | "continuity")
+        {
+            return Err(Status::invalid_argument(
+                "invalid object key or transfer kind",
+            ));
+        }
+        let instance_id = open
+            .object_key
+            .split('/')
+            .next()
+            .ok_or_else(|| Status::invalid_argument("object key has no instance prefix"))?
+            .parse::<Uuid>()
+            .map(InstanceId::from_uuid)
+            .map_err(|_| Status::invalid_argument("object key has invalid instance prefix"))?;
+        let instance = self
+            .storage
+            .get_instance(instance_id)
+            .await
+            .map_err(storage_err)?
+            .ok_or_else(|| Status::not_found("artifact"))?;
+        if tenant.is_some_and(|tenant| tenant != &instance.tenant_id) {
+            return Err(Status::not_found("artifact"));
+        }
+        let bytes = self
+            .storage
+            .get_artifact(&open.object_key)
+            .await
+            .map_err(storage_err)?
+            .ok_or_else(|| Status::not_found("artifact"))?;
+        let object_digest = Sha256::digest(&bytes).to_vec();
+        if !open.expected_sha256.is_empty() && open.expected_sha256 != object_digest {
+            return Err(Status::data_loss(
+                "artifact digest does not match expectation",
+            ));
+        }
+        let total_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if open.resume_offset > total_bytes {
+            return Err(Status::out_of_range("resume offset exceeds artifact size"));
+        }
+        Ok(PreparedArtifactTransfer {
+            bytes,
+            object_digest,
+            total_bytes,
+            resume_offset: open.resume_offset,
+            chunk_bytes: open
+                .chunk_bytes
+                .clamp(MIN_TRANSFER_CHUNK_BYTES, MAX_TRANSFER_CHUNK_BYTES),
+            transfer_kind: open.transfer_kind,
+        })
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn handle_worker_stream_frame(
         &self,
@@ -1151,6 +1229,111 @@ impl Orch8Service for Orch8GrpcService {
     }
 
     // --- Workers ---
+
+    type ArtifactTransferStream = Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<proto::ArtifactTransferServer, Status>> + Send>,
+    >;
+
+    async fn artifact_transfer(
+        &self,
+        req: Request<tonic::Streaming<proto::ArtifactTransferClient>>,
+    ) -> Result<Response<Self::ArtifactTransferStream>, Status> {
+        let tenant = caller_tenant(&req).cloned();
+        let mut inbound = req.into_inner();
+        let first = inbound
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("artifact transfer requires an open frame"))?;
+        let Some(proto::artifact_transfer_client::Payload::Open(open)) = first.payload else {
+            return Err(Status::invalid_argument(
+                "first artifact transfer frame must be open",
+            ));
+        };
+        let prepared = self
+            .prepare_artifact_transfer(open, tenant.as_ref())
+            .await?;
+        let PreparedArtifactTransfer {
+            bytes,
+            object_digest,
+            total_bytes,
+            resume_offset,
+            chunk_bytes,
+            transfer_kind,
+        } = prepared;
+        let transfer_id = Uuid::now_v7().to_string();
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        sender
+            .send(Ok(artifact_server_frame(
+                proto::artifact_transfer_server::Payload::Hello(proto::ArtifactTransferHello {
+                    transfer_id: transfer_id.clone(),
+                    total_bytes,
+                    sha256: object_digest,
+                    resume_offset,
+                    chunk_bytes,
+                    transfer_kind,
+                }),
+            )))
+            .await
+            .map_err(|_| Status::cancelled("artifact transfer closed during handshake"))?;
+
+        tokio::spawn(async move {
+            let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
+            loop {
+                let end = offset
+                    .saturating_add(usize::try_from(chunk_bytes).unwrap_or(usize::MAX))
+                    .min(bytes.len());
+                let data = bytes[offset..end].to_vec();
+                let chunk_digest = Sha256::digest(&data).to_vec();
+                let final_chunk = end == bytes.len();
+                let chunk = proto::ArtifactTransferChunk {
+                    transfer_id: transfer_id.clone(),
+                    offset: u64::try_from(offset).unwrap_or(u64::MAX),
+                    data,
+                    sha256: chunk_digest,
+                    final_chunk,
+                };
+                if sender
+                    .send(Ok(artifact_server_frame(
+                        proto::artifact_transfer_server::Payload::Chunk(chunk),
+                    )))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
+                match inbound.message().await {
+                    Ok(Some(proto::ArtifactTransferClient {
+                        payload:
+                            Some(proto::artifact_transfer_client::Payload::Ack(
+                                proto::ArtifactTransferAck { next_offset },
+                            )),
+                    })) if next_offset == expected_offset => {
+                        if final_chunk {
+                            break;
+                        }
+                        offset = end;
+                    }
+                    Ok(Some(_)) => {
+                        let _ = sender
+                            .send(Err(Status::failed_precondition(
+                                "artifact acknowledgement offset is not the next chunk boundary",
+                            )))
+                            .await;
+                        break;
+                    }
+                    Ok(None) => break,
+                    Err(status) => {
+                        let _ = sender.send(Err(status)).await;
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(receiver),
+        )))
+    }
 
     type WorkerStreamStream =
         Pin<Box<dyn tokio_stream::Stream<Item = Result<proto::WorkerStreamServer, Status>> + Send>>;

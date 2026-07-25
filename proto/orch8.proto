@@ -234,6 +234,49 @@ message WorkerStreamServer {
   }
 }
 
+message ArtifactTransferOpen {
+  string object_key = 1;
+  uint64 resume_offset = 2;
+  uint32 chunk_bytes = 3;
+  bytes expected_sha256 = 4;
+  string transfer_kind = 5;
+}
+
+message ArtifactTransferAck {
+  uint64 next_offset = 1;
+}
+
+message ArtifactTransferClient {
+  oneof payload {
+    ArtifactTransferOpen open = 1;
+    ArtifactTransferAck ack = 2;
+  }
+}
+
+message ArtifactTransferHello {
+  string transfer_id = 1;
+  uint64 total_bytes = 2;
+  bytes sha256 = 3;
+  uint64 resume_offset = 4;
+  uint32 chunk_bytes = 5;
+  string transfer_kind = 6;
+}
+
+message ArtifactTransferChunk {
+  string transfer_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bytes sha256 = 4;
+  bool final_chunk = 5;
+}
+
+message ArtifactTransferServer {
+  oneof payload {
+    ArtifactTransferHello hello = 1;
+    ArtifactTransferChunk chunk = 2;
+  }
+}
+
 // --- Pools ---
 
 message CreatePoolRequest {
@@ -340,6 +383,7 @@ service Orch8Service {
   rpc FailTask(FailTaskRequest) returns (Empty);
   rpc HeartbeatTask(HeartbeatTaskRequest) returns (Empty);
   rpc WorkerStream(stream WorkerStreamClient) returns (stream WorkerStreamServer);
+  rpc ArtifactTransfer(stream ArtifactTransferClient) returns (stream ArtifactTransferServer);
 
   // Pools
   rpc CreatePool(CreatePoolRequest) returns (PoolResponse);
