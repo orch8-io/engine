@@ -3118,6 +3118,7 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
+ "hex",
  "orch8-engine",
  "orch8-publisher",
  "orch8-storage",
@@ -3166,11 +3167,15 @@ name = "orch8-push"
 version = "0.7.0-dev"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
+ "ed25519-dalek",
+ "hex",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

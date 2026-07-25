@@ -13,6 +13,11 @@ pub enum StorageError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// A durable admission or usage ceiling was reached. Distinct from a
+    /// uniqueness conflict so APIs can return retry/backoff semantics.
+    #[error("quota exceeded: {0}")]
+    QuotaExceeded(String),
+
     /// The operation targets an entity that is in a terminal state and cannot
     /// accept further writes (e.g. signal enqueue to a Completed / Failed /
     /// Cancelled instance). Distinct from [`Self::Conflict`] — which covers

@@ -124,6 +124,14 @@ pub async fn create_instance(
         ));
     }
 
+    let entitlement_plan = crate::entitlements::admit_instances(
+        &state,
+        &tenant_id,
+        std::slice::from_ref(&req.namespace),
+        1,
+        req.context.serialized_size(),
+    )?;
+
     // Canary routing: when a release is actively routing traffic for the
     // requested (baseline) sequence, a deterministic cohort of new
     // instances is created on the candidate version instead. Explicit
@@ -270,7 +278,11 @@ pub async fn create_instance(
     // index remains the authority; on that expected conflict, read the winner
     // and return the same idempotent success response instead of leaking a
     // spurious 409 to one of the callers.
-    match state.storage.create_instance(&instance).await {
+    match state
+        .storage
+        .create_instance_admitted(&instance, entitlement_plan.max_active_instances)
+        .await
+    {
         Ok(()) => {}
         Err(err @ StorageError::Conflict(_)) => {
             if let Some(id) = concurrent_idempotency_winner(
@@ -328,6 +340,11 @@ pub async fn create_instances_batch(
         ));
     }
 
+    // Apply tenant plan admission before performing sequence reads or writes.
+    // Header scoping guarantees every batch item resolves to one tenant; when
+    // no header is present the loop below still rejects mixed unauthorized
+    // sequence ownership, while admission is evaluated per tenant group.
+
     // Enforce tenant isolation and context size for each item in the batch.
     // Also collect unique sequence_ids to validate they exist before inserting.
     //
@@ -358,6 +375,34 @@ pub async fn create_instances_batch(
             .check_size(state.max_context_bytes)
             .map_err(|e| ApiError::PayloadTooLarge(format!("instances[{i}]: {e}")))?;
         sequence_ids.insert(r.sequence_id);
+    }
+
+    let mut admission_groups = std::collections::HashMap::<
+        TenantId,
+        (usize, usize, std::collections::HashSet<Namespace>),
+    >::new();
+    for (i, item) in req.instances.iter().enumerate() {
+        let tenant = authoritative_tenants
+            .get(&i)
+            .cloned()
+            .ok_or_else(|| ApiError::Internal(format!("instances[{i}]: tenant not resolved")))?;
+        let entry = admission_groups
+            .entry(tenant)
+            .or_insert_with(|| (0, 0, std::collections::HashSet::new()));
+        entry.0 += 1;
+        entry.1 = entry.1.max(item.context.serialized_size());
+        entry.2.insert(item.namespace.clone());
+    }
+    let mut entitlement_limits = std::collections::HashMap::new();
+    for (tenant, (count, largest_context, namespaces)) in admission_groups {
+        let plan = crate::entitlements::admit_instances(
+            &state,
+            &tenant,
+            &namespaces.into_iter().collect::<Vec<_>>(),
+            count,
+            largest_context,
+        )?;
+        entitlement_limits.insert(tenant, plan.max_active_instances);
     }
 
     // Fetch every referenced sequence in one storage query instead of one
@@ -445,7 +490,7 @@ pub async fn create_instances_batch(
 
     let count = state
         .storage
-        .create_instances_batch(&instances)
+        .create_instances_batch_admitted(&instances, &entitlement_limits)
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 

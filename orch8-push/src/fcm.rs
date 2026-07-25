@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::{FcmConfig, PushError, PushProvider};
+use crate::{FcmConfig, PushError, PushProvider, SignedWakeMetadata};
 
 /// Fallback access-token lifetime used when the token endpoint omits
 /// `expires_in` (Google currently returns 3600s). The cached token is
@@ -250,9 +250,12 @@ impl FcmProvider {
     }
 }
 
-#[async_trait]
-impl PushProvider for FcmProvider {
-    async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
+impl FcmProvider {
+    async fn send(
+        &self,
+        token: &str,
+        metadata: Option<&SignedWakeMetadata>,
+    ) -> Result<(), PushError> {
         if token.len() > MAX_TOKEN_LEN {
             return Err(PushError::InvalidToken);
         }
@@ -261,12 +264,20 @@ impl PushProvider for FcmProvider {
             "https://fcm.googleapis.com/v1/projects/{}/messages:send",
             self.project_id
         );
+        let mut data =
+            serde_json::Map::from_iter([("type".into(), serde_json::Value::String("sync".into()))]);
+        if let Some(metadata) = metadata {
+            data.insert(
+                "orch8".into(),
+                serde_json::Value::String(serde_json::to_string(metadata).map_err(|error| {
+                    PushError::Permanent(format!("serialize signed wake: {error}"))
+                })?),
+            );
+        }
         let payload = serde_json::json!({
             "message": {
                 "token": token,
-                "data": {
-                    "type": "sync"
-                },
+                "data": data,
                 "android": {
                     "priority": "normal"
                 }
@@ -362,6 +373,22 @@ impl PushProvider for FcmProvider {
         Err(PushError::Retryable(format!(
             "FCM delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
         )))
+    }
+}
+
+#[async_trait]
+impl PushProvider for FcmProvider {
+    async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
+        self.send(token, None).await
+    }
+
+    async fn send_signed_wake(
+        &self,
+        token: &str,
+        _platform: &str,
+        metadata: &SignedWakeMetadata,
+    ) -> Result<(), PushError> {
+        self.send(token, Some(metadata)).await
     }
 }
 

@@ -11,9 +11,12 @@ mod templates;
 use commands::bootstrap::BootstrapCmd;
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
+use commands::context::ContextCmd;
 use commands::continuity::{ExecutionCmd, RuntimeCmd};
 use commands::cron::CronCmd;
+use commands::debugger::DebugCmd;
 use commands::demo::DemoCmd;
+use commands::deploy::DeployCmd;
 use commands::dev::DevCmd;
 use commands::doctor::DoctorCmd;
 use commands::inspect_cmd::InspectCmd;
@@ -43,6 +46,14 @@ pub enum OutputFormat {
     after_help = "© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io"
 )]
 struct Cli {
+    /// Explicit named fleet context. Overrides the selected context.
+    #[arg(long, global = true)]
+    context: Option<String>,
+
+    /// Fleet context file containing URL, tenant, and credential records.
+    #[arg(long, global = true, env = "ORCH8_CONTEXTS_FILE")]
+    contexts_file: Option<std::path::PathBuf>,
+
     /// Base URL of the Orch8 API server.
     #[arg(
         long,
@@ -108,6 +119,11 @@ enum Commands {
     /// Inspect template resolution for a block (read-only).
     #[command(subcommand)]
     Inspect(InspectCmd),
+    /// Bounded terminal timeline, checkpoint, effect, and fork debugger.
+    #[command(subcommand)]
+    Debug(DebugCmd),
+    /// Verify, validate, canary, observe, and optionally promote a release.
+    Deploy(DeployCmd),
     /// Safe workflow releases: diff, validate, canary, promote, rollback.
     #[command(subcommand)]
     Release(ReleaseCmd),
@@ -120,6 +136,9 @@ enum Commands {
     /// Configuration management.
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Named fleet URL/tenant/credential contexts.
+    #[command(subcommand)]
+    Context(ContextCmd),
     /// Initialize a new Orch8 project (config, example sequence, docker-compose).
     Init {
         /// Directory to initialize in (defaults to current directory).
@@ -332,7 +351,7 @@ pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let format = cli.output;
 
     if let Commands::Completions { shell } = cli.command {
@@ -355,6 +374,20 @@ async fn main() -> Result<()> {
 
     if let Commands::Bootstrap(cmd) = cli.command {
         return commands::bootstrap::run(cmd).await;
+    }
+
+    let contexts_path = cli
+        .contexts_file
+        .clone()
+        .unwrap_or_else(commands::context::default_path);
+    if let Commands::Context(cmd) = cli.command {
+        return commands::context::run(&contexts_path, cmd);
+    }
+
+    if let Some(context) = commands::context::resolve(&contexts_path, cli.context.as_deref())? {
+        cli.url = context.url;
+        cli.tenant_id = Some(context.tenant_id);
+        cli.api_key = Some(context.api_key);
     }
 
     // Handle migrate before building the HTTP client — it does not need one.
@@ -392,10 +425,17 @@ async fn main() -> Result<()> {
             commands::signal::run(&client, base, instance_id, signal_type, payload, format).await?;
         }
         Commands::Inspect(cmd) => commands::inspect_cmd::run(&client, base, cmd, format).await?,
+        Commands::Debug(cmd) => commands::debugger::run(&client, base, cmd, format).await?,
+        Commands::Deploy(cmd) => commands::deploy::run(&client, base, cmd, format).await?,
         Commands::Release(cmd) => commands::release::run(&client, base, cmd, format).await?,
         Commands::Package(cmd) => commands::package_cmd::run(&client, base, cmd, format).await?,
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd, format).await?,
         Commands::Config(cmd) => commands::config::run(cmd)?,
+        Commands::Context(..) => {
+            anyhow::bail!(
+                "internal error: context command should have been handled before dispatch"
+            )
+        }
         Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
         Commands::Templates(cmd) => commands::templates::run(cmd)?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,

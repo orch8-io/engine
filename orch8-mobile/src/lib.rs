@@ -9,6 +9,7 @@
     clippy::used_underscore_binding,
 )]
 
+mod capabilities;
 mod config;
 mod continuity;
 mod error;
@@ -16,6 +17,7 @@ mod handlers;
 mod lifecycle;
 mod memory;
 mod notifier;
+mod privacy;
 mod runtime;
 mod storage;
 mod sync;
@@ -41,10 +43,15 @@ use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
+pub use crate::capabilities::{
+    CapabilityDescriptor, CapabilityHost, CapabilityRequest, CapabilityResponse, DeviceCapability,
+    DeviceToolBridge, standard_capability_descriptors,
+};
 pub use crate::config::MobileEngineConfig;
 pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
+pub use crate::privacy::{DisclosureSurface, PrivacyError, ProtectedFieldBoundary};
 pub use crate::sync::{RootKey, SyncResult};
 pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
 

@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use orch8_push::{ClaimedWake, PushOutboxStore, PushTerminalReason, WakeAttemptOutcome};
+use orch8_push::{
+    ClaimedWake, CollapsibleWake, PushOutboxStore, PushTerminalReason, WakeAttemptOutcome,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -27,6 +29,41 @@ impl PushOutboxStore for PostgresStorage {
         .fetch_one(&self.pool)
         .await
         .map_err(|error| error.to_string())
+    }
+
+    async fn enqueue_collapsible_wake(&self, wake: &CollapsibleWake) -> Result<Uuid, String> {
+        let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
+        let id = Uuid::new_v4();
+        let collapse_key = wake.collapse_key();
+        // Serialize competing writers for the same collapse scope across the
+        // whole Postgres fleet; otherwise two empty-scope transactions could
+        // both miss each other and leave two pending rows.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(&collapse_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        sqlx::query("UPDATE push_wake_outbox SET status='terminal',terminal_reason='superseded',superseded_by=$1 WHERE tenant_id=$2 AND device_id=$3 AND collapse_key=$4 AND status='pending'")
+            .bind(&wake.command_id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&collapse_key)
+            .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        sqlx::query("INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,execution_id,topic,collapse_key,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(tenant_id,device_id,command_id) DO NOTHING")
+            .bind(id).bind(&wake.tenant_id).bind(&wake.device_id).bind(&wake.command_id)
+            .bind(&wake.execution_id).bind(&wake.topic).bind(&collapse_key).bind(wake.created_at)
+            .execute(&mut *transaction).await.map_err(|error| error.to_string())?;
+        let stored = sqlx::query_scalar(
+            "SELECT id FROM push_wake_outbox WHERE tenant_id=$1 AND device_id=$2 AND command_id=$3",
+        )
+        .bind(&wake.tenant_id)
+        .bind(&wake.device_id)
+        .bind(&wake.command_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| error.to_string())?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(stored)
     }
 
     async fn claim_due_wakes(
@@ -67,13 +104,34 @@ impl PushOutboxStore for PostgresStorage {
         outcome: &WakeAttemptOutcome,
         recorded_at: DateTime<Utc>,
     ) -> Result<(), String> {
+        let mut transaction = self.pool.begin().await.map_err(|error| error.to_string())?;
         let (status, next, error, reason, delivered) =
             super::push_outbox::outcome_fields(outcome, recorded_at);
         let result = sqlx::query("UPDATE push_wake_outbox SET attempts=attempts+1,status=$2,next_attempt_at=$3,lease_until=NULL,last_error=$4,terminal_reason=$5,delivered_at=$6 WHERE id=$1 AND status='in_flight' AND lease_until=$7")
-            .bind(wake.id).bind(status).bind(next).bind(error).bind(reason).bind(delivered).bind(wake.lease_until).execute(&self.pool).await.map_err(|error| error.to_string())?;
+            .bind(wake.id).bind(status).bind(next).bind(error).bind(reason).bind(delivered).bind(wake.lease_until).execute(&mut *transaction).await.map_err(|error| error.to_string())?;
         if result.rows_affected() != 1 {
             return Err("push wake lease was lost before outcome persistence".into());
         }
+        if matches!(
+            outcome,
+            WakeAttemptOutcome::Terminal {
+                reason: PushTerminalReason::InvalidToken,
+                ..
+            }
+        ) {
+            sqlx::query(
+                "UPDATE mobile_devices SET active=FALSE,push_token=NULL WHERE tenant_id=$1 AND device_id=$2",
+            )
+            .bind(&wake.tenant_id)
+            .bind(&wake.device_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 

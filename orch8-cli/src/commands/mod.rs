@@ -1,9 +1,12 @@
 pub mod bootstrap;
 pub mod checkpoint;
 pub mod config;
+pub mod context;
 pub mod continuity;
 pub mod cron;
+pub mod debugger;
 pub mod demo;
+pub mod deploy;
 pub mod dev;
 pub mod dev_server;
 pub mod doctor;

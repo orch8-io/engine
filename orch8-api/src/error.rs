@@ -50,6 +50,7 @@ impl ApiError {
         match err {
             StorageError::NotFound { entity: e, id } => Self::NotFound(format!("{e} {id}")),
             StorageError::Conflict(msg) => Self::AlreadyExists(msg),
+            StorageError::QuotaExceeded(msg) => Self::RateLimited(msg),
             // Terminal-state targets are precondition failures, not "already
             // exists" — surface as 409 Conflict with a clear message so HTTP
             // clients can distinguish "duplicate" from "wrong state".
@@ -174,6 +175,14 @@ mod tests {
         assert_eq!(
             status_of(ApiError::PayloadTooLarge("context > max".into())),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn storage_quota_maps_to_429() {
+        assert_eq!(
+            status_of(StorageError::QuotaExceeded("plan exhausted".into()).into()),
+            StatusCode::TOO_MANY_REQUESTS
         );
     }
 

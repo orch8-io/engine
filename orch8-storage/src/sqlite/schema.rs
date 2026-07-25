@@ -489,11 +489,18 @@ CREATE TABLE IF NOT EXISTS push_wake_outbox (
     terminal_reason TEXT,
     delivered_at TEXT,
     command_acked_at TEXT,
+    execution_id TEXT,
+    topic TEXT,
+    collapse_key TEXT,
+    superseded_by TEXT,
     created_at TEXT NOT NULL,
     UNIQUE (tenant_id, device_id, command_id)
 );
 CREATE INDEX IF NOT EXISTS idx_push_wake_due
     ON push_wake_outbox(next_attempt_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_push_wake_collapse_pending
+    ON push_wake_outbox(tenant_id,device_id,collapse_key,created_at)
+    WHERE status='pending' AND collapse_key IS NOT NULL;
 
 -- End mobile sync tables ─────────────────────────────────────────────────────
 

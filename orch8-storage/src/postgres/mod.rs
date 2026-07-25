@@ -370,11 +370,27 @@ impl crate::InstanceStore for PostgresStorage {
         instances::create(self, instance).await
     }
 
+    async fn create_instance_admitted(
+        &self,
+        instance: &TaskInstance,
+        max_active_instances: u64,
+    ) -> Result<(), StorageError> {
+        instances::create_admitted(self, instance, max_active_instances).await
+    }
+
     async fn create_instances_batch(
         &self,
         instances: &[TaskInstance],
     ) -> Result<u64, StorageError> {
         instances::create_batch(self, instances).await
+    }
+
+    async fn create_instances_batch_admitted(
+        &self,
+        instances: &[TaskInstance],
+        limits: &std::collections::HashMap<TenantId, u64>,
+    ) -> Result<u64, StorageError> {
+        instances::create_batch_admitted(self, instances, limits).await
     }
 
     async fn create_instance_externalized(

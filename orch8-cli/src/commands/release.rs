@@ -237,7 +237,7 @@ struct GateReport {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_gate(
+async fn gate_report(
     client: &Client,
     base: &str,
     id: Uuid,
@@ -245,8 +245,7 @@ async fn run_gate(
     allow_side_effect_risk: bool,
     max_divergences: u32,
     max_inconclusive: u32,
-    format: OutputFormat,
-) -> Result<()> {
+) -> Result<GateReport> {
     let release = get_json(client, format!("{base}/releases/{id}"), "release").await?;
     let candidate = release["candidate_sequence_id"]
         .as_str()
@@ -275,7 +274,7 @@ async fn run_gate(
         release["validation_summary"].clone()
     };
 
-    let report = evaluate_gate(
+    Ok(evaluate_gate(
         id,
         &diff,
         &preflight,
@@ -283,8 +282,56 @@ async fn run_gate(
         allow_side_effect_risk,
         max_divergences,
         max_inconclusive,
-    );
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_gate(
+    client: &Client,
+    base: &str,
+    id: Uuid,
+    sample: Option<u32>,
+    allow_side_effect_risk: bool,
+    max_divergences: u32,
+    max_inconclusive: u32,
+    format: OutputFormat,
+) -> Result<()> {
+    let report = gate_report(
+        client,
+        base,
+        id,
+        sample,
+        allow_side_effect_risk,
+        max_divergences,
+        max_inconclusive,
+    )
+    .await?;
     print_gate_report(&report, format)?;
+    if !report.passed {
+        bail!("release proof gate failed");
+    }
+    Ok(())
+}
+
+pub(crate) async fn check_gate(
+    client: &Client,
+    base: &str,
+    id: Uuid,
+    sample: Option<u32>,
+    allow_side_effect_risk: bool,
+    max_divergences: u32,
+    max_inconclusive: u32,
+) -> Result<()> {
+    let report = gate_report(
+        client,
+        base,
+        id,
+        sample,
+        allow_side_effect_risk,
+        max_divergences,
+        max_inconclusive,
+    )
+    .await?;
     if !report.passed {
         bail!("release proof gate failed");
     }

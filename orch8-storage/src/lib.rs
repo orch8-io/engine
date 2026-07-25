@@ -305,8 +305,68 @@ impl Drop for ManifestLockGuard {
 pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
 
+    /// Atomically enforce a tenant active-instance ceiling and insert one row.
+    /// Production backends override this with a transaction/tenant lock.
+    async fn create_instance_admitted(
+        &self,
+        instance: &TaskInstance,
+        max_active_instances: u64,
+    ) -> Result<(), StorageError> {
+        let active = self
+            .count_instances(&InstanceFilter {
+                tenant_id: Some(instance.tenant_id.clone()),
+                states: Some(vec![
+                    InstanceState::Scheduled,
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    InstanceState::Paused,
+                ]),
+                ..InstanceFilter::default()
+            })
+            .await?;
+        if active >= max_active_instances {
+            return Err(StorageError::QuotaExceeded(
+                "active-instance entitlement exhausted".into(),
+            ));
+        }
+        self.create_instance(instance).await
+    }
+
     async fn create_instances_batch(&self, instances: &[TaskInstance])
     -> Result<u64, StorageError>;
+
+    /// Atomic multi-tenant counterpart to [`Self::create_instance_admitted`].
+    async fn create_instances_batch_admitted(
+        &self,
+        instances: &[TaskInstance],
+        limits: &std::collections::HashMap<TenantId, u64>,
+    ) -> Result<u64, StorageError> {
+        let mut requested = std::collections::HashMap::<TenantId, u64>::new();
+        for instance in instances {
+            *requested.entry(instance.tenant_id.clone()).or_default() += 1;
+        }
+        for (tenant_id, count) in requested {
+            let active = self
+                .count_instances(&InstanceFilter {
+                    tenant_id: Some(tenant_id.clone()),
+                    states: Some(vec![
+                        InstanceState::Scheduled,
+                        InstanceState::Running,
+                        InstanceState::Waiting,
+                        InstanceState::Paused,
+                    ]),
+                    ..InstanceFilter::default()
+                })
+                .await?;
+            let limit = limits.get(&tenant_id).copied().unwrap_or(0);
+            if active.saturating_add(count) > limit {
+                return Err(StorageError::QuotaExceeded(
+                    "active-instance entitlement exhausted".into(),
+                ));
+            }
+        }
+        self.create_instances_batch(instances).await
+    }
 
     /// Persist a new instance while externalizing large `context.data` fields.
     ///

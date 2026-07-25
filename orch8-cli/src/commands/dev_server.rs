@@ -67,6 +67,7 @@ impl DevServer {
             publisher: None,
             push_provider: Arc::new(orch8_push::NoopPushProvider),
             mobile_sync_enabled: false,
+            entitlements: orch8_api::entitlements::unlimited_provider(),
             builtin_handlers: Arc::new(orch8_api::builtin_handler_names()),
             // Dev server runs the engine in-process for the lifetime of the
             // command; report ready unconditionally.

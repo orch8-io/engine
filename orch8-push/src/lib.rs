@@ -1,5 +1,6 @@
 mod apns;
 mod fcm;
+mod governance;
 mod outbox;
 
 use async_trait::async_trait;
@@ -26,6 +27,21 @@ pub trait PushProvider: Send + Sync + 'static {
     }
 
     async fn send_silent_push(&self, token: &str, platform: &str) -> Result<(), PushError>;
+
+    /// Send a silent wake carrying signed, non-sensitive command metadata.
+    /// Built-in APNs/FCM implementations serialize the signature envelope;
+    /// third-party providers must opt in explicitly or delivery fails closed.
+    async fn send_signed_wake(
+        &self,
+        token: &str,
+        platform: &str,
+        metadata: &SignedWakeMetadata,
+    ) -> Result<(), PushError> {
+        let _ = (token, platform, metadata);
+        Err(PushError::Config(
+            "push provider does not support signed wake metadata".into(),
+        ))
+    }
 }
 
 pub struct NoopPushProvider;
@@ -44,6 +60,10 @@ impl PushProvider for NoopPushProvider {
 
 pub use apns::ApnsProvider;
 pub use fcm::FcmProvider;
+pub use governance::{
+    CollapsibleWake, CredentialRouter, EncryptedPushCredentialSource, PushCredentialRoute,
+    PushGovernanceError, SignedWakeMetadata, TokenLifecycleState, WakeNonceCache, collapse_wakes,
+};
 pub use outbox::{
     ClaimedWake, PushOutboxStore, PushOutboxWorker, PushTerminalReason, WakeAttemptOutcome,
 };

@@ -29,6 +29,7 @@ ed25519-dalek = { workspace = true }
 sqlx = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
+hex = "0.4"
 
 [build-dependencies]
 uniffi = { version = "0.32", features = ["build"] }

@@ -323,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
         spawn_push_outbox_worker(
             storage.clone(),
             app_state.push_provider.clone(),
+            app_state.continuity_crypto.as_deref(),
             shutdown_token.clone(),
         )
     });
@@ -523,6 +524,7 @@ fn build_app_state(
         publisher: None,
         push_provider,
         mobile_sync_enabled,
+        entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
         continuity_crypto,
@@ -979,10 +981,18 @@ fn spawn_engine(
 fn spawn_push_outbox_worker(
     storage: Arc<dyn StorageBackend>,
     provider: Arc<dyn orch8_push::PushProvider>,
+    crypto: Option<&orch8_api::ContinuityCrypto>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let store: Arc<dyn orch8_push::PushOutboxStore> = storage;
     let worker = orch8_push::PushOutboxWorker::new(store, provider);
+    let worker = match crypto {
+        Some(crypto) => worker.with_wake_signer(
+            format!("push-{}", crypto.signing_key_id),
+            crypto.signing_key.clone(),
+        ),
+        None => worker,
+    };
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
