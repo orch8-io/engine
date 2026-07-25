@@ -25,7 +25,7 @@ mod tick_controller;
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock as StdRwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,22 @@ pub struct TickResult {
     pub instances_advanced: u32,
     pub steps_executed: u32,
     pub has_pending_work: bool,
+}
+
+/// Aggregate result from a bounded background execution window.
+///
+/// Mobile operating systems grant background work for a limited, inexact
+/// amount of time. Hosts should call `run_until_idle` from their platform
+/// scheduler instead of starting the foreground loop.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct BackgroundRunResult {
+    pub ticks_executed: u32,
+    pub instances_advanced: u32,
+    pub steps_executed: u32,
+    pub has_pending_work: bool,
+    /// True when work remains after either the tick or wall-clock budget was
+    /// exhausted. The host should schedule another background opportunity.
+    pub budget_exhausted: bool,
 }
 
 impl From<TickOnceResult> for TickResult {
@@ -239,7 +255,8 @@ impl MobileEngine {
     /// Create a new mobile engine backed by a `SQLite` database at `db_path`.
     #[uniffi::constructor]
     pub fn new(db_path: String, config: MobileEngineConfig) -> Result<Arc<Self>, MobileError> {
-        let rt = runtime::MobileRuntime::new().map_err(|e| MobileError::Engine { message: e })?;
+        let rt = runtime::MobileRuntime::new(config.max_concurrent_steps)
+            .map_err(|e| MobileError::Engine { message: e })?;
 
         let (storage, sqlite) = rt.block_on(async {
             let s = orch8_storage::sqlite::SqliteStorage::file_mobile(&db_path)
@@ -317,7 +334,6 @@ impl MobileEngine {
                 config.sync_url.clone(),
                 config.device_id.clone(),
                 config.sync_api_key.clone(),
-                config.tick_interval_ms,
             ));
             rt.block_on(async { reporter.init_tables().await });
             info!(sync_url = %config.sync_url, "mobile sync reporter enabled");
@@ -368,15 +384,15 @@ impl MobileEngine {
         self.runtime.block_on(async {
             self.notifier.set_listener(listener).await;
         });
+        self.tick_controller.wake();
     }
 
     /// Execute a single tick.
     pub fn tick_once(&self) -> Result<TickResult, MobileError> {
-        if memory::exceeds_budget(self.config.memory_budget_bytes) {
+        if let Some(rss) = memory::rss_over_budget(self.config.memory_budget_bytes) {
             warn!(
                 budget = self.config.memory_budget_bytes,
-                rss = memory::current_rss_bytes().unwrap_or(0),
-                "tick skipped — memory budget exceeded"
+                rss, "tick skipped — memory budget exceeded"
             );
             return Ok(TickResult {
                 instances_advanced: 0,
@@ -413,6 +429,57 @@ impl MobileEngine {
 
             Ok(result.into())
         })
+    }
+
+    /// Execute a bounded batch of ticks for an OS-granted background window.
+    ///
+    /// This method never starts a persistent loop. It returns when the engine
+    /// becomes idle, `max_ticks` is reached, or `time_budget_ms` elapses. The
+    /// host remains responsible for registering and completing the native
+    /// `BGTaskScheduler`/`WorkManager` job.
+    pub fn run_until_idle(
+        &self,
+        max_ticks: u32,
+        time_budget_ms: u64,
+    ) -> Result<BackgroundRunResult, MobileError> {
+        if max_ticks == 0 {
+            return Err(MobileError::InvalidInput {
+                message: "max_ticks must be greater than zero".to_string(),
+            });
+        }
+        if time_budget_ms == 0 {
+            return Err(MobileError::InvalidInput {
+                message: "time_budget_ms must be greater than zero".to_string(),
+            });
+        }
+
+        let started = Instant::now();
+        let budget = Duration::from_millis(time_budget_ms);
+        let mut aggregate = BackgroundRunResult {
+            ticks_executed: 0,
+            instances_advanced: 0,
+            steps_executed: 0,
+            has_pending_work: true,
+            budget_exhausted: false,
+        };
+
+        while aggregate.ticks_executed < max_ticks && started.elapsed() < budget {
+            let tick = self.tick_once()?;
+            aggregate.ticks_executed = aggregate.ticks_executed.saturating_add(1);
+            aggregate.instances_advanced = aggregate
+                .instances_advanced
+                .saturating_add(tick.instances_advanced);
+            aggregate.steps_executed = aggregate.steps_executed.saturating_add(tick.steps_executed);
+            aggregate.has_pending_work = tick.has_pending_work;
+
+            if !tick.has_pending_work {
+                break;
+            }
+        }
+
+        aggregate.budget_exhausted = aggregate.has_pending_work
+            && (aggregate.ticks_executed >= max_ticks || started.elapsed() >= budget);
+        Ok(aggregate)
     }
 
     /// Start a foreground tick loop.
@@ -453,6 +520,7 @@ impl MobileEngine {
     pub fn on_push_received(&self) {
         if let Some(ref reporter) = self.sync_reporter {
             reporter.on_push_received();
+            self.tick_controller.wake();
         }
     }
 
@@ -469,7 +537,10 @@ impl MobileEngine {
                 .await
         });
         match &result {
-            Ok(id) => tracing::debug!("[orch8] started instance {id} for {sequence_name}"),
+            Ok(id) => {
+                tracing::debug!("[orch8] started instance {id} for {sequence_name}");
+                self.tick_controller.wake();
+            }
             Err(e) => tracing::warn!("[orch8] start failed for {sequence_name}: {e}"),
         }
         result
@@ -477,7 +548,12 @@ impl MobileEngine {
 
     /// Cancel a running instance.
     pub fn cancel_instance(&self, instance_id: String) -> Result<(), MobileError> {
-        self.run_with_timeout(async { self.lifecycle.cancel_instance(&instance_id).await })
+        let result =
+            self.run_with_timeout(async { self.lifecycle.cancel_instance(&instance_id).await });
+        if result.is_ok() {
+            self.tick_controller.wake();
+        }
+        result
     }
 
     /// Get the state of a specific instance.
@@ -518,11 +594,15 @@ impl MobileEngine {
         _step_name: String,
         output: String,
     ) -> Result<(), MobileError> {
-        self.run_with_timeout(async {
+        let result = self.run_with_timeout(async {
             self.lifecycle
                 .complete_step(&instance_id, &_step_name, &output)
                 .await
-        })
+        });
+        if result.is_ok() {
+            self.tick_controller.wake();
+        }
+        result
     }
 
     /// Verify and import an encrypted portable capsule into paused local
@@ -897,7 +977,7 @@ mod tests {
     #[test]
     fn default_config_has_sane_values() {
         let config = MobileEngineConfig::default();
-        assert_eq!(config.tick_interval_ms, 100);
+        assert_eq!(config.tick_interval_ms, 500);
         assert_eq!(config.max_concurrent_steps, 4);
         assert_eq!(config.max_concurrent_instances, 10);
         assert_eq!(config.max_steps_per_instance, 1000);
@@ -1224,7 +1304,7 @@ mod tests {
 
         // Manually set instance to Waiting state (simulating scheduler pause).
         let parsed_id = parse_instance_id(&instance_id).unwrap();
-        let rt = runtime::MobileRuntime::new().unwrap();
+        let rt = runtime::MobileRuntime::new(4).unwrap();
         rt.block_on(async {
             engine
                 .storage
@@ -1753,7 +1833,7 @@ mod tests {
             .unwrap();
 
         // Manually age the instance by updating created_at in the database.
-        let rt = runtime::MobileRuntime::new().unwrap();
+        let rt = runtime::MobileRuntime::new(4).unwrap();
         rt.block_on(async {
             let _parsed_id = parse_instance_id(&id).unwrap();
             // We need to update the created_at field directly.

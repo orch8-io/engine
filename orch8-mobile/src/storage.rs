@@ -83,6 +83,24 @@ impl MobileStorage {
         Ok(count as u64)
     }
 
+    /// Delete up to `limit` oldest telemetry rows without loading their
+    /// payloads into memory first.
+    pub async fn delete_oldest_telemetry_events(&self, limit: u64) -> Result<u64, StorageError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let result = sqlx::query(
+            "DELETE FROM telemetry_events WHERE id IN (
+                SELECT id FROM telemetry_events ORDER BY id ASC LIMIT ?1
+            )",
+        )
+        .bind(limit)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     // ── Sync Metadata ──
 
     pub async fn get_sync_metadata(&self, key: &str) -> Result<Option<String>, StorageError> {
@@ -181,6 +199,22 @@ impl MobileStorage {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    /// Remove crash leftovers for missing or terminal instances before the
+    /// in-memory dedup map is hydrated.
+    pub async fn prune_stale_dedup(&self) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM mobile_dedup
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM task_instances
+                 WHERE task_instances.id = mobile_dedup.instance_id
+                   AND task_instances.state IN ('scheduled', 'running', 'waiting', 'paused')
+             )",
+        )
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// List all dedup entries for hydration on engine startup.
@@ -324,6 +358,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dedup_prune_removes_orphan_rows() {
+        let (storage, _dir) = setup().await;
+        storage
+            .set_dedup("stale", "missing-instance")
+            .await
+            .unwrap();
+
+        assert_eq!(storage.prune_stale_dedup().await.unwrap(), 1);
+        assert!(storage.list_all_dedup().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn telemetry_delete_empty_is_noop() {
         let (storage, _dir) = setup().await;
         let deleted = storage.delete_telemetry_events(&[]).await.unwrap();
@@ -342,5 +388,19 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, "A");
         assert_eq!(events[1].event_type, "B");
+    }
+
+    #[tokio::test]
+    async fn telemetry_delete_oldest_is_bounded() {
+        let (storage, _dir) = setup().await;
+        storage.append_telemetry_event("A", "1").await.unwrap();
+        storage.append_telemetry_event("B", "2").await.unwrap();
+        storage.append_telemetry_event("C", "3").await.unwrap();
+
+        assert_eq!(storage.delete_oldest_telemetry_events(2).await.unwrap(), 2);
+        let events = storage.read_telemetry_events(10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "C");
+        assert_eq!(storage.delete_oldest_telemetry_events(0).await.unwrap(), 0);
     }
 }

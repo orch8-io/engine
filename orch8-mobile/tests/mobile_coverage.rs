@@ -160,7 +160,7 @@ fn poll_instance_state(engine: &MobileEngine, id: &str, max_ms: u64) -> Instance
 #[test]
 fn config_01_default_tick_interval() {
     let config = MobileEngineConfig::default();
-    assert_eq!(config.tick_interval_ms, 100);
+    assert_eq!(config.tick_interval_ms, 500);
 }
 
 #[test]

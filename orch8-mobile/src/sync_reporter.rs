@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use sqlx::SqlitePool;
@@ -8,6 +9,7 @@ use tracing::{debug, warn};
 use crate::lifecycle::InstanceLifecycleManager;
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
+use orch8_types::clock::SharedClock;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::InstanceState;
@@ -21,7 +23,7 @@ const MIN_SYNC_INTERVAL_SECS: u32 = 5;
 const MAX_SYNC_INTERVAL_SECS: u32 = 3600;
 
 /// Batched status + approval reporter that syncs with the server on a
-/// configurable tick cadence. Receives commands from the server and executes
+/// configurable wall-clock cadence. Receives commands from the server and executes
 /// them locally.
 pub(crate) struct SyncReporter {
     pool: SqlitePool,
@@ -29,10 +31,11 @@ pub(crate) struct SyncReporter {
     sync_url: String,
     device_id: String,
     api_key: String,
-    tick_interval_ms: u64,
-    tick_counter: AtomicU64,
-    sync_interval_ticks: AtomicU64,
-    force_sync: AtomicBool,
+    sync_interval_secs: AtomicU64,
+    last_sync_attempt: StdMutex<chrono::DateTime<chrono::Utc>>,
+    clock: SharedClock,
+    push_generation: AtomicU64,
+    completed_push_generation: AtomicU64,
 }
 
 #[derive(serde::Serialize)]
@@ -76,12 +79,16 @@ enum CommandOutcome {
 }
 
 impl SyncReporter {
-    pub fn new(
+    pub fn new(pool: SqlitePool, sync_url: String, device_id: String, api_key: String) -> Self {
+        Self::new_with_clock(pool, sync_url, device_id, api_key, SharedClock::default())
+    }
+
+    fn new_with_clock(
         pool: SqlitePool,
         sync_url: String,
         device_id: String,
         api_key: String,
-        tick_interval_ms: u64,
+        clock: SharedClock,
     ) -> Self {
         // The builder only uses constants, so failure is a programming error.
         #[allow(clippy::expect_used)]
@@ -92,7 +99,7 @@ impl SyncReporter {
             .build()
             .expect("reqwest client");
 
-        let default_sync_interval_ticks = 30 * 1000 / tick_interval_ms.max(1);
+        let now = clock.now();
 
         Self {
             pool,
@@ -100,37 +107,76 @@ impl SyncReporter {
             sync_url,
             device_id,
             api_key,
-            tick_interval_ms,
-            tick_counter: AtomicU64::new(0),
-            sync_interval_ticks: AtomicU64::new(default_sync_interval_ticks),
-            force_sync: AtomicBool::new(false),
+            sync_interval_secs: AtomicU64::new(u64::from(default_interval())),
+            last_sync_attempt: StdMutex::new(now),
+            clock,
+            push_generation: AtomicU64::new(0),
+            completed_push_generation: AtomicU64::new(0),
         }
     }
 
     /// Called by host app when a silent push notification arrives.
     pub fn on_push_received(&self) {
-        self.force_sync.store(true, Ordering::Relaxed);
+        self.request_immediate_sync();
     }
 
-    /// Check if it's time to sync. Called from the tick loop.
+    fn request_immediate_sync(&self) {
+        *self
+            .last_sync_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            self.clock.now() - chrono::Duration::seconds(i64::from(MIN_SYNC_INTERVAL_SECS));
+        self.push_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Atomically claim a due sync attempt. Wall-clock scheduling keeps server
+    /// intervals stable when the scheduler backs off while idle or on battery.
     pub fn should_sync(&self) -> bool {
-        let count = self.tick_counter.fetch_add(1, Ordering::Relaxed);
-        if self.force_sync.load(Ordering::Relaxed) {
-            // A forced sync retries promptly, but not in a hot loop: space
-            // attempts ~5s apart so a push-triggered sync while offline
-            // doesn't hammer the radio every tick.
-            let retry_ticks = (5_000 / self.tick_interval_ms.max(1)).max(1);
-            return count >= retry_ticks;
+        let interval = self.current_sync_interval();
+        let now = self.clock.now();
+        let mut last = self
+            .last_sync_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let due =
+            now - *last >= chrono::Duration::from_std(interval).unwrap_or(chrono::Duration::MAX);
+        if due {
+            *last = now;
         }
-        count >= self.sync_interval_ticks.load(Ordering::Relaxed)
+        due
     }
 
-    /// Reset the tick counter after a sync attempt. Deliberately does NOT
-    /// clear `force_sync`: a push-triggered sync that fails (offline, server
-    /// error) must stay pending so the wakeup isn't wasted — the flag is
-    /// cleared only after a successful round-trip in `sync_once`.
-    fn reset_counter(&self) {
-        self.tick_counter.store(0, Ordering::Relaxed);
+    /// Time until the next sync attempt is due, without claiming that attempt.
+    /// The tick controller uses this to sleep directly to the wall-clock
+    /// deadline when no workflow needs scheduler polling.
+    pub fn next_sync_delay(&self) -> Duration {
+        let interval = self.current_sync_interval();
+        let now = self.clock.now();
+        let last = *self
+            .last_sync_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let elapsed = (now - last).to_std().unwrap_or(Duration::ZERO);
+        interval.saturating_sub(elapsed)
+    }
+
+    fn current_sync_interval(&self) -> Duration {
+        let seconds = if self.has_forced_sync() {
+            u64::from(MIN_SYNC_INTERVAL_SECS)
+        } else {
+            self.sync_interval_secs.load(Ordering::Relaxed)
+        };
+        Duration::from_secs(seconds)
+    }
+
+    fn has_forced_sync(&self) -> bool {
+        self.push_generation.load(Ordering::Acquire)
+            != self.completed_push_generation.load(Ordering::Acquire)
+    }
+
+    fn mark_pushes_completed(&self, attempted_generation: u64) {
+        self.completed_push_generation
+            .fetch_max(attempted_generation, Ordering::AcqRel);
     }
 
     /// Initialize the outbox tables. Called once on engine startup.
@@ -280,8 +326,7 @@ impl SyncReporter {
             warn!(error = %e, instance_id, block_id, "failed to queue mobile step delegation");
             return;
         }
-        self.force_sync
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.request_immediate_sync();
     }
 
     /// Scan storage for active instances and queue status updates + approval
@@ -375,6 +420,9 @@ impl SyncReporter {
         storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
     ) {
+        // Capture only pushes known when this request begins. A newer push
+        // arriving during the HTTP round trip must remain pending afterward.
+        let attempted_push_generation = self.push_generation.load(Ordering::Acquire);
         let pending = tokio::try_join!(
             sqlx::query_as::<_, (i64, String)>(
                 "SELECT id, payload FROM sync_outbox WHERE entry_type = 'status' ORDER BY id LIMIT 100",
@@ -397,7 +445,6 @@ impl SyncReporter {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(%error, "failed to read pending mobile sync data");
-                self.reset_counter();
                 return;
             }
         };
@@ -440,12 +487,10 @@ impl SyncReporter {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 warn!(status = %r.status(), "sync request failed");
-                self.reset_counter();
                 return;
             }
             Err(e) => {
                 debug!(error = %e, "sync request error (offline?)");
-                self.reset_counter();
                 return;
             }
         };
@@ -454,7 +499,6 @@ impl SyncReporter {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "failed to parse sync response");
-                self.reset_counter();
                 return;
             }
         };
@@ -560,10 +604,8 @@ impl SyncReporter {
                 "server sync_interval_secs out of range — clamped"
             );
         }
-        let new_interval_ticks =
-            (u64::from(clamped_secs) * 1000 / self.tick_interval_ms.max(1)).max(1);
-        self.sync_interval_ticks
-            .store(new_interval_ticks, Ordering::Relaxed);
+        self.sync_interval_secs
+            .store(u64::from(clamped_secs), Ordering::Relaxed);
 
         debug!(
             status_sent = sent_status_ids.len(),
@@ -574,9 +616,9 @@ impl SyncReporter {
             "sync complete"
         );
 
-        // Successful round-trip: clear any pending push-triggered forced sync.
-        self.force_sync.store(false, Ordering::Relaxed);
-        self.reset_counter();
+        // Mark only the pushes covered by this successful round-trip. `fetch_max`
+        // also keeps concurrent sync completions from moving the marker backward.
+        self.mark_pushes_completed(attempted_push_generation);
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1067,6 +1109,7 @@ fn find_wait_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_types::clock::{Clock, ManualClock};
     use orch8_types::ids::{SequenceId, TenantId};
     use orch8_types::sequence::{SequenceStatus, StepDef};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1094,27 +1137,25 @@ mod tests {
         ));
 
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let reporter = SyncReporter::new(
-            pool,
-            sync_url,
-            "device-1".to_string(),
-            "key".to_string(),
-            1000,
-        );
+        let reporter = SyncReporter::new(pool, sync_url, "device-1".to_string(), "key".to_string());
         reporter.init_tables().await;
 
         (reporter, storage, lifecycle)
     }
 
     #[tokio::test]
-    async fn sync_read_failure_resets_counter_without_sending_partial_data() {
+    async fn sync_read_failure_keeps_forced_retry_throttled() {
         let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
-        reporter.tick_counter.store(42, Ordering::Relaxed);
+        reporter.on_push_received();
+        assert!(reporter.should_sync(), "push should be immediately due");
         reporter.pool.close().await;
 
         reporter.sync_once(&storage, &lifecycle).await;
 
-        assert_eq!(reporter.tick_counter.load(Ordering::Relaxed), 0);
+        assert!(
+            !reporter.should_sync(),
+            "failed forced sync must wait before retrying"
+        );
     }
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
@@ -1405,19 +1446,18 @@ mod tests {
         ];
         let (sync_url, server) = spawn_mock_server(bodies, 2).await;
 
-        // setup() uses tick_interval_ms = 1000, so ticks == seconds.
         let (reporter, storage, lifecycle) = setup(sync_url).await;
 
         reporter.sync_once(&storage, &lifecycle).await;
         assert_eq!(
-            reporter.sync_interval_ticks.load(Ordering::Relaxed),
+            reporter.sync_interval_secs.load(Ordering::Relaxed),
             u64::from(MIN_SYNC_INTERVAL_SECS),
             "zero interval must clamp up to the floor"
         );
 
         reporter.sync_once(&storage, &lifecycle).await;
         assert_eq!(
-            reporter.sync_interval_ticks.load(Ordering::Relaxed),
+            reporter.sync_interval_secs.load(Ordering::Relaxed),
             u64::from(MAX_SYNC_INTERVAL_SECS),
             "huge interval must clamp down to the ceiling"
         );
@@ -1434,7 +1474,7 @@ mod tests {
         reporter.on_push_received();
         reporter.sync_once(&storage, &lifecycle).await;
         assert!(
-            reporter.force_sync.load(Ordering::Relaxed),
+            reporter.has_forced_sync(),
             "force_sync must survive a failed sync attempt"
         );
 
@@ -1446,19 +1486,58 @@ mod tests {
         reporter2.sync_once(&storage2, &lifecycle2).await;
         server.await.unwrap();
         assert!(
-            !reporter2.force_sync.load(Ordering::Relaxed),
+            !reporter2.has_forced_sync(),
             "force_sync must clear after a successful sync"
         );
     }
 
-    /// Forced (push-triggered) syncs retry promptly but not in a hot loop:
-    /// attempts are spaced ~5s apart. `setup()` uses `tick_interval_ms` = 1000,
-    /// so the retry floor is 5 ticks.
+    /// Forced (push-triggered) syncs run immediately but cannot hot-loop the
+    /// radio while offline; subsequent attempts wait for the retry interval.
     #[tokio::test]
     async fn should_sync_throttles_forced_retries() {
         let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
         reporter.on_push_received();
-        let results: Vec<bool> = (0..6).map(|_| reporter.should_sync()).collect();
-        assert_eq!(results, vec![false, false, false, false, false, true]);
+        assert!(reporter.should_sync());
+        assert!(!reporter.should_sync());
+    }
+
+    #[tokio::test]
+    async fn next_sync_delay_tracks_deadline_without_claiming_it() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let start = chrono::Utc::now();
+        let manual = Arc::new(ManualClock::new(start));
+        let clock = SharedClock::from_arc(Arc::clone(&manual) as Arc<dyn Clock>);
+        let reporter = SyncReporter::new_with_clock(
+            pool,
+            "http://127.0.0.1:1/sync".into(),
+            "device-1".into(),
+            "key".into(),
+            clock,
+        );
+
+        assert_eq!(reporter.next_sync_delay(), Duration::from_secs(30));
+        manual.advance(chrono::Duration::seconds(23));
+        assert_eq!(reporter.next_sync_delay(), Duration::from_secs(7));
+        assert!(!reporter.should_sync());
+        manual.advance(chrono::Duration::seconds(7));
+        assert_eq!(reporter.next_sync_delay(), Duration::ZERO);
+        assert!(reporter.should_sync());
+        assert_eq!(reporter.next_sync_delay(), Duration::from_secs(30));
+
+        reporter.on_push_received();
+        assert_eq!(reporter.next_sync_delay(), Duration::ZERO);
+    }
+
+    #[tokio::test]
+    async fn push_arriving_during_sync_remains_pending() {
+        let (reporter, _storage, _lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        reporter.on_push_received();
+        let attempted = reporter.push_generation.load(Ordering::Acquire);
+
+        reporter.on_push_received();
+        reporter.mark_pushes_completed(attempted);
+
+        assert!(reporter.has_forced_sync());
+        assert!(reporter.should_sync());
     }
 }

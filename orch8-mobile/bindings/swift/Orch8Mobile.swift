@@ -2575,7 +2575,7 @@ public func FfiConverterTypeInstanceSummary_lower(_ value: InstanceSummary) -> R
  */
 public struct MobileEngineConfig: Equatable, Hashable {
     /**
-     * Tick interval in milliseconds for the foreground loop (default: 100).
+     * Tick interval in milliseconds for the foreground loop (default: 500).
      */
     public let tickIntervalMs: UInt64
     /**
@@ -2667,7 +2667,7 @@ public struct MobileEngineConfig: Equatable, Hashable {
     // declare one manually.
     public init(
         /**
-         * Tick interval in milliseconds for the foreground loop (default: 100).
+         * Tick interval in milliseconds for the foreground loop (default: 500).
          */tickIntervalMs: UInt64,
         /**
          * Maximum concurrent step executions (default: 4).

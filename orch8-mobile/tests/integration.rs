@@ -148,6 +148,56 @@ fn engine_lifecycle() {
 }
 
 #[test]
+fn bounded_background_run_drains_work_without_starting_foreground_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir
+        .path()
+        .join("background.db")
+        .to_string_lossy()
+        .to_string();
+    let engine = orch8_mobile::MobileEngine::new(db_path, MobileEngineConfig::default()).unwrap();
+    engine
+        .register_handler("echo".to_string(), Arc::new(EchoHandler))
+        .unwrap();
+    engine
+        .load_sequence_from_json(test_sequence_json())
+        .unwrap();
+    let instance_id = engine
+        .start("test_flow".to_string(), "{}".to_string(), None)
+        .unwrap();
+
+    let result = engine.run_until_idle(10, 5_000).unwrap();
+
+    assert!(result.ticks_executed > 0);
+    assert!(result.steps_executed > 0);
+    assert!(!result.budget_exhausted);
+    assert_eq!(
+        engine.get_instance(instance_id).unwrap().state,
+        InstanceStateKind::Completed
+    );
+}
+
+#[test]
+fn bounded_background_run_rejects_empty_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir
+        .path()
+        .join("background.db")
+        .to_string_lossy()
+        .to_string();
+    let engine = orch8_mobile::MobileEngine::new(db_path, MobileEngineConfig::default()).unwrap();
+
+    assert!(matches!(
+        engine.run_until_idle(0, 1_000),
+        Err(MobileError::InvalidInput { .. })
+    ));
+    assert!(matches!(
+        engine.run_until_idle(1, 0),
+        Err(MobileError::InvalidInput { .. })
+    ));
+}
+
+#[test]
 fn resource_limit_rejects_oversized_sequence() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.db").to_string_lossy().to_string();

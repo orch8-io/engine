@@ -13,6 +13,7 @@ use tracing::debug;
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::filter::{InstanceFilter, Pagination};
+use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 
 use crate::handlers::EngineListener;
@@ -25,13 +26,13 @@ const MAX_TRACKED: usize = 1000;
 /// Manages listener registration and bounded deduplication of lifecycle events.
 pub(crate) struct MobileNotifier {
     listener: Mutex<Option<Arc<dyn EngineListener>>>,
-    terminal_seen: Mutex<HashSet<String>>,
+    terminal_seen: Mutex<HashSet<InstanceId>>,
     waiting_seen: Mutex<HashSet<String>>,
     /// Terminal instance IDs already returned for dedup cleanup. Tracked
     /// separately from `terminal_seen` so cleanup happens even when no
     /// listener is registered, without suppressing the listener callbacks
     /// that fire once a listener *is* set.
-    cleanup_seen: Mutex<HashSet<String>>,
+    cleanup_seen: Mutex<HashSet<InstanceId>>,
 }
 
 impl MobileNotifier {
@@ -111,20 +112,20 @@ impl MobileNotifier {
         let mut terminal_ids = Vec::new();
 
         for inst in instances {
-            let id_str = inst.id.to_string();
-
             // Dedup cleanup is listener-independent: report each terminal
             // instance exactly once regardless of callback delivery.
-            if cleanup_seen.insert(id_str.clone()) {
-                terminal_ids.push(id_str.clone());
+            if cleanup_seen.insert(inst.id) {
+                terminal_ids.push(inst.id.to_string());
             }
 
             let Some(ref listener) = listener else {
                 continue;
             };
-            if !seen.insert(id_str.clone()) {
+            if !seen.insert(inst.id) {
                 continue;
             }
+
+            let id_str = inst.id.to_string();
 
             match inst.state {
                 InstanceState::Completed => {

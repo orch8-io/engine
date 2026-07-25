@@ -779,32 +779,25 @@ fn bench_tick_once(c: &mut Criterion) {
     }
 
     c.bench_function("tick_once_empty", |b| {
-        b.to_async(&rt).iter_batched(
-            || {
-                let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
-                let config = orch8_types::config::SchedulerConfig::default();
-                let handlers = orch8_engine::handlers::HandlerRegistry::new();
-                let cache = orch8_engine::sequence_cache::SequenceCache::new(
-                    64,
-                    std::time::Duration::from_secs(60),
-                );
-                let cancel = tokio_util::sync::CancellationToken::new();
-                (s, config, handlers, cache, cancel)
-            },
-            |(s, config, handlers, cache, cancel)| async move {
-                let storage: Arc<dyn StorageBackend> = Arc::new(s);
-                let handlers = Arc::new(handlers);
-                let semaphore = Arc::new(tokio::sync::Semaphore::new(
-                    config.max_concurrent_steps as usize,
-                ));
-                let cache = Arc::new(cache);
-                let _ = orch8_engine::scheduler::tick_once(
-                    &storage, &handlers, &semaphore, &config, &cache, &cancel,
-                )
-                .await;
-            },
-            BatchSize::SmallInput,
-        );
+        let storage: Arc<dyn StorageBackend> =
+            Arc::new(rt.block_on(SqliteStorage::in_memory()).unwrap());
+        let config = orch8_types::config::SchedulerConfig::default();
+        let handlers = Arc::new(orch8_engine::handlers::HandlerRegistry::new());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_steps as usize,
+        ));
+        let cache = Arc::new(orch8_engine::sequence_cache::SequenceCache::new(
+            64,
+            std::time::Duration::from_secs(60),
+        ));
+        let cancel = tokio_util::sync::CancellationToken::new();
+
+        b.iter(|| {
+            rt.block_on(orch8_engine::scheduler::tick_once(
+                &storage, &handlers, &semaphore, &config, &cache, &cancel,
+            ))
+            .unwrap();
+        });
     });
 }
 

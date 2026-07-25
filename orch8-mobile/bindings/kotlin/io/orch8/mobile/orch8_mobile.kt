@@ -2704,7 +2704,7 @@ public object FfiConverterTypeInstanceSummary: FfiConverterRustBuffer<InstanceSu
  */
 data class MobileEngineConfig (
     /**
-     * Tick interval in milliseconds for the foreground loop (default: 100).
+     * Tick interval in milliseconds for the foreground loop (default: 500).
      */
     var `tickIntervalMs`: kotlin.ULong, 
     /**
@@ -3324,4 +3324,3 @@ public object FfiConverterSequenceTypeSequenceInfo: FfiConverterRustBuffer<List<
         }
     }
 }
-

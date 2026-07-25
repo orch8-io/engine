@@ -42,11 +42,19 @@ fn linux_rss() -> Option<u64> {
     None
 }
 
+#[cfg(test)]
 pub fn exceeds_budget(budget_bytes: u64) -> bool {
-    if budget_bytes == 0 {
-        return false;
-    }
-    current_rss_bytes().is_some_and(|rss| rss > budget_bytes)
+    rss_over_budget(budget_bytes).is_some()
+}
+
+/// Return the sampled RSS only when it exceeds the configured budget.
+/// Sampling once lets callers report the value without launching a duplicate
+/// process/procfs read on the over-budget path.
+pub fn rss_over_budget(budget_bytes: u64) -> Option<u64> {
+    (budget_bytes != 0)
+        .then(current_rss_bytes)
+        .flatten()
+        .filter(|rss| *rss > budget_bytes)
 }
 
 #[cfg(test)]
@@ -68,5 +76,10 @@ mod tests {
     #[test]
     fn huge_budget_never_exceeds() {
         assert!(!exceeds_budget(u64::MAX));
+    }
+
+    #[test]
+    fn zero_budget_does_not_sample_as_exceeded() {
+        assert_eq!(rss_over_budget(0), None);
     }
 }

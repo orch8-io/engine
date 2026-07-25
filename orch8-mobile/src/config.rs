@@ -1,7 +1,7 @@
 /// Configuration for the mobile engine, exposed to host apps via `UniFFI`.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MobileEngineConfig {
-    /// Tick interval in milliseconds for the foreground loop (default: 100).
+    /// Tick interval in milliseconds for the foreground loop (default: 500).
     pub tick_interval_ms: u64,
     /// Maximum concurrent step executions (default: 4).
     pub max_concurrent_steps: u32,
@@ -54,7 +54,7 @@ pub struct MobileEngineConfig {
 impl Default for MobileEngineConfig {
     fn default() -> Self {
         Self {
-            tick_interval_ms: 100,
+            tick_interval_ms: 500,
             max_concurrent_steps: 4,
             max_steps_per_instance: 1000,
             max_concurrent_instances: 10,
@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn default_config_has_sane_values() {
         let config = MobileEngineConfig::default();
-        assert_eq!(config.tick_interval_ms, 100);
+        assert_eq!(config.tick_interval_ms, 500);
         assert_eq!(config.max_concurrent_steps, 4);
         assert_eq!(config.max_steps_per_instance, 1000);
         assert_eq!(config.max_concurrent_instances, 10);
@@ -120,7 +120,7 @@ mod tests {
     fn scheduler_config_derived_correctly() {
         let config = MobileEngineConfig::default();
         let sched = config.to_scheduler_config();
-        assert_eq!(sched.tick_interval_ms, 100);
+        assert_eq!(sched.tick_interval_ms, 500);
         assert_eq!(sched.batch_size, 10);
         assert_eq!(sched.max_concurrent_steps, 4);
         assert_eq!(sched.max_steps_per_instance, 1000);

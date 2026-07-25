@@ -49,6 +49,9 @@ impl InstanceLifecycleManager {
 
     /// Hydrate the in-memory dedup cache from persistent storage.
     pub async fn hydrate_dedup(&self) -> Result<(), MobileError> {
+        if let Err(e) = self.mobile_storage.prune_stale_dedup().await {
+            warn!(error = %e, "failed to prune stale dedup keys");
+        }
         match self.mobile_storage.list_all_dedup().await {
             Ok(rows) => {
                 let mut dedup = self.dedup_keys.lock().await;
@@ -491,16 +494,54 @@ mod tests {
     #[tokio::test]
     async fn hydrate_dedup_loads_from_storage() {
         let (lifecycle, mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let existing = lifecycle.start("seq", "{}", Some("dk1")).await.unwrap();
 
-        mobile_storage.set_dedup("dk1", "inst-1").await.unwrap();
-        mobile_storage.set_dedup("dk2", "inst-2").await.unwrap();
+        let reloaded = InstanceLifecycleManager::new(
+            lifecycle.storage.clone(),
+            mobile_storage,
+            lifecycle.sequence_cache.clone(),
+            10,
+        );
+        reloaded.hydrate_dedup().await.unwrap();
 
-        lifecycle.hydrate_dedup().await.unwrap();
+        let id = reloaded.start("seq", "{}", Some("dk1")).await.unwrap();
+        assert_eq!(id, existing);
+    }
 
-        // After hydration, start with the same dedup key should return the persisted ID.
-        let id = lifecycle.start("seq", "{}", Some("dk1")).await;
-        assert!(id.is_ok());
-        assert_eq!(id.unwrap(), "inst-1");
+    #[tokio::test]
+    async fn hydrate_dedup_prunes_terminal_crash_leftovers() {
+        let (lifecycle, mobile_storage, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let terminal = lifecycle
+            .start("seq", "{}", Some("dk-terminal"))
+            .await
+            .unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(
+                parse_instance_id(&terminal).unwrap(),
+                InstanceState::Completed,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let reloaded = InstanceLifecycleManager::new(
+            lifecycle.storage.clone(),
+            mobile_storage.clone(),
+            lifecycle.sequence_cache.clone(),
+            10,
+        );
+        reloaded.hydrate_dedup().await.unwrap();
+
+        assert!(
+            mobile_storage
+                .get_dedup_instance("dk-terminal")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

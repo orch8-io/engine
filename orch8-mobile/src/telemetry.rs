@@ -123,6 +123,7 @@ impl TelemetryManager {
                 .map_err(|e| MobileError::Storage {
                     message: e.to_string(),
                 })?;
+        self.enforce_capacity_from_count(count).await?;
         if count >= (u64::from(MAX_BUFFER_SIZE) * u64::from(AUTO_FLUSH_PCT) / 100) {
             // H-17: only attempt an auto-flush if the cooldown since the last
             // *attempt* (successful or not) has elapsed. Otherwise, once the
@@ -201,10 +202,10 @@ impl TelemetryManager {
         let batch: Vec<TelemetryBatchItem> = events
             .iter()
             .map(|e| TelemetryBatchItem {
-                event_type: e.event_type.clone(),
-                payload: e.payload.clone(),
+                event_type: &e.event_type,
+                payload: &e.payload,
                 timestamp: e.created_at.to_rfc3339(),
-                device: device_ctx.clone(),
+                device: &device_ctx,
             })
             .collect();
 
@@ -258,20 +259,15 @@ impl TelemetryManager {
                 .map_err(|e| MobileError::Storage {
                     message: e.to_string(),
                 })?;
-        if count > u64::from(MAX_BUFFER_SIZE) {
-            let excess = count - u64::from(MAX_BUFFER_SIZE);
-            #[allow(clippy::cast_possible_truncation)]
-            let to_drop = self
-                .storage
-                .read_telemetry_events(excess as u32)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-            let ids: Vec<i64> = to_drop.iter().map(|e| e.id).collect();
+        self.enforce_capacity_from_count(count).await
+    }
+
+    async fn enforce_capacity_from_count(&self, count: u64) -> Result<u64, MobileError> {
+        let excess = count.saturating_sub(u64::from(MAX_BUFFER_SIZE));
+        if excess != 0 {
             let dropped = self
                 .storage
-                .delete_telemetry_events(&ids)
+                .delete_oldest_telemetry_events(excess)
                 .await
                 .map_err(|e| MobileError::Storage {
                     message: e.to_string(),
@@ -288,11 +284,11 @@ impl TelemetryManager {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct TelemetryBatchItem {
-    event_type: String,
-    payload: String,
+struct TelemetryBatchItem<'a> {
+    event_type: &'a str,
+    payload: &'a str,
     timestamp: String,
-    device: DeviceContext,
+    device: &'a DeviceContext,
 }
 
 /// Result of a telemetry flush operation.
@@ -390,6 +386,30 @@ mod tests {
         // enforce_capacity with 5/1000 should not drop anything.
         let dropped = mgr.enforce_capacity().await.unwrap();
         assert_eq!(dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn record_keeps_offline_buffer_bounded() {
+        let (mgr, storage, _dir) = setup().await;
+
+        storage
+            .append_telemetry_event("oldest", "{}")
+            .await
+            .unwrap();
+        for _ in 1..MAX_BUFFER_SIZE {
+            storage.append_telemetry_event("seed", "{}").await.unwrap();
+        }
+
+        mgr.record(&TelemetryEventRecord::new("newest", "{}"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage.count_telemetry_events().await.unwrap(),
+            u64::from(MAX_BUFFER_SIZE)
+        );
+        let first = storage.read_telemetry_events(1).await.unwrap();
+        assert_eq!(first[0].event_type, "seed", "oldest event must be evicted");
     }
 
     #[tokio::test]

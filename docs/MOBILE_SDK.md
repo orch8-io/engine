@@ -78,7 +78,7 @@ implementation(project(":orch8-mobile"))
 import Orch8Mobile
 
 let config = MobileEngineConfig(
-    tickIntervalMs: 100,
+    tickIntervalMs: 500,
     maxConcurrentSteps: 4,
     maxStepsPerInstance: 1000,
     maxConcurrentInstances: 10,
@@ -112,7 +112,7 @@ let engine = try MobileEngine(
 import io.orch8.mobile.*
 
 val config = MobileEngineConfig(
-    tickIntervalMs = 100u,
+    tickIntervalMs = 500u,
     maxConcurrentSteps = 4u,
     maxStepsPerInstance = 1000u,
     maxConcurrentInstances = 10u,
@@ -260,7 +260,7 @@ engine.setListener(listener: MyListener())
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `tickIntervalMs` | u64 | 100 | Tick loop interval |
+| `tickIntervalMs` | u64 | 500 | Base tick interval; doubles at low battery and quadruples at critical battery |
 | `maxConcurrentSteps` | u32 | 4 | Parallel step executions |
 | `maxStepsPerInstance` | u32 | 1000 | Step limit per instance |
 | `maxConcurrentInstances` | u32 | 10 | Active instance limit |
@@ -320,6 +320,20 @@ and receives commands back (`complete_step`, `cancel_instance`, `start_workflow`
   accordingly.
 - **Device ownership is enforced server-side.** The `/mobile/sync` and device-registration
   endpoints verify that `deviceId` belongs to the calling tenant.
+
+## Energy Behavior
+
+The foreground scheduler uses a 500 ms base interval. Active workflows back off
+progressively to five seconds when no step is immediately runnable, preserving waiting
+deadlines and SLA checks. Once storage contains no scheduled, running, waiting, or paused
+workflow, the engine sleeps directly to the next sync or maintenance deadline (normally
+30 or 60 seconds). `start`, `completeStep`, listener registration, and silent pushes wake
+it immediately. Report `LowBattery` or `CriticalBattery` through `reportPowerState` to
+make the real active timer interval 2x or 4x longer. RSS budget checks run at most every
+30 seconds while memory is healthy and every five seconds while over budget.
+
+Always call `pause()` when the app leaves the foreground. The host operating system's
+background task APIs should own longer-running background execution.
 
 ## Background Execution
 
