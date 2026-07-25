@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod checkpoint;
 pub mod config;
 pub mod continuity;

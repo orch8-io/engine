@@ -8,6 +8,7 @@ use serde_json::Value;
 mod commands;
 mod templates;
 
+use commands::bootstrap::BootstrapCmd;
 use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
 use commands::continuity::{ExecutionCmd, RuntimeCmd};
@@ -72,6 +73,8 @@ struct Cli {
 enum Commands {
     /// Check engine health.
     Health,
+    /// Securely scaffold, preflight, migrate, start, and verify a production-capable node.
+    Bootstrap(BootstrapCmd),
     /// Diagnose configuration, connectivity, compatibility, workers, continuity, and an optional instance.
     Doctor(DoctorCmd),
     /// Instance management.
@@ -347,6 +350,10 @@ async fn main() -> Result<()> {
         return commands::demo::run(cmd, format).await;
     }
 
+    if let Commands::Bootstrap(cmd) = cli.command {
+        return commands::bootstrap::run(cmd).await;
+    }
+
     // Handle migrate before building the HTTP client — it does not need one.
     if let Commands::Migrate { database_url } = cli.command {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -389,6 +396,7 @@ async fn main() -> Result<()> {
         Commands::Templates(cmd) => commands::templates::run(cmd)?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
+        | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Migrate { .. }
         | Commands::Completions { .. } => {
