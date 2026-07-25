@@ -114,6 +114,96 @@ impl NodeAssembly {
     }
 }
 
+fn automatic_startup_preflight(
+    config: &EngineConfig,
+    assembly: NodeAssembly,
+) -> anyhow::Result<()> {
+    let mut errors = config.validate().err().unwrap_or_default();
+    if config.database.url.is_empty() {
+        errors.push("database.url must be configured for startup".into());
+    }
+    let http_addr = config.api.http_addr.parse::<std::net::SocketAddr>();
+    let grpc_addr = config.api.grpc_addr.parse::<std::net::SocketAddr>();
+    if let Err(error) = &http_addr {
+        errors.push(format!("api.http_addr is invalid: {error}"));
+    }
+    if assembly.grpc != GrpcSurface::Disabled {
+        if let Err(error) = &grpc_addr {
+            errors.push(format!("api.grpc_addr is invalid: {error}"));
+        }
+        if http_addr.as_ref().ok() == grpc_addr.as_ref().ok() && http_addr.is_ok() {
+            errors.push("api.http_addr and api.grpc_addr must use different sockets".into());
+        }
+    }
+
+    let tls_paths = [
+        (
+            "api.grpc_tls_cert_path",
+            config.api.grpc_tls_cert_path.as_str(),
+        ),
+        (
+            "api.grpc_tls_key_path",
+            config.api.grpc_tls_key_path.as_str(),
+        ),
+        (
+            "api.grpc_tls_client_ca_path",
+            config.api.grpc_tls_client_ca_path.as_str(),
+        ),
+    ];
+    let configured_tls_paths = tls_paths
+        .iter()
+        .filter(|(_, path)| !path.is_empty())
+        .count();
+    if configured_tls_paths != 0 && configured_tls_paths != tls_paths.len() {
+        errors.push("gRPC TLS requires certificate, private key, and client CA paths".into());
+    } else if configured_tls_paths == tls_paths.len() {
+        for (field, path) in tls_paths {
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
+                Ok(_) => errors.push(format!("{field} must reference a non-empty regular file")),
+                Err(error) => errors.push(format!("{field} cannot be read at {path:?}: {error}")),
+            }
+        }
+    }
+    if let Err(error) =
+        orch8_grpc::auth::WorkloadIdentityRegistry::from_json(&config.api.grpc_mtls_identities)
+    {
+        errors.push(format!("api.grpc_mtls_identities is invalid: {error}"));
+    }
+
+    if config.telemetry.otlp_enabled() {
+        let valid = config
+            .telemetry
+            .otlp_endpoint
+            .parse::<http::Uri>()
+            .is_ok_and(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
+            });
+        if !valid {
+            errors.push("telemetry.otlp_endpoint must be an absolute HTTP(S) URI".into());
+        }
+    }
+    if let Ok(encoded) = std::env::var("ORCH8_FEDERATION_PEERS")
+        && let Err(error) = parse_federation_peers(&encoded)
+    {
+        errors.push(format!("ORCH8_FEDERATION_PEERS is invalid: {error}"));
+    }
+    let mobile_sync_enabled = std::env::var("ORCH8_MOBILE_SYNC_ENABLED")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true"));
+    if mobile_sync_enabled && !assembly.full_api {
+        errors.push("ORCH8_MOBILE_SYNC_ENABLED requires an all_in_one or control node".into());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "automatic startup preflight failed:\n  - {}",
+            errors.join("\n  - ")
+        )
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "orch8",
@@ -160,13 +250,8 @@ async fn main() -> anyhow::Result<()> {
     let mut config = tokio::task::spawn_blocking(move || load_config(&config_path))
         .await
         .context("config loader panicked")??;
-    if let Err(errors) = config.validate() {
-        return Err(anyhow::anyhow!(
-            "configuration invalid: {}",
-            errors.join(", ")
-        ));
-    }
     let assembly = NodeAssembly::for_role(config.node.role);
+    automatic_startup_preflight(&config, assembly)?;
 
     // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
     // [telemetry] otlp_endpoint is set) and logging.
@@ -1300,6 +1385,21 @@ mod tests {
         let edge = NodeAssembly::for_role(NodeRole::Edge);
         assert!(edge.engine && !edge.full_api && !edge.public_webhooks);
         assert_eq!(edge.grpc, GrpcSurface::Disabled);
+    }
+
+    #[test]
+    fn automatic_preflight_aggregates_ports_tls_and_otlp_errors() {
+        let mut config = EngineConfig::default();
+        config.api.grpc_addr = config.api.http_addr.clone();
+        config.api.grpc_tls_cert_path = "/definitely/missing/server.crt".into();
+        config.telemetry.otlp_endpoint = "not-an-absolute-uri".into();
+        let error =
+            automatic_startup_preflight(&config, NodeAssembly::for_role(NodeRole::AllInOne))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("different sockets"));
+        assert!(error.contains("certificate, private key, and client CA"));
+        assert!(error.contains("absolute HTTP(S) URI"));
     }
     use serial_test::serial;
 

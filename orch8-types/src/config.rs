@@ -723,7 +723,6 @@ impl EngineConfig {
         if self.database.max_connections == 0 {
             errors.push("database.max_connections must be > 0".into());
         }
-
         // Engine / scheduler
         if self.engine.tick_interval_ms == 0 {
             errors.push("engine.tick_interval_ms must be > 0".into());
@@ -748,9 +747,16 @@ impl EngineConfig {
                 _ => {}
             }
         }
-        if !self.engine.encryption_key.is_empty() && self.engine.encryption_key.expose().len() != 64
+        if !self.engine.encryption_key.is_empty()
+            && (self.engine.encryption_key.expose().len() != 64
+                || !self
+                    .engine
+                    .encryption_key
+                    .expose()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()))
         {
-            errors.push("engine.encryption_key must be exactly 64 hex characters".into());
+            errors.push("engine.encryption_key must be exactly 64 hexadecimal characters".into());
         }
 
         // Logging

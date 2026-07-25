@@ -11,6 +11,13 @@ documented defaults.
 |-------|------|---------|-------------|
 | `role` | string | `"all_in_one"` | Process assembly: `all_in_one`, `control`, `executor`, `gateway`, or `edge`. See [Node Roles](NODE_ROLES.md). |
 
+Before opening storage or listeners, the server runs an aggregated automatic
+preflight over typed config, HTTP/gRPC socket syntax and conflicts, TLS file
+completeness/readability, workload-identity mappings, OTLP URI syntax,
+federation trust configuration, and role-compatible mobile surfaces. Every
+finding is reported in one actionable error list. Storage connection and
+migration execution are the subsequent live preflight gate.
+
 ---
 
 ## [database]
