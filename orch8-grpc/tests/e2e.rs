@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use orch8_grpc::proto::orch8_service_client::Orch8ServiceClient;
 use orch8_grpc::proto::{
-    CreateInstanceRequest, CreateSequenceRequest, GetInstanceRequest, RetryInstanceRequest,
-    SendSignalRequest,
+    CreateInstanceRequest, CreateSequenceRequest, GetInstanceRequest, IngestTelemetryBatchRequest,
+    RetryInstanceRequest, SendSignalRequest, TelemetryEventInput,
 };
 use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
 use orch8_storage::WorkerStore;
@@ -46,6 +46,47 @@ async fn spawn_test_server() -> (SocketAddr, Arc<SqliteStorage>) {
     // Give the server a moment to start accepting.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     (addr, storage)
+}
+
+#[tokio::test]
+async fn grpc_telemetry_batch_accepts_valid_events_and_reports_partial_rejections() {
+    let (addr, _storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .expect("connect to test server");
+    let event = |event_type: &str, payload_json: &str, created_at: &str| TelemetryEventInput {
+        event_type: event_type.into(),
+        payload_json: payload_json.into(),
+        device_id: "device-1".into(),
+        os_name: "linux".into(),
+        os_version: "6.12".into(),
+        app_version: "1.0.0".into(),
+        sdk_version: "1.0.0".into(),
+        created_at: created_at.into(),
+    };
+    let response = client
+        .ingest_telemetry_batch(IngestTelemetryBatchRequest {
+            tenant_id: "test".into(),
+            events: vec![
+                event(
+                    "worker.started",
+                    r#"{"worker":"alpha"}"#,
+                    "2026-07-25T10:00:00Z",
+                ),
+                event("worker.bad", "not-json", "2026-07-25T10:00:01Z"),
+                event("worker.ready", r#"{"ready":true}"#, "not-a-timestamp"),
+            ],
+        })
+        .await
+        .expect("ingest telemetry")
+        .into_inner();
+
+    assert_eq!(response.accepted, 1);
+    assert_eq!(response.rejected.len(), 2);
+    assert_eq!(response.rejected[0].index, 1);
+    assert_eq!(response.rejected[0].code, "invalid_payload_json");
+    assert_eq!(response.rejected[1].index, 2);
+    assert_eq!(response.rejected[1].code, "invalid_created_at");
 }
 
 #[tokio::test]

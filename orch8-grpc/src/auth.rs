@@ -14,20 +14,22 @@
 //! contract diverged on the same storage. This module gives the gRPC path
 //! parity with the HTTP path via:
 //!
-//!   1. A [`GrpcAuthLayer`] that runs asynchronously before every RPC, rejecting
-//!      requests without a valid API key and stamping the caller's
-//!      `x-tenant-id` into request extensions as a [`CallerTenant`].
+//!   1. A [`GrpcAuthLayer`] that runs asynchronously before every RPC, accepting
+//!      a valid API key or mapped mTLS workload certificate and stamping the
+//!      authoritative tenant into request extensions as a [`CallerTenant`].
 //!   2. A [`caller_tenant`] helper that handlers can call to pull the
 //!      stamped `TenantId` back out, plus [`enforce_tenant_match`] which
 //!      mirrors the HTTP-side `enforce_tenant_access` (returns `NotFound`
 //!      on cross-tenant reads so existence doesn't leak).
 //!
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tonic::codegen::http;
+use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Request, Status};
 use tower::{Layer, Service};
 
@@ -43,6 +45,89 @@ use orch8_types::ids::TenantId;
 #[derive(Clone, Debug)]
 pub struct CallerTenant(pub TenantId);
 
+/// Verified workload identity mapped from the SHA-256 fingerprint of the
+/// connection's leaf client certificate.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+pub struct WorkloadIdentity {
+    pub tenant_id: String,
+    pub identity: String,
+}
+
+/// Immutable certificate-fingerprint registry used by the auth layer.
+#[derive(Clone, Debug, Default)]
+pub struct WorkloadIdentityRegistry(Arc<HashMap<String, WorkloadIdentity>>);
+
+impl WorkloadIdentityRegistry {
+    /// Parse a JSON object keyed by a 64-character SHA-256 certificate
+    /// fingerprint. Colons and ASCII case in keys are normalized.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        if json.trim().is_empty() {
+            return Ok(Self::default());
+        }
+        let raw: HashMap<String, WorkloadIdentity> =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let mut normalized = HashMap::with_capacity(raw.len());
+        for (fingerprint, mut identity) in raw {
+            let fingerprint = normalize_fingerprint(&fingerprint)?;
+            identity.tenant_id = identity.tenant_id.trim().to_owned();
+            identity.identity = identity.identity.trim().to_owned();
+            if identity.tenant_id.is_empty()
+                || identity.identity.is_empty()
+                || identity.tenant_id.len() > 128
+                || identity.identity.len() > 128
+            {
+                return Err(
+                    "workload identity tenant_id and identity must contain 1..=128 bytes".into(),
+                );
+            }
+            if normalized.insert(fingerprint, identity).is_some() {
+                return Err("duplicate workload certificate fingerprint".into());
+            }
+        }
+        Ok(Self(Arc::new(normalized)))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn identity_for_certificate(&self, certificate_der: &[u8]) -> Option<&WorkloadIdentity> {
+        let fingerprint = hex_sha256(certificate_der);
+        self.0.get(&fingerprint)
+    }
+
+    fn identity_for_extensions(&self, extensions: &http::Extensions) -> Option<WorkloadIdentity> {
+        let connect_info = extensions.get::<TlsConnectInfo<TcpConnectInfo>>()?;
+        let certificates = connect_info.peer_certs()?;
+        let leaf = certificates.first()?;
+        self.identity_for_certificate(leaf.as_ref()).cloned()
+    }
+}
+
+fn normalize_fingerprint(value: &str) -> Result<String, String> {
+    let normalized: String = value
+        .chars()
+        .filter(|character| *character != ':')
+        .flat_map(char::to_lowercase)
+        .collect();
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("workload certificate fingerprints must be 64 hexadecimal characters".into());
+    }
+    Ok(normalized)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// Async authentication middleware for tonic services.
@@ -51,6 +136,7 @@ pub struct GrpcAuthLayer {
     storage: Arc<dyn StorageBackend>,
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
+    workload_identities: WorkloadIdentityRegistry,
 }
 
 impl GrpcAuthLayer {
@@ -63,7 +149,14 @@ impl GrpcAuthLayer {
             storage,
             expected_digest,
             require_tenant,
+            workload_identities: WorkloadIdentityRegistry::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_workload_identities(mut self, identities: WorkloadIdentityRegistry) -> Self {
+        self.workload_identities = identities;
+        self
     }
 }
 
@@ -76,6 +169,7 @@ impl<S> Layer<S> for GrpcAuthLayer {
             storage: Arc::clone(&self.storage),
             expected_digest: self.expected_digest,
             require_tenant: self.require_tenant,
+            workload_identities: self.workload_identities.clone(),
         }
     }
 }
@@ -86,6 +180,7 @@ pub struct GrpcAuthService<S> {
     storage: Arc<dyn StorageBackend>,
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
+    workload_identities: WorkloadIdentityRegistry,
 }
 
 impl<S> Service<http::Request<tonic::body::Body>> for GrpcAuthService<S>
@@ -111,15 +206,17 @@ where
         let storage = Arc::clone(&self.storage);
         let expected_digest = self.expected_digest;
         let require_tenant = self.require_tenant;
+        let workload_identities = self.workload_identities.clone();
 
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
-            if let Err(status) = authenticate_request(
+            if let Err(status) = authenticate_request_with_workloads(
                 &parts.headers,
                 &mut parts.extensions,
                 &storage,
                 expected_digest,
                 require_tenant,
+                &workload_identities,
             )
             .await
             {
@@ -130,18 +227,44 @@ where
     }
 }
 
-async fn authenticate_request(
+async fn authenticate_request_with_workloads(
     headers: &http::HeaderMap,
     extensions: &mut http::Extensions,
     storage: &Arc<dyn StorageBackend>,
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
+    workload_identities: &WorkloadIdentityRegistry,
 ) -> Result<(), Status> {
     let tenant = headers
         .get("x-tenant-id")
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    let provided = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if provided.is_empty()
+        && let Some(identity) = workload_identities.identity_for_extensions(extensions)
+    {
+        if tenant.is_some_and(|tenant| tenant != identity.tenant_id) {
+            return Err(Status::permission_denied(
+                "x-tenant-id does not match workload identity tenant",
+            ));
+        }
+        extensions.insert(CallerTenant(TenantId::unchecked(
+            identity.tenant_id.clone(),
+        )));
+        extensions.insert(identity);
+        return Ok(());
+    }
+
+    if provided.is_empty() && !workload_identities.is_empty() && expected_digest.is_none() {
+        return Err(Status::unauthenticated(
+            "client certificate is not mapped to a workload identity",
+        ));
+    }
 
     if expected_digest.is_none() {
         if let Some(tenant) = tenant {
@@ -155,10 +278,6 @@ async fn authenticate_request(
         };
     }
 
-    let provided = headers
-        .get("x-api-key")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
     if expected_digest
         .as_ref()
         .is_some_and(|digest| orch8_types::auth::verify_secret_against_digest(provided, digest))
@@ -195,6 +314,25 @@ async fn authenticate_request(
             Err(Status::internal("authentication failed"))
         }
     }
+}
+
+#[cfg(test)]
+async fn authenticate_request(
+    headers: &http::HeaderMap,
+    extensions: &mut http::Extensions,
+    storage: &Arc<dyn StorageBackend>,
+    expected_digest: Option<[u8; 32]>,
+    require_tenant: bool,
+) -> Result<(), Status> {
+    authenticate_request_with_workloads(
+        headers,
+        extensions,
+        storage,
+        expected_digest,
+        require_tenant,
+        &WorkloadIdentityRegistry::default(),
+    )
+    .await
 }
 
 /// Pull the caller's tenant out of request extensions, if the auth layer
@@ -298,6 +436,41 @@ mod tests {
 
     fn digest_of(key: &str) -> [u8; 32] {
         orch8_types::auth::precompute_secret_digest(key)
+    }
+
+    #[test]
+    fn workload_registry_maps_normalized_certificate_fingerprint() {
+        let certificate = b"test client certificate DER";
+        let fingerprint = hex_sha256(certificate);
+        let colonized = fingerprint
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap().to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .join(":");
+        let json = serde_json::json!({
+            (colonized): { "tenant_id": "acme", "identity": "worker-prod" }
+        });
+        let registry = WorkloadIdentityRegistry::from_json(&json.to_string()).unwrap();
+
+        assert_eq!(
+            registry.identity_for_certificate(certificate),
+            Some(&WorkloadIdentity {
+                tenant_id: "acme".into(),
+                identity: "worker-prod".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn workload_registry_rejects_ambiguous_or_incomplete_entries() {
+        let invalid_fingerprint = r#"{"abcd":{"tenant_id":"acme","identity":"worker"}}"#;
+        assert!(WorkloadIdentityRegistry::from_json(invalid_fingerprint).is_err());
+        let fingerprint = "0".repeat(64);
+        let missing_identity = serde_json::json!({
+            (fingerprint): { "tenant_id": "acme", "identity": "" }
+        });
+        assert!(WorkloadIdentityRegistry::from_json(&missing_identity.to_string()).is_err());
     }
 
     #[tokio::test]

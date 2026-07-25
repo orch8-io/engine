@@ -7,7 +7,7 @@ use tonic::{Request, Response, Status};
 use tracing;
 use uuid::Uuid;
 
-use orch8_storage::StorageBackend;
+use orch8_storage::{StorageBackend, TelemetryEvent};
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
@@ -164,6 +164,9 @@ const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
 const MIN_TRANSFER_CHUNK_BYTES: u32 = 4 * 1024;
 const MAX_TRANSFER_CHUNK_BYTES: u32 = 1024 * 1024;
+const MAX_TELEMETRY_EVENTS: usize = 1_000;
+const MAX_TELEMETRY_BATCH_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TELEMETRY_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 const WORKER_STREAM_FEATURES: [&str; 5] = [
     "task_delivery",
     "completion",
@@ -178,6 +181,92 @@ fn negotiated_worker_features(requested: &[String]) -> Vec<String> {
         .filter(|feature| requested.iter().any(|requested| requested == **feature))
         .map(|feature| (*feature).to_owned())
         .collect()
+}
+
+fn telemetry_rejection(index: usize, code: &str, message: &str) -> proto::TelemetryEventRejection {
+    proto::TelemetryEventRejection {
+        index: u32::try_from(index).unwrap_or(u32::MAX),
+        code: code.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+fn bounded_telemetry_field(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+}
+
+fn validate_telemetry_event(
+    index: usize,
+    input: &proto::TelemetryEventInput,
+    tenant_id: &TenantId,
+    accepted_payload_bytes: usize,
+) -> Result<TelemetryEvent, proto::TelemetryEventRejection> {
+    let event_type = input.event_type.trim();
+    if event_type.is_empty() || !bounded_telemetry_field(event_type, 128) {
+        return Err(telemetry_rejection(
+            index,
+            "invalid_event_type",
+            "event_type must contain 1..=128 bytes",
+        ));
+    }
+    if input.payload_json.len() > MAX_TELEMETRY_EVENT_PAYLOAD_BYTES {
+        return Err(telemetry_rejection(
+            index,
+            "payload_too_large",
+            "payload_json exceeds 256 KiB",
+        ));
+    }
+    if accepted_payload_bytes.saturating_add(input.payload_json.len())
+        > MAX_TELEMETRY_BATCH_PAYLOAD_BYTES
+    {
+        return Err(telemetry_rejection(
+            index,
+            "batch_payload_limit_exceeded",
+            "accepted payloads would exceed the 4 MiB batch limit",
+        ));
+    }
+    if serde_json::from_str::<serde_json::Value>(&input.payload_json).is_err() {
+        return Err(telemetry_rejection(
+            index,
+            "invalid_payload_json",
+            "payload_json must be valid JSON",
+        ));
+    }
+    for (name, value, max_bytes) in [
+        ("device_id", input.device_id.as_str(), 256),
+        ("os_name", input.os_name.as_str(), 64),
+        ("os_version", input.os_version.as_str(), 64),
+        ("app_version", input.app_version.as_str(), 64),
+        ("sdk_version", input.sdk_version.as_str(), 64),
+    ] {
+        if !bounded_telemetry_field(value, max_bytes) {
+            return Err(telemetry_rejection(
+                index,
+                "metadata_too_large",
+                &format!("{name} exceeds {max_bytes} bytes"),
+            ));
+        }
+    }
+    let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
+        .map_err(|_| {
+            telemetry_rejection(
+                index,
+                "invalid_created_at",
+                "created_at must be an RFC 3339 timestamp",
+            )
+        })?
+        .with_timezone(&chrono::Utc);
+    Ok(TelemetryEvent {
+        event_type: event_type.to_owned(),
+        payload: input.payload_json.clone(),
+        device_id: input.device_id.clone(),
+        os_name: input.os_name.clone(),
+        os_version: input.os_version.clone(),
+        app_version: input.app_version.clone(),
+        sdk_version: input.sdk_version.clone(),
+        tenant_id: tenant_id.as_str().to_owned(),
+        created_at,
+    })
 }
 
 fn worker_feature_enabled(open: &proto::WorkerStreamOpen, feature: &str) -> bool {
@@ -662,6 +751,50 @@ impl Orch8Service for Orch8GrpcService {
         self.storage.ping().await.map_err(storage_err)?;
         Ok(Response::new(proto::HealthResponse {
             status: "ok".into(),
+        }))
+    }
+
+    // --- Telemetry ---
+
+    async fn ingest_telemetry_batch(
+        &self,
+        req: Request<proto::IngestTelemetryBatchRequest>,
+    ) -> Result<Response<proto::IngestTelemetryBatchResponse>, Status> {
+        let requested_tenant = TenantId::unchecked(req.get_ref().tenant_id.clone());
+        let tenant_id = enforce_tenant_create(&req, &requested_tenant)?;
+        if tenant_id.as_str().is_empty() {
+            return Err(Status::invalid_argument("tenant_id is required"));
+        }
+
+        let mut accepted = Vec::with_capacity(req.get_ref().events.len().min(MAX_TELEMETRY_EVENTS));
+        let mut rejected = Vec::new();
+        let mut accepted_payload_bytes = 0usize;
+        for (index, input) in req.get_ref().events.iter().enumerate() {
+            if index >= MAX_TELEMETRY_EVENTS {
+                rejected.push(telemetry_rejection(
+                    index,
+                    "batch_event_limit_exceeded",
+                    "batch contains more than 1000 events",
+                ));
+                continue;
+            }
+            match validate_telemetry_event(index, input, &tenant_id, accepted_payload_bytes) {
+                Ok(event) => {
+                    accepted_payload_bytes =
+                        accepted_payload_bytes.saturating_add(event.payload.len());
+                    accepted.push(event);
+                }
+                Err(rejection) => rejected.push(rejection),
+            }
+        }
+        let inserted = self
+            .storage
+            .ingest_telemetry_events_batch(&accepted)
+            .await
+            .map_err(storage_err)?;
+        Ok(Response::new(proto::IngestTelemetryBatchResponse {
+            accepted: u32::try_from(inserted).unwrap_or(u32::MAX),
+            rejected,
         }))
     }
 

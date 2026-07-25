@@ -659,12 +659,56 @@ async fn spawn_grpc_server(
         .await
         .context("Failed to bind gRPC listener")?;
 
+    let tls_paths = [
+        config.api.grpc_tls_cert_path.as_str(),
+        config.api.grpc_tls_key_path.as_str(),
+        config.api.grpc_tls_client_ca_path.as_str(),
+    ];
+    let configured_tls_paths = tls_paths.iter().filter(|path| !path.is_empty()).count();
+    if configured_tls_paths != 0 && configured_tls_paths != tls_paths.len() {
+        anyhow::bail!(
+            "gRPC mTLS requires grpc_tls_cert_path, grpc_tls_key_path, and grpc_tls_client_ca_path"
+        );
+    }
+    if configured_tls_paths == 0 && !config.api.grpc_mtls_identities.trim().is_empty() {
+        anyhow::bail!("grpc_mtls_identities requires gRPC mTLS transport configuration");
+    }
+    let workload_identities =
+        orch8_grpc::auth::WorkloadIdentityRegistry::from_json(&config.api.grpc_mtls_identities)
+            .map_err(anyhow::Error::msg)
+            .context("Invalid grpc_mtls_identities")?;
+    let tls_config = if configured_tls_paths == tls_paths.len() {
+        let (certificate, private_key, client_ca) = tokio::try_join!(
+            tokio::fs::read(&config.api.grpc_tls_cert_path),
+            tokio::fs::read(&config.api.grpc_tls_key_path),
+            tokio::fs::read(&config.api.grpc_tls_client_ca_path),
+        )
+        .context("Failed to read gRPC mTLS certificate material")?;
+        Some(
+            tonic::transport::ServerTlsConfig::new()
+                .identity(tonic::transport::Identity::from_pem(
+                    certificate,
+                    private_key,
+                ))
+                .client_ca_root(tonic::transport::Certificate::from_pem(client_ca)),
+        )
+    } else {
+        None
+    };
+
     let grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
-    let auth_layer = orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant);
+    let auth_layer = orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant)
+        .with_workload_identities(workload_identities);
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls_config) = tls_config {
+        server = server
+            .tls_config(tls_config)
+            .context("Invalid gRPC mTLS certificate material")?;
+    }
     let handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = server
             .layer(auth_layer)
             .add_service(Orch8ServiceServer::new(grpc_service))
             .serve_with_incoming_shutdown(
@@ -882,6 +926,18 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_GRPC_ADDR") {
         config.api.grpc_addr = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CERT_PATH") {
+        config.api.grpc_tls_cert_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_KEY_PATH") {
+        config.api.grpc_tls_key_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CLIENT_CA_PATH") {
+        config.api.grpc_tls_client_ca_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_MTLS_IDENTITIES") {
+        config.api.grpc_mtls_identities = val;
     }
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;

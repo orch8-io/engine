@@ -69,3 +69,46 @@ capsules, checkpoints, provenance, or large step artifacts into control-plane
 messages. Those formats remain independently versioned and signed; the stream
 provides bounded transport, checksum verification, tenant authorization, and
 resume semantics without becoming another persistence layer.
+
+## Bounded telemetry ingestion
+
+`Orch8Service.IngestTelemetryBatch` accepts at most 1,000 events and 4 MiB of
+accepted JSON payload per request. A single payload is capped at 256 KiB;
+event names, device metadata, version strings, and RFC 3339 timestamps are
+validated before storage. Invalid events do not poison valid neighbors: the
+response returns the accepted count plus stable rejection codes and original
+indexes for every rejected event. Accepted events are handed to the storage
+backend in one batch operation.
+
+The authenticated caller tenant is authoritative. A supplied `tenant_id` must
+match it, and storage enrichment uses that authoritative tenant rather than
+trusting event JSON. In explicitly permissive deployments, `tenant_id` remains
+required in the request.
+
+## mTLS workload identity
+
+Production gRPC listeners can require client certificates signed by a
+configured CA. Set all three `[api]` paths—`grpc_tls_cert_path`,
+`grpc_tls_key_path`, and `grpc_tls_client_ca_path`—then map leaf-certificate
+SHA-256 fingerprints with `grpc_mtls_identities`:
+
+```toml
+[api]
+grpc_tls_cert_path = "/run/orch8/tls/server.crt"
+grpc_tls_key_path = "/run/orch8/tls/server.key"
+grpc_tls_client_ca_path = "/run/orch8/tls/workload-ca.crt"
+grpc_mtls_identities = '''
+{
+  "13:8A:...:F0": { "tenant_id": "acme", "identity": "worker-prod" }
+}
+'''
+```
+
+The TLS stack verifies the certificate chain; the auth layer hashes the leaf
+certificate DER, resolves the configured identity, and stamps its tenant into
+the same isolation path used by tenant API keys. An `x-tenant-id` that
+disagrees with the mapping is rejected. Existing API-key authentication is
+unchanged when mTLS is not configured and remains available to authenticated
+TLS clients during migration. Configuration is fail-fast: partial TLS paths,
+malformed fingerprints, duplicate normalized fingerprints, empty identities,
+and identity mappings without TLS all prevent listener startup.

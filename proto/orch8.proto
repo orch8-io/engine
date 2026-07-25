@@ -341,6 +341,35 @@ message HealthResponse {
   string status = 1;
 }
 
+// --- Telemetry ---
+
+message TelemetryEventInput {
+  string event_type = 1;
+  string payload_json = 2;
+  string device_id = 3;
+  string os_name = 4;
+  string os_version = 5;
+  string app_version = 6;
+  string sdk_version = 7;
+  string created_at = 8;
+}
+
+message IngestTelemetryBatchRequest {
+  string tenant_id = 1;
+  repeated TelemetryEventInput events = 2;
+}
+
+message TelemetryEventRejection {
+  uint32 index = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message IngestTelemetryBatchResponse {
+  uint32 accepted = 1;
+  repeated TelemetryEventRejection rejected = 2;
+}
+
 // --- Common responses ---
 
 message Empty {}
@@ -350,6 +379,9 @@ message Empty {}
 service Orch8Service {
   // Health
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Telemetry
+  rpc IngestTelemetryBatch(IngestTelemetryBatchRequest) returns (IngestTelemetryBatchResponse);
 
   // Sequences
   rpc CreateSequence(CreateSequenceRequest) returns (SequenceResponse);

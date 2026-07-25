@@ -522,6 +522,20 @@ const fn default_stale_threshold() -> u64 {
 pub struct ApiConfig {
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
+    /// PEM certificate chain presented by the gRPC server. TLS is enabled
+    /// when this, `grpc_tls_key_path`, and `grpc_tls_client_ca_path` are set.
+    #[serde(default)]
+    pub grpc_tls_cert_path: String,
+    /// PEM private key corresponding to `grpc_tls_cert_path`.
+    #[serde(default)]
+    pub grpc_tls_key_path: String,
+    /// PEM CA roots used to verify required gRPC client certificates.
+    #[serde(default)]
+    pub grpc_tls_client_ca_path: String,
+    /// JSON object mapping client-certificate SHA-256 fingerprints to
+    /// `{ "tenant_id": "...", "identity": "..." }` workload identities.
+    #[serde(default)]
+    pub grpc_mtls_identities: String,
     #[serde(default = "default_http_addr")]
     pub http_addr: String,
     /// Comma-separated allowed origins for CORS. Use `*` to allow all.
@@ -553,6 +567,10 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             grpc_addr: default_grpc_addr(),
+            grpc_tls_cert_path: String::new(),
+            grpc_tls_key_path: String::new(),
+            grpc_tls_client_ca_path: String::new(),
+            grpc_mtls_identities: String::new(),
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
             api_key: SecretString::default(),
