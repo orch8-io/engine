@@ -375,6 +375,7 @@ fn cfg_35_scheduler_config_max_steps_per_instance() {
 #[test]
 fn cfg_36_config_serde_with_all_sections() {
     let cfg = EngineConfig {
+        node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             backend: "sqlite".into(),
             url: SecretString::from("sqlite::memory:"),
@@ -489,6 +490,7 @@ fn cfg_43_config_validate_accepts_sqlite_backend() {
 #[test]
 fn cfg_44_secret_string_not_leaked_in_serialized_config() {
     let cfg = EngineConfig {
+        node: orch8_types::config::NodeConfig::default(),
         database: orch8_types::config::DatabaseConfig {
             url: SecretString::from("postgres://user:pass@host/db"),
             ..orch8_types::config::DatabaseConfig::default()

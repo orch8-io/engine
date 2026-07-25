@@ -257,6 +257,17 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Build the hardened continuity-gateway surface.
+///
+/// Only canonical versioned continuity routes are mounted: no general
+/// management API, legacy aliases, Swagger, webhooks, or mobile endpoints.
+/// Operational health is attached by `orch8-server` outside this router.
+pub fn build_continuity_gateway_router(state: AppState) -> Router {
+    Router::new()
+        .nest(API_V1_PREFIX, continuity::routes())
+        .with_state(state)
+}
+
 /// Add standards-based migration metadata to a legacy unversioned router.
 /// Exported so server-owned route groups (for example circuit breakers) use
 /// the exact same lifecycle contract as routes assembled by [`build_router`].

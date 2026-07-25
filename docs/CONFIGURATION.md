@@ -2,7 +2,14 @@
 
 Configuration is layered: `orch8.toml` is the base, environment variables override individual fields, and CLI flags (where supported) take final precedence.
 
-The `orch8.toml` file has four sections: `[database]`, `[engine]`, `[api]`, and `[logging]`.
+The `orch8.toml` file is organized into typed sections; omitted sections use
+documented defaults.
+
+## [node]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `role` | string | `"all_in_one"` | Process assembly: `all_in_one`, `control`, `executor`, `gateway`, or `edge`. See [Node Roles](NODE_ROLES.md). |
 
 ---
 
@@ -170,6 +177,7 @@ mount a config file for those settings.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORCH8_HTTP_ADDR` | `127.0.0.1:8080` | HTTP listen address |
+| `ORCH8_NODE_ROLE` | `all_in_one` | Fail-closed process assembly role; see [Node Roles](NODE_ROLES.md) |
 | `ORCH8_GRPC_ADDR` | `127.0.0.1:50051` | gRPC listen address |
 | `ORCH8_GRPC_TLS_CERT_PATH` | — | PEM gRPC server certificate chain path |
 | `ORCH8_GRPC_TLS_KEY_PATH` | — | PEM gRPC server private-key path |

@@ -22,7 +22,7 @@
 //!      mirrors the HTTP-side `enforce_tenant_access` (returns `NotFound`
 //!      on cross-tenant reads so existence doesn't leak).
 //!
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -139,6 +139,7 @@ pub struct GrpcAuthLayer {
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
     workload_identities: WorkloadIdentityRegistry,
+    allowed_rpc_paths: Option<Arc<HashSet<&'static str>>>,
 }
 
 impl GrpcAuthLayer {
@@ -152,12 +153,21 @@ impl GrpcAuthLayer {
             expected_digest,
             require_tenant,
             workload_identities: WorkloadIdentityRegistry::default(),
+            allowed_rpc_paths: None,
         }
     }
 
     #[must_use]
     pub fn with_workload_identities(mut self, identities: WorkloadIdentityRegistry) -> Self {
         self.workload_identities = identities;
+        self
+    }
+
+    /// Restrict this listener to an explicit set of fully-qualified tonic RPC
+    /// paths. Used by role-specific nodes to fail closed at the transport.
+    #[must_use]
+    pub fn with_allowed_rpc_paths(mut self, paths: &'static [&'static str]) -> Self {
+        self.allowed_rpc_paths = Some(Arc::new(paths.iter().copied().collect()));
         self
     }
 }
@@ -172,6 +182,7 @@ impl<S> Layer<S> for GrpcAuthLayer {
             expected_digest: self.expected_digest,
             require_tenant: self.require_tenant,
             workload_identities: self.workload_identities.clone(),
+            allowed_rpc_paths: self.allowed_rpc_paths.clone(),
         }
     }
 }
@@ -183,6 +194,7 @@ pub struct GrpcAuthService<S> {
     expected_digest: Option<[u8; 32]>,
     require_tenant: bool,
     workload_identities: WorkloadIdentityRegistry,
+    allowed_rpc_paths: Option<Arc<HashSet<&'static str>>>,
 }
 
 impl<S> Service<http::Request<tonic::body::Body>> for GrpcAuthService<S>
@@ -209,9 +221,18 @@ where
         let expected_digest = self.expected_digest;
         let require_tenant = self.require_tenant;
         let workload_identities = self.workload_identities.clone();
+        let allowed_rpc_paths = self.allowed_rpc_paths.clone();
 
         Box::pin(async move {
             let (mut parts, body) = request.into_parts();
+            if allowed_rpc_paths
+                .as_ref()
+                .is_some_and(|paths| !paths.contains(parts.uri.path()))
+            {
+                return Ok(
+                    Status::permission_denied("RPC is disabled for this node role").into_http(),
+                );
+            }
             if let Err(status) = authenticate_request_with_workloads(
                 &parts.headers,
                 &mut parts.extensions,
@@ -473,6 +494,36 @@ mod tests {
             (fingerprint): { "tenant_id": "acme", "identity": "" }
         });
         assert!(WorkloadIdentityRegistry::from_json(&missing_identity.to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn rpc_allowlist_rejects_methods_outside_role_surface() {
+        use tower::ServiceExt as _;
+
+        let storage = empty_storage().await;
+        let layer = GrpcAuthLayer::new(storage, None, false)
+            .with_allowed_rpc_paths(&["/orch8.Orch8Service/Health"]);
+        let inner = tower::service_fn(|_request| async {
+            Ok::<_, std::convert::Infallible>(http::Response::new(tonic::body::Body::empty()))
+        });
+        let response = layer
+            .layer(inner)
+            .oneshot(
+                http::Request::builder()
+                    .uri("/orch8.Orch8Service/CreateInstance")
+                    .body(tonic::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("grpc-status")
+                .and_then(|v| v.to_str().ok()),
+            Some("7")
+        );
     }
 
     #[tokio::test]

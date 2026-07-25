@@ -118,6 +118,8 @@ impl Drop for SecretString {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
     #[serde(default)]
+    pub node: NodeConfig,
+    #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
     pub engine: SchedulerConfig,
@@ -129,6 +131,25 @@ pub struct EngineConfig {
     pub artifacts: ArtifactConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+}
+
+/// Process assembly role. Each role starts only its declared listeners and
+/// background services; unknown values fail during deserialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRole {
+    #[default]
+    AllInOne,
+    Control,
+    Executor,
+    Gateway,
+    Edge,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeConfig {
+    #[serde(default)]
+    pub role: NodeRole,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -662,6 +683,35 @@ impl EngineConfig {
     /// Validate configuration values, returning all errors found.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
+
+        if self.node.role == NodeRole::Gateway {
+            if self.api.api_key.is_empty() {
+                errors.push("node.role=gateway requires api.api_key".into());
+            }
+            if !self.api.require_tenant_header {
+                errors.push("node.role=gateway requires api.require_tenant_header=true".into());
+            }
+            if self.engine.encryption_key.is_empty() {
+                errors.push("node.role=gateway requires engine.encryption_key".into());
+            }
+            if self.api.grpc_tls_cert_path.is_empty()
+                || self.api.grpc_tls_key_path.is_empty()
+                || self.api.grpc_tls_client_ca_path.is_empty()
+            {
+                errors.push("node.role=gateway requires gRPC mTLS certificate paths".into());
+            }
+            if self
+                .api
+                .http_addr
+                .parse::<std::net::SocketAddr>()
+                .map_or(true, |address| !address.ip().is_loopback())
+            {
+                errors.push(
+                    "node.role=gateway requires api.http_addr on loopback behind a TLS proxy"
+                        .into(),
+                );
+            }
+        }
 
         // Database
         match self.database.backend.as_str() {
@@ -1284,5 +1334,34 @@ mod tests {
             "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd"
         );
         assert_eq!(cfg.api.api_key.expose(), "secret-api-key");
+    }
+
+    #[test]
+    fn node_role_defaults_and_deserializes_fail_closed() {
+        assert_eq!(EngineConfig::default().node.role, NodeRole::AllInOne);
+        let gateway: EngineConfig = toml::from_str("[node]\nrole = \"gateway\"\n").unwrap();
+        assert_eq!(gateway.node.role, NodeRole::Gateway);
+        assert!(toml::from_str::<EngineConfig>("[node]\nrole = \"mystery\"\n").is_err());
+    }
+
+    #[test]
+    fn gateway_role_requires_hardened_identity_and_crypto() {
+        let mut cfg = EngineConfig::default();
+        cfg.node.role = NodeRole::Gateway;
+        let errors = cfg.validate().unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("api.api_key")));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("engine.encryption_key"))
+        );
+        assert!(errors.iter().any(|error| error.contains("gRPC mTLS")));
+
+        cfg.api.api_key = "root-key".into();
+        cfg.engine.encryption_key = "11".repeat(32).into();
+        cfg.api.grpc_tls_cert_path = "/run/tls/server.crt".into();
+        cfg.api.grpc_tls_key_path = "/run/tls/server.key".into();
+        cfg.api.grpc_tls_client_ca_path = "/run/tls/client-ca.crt".into();
+        assert!(cfg.validate().is_ok());
     }
 }
