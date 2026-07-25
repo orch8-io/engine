@@ -127,6 +127,11 @@ async fn main() -> anyhow::Result<()> {
         cb_registry.clone(),
         engine_ready.clone(),
     );
+    let push_outbox_handle = spawn_push_outbox_worker(
+        storage.clone(),
+        app_state.push_provider.clone(),
+        shutdown_token.clone(),
+    );
     let cors = build_cors_layer(&config.api.cors_origins);
     let require_tenant = config.api.require_tenant_header;
     let has_api_key = !config.api.api_key.is_empty();
@@ -245,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("HTTP server error")?;
 
-    drain_shutdown(engine_handle, grpc_handle, cb_registry).await;
+    drain_shutdown(engine_handle, grpc_handle, push_outbox_handle, cb_registry).await;
 
     // Flush any spans still buffered in the OTLP batch exporter. After the
     // engine has drained so the last step spans make it out. Best-effort: a
@@ -708,9 +713,33 @@ fn spawn_engine(
     })
 }
 
+fn spawn_push_outbox_worker(
+    storage: Arc<dyn StorageBackend>,
+    provider: Arc<dyn orch8_push::PushProvider>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let store: Arc<dyn orch8_push::PushOutboxStore> = storage;
+    let worker = orch8_push::PushOutboxWorker::new(store, provider);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(error) = worker.drain_once(chrono::Utc::now()).await {
+                        tracing::warn!(%error, "push outbox drain failed");
+                    }
+                }
+            }
+        }
+    })
+}
+
 async fn drain_shutdown(
     engine_handle: tokio::task::JoinHandle<()>,
     grpc_handle: tokio::task::JoinHandle<()>,
+    push_outbox_handle: tokio::task::JoinHandle<()>,
     cb_registry: Arc<CircuitBreakerRegistry>,
 ) {
     // Wait for engine and gRPC to finish draining (with timeout).
@@ -722,12 +751,16 @@ async fn drain_shutdown(
     // rehydrated against at boot.
     let drain_timeout = tokio::time::Duration::from_secs(30);
     if tokio::time::timeout(drain_timeout, async {
-        let (engine_result, grpc_result) = tokio::join!(engine_handle, grpc_handle);
+        let (engine_result, grpc_result, push_result) =
+            tokio::join!(engine_handle, grpc_handle, push_outbox_handle);
         if let Err(error) = engine_result {
             tracing::error!(%error, "engine task failed while draining shutdown");
         }
         if let Err(error) = grpc_result {
             tracing::error!(%error, "gRPC task failed while draining shutdown");
+        }
+        if let Err(error) = push_result {
+            tracing::error!(%error, "push outbox task failed while draining shutdown");
         }
     })
     .await

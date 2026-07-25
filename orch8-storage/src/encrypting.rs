@@ -2146,6 +2146,19 @@ passthrough_impl! {
         self.inner.create_mobile_command(&encrypted).await
     }
 
+    async fn create_mobile_command_with_wake(
+        &self,
+        command: &crate::MobileCommand,
+        tenant_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, StorageError> {
+        let mut encrypted = command.clone();
+        encrypted.payload = self.encrypt_string_field(&command.payload)?;
+        self.inner
+            .create_mobile_command_with_wake(&encrypted, tenant_id, created_at)
+            .await
+    }
+
     async fn fetch_pending_commands(
         &self,
         device_id: &str,
@@ -2161,6 +2174,52 @@ passthrough_impl! {
     async fn ack_mobile_commands(&self, device_id: &str, command_ids: &[String]) -> Result<u64, StorageError>;
     async fn cleanup_acked_commands(&self, older_than_secs: i64) -> Result<u64, StorageError>;
     async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError>;
+    }
+}
+
+#[async_trait::async_trait]
+impl orch8_push::PushOutboxStore for EncryptingStorage {
+    async fn enqueue_wake(
+        &self,
+        tenant_id: &str,
+        device_id: &str,
+        command_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, String> {
+        self.inner
+            .enqueue_wake(tenant_id, device_id, command_id, created_at)
+            .await
+    }
+
+    async fn claim_due_wakes(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<Vec<orch8_push::ClaimedWake>, String> {
+        self.inner.claim_due_wakes(now, lease_until, limit).await
+    }
+
+    async fn record_wake_outcome(
+        &self,
+        wake: &orch8_push::ClaimedWake,
+        outcome: &orch8_push::WakeAttemptOutcome,
+        recorded_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), String> {
+        self.inner
+            .record_wake_outcome(wake, outcome, recorded_at)
+            .await
+    }
+
+    async fn record_command_acks(
+        &self,
+        device_id: &str,
+        command_ids: &[String],
+        acked_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, String> {
+        self.inner
+            .record_command_acks(device_id, command_ids, acked_at)
+            .await
     }
 }
 

@@ -3228,6 +3228,7 @@ dependencies = [
  "futures",
  "moka",
  "object_store",
+ "orch8-push",
  "orch8-types",
  "rand 0.9.5",
  "serde",

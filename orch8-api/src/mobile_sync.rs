@@ -251,6 +251,10 @@ async fn handle_sync(
             .ack_mobile_commands(&req.device_id, &req.command_acks)
             .await
             .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
+        storage
+            .record_command_acks(&req.device_id, &req.command_acks, chrono::Utc::now())
+            .await
+            .map_err(|error| ApiError::Internal(format!("push wake acknowledgements: {error}")))?;
     }
 
     let pending = storage
@@ -565,29 +569,9 @@ async fn resolve_approval(
 
     state
         .storage
-        .create_mobile_command(&command)
+        .create_mobile_command_with_wake(&command, &approval.tenant_id, chrono::Utc::now())
         .await
         .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
-
-    // Fire-and-forget silent push
-    let device = state
-        .storage
-        .get_mobile_device(&approval.device_id)
-        .await
-        .ok()
-        .flatten();
-
-    if let Some(device) = device
-        && let Some(token) = device.push_token
-    {
-        let push = state.push_provider.clone();
-        let platform = device.platform.clone();
-        tokio::spawn(async move {
-            if let Err(e) = push.send_silent_push(&token, &platform).await {
-                warn!(device_id = %device.device_id, error = %e, "push notification failed");
-            }
-        });
-    }
 
     debug!(approval_id = %id, device_id = %approval.device_id, "approval resolved");
     Ok(StatusCode::OK)
@@ -657,19 +641,17 @@ async fn create_command(
     // `complete_step`) into another tenant's device queue. Same fall-open
     // convention as `resolve_approval`: an empty tenant (insecure mode /
     // root key without X-Tenant-Id) skips the scope check.
-    if !tenant_id.is_empty() {
-        let device = state
-            .storage
-            .get_mobile_device(&req.device_id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?;
-        let owned = device.is_some_and(|d| d.tenant_id == tenant_id);
-        if !owned {
-            return Err(ApiError::NotFound(format!(
-                "device {} not found",
-                req.device_id
-            )));
-        }
+    let device = state
+        .storage
+        .get_mobile_device(&req.device_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "mobile_devices"))?
+        .ok_or_else(|| ApiError::NotFound(format!("device {} not found", req.device_id)))?;
+    if !tenant_id.is_empty() && device.tenant_id != tenant_id {
+        return Err(ApiError::NotFound(format!(
+            "device {} not found",
+            req.device_id
+        )));
     }
 
     let command = MobileCommand {
@@ -683,29 +665,9 @@ async fn create_command(
 
     state
         .storage
-        .create_mobile_command(&command)
+        .create_mobile_command_with_wake(&command, &device.tenant_id, chrono::Utc::now())
         .await
         .map_err(|e| ApiError::from_storage(e, "mobile_commands"))?;
-
-    // Fire-and-forget silent push
-    let device = state
-        .storage
-        .get_mobile_device(&req.device_id)
-        .await
-        .ok()
-        .flatten();
-
-    if let Some(device) = device
-        && let Some(token) = device.push_token
-    {
-        let push = state.push_provider.clone();
-        let platform = device.platform.clone();
-        tokio::spawn(async move {
-            if let Err(e) = push.send_silent_push(&token, &platform).await {
-                warn!(device_id = %device.device_id, error = %e, "push notification failed");
-            }
-        });
-    }
 
     Ok(StatusCode::CREATED)
 }

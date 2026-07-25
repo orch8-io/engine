@@ -527,6 +527,37 @@ impl crate::MobileSyncStore for PostgresStorage {
         Ok(())
     }
 
+    async fn create_mobile_command_with_wake(
+        &self,
+        command: &crate::MobileCommand,
+        tenant_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, StorageError> {
+        let wake_id = uuid::Uuid::new_v4();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO mobile_commands (id, device_id, command_type, payload, created_at) VALUES ($1, $2, $3, $4, now())",
+        )
+        .bind(&command.id)
+        .bind(&command.device_id)
+        .bind(&command.command_type)
+        .bind(&command.payload)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO push_wake_outbox (id,tenant_id,device_id,command_id,created_at) VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(wake_id)
+        .bind(tenant_id)
+        .bind(&command.device_id)
+        .bind(&command.id)
+        .bind(created_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(wake_id)
+    }
+
     async fn fetch_pending_commands(
         &self,
         device_id: &str,

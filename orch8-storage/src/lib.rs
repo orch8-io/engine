@@ -2605,6 +2605,14 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 
     async fn create_mobile_command(&self, command: &MobileCommand) -> Result<(), StorageError>;
 
+    /// Atomically persist a mobile command and its provider wake outbox row.
+    async fn create_mobile_command_with_wake(
+        &self,
+        command: &MobileCommand,
+        tenant_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, StorageError>;
+
     async fn fetch_pending_commands(
         &self,
         device_id: &str,
@@ -3195,6 +3203,7 @@ pub trait StorageBackend:
     + InvariantStore
     + EvaluationStore
     + AttentionStore
+    + orch8_push::PushOutboxStore
     + Send
     + Sync
     + 'static
@@ -3219,6 +3228,7 @@ impl<T> StorageBackend for T where
         + InvariantStore
         + EvaluationStore
         + AttentionStore
+        + orch8_push::PushOutboxStore
         + Send
         + Sync
         + 'static

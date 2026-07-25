@@ -20,6 +20,11 @@ pub enum PushError {
 
 #[async_trait]
 pub trait PushProvider: Send + Sync + 'static {
+    /// Whether this provider can contact a real push service.
+    fn is_configured(&self) -> bool {
+        true
+    }
+
     async fn send_silent_push(&self, token: &str, platform: &str) -> Result<(), PushError>;
 }
 
@@ -27,6 +32,10 @@ pub struct NoopPushProvider;
 
 #[async_trait]
 impl PushProvider for NoopPushProvider {
+    fn is_configured(&self) -> bool {
+        false
+    }
+
     async fn send_silent_push(&self, _token: &str, _platform: &str) -> Result<(), PushError> {
         tracing::debug!("noop push provider: silent push not sent");
         Ok(())

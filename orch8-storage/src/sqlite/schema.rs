@@ -472,6 +472,25 @@ CREATE TABLE IF NOT EXISTS mobile_commands (
 CREATE INDEX IF NOT EXISTS idx_mobile_commands_device_pending
     ON mobile_commands(device_id, acked_at);
 
+CREATE TABLE IF NOT EXISTS push_wake_outbox (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    command_id TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    next_attempt_at TEXT,
+    lease_until TEXT,
+    last_error TEXT,
+    terminal_reason TEXT,
+    delivered_at TEXT,
+    command_acked_at TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (tenant_id, device_id, command_id)
+);
+CREATE INDEX IF NOT EXISTS idx_push_wake_due
+    ON push_wake_outbox(next_attempt_at) WHERE status = 'pending';
+
 -- End mobile sync tables ─────────────────────────────────────────────────────
 
 -- Rollback policy tables (server-side, also in SQLite for testing) ────────────

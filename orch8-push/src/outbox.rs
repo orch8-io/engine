@@ -22,6 +22,8 @@ pub struct ClaimedWake {
     pub platform: String,
     /// Attempts completed before this lease.
     pub attempts: u32,
+    /// Fencing value used when persisting this claimant's outcome.
+    pub lease_until: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,16 @@ pub enum WakeAttemptOutcome {
 /// Persistence boundary for a multi-node-safe push outbox.
 #[async_trait]
 pub trait PushOutboxStore: Send + Sync + 'static {
+    /// Persist a wake correlated to a durable mobile command. Re-enqueueing
+    /// the same tenant/device/command tuple must be idempotent.
+    async fn enqueue_wake(
+        &self,
+        tenant_id: &str,
+        device_id: &str,
+        command_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, String>;
+
     /// Atomically lease due rows. Implementations must prevent concurrent
     /// workers from receiving the same wake until `lease_until` expires.
     async fn claim_due_wakes(
@@ -66,6 +78,14 @@ pub trait PushOutboxStore: Send + Sync + 'static {
         outcome: &WakeAttemptOutcome,
         recorded_at: DateTime<Utc>,
     ) -> Result<(), String>;
+
+    /// Correlate device acknowledgements with all matching wake records.
+    async fn record_command_acks(
+        &self,
+        device_id: &str,
+        command_ids: &[String],
+        acked_at: DateTime<Utc>,
+    ) -> Result<u64, String>;
 }
 
 /// Bounded outbox worker. Safe to run on every server node when the store's
@@ -99,6 +119,9 @@ impl PushOutboxWorker {
 
     /// Claim and deliver one bounded batch, returning the number attempted.
     pub async fn drain_once(&self, now: DateTime<Utc>) -> Result<usize, String> {
+        if !self.provider.is_configured() {
+            return Ok(0);
+        }
         let wakes = self
             .store
             .claim_due_wakes(now, now + self.lease_duration, self.batch_size)
@@ -180,6 +203,16 @@ mod tests {
 
     #[async_trait]
     impl PushOutboxStore for RecordingStore {
+        async fn enqueue_wake(
+            &self,
+            _tenant_id: &str,
+            _device_id: &str,
+            _command_id: &str,
+            _created_at: DateTime<Utc>,
+        ) -> Result<Uuid, String> {
+            Ok(Uuid::nil())
+        }
+
         async fn claim_due_wakes(
             &self,
             _now: DateTime<Utc>,
@@ -202,6 +235,15 @@ mod tests {
             self.outcomes.lock().unwrap().push(outcome.clone());
             Ok(())
         }
+
+        async fn record_command_acks(
+            &self,
+            _device_id: &str,
+            command_ids: &[String],
+            _acked_at: DateTime<Utc>,
+        ) -> Result<u64, String> {
+            u64::try_from(command_ids.len()).map_err(|error| error.to_string())
+        }
     }
 
     fn wake(attempts: u32) -> ClaimedWake {
@@ -213,6 +255,7 @@ mod tests {
             push_token: "token".into(),
             platform: "ios".into(),
             attempts,
+            lease_until: DateTime::from_timestamp(1_800_000_030, 0).unwrap(),
         }
     }
 
@@ -262,5 +305,18 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_provider_leaves_outbox_unclaimed() {
+        let store = Arc::new(RecordingStore {
+            wakes: Mutex::new(vec![wake(0)]),
+            ..Default::default()
+        });
+        let worker = PushOutboxWorker::new(store.clone(), Arc::new(crate::NoopPushProvider));
+
+        assert_eq!(worker.drain_once(Utc::now()).await.unwrap(), 0);
+        assert_eq!(store.wakes.lock().unwrap().len(), 1);
+        assert!(store.outcomes.lock().unwrap().is_empty());
     }
 }

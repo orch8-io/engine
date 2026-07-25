@@ -21,6 +21,7 @@ mod mobile_sync;
 mod outputs;
 mod plugins;
 mod pools;
+mod push_outbox;
 mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;

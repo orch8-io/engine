@@ -46,6 +46,7 @@ mod mobile_sync;
 mod outputs;
 mod plugins;
 mod pools;
+mod push_outbox;
 mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
@@ -2704,6 +2705,15 @@ impl crate::MobileSyncStore for SqliteStorage {
         command: &crate::MobileCommand,
     ) -> Result<(), StorageError> {
         mobile_sync::create_mobile_command(self, command).await
+    }
+
+    async fn create_mobile_command_with_wake(
+        &self,
+        command: &crate::MobileCommand,
+        tenant_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<uuid::Uuid, StorageError> {
+        mobile_sync::create_mobile_command_with_wake(self, command, tenant_id, created_at).await
     }
 
     async fn fetch_pending_commands(

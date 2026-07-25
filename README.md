@@ -42,7 +42,7 @@ Portable Continuity takes that further: a running execution can hand off between
 
 **AI Agent Support** — Unified `llm_call` handler covering all major providers (OpenAI, Anthropic, Gemini + 7 more), dynamic step injection (self_modify), human-in-the-loop with timeout/escalation, SSE streaming, query-instance handler for cross-workflow coordination
 
-**Mobile** — Native iOS and Android SDK via Rust + UniFFI, offline-first execution, battery-aware sync intervals, server-side visibility into mobile workflows, human-in-the-loop approvals via silent push notifications (APNs/FCM), single bidirectional sync endpoint
+**Mobile** — Native iOS and Android SDK via Rust + UniFFI, offline-first execution, battery-aware sync intervals, server-side visibility into mobile workflows, human-in-the-loop approvals via a [durable APNs/FCM wake outbox](docs/PUSH_DELIVERY.md), single bidirectional sync endpoint
 
 **Portable Continuity** — cryptographically-signed capsule handoff lets a running execution move between server, device, and back mid-flight with exactly-once ownership transfer, tamper-evident provenance chains, effect-receipt tracking (at-most-once side effects across retries and handoffs), capability-aware placement routing, live migration between sequence versions with rollback, comparative what-if simulation from a checkpoint, and fail-closed residency/federation controls for regulated data. See [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) and [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md).
 
