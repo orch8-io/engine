@@ -30,6 +30,7 @@ use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::EngineConfig;
 use orch8_types::config::NodeRole;
 
+mod managed_control;
 mod telemetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +253,26 @@ async fn main() -> anyhow::Result<()> {
         .context("config loader panicked")??;
     let assembly = NodeAssembly::for_role(config.node.role);
     automatic_startup_preflight(&config, assembly)?;
+    let managed_control = if config.node.managed_control_endpoint.is_empty() {
+        None
+    } else {
+        let runtime_id = uuid::Uuid::parse_str(&config.node.managed_control_runtime_id)
+            .map(orch8_types::continuity::RuntimeId::from_uuid)
+            .context("invalid managed control runtime id")?;
+        Some(managed_control::ManagedControlConfig {
+            endpoint: config.node.managed_control_endpoint.clone(),
+            api_key: config.node.managed_control_api_key.clone(),
+            tenant_id: config.node.managed_control_tenant_id.clone(),
+            worker_id: config.node.managed_control_worker_id.clone(),
+            runtime_id,
+            kind: if config.node.role == NodeRole::Edge {
+                orch8_types::continuity::RuntimeKind::Edge
+            } else {
+                orch8_types::continuity::RuntimeKind::Server
+            },
+        })
+    };
+    config.node.managed_control_api_key = orch8_types::SecretString::default();
 
     // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
     // [telemetry] otlp_endpoint is set) and logging.
@@ -273,6 +294,8 @@ async fn main() -> anyhow::Result<()> {
     // Graceful shutdown token. Shared with HTTP, gRPC, engine, and any long-lived
     // request handlers (SSE streams) via `AppState`.
     let shutdown_token = CancellationToken::new();
+    let managed_control_handle =
+        managed_control.map(|managed| managed_control::spawn(managed, shutdown_token.clone()));
 
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
@@ -431,7 +454,14 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("HTTP server error")?;
 
-    drain_shutdown(engine_handle, grpc_handle, push_outbox_handle, cb_registry).await;
+    drain_shutdown(
+        engine_handle,
+        grpc_handle,
+        push_outbox_handle,
+        managed_control_handle,
+        cb_registry,
+    )
+    .await;
 
     // Flush any spans still buffered in the OTLP batch exporter. After the
     // engine has drained so the last step spans make it out. Best-effort: a
@@ -973,6 +1003,7 @@ async fn drain_shutdown(
     engine_handle: Option<tokio::task::JoinHandle<()>>,
     grpc_handle: Option<tokio::task::JoinHandle<()>>,
     push_outbox_handle: Option<tokio::task::JoinHandle<()>>,
+    managed_control_handle: Option<tokio::task::JoinHandle<()>>,
     cb_registry: Arc<CircuitBreakerRegistry>,
 ) {
     // Wait for engine and gRPC to finish draining (with timeout).
@@ -991,15 +1022,17 @@ async fn drain_shutdown(
                 Ok(())
             }
         };
-        let (engine_result, grpc_result, push_result) = tokio::join!(
+        let (engine_result, grpc_result, push_result, managed_result) = tokio::join!(
             wait(engine_handle),
             wait(grpc_handle),
-            wait(push_outbox_handle)
+            wait(push_outbox_handle),
+            wait(managed_control_handle)
         );
         for (service, result) in [
             ("engine", engine_result),
             ("gRPC", grpc_result),
             ("push outbox", push_result),
+            ("managed control", managed_result),
         ] {
             if let Err(error) = result {
                 tracing::error!(%error, %service, "service task failed while draining shutdown");
@@ -1129,6 +1162,21 @@ fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_NODE_ROLE") {
         config.node.role = serde_json::from_value(serde_json::Value::String(val))
             .context("ORCH8_NODE_ROLE must be all_in_one, control, executor, gateway, or edge")?;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_ENDPOINT") {
+        config.node.managed_control_endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_API_KEY") {
+        config.node.managed_control_api_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_TENANT_ID") {
+        config.node.managed_control_tenant_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_WORKER_ID") {
+        config.node.managed_control_worker_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_RUNTIME_ID") {
+        config.node.managed_control_runtime_id = val;
     }
     if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CERT_PATH") {
         config.api.grpc_tls_cert_path = val;

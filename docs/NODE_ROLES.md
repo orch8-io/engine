@@ -53,3 +53,34 @@ encryption_key = "64-hex-characters"
 
 `ORCH8_NODE_ROLE` overrides the TOML role and accepts exactly `all_in_one`,
 `control`, `executor`, `gateway`, or `edge`.
+
+## Managed-cloud outbound control
+
+Executor and edge roles can establish a control-only outbound gRPC session to
+a managed control plane. The endpoint must use HTTPS and requires a dedicated
+API key, tenant, stable worker ID, and UUID runtime ID:
+
+```toml
+[node]
+role = "edge"
+managed_control_endpoint = "https://control.example.com"
+managed_control_api_key = "replace-with-dedicated-key"
+managed_control_tenant_id = "acme"
+managed_control_worker_id = "edge-factory-1"
+managed_control_runtime_id = "018f5f2d-58ef-7a61-9b4f-21f77aa1f005"
+```
+
+The session authenticates outbound, advertises only coarse runtime identity
+and connectivity with empty plugin, credential, region, hardware, and signing
+key lists, then refreshes a 45-second lease. It never sends task demand and
+therefore never exports workflow contexts, params, outputs, artifacts, logs,
+or credential bindings. `ping` and `reload` commands are acknowledged; a
+`drain` command triggers local graceful shutdown. Placement commands remain
+pending because this control-only channel will not accept workload payloads.
+
+Disconnects retry with bounded 1–30 second exponential backoff. The dedicated
+managed API key is removed from the long-lived engine config after the client
+task receives it. Environment equivalents are
+`ORCH8_MANAGED_CONTROL_ENDPOINT`, `ORCH8_MANAGED_CONTROL_API_KEY`,
+`ORCH8_MANAGED_CONTROL_TENANT_ID`, `ORCH8_MANAGED_CONTROL_WORKER_ID`, and
+`ORCH8_MANAGED_CONTROL_RUNTIME_ID`.

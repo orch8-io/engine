@@ -150,6 +150,18 @@ pub enum NodeRole {
 pub struct NodeConfig {
     #[serde(default)]
     pub role: NodeRole,
+    /// Optional outbound managed-cloud gRPC endpoint. Control-only: local
+    /// nodes never request workload payloads on this session.
+    #[serde(default)]
+    pub managed_control_endpoint: String,
+    #[serde(default)]
+    pub managed_control_api_key: SecretString,
+    #[serde(default)]
+    pub managed_control_tenant_id: String,
+    #[serde(default)]
+    pub managed_control_worker_id: String,
+    #[serde(default)]
+    pub managed_control_runtime_id: String,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -681,6 +693,7 @@ fn default_otlp_protocol() -> String {
 
 impl EngineConfig {
     /// Validate configuration values, returning all errors found.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
@@ -708,6 +721,30 @@ impl EngineConfig {
             {
                 errors.push(
                     "node.role=gateway requires api.http_addr on loopback behind a TLS proxy"
+                        .into(),
+                );
+            }
+        }
+        if !self.node.managed_control_endpoint.is_empty() {
+            if !matches!(self.node.role, NodeRole::Executor | NodeRole::Edge) {
+                errors.push(
+                    "node.managed_control_endpoint requires node.role=executor or edge".into(),
+                );
+            }
+            if !self.node.managed_control_endpoint.starts_with("https://") {
+                errors.push("node.managed_control_endpoint must use HTTPS".into());
+            }
+            if self.node.managed_control_api_key.is_empty()
+                || self.node.managed_control_tenant_id.trim().is_empty()
+                || self.node.managed_control_worker_id.trim().is_empty()
+                || self
+                    .node
+                    .managed_control_runtime_id
+                    .parse::<uuid::Uuid>()
+                    .is_err()
+            {
+                errors.push(
+                    "managed control requires API key, tenant, worker id, and UUID runtime id"
                         .into(),
                 );
             }
@@ -1368,6 +1405,27 @@ mod tests {
         cfg.api.grpc_tls_cert_path = "/run/tls/server.crt".into();
         cfg.api.grpc_tls_key_path = "/run/tls/server.key".into();
         cfg.api.grpc_tls_client_ca_path = "/run/tls/client-ca.crt".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn managed_control_is_https_authenticated_and_role_scoped() {
+        let mut cfg = EngineConfig::default();
+        cfg.node.managed_control_endpoint = "http://control.example.com".into();
+        let errors = cfg.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("executor or edge"))
+        );
+        assert!(errors.iter().any(|error| error.contains("HTTPS")));
+
+        cfg.node.role = NodeRole::Edge;
+        cfg.node.managed_control_endpoint = "https://control.example.com".into();
+        cfg.node.managed_control_api_key = "managed-secret".into();
+        cfg.node.managed_control_tenant_id = "acme".into();
+        cfg.node.managed_control_worker_id = "edge-1".into();
+        cfg.node.managed_control_runtime_id = uuid::Uuid::now_v7().to_string();
         assert!(cfg.validate().is_ok());
     }
 }
