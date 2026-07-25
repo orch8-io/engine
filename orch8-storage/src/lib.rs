@@ -6,6 +6,7 @@ pub mod encrypting;
 pub mod externalizing;
 pub mod postgres;
 pub mod sqlite;
+pub mod tenant_partition;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -45,7 +46,7 @@ use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::WorkerTask;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 77;
+pub const STORAGE_SCHEMA_VERSION: u32 = 78;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]

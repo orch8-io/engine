@@ -1066,9 +1066,20 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
     tenant_id TEXT PRIMARY KEY,
     locked_at TEXT NOT NULL
 );
+
+-- Authoritative tenant-to-backend placement. There is no implicit/default
+-- partition; callers fail closed when a row or registered backend is absent.
+CREATE TABLE IF NOT EXISTS tenant_storage_placements (
+    tenant_id TEXT PRIMARY KEY,
+    backend_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch > 0),
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
+    ON tenant_storage_placements(backend_id);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 38;
+pub(super) const SCHEMA_VERSION: i64 = 39;
