@@ -25,6 +25,10 @@ pub struct RegistryIndex {
     /// Package name to versions, ordered oldest to newest by publication.
     pub packages: BTreeMap<String, Vec<RegistryVersion>>,
     pub ledger_head: Option<String>,
+    /// `ETag` observed when this index was loaded. It is transport metadata and
+    /// is intentionally not serialized into the signed discovery document.
+    #[serde(skip)]
+    pub source_etag: Option<String>,
 }
 
 impl RegistryIndex {
@@ -36,7 +40,15 @@ impl RegistryIndex {
             namespace: namespace.into(),
             packages: BTreeMap::new(),
             ledger_head: None,
+            source_etag: None,
         }
+    }
+
+    /// Attach the CDN `ETag` returned alongside a loaded index.
+    #[must_use]
+    pub fn with_source_etag(mut self, etag: impl Into<String>) -> Self {
+        self.source_etag = Some(etag.into());
+        self
     }
 
     /// Cross-check every discovery record against the signed ledger.
@@ -257,36 +269,7 @@ impl PackageRegistryPublisher {
         signing_key: &SigningKey,
         published_at: DateTime<Utc>,
     ) -> Result<RegistryVersion, RegistryError> {
-        verify_package(package)?;
-        self.validate_state(index, ledger)?;
-        let expected_prefix = format!("{}/", self.namespace);
-        if !package.archive.manifest.name.starts_with(&expected_prefix) {
-            return Err(RegistryError::InvalidConfig(format!(
-                "package {} is outside publisher namespace {}",
-                package.archive.manifest.name, self.namespace
-            )));
-        }
-        let signing_public_key = BASE64.encode(signing_key.verifying_key().to_bytes());
-        if signing_public_key != package.public_key {
-            return Err(RegistryError::InvalidConfig(
-                "ledger signing key must match package signing key".into(),
-            ));
-        }
-
-        let versions = index
-            .packages
-            .get(&package.archive.manifest.name)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        if versions
-            .iter()
-            .any(|version| version.version == package.archive.manifest.version)
-        {
-            return Err(RegistryError::DuplicateVersion {
-                package: package.archive.manifest.name.clone(),
-                version: package.archive.manifest.version.clone(),
-            });
-        }
+        let package_leaf = self.validate_publication(package, index, ledger, signing_key)?;
 
         let sequence = u64::try_from(ledger.entries.len())
             .map_err(|_| RegistryError::InvalidLedger("ledger is too large".into()))?;
@@ -309,13 +292,8 @@ impl PackageRegistryPublisher {
         entry.entry_hash = hex::encode(Sha256::digest(canonical.as_bytes()));
         entry.signature = BASE64.encode(signing_key.sign(entry.entry_hash.as_bytes()).to_bytes());
 
-        let package_leaf = package
-            .archive
-            .manifest
-            .name
-            .strip_prefix(&expected_prefix)
-            .ok_or_else(|| RegistryError::InvalidConfig("package namespace changed".into()))?;
         let root = format!("{}/registry/{}", self.tenant_id, self.namespace);
+        let index_path = format!("{root}/index.json");
         let package_path = format!(
             "{root}/packages/{package_leaf}/{}/{}.orch8pkg",
             package.archive.manifest.version, package.content_hash
@@ -341,6 +319,7 @@ impl PackageRegistryPublisher {
             .or_default()
             .push(version.clone());
         next_index.ledger_head = Some(entry.entry_hash.clone());
+        next_index.source_etag = None;
         let mut next_ledger = ledger.clone();
         next_ledger.entries.push(entry.clone());
 
@@ -349,17 +328,72 @@ impl PackageRegistryPublisher {
         self.upload_json(&entry_path, &entry, "immutable, max-age=31536000")
             .await?;
         self.upload_json(
-            &format!("{root}/transparency/ledger.json"),
+            &format!("{root}/transparency/ledgers/{}.json", entry.entry_hash),
             &next_ledger,
-            "max-age=60",
+            "immutable, max-age=31536000",
         )
         .await?;
-        self.upload_json(&format!("{root}/index.json"), &next_index, "max-age=60")
+        let index_json = canonical_json(&next_index)
+            .map_err(|error| RegistryError::Serialization(error.to_string()))?;
+        let new_etag = self
+            .cdn
+            .upload_if_match(
+                &index_path,
+                index_json.into_bytes(),
+                Some("application/json"),
+                Some("max-age=60"),
+                index.source_etag.as_deref(),
+            )
             .await?;
+        next_index.source_etag = Some(new_etag);
 
         *index = next_index;
         *ledger = next_ledger;
         Ok(version)
+    }
+
+    fn validate_publication<'a>(
+        &self,
+        package: &'a SignedPackage,
+        index: &RegistryIndex,
+        ledger: &TransparencyLedger,
+        signing_key: &SigningKey,
+    ) -> Result<&'a str, RegistryError> {
+        verify_package(package)?;
+        self.validate_state(index, ledger)?;
+        let expected_prefix = format!("{}/", self.namespace);
+        let package_leaf = package
+            .archive
+            .manifest
+            .name
+            .strip_prefix(&expected_prefix)
+            .ok_or_else(|| {
+                RegistryError::InvalidConfig(format!(
+                    "package {} is outside publisher namespace {}",
+                    package.archive.manifest.name, self.namespace
+                ))
+            })?;
+        let signing_public_key = BASE64.encode(signing_key.verifying_key().to_bytes());
+        if signing_public_key != package.public_key {
+            return Err(RegistryError::InvalidConfig(
+                "ledger signing key must match package signing key".into(),
+            ));
+        }
+        if index
+            .packages
+            .get(&package.archive.manifest.name)
+            .is_some_and(|versions| {
+                versions
+                    .iter()
+                    .any(|version| version.version == package.archive.manifest.version)
+            })
+        {
+            return Err(RegistryError::DuplicateVersion {
+                package: package.archive.manifest.name.clone(),
+                version: package.archive.manifest.version.clone(),
+            });
+        }
+        Ok(package_leaf)
     }
 
     fn validate_state(
@@ -550,5 +584,45 @@ mod tests {
         ledger.entries[0].content_hash = "tampered".into();
         assert!(ledger.verify().is_err());
         assert!(index.verify_against(&ledger).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_competing_writer_with_a_stale_head() {
+        let cdn = Arc::new(MemoryCdnBackend::new());
+        let first_publisher =
+            PackageRegistryPublisher::new(Box::new(Arc::clone(&cdn)), "tenant-a", "acme").unwrap();
+        let second_publisher =
+            PackageRegistryPublisher::new(Box::new(cdn), "tenant-a", "acme").unwrap();
+        let key = SigningKey::generate(&mut OsRng);
+        let mut first_index = RegistryIndex::new("tenant-a", "acme");
+        let mut first_ledger = TransparencyLedger::default();
+        let mut stale_index = first_index.clone();
+        let mut stale_ledger = first_ledger.clone();
+        let timestamp = Utc.with_ymd_and_hms(2026, 7, 25, 1, 0, 0).unwrap();
+
+        first_publisher
+            .publish(
+                &package(&key, "1.0.0"),
+                &mut first_index,
+                &mut first_ledger,
+                &key,
+                timestamp,
+            )
+            .await
+            .unwrap();
+        let error = second_publisher
+            .publish(
+                &package(&key, "1.1.0"),
+                &mut stale_index,
+                &mut stale_ledger,
+                &key,
+                timestamp,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, RegistryError::Cdn(CdnError::Conflict)));
+        assert!(stale_index.packages.is_empty());
+        assert!(stale_ledger.entries.is_empty());
     }
 }

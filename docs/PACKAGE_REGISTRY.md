@@ -13,13 +13,13 @@ tenant-a/registry/acme/
 ├── index.json
 ├── packages/checkout/1.2.0/<content-hash>.orch8pkg
 └── transparency/
-    ├── ledger.json
-    └── entries/00000000000000000042-<entry-hash>.json
+    ├── entries/00000000000000000042-<entry-hash>.json
+    └── ledgers/<entry-hash>.json
 ```
 
-The content-addressed package and numbered ledger entry are immutable and may
-be cached for a year. The discovery index and complete ledger use a 60-second
-cache window.
+The content-addressed package, numbered ledger entry, and hash-addressed ledger
+snapshot are immutable and may be cached for a year. Only the discovery index
+uses a 60-second cache window.
 
 The tenant and publisher namespace are validated path segments. A publisher
 for namespace `acme` rejects packages outside `acme/*`, and an index supplied
@@ -37,8 +37,15 @@ Call `PackageRegistryPublisher::publish` with:
 The publisher verifies the package, the entire existing hash chain, the
 index-to-ledger correspondence, the signing-key identity, and version
 uniqueness. It builds the next state on clones, uploads immutable objects
-first, then publishes the ledger and index heads. The caller's state is only
-advanced after every write succeeds, making a failed attempt safe to retry.
+first, then atomically advances the index with an ETag precondition. The
+caller's state is only advanced after every write succeeds, making a failed
+attempt safe to retry. Concurrent publishers cannot silently overwrite one
+another: one wins the index compare-and-swap and the other receives
+`CdnError::Conflict`, reloads the new head, and retries.
+
+When loading an existing `index.json`, retain the response ETag with
+`RegistryIndex::with_source_etag`. A freshly created index intentionally has no
+source ETag and uses `If-None-Match: *` for its first publication.
 
 ## Consumer verification
 

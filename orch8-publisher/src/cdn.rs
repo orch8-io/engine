@@ -81,6 +81,20 @@ pub trait CdnBackend: Send + Sync {
 
     /// Get the current `ETag` for the object at `path`.
     async fn get_etag(&self, path: &str) -> Result<Option<String>, CdnError>;
+
+    /// Atomically upload only when the object's current `ETag` matches.
+    /// `None` means the object must not exist.
+    async fn upload_if_match(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        cache_control: Option<&str>,
+        expected_etag: Option<&str>,
+    ) -> Result<String, CdnError> {
+        let _ = (path, bytes, content_type, cache_control, expected_etag);
+        Err(CdnError::ConditionalWritesUnsupported)
+    }
 }
 
 #[async_trait::async_trait]
@@ -104,6 +118,19 @@ impl<T: CdnBackend + ?Sized> CdnBackend for std::sync::Arc<T> {
     async fn get_etag(&self, path: &str) -> Result<Option<String>, CdnError> {
         (**self).get_etag(path).await
     }
+
+    async fn upload_if_match(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        cache_control: Option<&str>,
+        expected_etag: Option<&str>,
+    ) -> Result<String, CdnError> {
+        (**self)
+            .upload_if_match(path, bytes, content_type, cache_control, expected_etag)
+            .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -118,6 +145,8 @@ pub enum CdnError {
     Signing(String),
     #[error("optimistic concurrency conflict")]
     Conflict,
+    #[error("CDN backend does not support atomic conditional writes")]
+    ConditionalWritesUnsupported,
 }
 
 /// Total attempts for a single CDN operation (1 initial + 2 retries).
@@ -374,6 +403,63 @@ impl CdnBackend for S3CdnBackend {
             )))
         }
     }
+
+    async fn upload_if_match(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        cache_control: Option<&str>,
+        expected_etag: Option<&str>,
+    ) -> Result<String, CdnError> {
+        let url = reqwest::Url::parse(&self.url(path))
+            .map_err(|error| CdnError::Upload(error.to_string()))?;
+        let payload_hash = hex::encode(Sha256::digest(&bytes));
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(value) = content_type {
+            headers.insert(
+                "content-type",
+                HeaderValue::from_str(value)
+                    .map_err(|error| CdnError::Upload(error.to_string()))?,
+            );
+        }
+        if let Some(value) = cache_control {
+            headers.insert(
+                "cache-control",
+                HeaderValue::from_str(value)
+                    .map_err(|error| CdnError::Upload(error.to_string()))?,
+            );
+        }
+        let (header, value) = expected_etag.map_or((reqwest::header::IF_NONE_MATCH, "*"), |etag| {
+            (reqwest::header::IF_MATCH, etag)
+        });
+        headers.insert(
+            header,
+            HeaderValue::from_str(value).map_err(|error| CdnError::Upload(error.to_string()))?,
+        );
+        self.sign_request("PUT", &url, path, &mut headers, &payload_hash)?;
+        let response = send_with_retry(self.http.put(url).headers(headers).body(bytes))
+            .await
+            .map_err(|error| CdnError::Upload(error.to_string()))?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT
+        ) {
+            return Err(CdnError::Conflict);
+        }
+        if !response.status().is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(CdnError::Upload(format!(
+                "conditional S3 PUT failed: {body}"
+            )));
+        }
+        response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or_else(|| CdnError::Etag("conditional S3 PUT returned no ETag".into()))
+    }
 }
 
 fn format_date(timestamp: u64) -> String {
@@ -454,6 +540,26 @@ impl CdnBackend for MemoryCdnBackend {
         Ok(store
             .get(path)
             .map(|(bytes, _)| format!("\"{}\"", hex::encode(Sha256::digest(bytes)))))
+    }
+
+    async fn upload_if_match(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        _content_type: Option<&str>,
+        cache_control: Option<&str>,
+        expected_etag: Option<&str>,
+    ) -> Result<String, CdnError> {
+        let mut store = self.store.lock().await;
+        let current = store.get(path).map(|(current_bytes, _)| {
+            format!("\"{}\"", hex::encode(Sha256::digest(current_bytes)))
+        });
+        if current.as_deref() != expected_etag {
+            return Err(CdnError::Conflict);
+        }
+        let new_etag = format!("\"{}\"", hex::encode(Sha256::digest(&bytes)));
+        store.insert(path.to_string(), (bytes, cache_control.map(String::from)));
+        Ok(new_etag)
     }
 }
 
