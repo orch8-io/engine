@@ -24,6 +24,7 @@ pub mod handlers;
 pub mod interceptors;
 pub mod lifecycle;
 pub mod lint;
+pub mod memory_governance;
 pub mod metrics;
 pub mod optimizer;
 pub mod placement;

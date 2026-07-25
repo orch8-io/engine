@@ -1014,8 +1014,9 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `mcp_call` | `url`, `action` ("call"/"list"), `tool_name`, `arguments`, `headers`, `timeout_ms` | _(MCP tool result, or tool list for `"list"`)_ |
 | `agent` | `goal` or `messages`, `system`, `tools`, `tool_dispatch`, `max_iterations` (default 6), `auto_memory`, plus `llm_call` config passthrough | `{ "final": "...", "iterations": N, "stop_reason": "completed"\|"max_iterations", "tool_calls_made": M, "messages": [...] }` |
 | `embed` | `input`, plus embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`) | `{ "embedding"\|"embeddings", "model", "dimensions" }` |
-| `memory_store` | `text`, optional `embedding`, `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "..." }` |
-| `memory_search` | `query` or `query_embedding`, optional `top_k` (max 100), `scope`, `namespace` | `{ "results": [{ key, text, score, metadata }], "count": N, "scope": "...", "namespace": "..." }` |
+| `memory_store` | `text`, optional `embedding`, `key`, `metadata`, `scope` (`instance` default or `tenant`), `namespace`, `retention_secs`, `residency` | `{ "key": "...", "dimensions": N, "scope": "...", "namespace": "...", "residency": "...", "retention_secs": N, "policy_version": N }` |
+| `memory_search` | `query` or `query_embedding`, optional `top_k` (max 100), `scope`, `namespace`, `residency` | `{ "results": [{ key, text, score, metadata, provenance }], "count": N, "scope": "...", "namespace": "...", "expired_deleted": N }` |
+| `memory_delete` | `key`, optional `scope`, `namespace`, `residency` | `{ "key": "...", "deleted": true, "scope": "...", "namespace": "...", "policy_version": N }` |
 | `blob_put` | `text` or `data` (base64), `content_type`, `max_size_bytes` (default 25 MiB) | _(an `ArtifactRef` to pass between steps)_ |
 | `blob_get` | `ref` (ArtifactRef), `encoding` | _(the stored content)_ |
 | `human_review` | `prompt`, `timeout_ms`, `escalation_handler` | `{ "approved": bool, "reviewer": "...", "comments": "..." }` |
@@ -1031,6 +1032,11 @@ All blocks are defined in the `blocks` array of a sequence. Blocks can nest arbi
 | `assert` | `condition` (string), `message` (string) | `{}` |
 
 Any handler name not registered as built-in is automatically dispatched to the external worker queue.
+
+Tenant-scoped memory fails closed unless trusted host code has installed a
+namespace policy. See [Governed durable memory](GOVERNED_MEMORY.md) for the
+authorization, retention, residency, deletion, provenance, and compatibility
+rules.
 
 ---
 

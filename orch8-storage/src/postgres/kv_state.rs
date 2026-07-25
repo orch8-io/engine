@@ -47,6 +47,24 @@ impl PostgresStorage {
         Ok(rows.into_iter().collect())
     }
 
+    pub(crate) async fn get_shared_knowledge_impl(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT value FROM shared_agent_knowledge WHERE tenant_id = $1 AND namespace = $2 AND key = $3",
+        )
+        .bind(tenant_id)
+        .bind(namespace)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(row.map(|(value,)| value))
+    }
+
     pub(crate) async fn delete_shared_knowledge_impl(
         &self,
         tenant_id: &str,
@@ -126,6 +144,58 @@ impl PostgresStorage {
             .execute(&self.pool)
             .await
             .map_err(|e| StorageError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_instance_kv_batch_impl(
+        &self,
+        instance_id: InstanceId,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut query =
+            sqlx::QueryBuilder::new("DELETE FROM instance_kv_state WHERE instance_id = ");
+        query.push_bind(instance_id.into_uuid());
+        query.push(" AND key IN (");
+        let mut separated = query.separated(", ");
+        for key in keys {
+            separated.push_bind(key);
+        }
+        separated.push_unseparated(")");
+        query
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_shared_knowledge_batch_impl(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut query =
+            sqlx::QueryBuilder::new("DELETE FROM shared_agent_knowledge WHERE tenant_id = ");
+        query.push_bind(tenant_id);
+        query.push(" AND namespace = ").push_bind(namespace);
+        query.push(" AND key IN (");
+        let mut separated = query.separated(", ");
+        for key in keys {
+            separated.push_bind(key);
+        }
+        separated.push_unseparated(")");
+        query
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(())
     }
 }

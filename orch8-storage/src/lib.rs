@@ -2176,6 +2176,20 @@ pub trait ResourceStore: Send + Sync + 'static {
         key: &str,
     ) -> Result<(), StorageError>;
 
+    /// Delete several instance-KV entries. Concrete SQL backends override
+    /// this with one bounded statement; the default preserves compatibility
+    /// for third-party backends.
+    async fn delete_instance_kv_batch(
+        &self,
+        instance_id: InstanceId,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        for key in keys {
+            self.delete_instance_kv(instance_id, key).await?;
+        }
+        Ok(())
+    }
+
     // === Shared agent knowledge ===
     //
     // Tenant-isolated, namespace-scoped records shared by workflows and agent
@@ -2190,6 +2204,18 @@ pub trait ResourceStore: Send + Sync + 'static {
         value: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    async fn get_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let mut records = self
+            .list_shared_knowledge(tenant_id, namespace, 10_000)
+            .await?;
+        Ok(records.remove(key))
+    }
+
     async fn list_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -2203,6 +2229,21 @@ pub trait ResourceStore: Send + Sync + 'static {
         namespace: &str,
         key: &str,
     ) -> Result<(), StorageError>;
+
+    /// Delete several records from one tenant namespace. Concrete SQL
+    /// backends override this to avoid an N+1 cleanup path.
+    async fn delete_shared_knowledge_batch(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        for key in keys {
+            self.delete_shared_knowledge(tenant_id, namespace, key)
+                .await?;
+        }
+        Ok(())
+    }
 
     // === Artifacts (durable binary blobs) ===
     //

@@ -1976,6 +1976,14 @@ impl crate::ResourceStore for PostgresStorage {
         self.delete_instance_kv_impl(instance_id, key).await
     }
 
+    async fn delete_instance_kv_batch(
+        &self,
+        instance_id: InstanceId,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        self.delete_instance_kv_batch_impl(instance_id, keys).await
+    }
+
     async fn set_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -1997,6 +2005,16 @@ impl crate::ResourceStore for PostgresStorage {
             .await
     }
 
+    async fn get_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        self.get_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
+    }
+
     async fn delete_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -2004,6 +2022,16 @@ impl crate::ResourceStore for PostgresStorage {
         key: &str,
     ) -> Result<(), StorageError> {
         self.delete_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
+    }
+
+    async fn delete_shared_knowledge_batch(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        self.delete_shared_knowledge_batch_impl(tenant_id, namespace, keys)
             .await
     }
 
