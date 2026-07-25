@@ -28,6 +28,17 @@ const fn retry_backoff(attempt: u32) -> Duration {
     Duration::from_millis(200_u64.saturating_mul(1 << attempt))
 }
 
+fn error_preview(body: &str) -> String {
+    if body.len() > MAX_ERROR_BODY_LEN {
+        format!(
+            "{}… (truncated)",
+            crate::safe_prefix(body, MAX_ERROR_BODY_LEN)
+        )
+    } else {
+        body.to_owned()
+    }
+}
+
 /// How `send_silent_push` should react to an FCM response. Pulled out as a
 /// pure function (no network I/O) so the M-21 retry/invalidate decision is
 /// directly unit-testable without a mock FCM server.
@@ -336,23 +347,19 @@ impl PushProvider for FcmProvider {
                     warn!(attempt, status = %status, "FCM server error, will retry");
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
-                FcmOutcome::Retryable | FcmOutcome::Permanent => {
-                    let preview = if body.len() > MAX_ERROR_BODY_LEN {
-                        format!(
-                            "{}… (truncated)",
-                            crate::safe_prefix(&body, MAX_ERROR_BODY_LEN)
-                        )
+                outcome @ (FcmOutcome::Retryable | FcmOutcome::Permanent) => {
+                    let preview = error_preview(&body);
+                    let message = format!("FCM returned {status}: {preview}");
+                    return Err(if outcome == FcmOutcome::Retryable {
+                        PushError::Retryable(message)
                     } else {
-                        body
-                    };
-                    return Err(PushError::Delivery(format!(
-                        "FCM returned {status}: {preview}"
-                    )));
+                        PushError::Permanent(message)
+                    });
                 }
             }
         }
 
-        Err(PushError::Delivery(format!(
+        Err(PushError::Retryable(format!(
             "FCM delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
         )))
     }

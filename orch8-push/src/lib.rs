@@ -1,5 +1,6 @@
 mod apns;
 mod fcm;
+mod outbox;
 
 use async_trait::async_trait;
 
@@ -7,6 +8,10 @@ use async_trait::async_trait;
 pub enum PushError {
     #[error("push delivery failed: {0}")]
     Delivery(String),
+    #[error("temporary push delivery failure: {0}")]
+    Retryable(String),
+    #[error("permanent push delivery failure: {0}")]
+    Permanent(String),
     #[error("invalid push token")]
     InvalidToken,
     #[error("configuration error: {0}")]
@@ -30,6 +35,9 @@ impl PushProvider for NoopPushProvider {
 
 pub use apns::ApnsProvider;
 pub use fcm::FcmProvider;
+pub use outbox::{
+    ClaimedWake, PushOutboxStore, PushOutboxWorker, PushTerminalReason, WakeAttemptOutcome,
+};
 
 /// Secret material that is redacted from debug output and wiped on drop.
 #[derive(Clone)]

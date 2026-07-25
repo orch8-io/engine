@@ -218,7 +218,7 @@ impl PushProvider for ApnsProvider {
                     warn!(attempt, status = %status, "APNs server error, will retry");
                     tokio::time::sleep(retry_backoff(attempt)).await;
                 }
-                ApnsOutcome::Retryable | ApnsOutcome::Permanent => {
+                outcome @ (ApnsOutcome::Retryable | ApnsOutcome::Permanent) => {
                     let body = resp.text().await.unwrap_or_default();
                     let preview = if body.len() > MAX_ERROR_BODY_LEN {
                         format!(
@@ -228,14 +228,17 @@ impl PushProvider for ApnsProvider {
                     } else {
                         body
                     };
-                    return Err(PushError::Delivery(format!(
-                        "APNs returned {status}: {preview}"
-                    )));
+                    let message = format!("APNs returned {status}: {preview}");
+                    return Err(if outcome == ApnsOutcome::Retryable {
+                        PushError::Retryable(message)
+                    } else {
+                        PushError::Permanent(message)
+                    });
                 }
             }
         }
 
-        Err(PushError::Delivery(format!(
+        Err(PushError::Retryable(format!(
             "APNs delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
         )))
     }

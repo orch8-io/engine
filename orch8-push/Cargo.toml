@@ -17,6 +17,7 @@ chrono.workspace = true
 tokio.workspace = true
 urlencoding = "2"
 zeroize.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
