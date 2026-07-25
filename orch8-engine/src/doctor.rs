@@ -15,7 +15,8 @@ use chrono::{DateTime, Duration, Utc};
 
 use orch8_types::circuit_breaker::{BreakerState, CircuitBreakerState};
 use orch8_types::diagnosis::{
-    Diagnosis, DiagnosisCategory, DiagnosisHealth, InstanceDiagnosisReport, rank_diagnoses,
+    Diagnosis, DiagnosisCategory, DiagnosisHealth, InstanceDiagnosisReport, RemediationAction,
+    RemediationPreview, rank_diagnoses,
 };
 use orch8_types::finding::{Confidence, Evidence, Finding, FindingSeverity, Remediation};
 use orch8_types::instance::{InstanceState, TaskInstance};
@@ -122,6 +123,56 @@ pub fn diagnose(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>) -> Instance
         diagnoses,
         generated_at: now,
     }
+}
+
+/// Convert ranked findings into stable, state-bound remediation previews.
+///
+/// A preview never mutates state. Callers must re-diagnose and match the
+/// `preview_id` immediately before applying an action, which makes stale
+/// previews fail closed after any instance transition.
+#[must_use]
+pub fn remediation_previews(report: &InstanceDiagnosisReport) -> Vec<RemediationPreview> {
+    report
+        .diagnoses
+        .iter()
+        .enumerate()
+        .flat_map(|(diagnosis_index, diagnosis)| {
+            diagnosis
+                .finding
+                .remediation
+                .iter()
+                .enumerate()
+                .map(move |(index, remediation)| {
+                    let action = remediation.command.as_deref().map_or(
+                        RemediationAction::Manual,
+                        |command| {
+                            if command == format!("orch8 instance retry {}", report.instance_id) {
+                                RemediationAction::RetryInstance
+                            } else if command
+                                == format!("orch8 signal {} resume", report.instance_id)
+                            {
+                                RemediationAction::ResumeInstance
+                            } else {
+                                RemediationAction::Manual
+                            }
+                        },
+                    );
+                    RemediationPreview {
+                        preview_id: format!(
+                            "{}:{}:{}:{diagnosis_index}:{index}",
+                            report.instance_id, report.state, diagnosis.finding.code,
+                        ),
+                        finding_code: diagnosis.finding.code.clone(),
+                        remediation_index: u32::try_from(index).unwrap_or(u32::MAX),
+                        action,
+                        summary: remediation.summary.clone(),
+                        command: remediation.command.clone(),
+                        side_effect_risk: remediation.side_effect_risk,
+                        expected_state: report.state.clone(),
+                    }
+                })
+        })
+        .collect()
 }
 
 fn terminal_diagnosis(instance: &TaskInstance, now: DateTime<Utc>) -> Diagnosis {
@@ -1320,5 +1371,19 @@ mod tests {
         assert_eq!(humanize(Duration::seconds(7500)), "2h 5m");
         assert_eq!(humanize(Duration::days(3) + Duration::hours(4)), "3d 4h");
         assert_eq!(humanize(Duration::seconds(-5)), "0s");
+    }
+
+    #[test]
+    fn remediation_preview_is_state_bound_and_classifies_retry() {
+        let report = diagnose(&full_ctx(instance(InstanceState::Failed)), t0());
+        let previews = remediation_previews(&report);
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].action, RemediationAction::RetryInstance);
+        assert!(previews[0].side_effect_risk);
+        assert!(
+            previews[0]
+                .preview_id
+                .contains(":failed:TERMINAL_STATE:0:0")
+        );
     }
 }

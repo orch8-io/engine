@@ -146,7 +146,7 @@ orch8-push            APNs/FCM push notification providers
     |
 orch8-publisher       Event publishing (webhooks, NATS)
     |
-orch8-cli             CLI tool (init, sequence, instance, signal, health)
+orch8-cli             CLI tool (init, doctor, release gate, sequence, instance, signal, health)
 ```
 
 **Key design decisions:**
@@ -174,7 +174,7 @@ at `/api-docs/openapi.json` and `/swagger-ui`. Canonical product routes use the
 `/api/v1` prefix; bare paths remain compatibility aliases. The surface covers:
 
 - **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup, preflight readiness, template inspection, dataflow bindings
-- **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ, diagnosis, workbench (timeline/compare/fork-preview)
+- **Instances** — create, batch create, list/filter, state transitions, context update, retry, DLQ, diagnosis, previewable authorized remediation, workbench (timeline/compare/fork-preview)
 - **Releases** — semantic diff, historical validation, canary routing, gate evaluation, promote/pause/rollback
 - **Signals** — send pause/resume/cancel/context signals to running instances
 - **Events** — ingest for `wait_for_event` correlation, producer-id deduplication

@@ -62,6 +62,30 @@ pub struct InstanceDiagnosisReport {
     pub generated_at: DateTime<Utc>,
 }
 
+/// Machine-applicable subset of a human remediation suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationAction {
+    ResumeInstance,
+    RetryInstance,
+    /// The recipe is useful evidence but must be carried out in its owning system.
+    Manual,
+}
+
+/// Stable preview generated from the current diagnosis and instance state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RemediationPreview {
+    pub preview_id: String,
+    pub finding_code: String,
+    pub remediation_index: u32,
+    pub action: RemediationAction,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub side_effect_risk: bool,
+    pub expected_state: String,
+}
+
 /// Rank diagnoses in presentation order: category, then confidence
 /// (descending), then code for determinism.
 pub fn rank_diagnoses(diagnoses: &mut [Diagnosis]) {

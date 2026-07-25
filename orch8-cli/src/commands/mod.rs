@@ -5,6 +5,7 @@ pub mod cron;
 pub mod demo;
 pub mod dev;
 pub mod dev_server;
+pub mod doctor;
 pub mod health;
 pub mod init;
 pub mod inspect_cmd;

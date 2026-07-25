@@ -59,6 +59,28 @@ Returns 200 only if the database is reachable **and** the engine tick loop is ru
 
 ---
 
+## Diagnosis and remediation
+
+`GET /api/v1/instances/{id}/diagnosis` returns ranked, read-only findings.
+`GET /api/v1/instances/{id}/remediations` converts applicable findings into
+state-bound previews. Applying one requires `POST
+/api/v1/instances/{id}/remediations/apply` with the exact `preview_id`; the
+server re-diagnoses immediately, rejects stale/manual recipes, requires
+`acknowledge_side_effect_risk: true` when appropriate, and returns durable
+before/after evidence. Existing API-key and tenant authorization applies.
+
+For an operator-wide read-only pass, run:
+
+```bash
+orch8 doctor --config orch8.toml --instance <uuid>
+```
+
+The command checks local configuration, readiness, CLI/server compatibility,
+sequence storage, worker inventory, continuity control, and optional instance
+diagnosis. `--strict` turns warnings into a non-zero exit status for CI.
+
+---
+
 ## Sequences
 
 ### Create Sequence

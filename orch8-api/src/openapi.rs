@@ -63,6 +63,8 @@ use utoipa::OpenApi;
         crate::instances::inject_blocks,
         // Diagnosis
         crate::diagnosis::get_diagnosis,
+        crate::diagnosis::preview_remediations,
+        crate::diagnosis::apply_remediation,
         // Template inspector
         crate::inspect::inspect_draft,
         crate::inspect::inspect_instance_block,
@@ -188,6 +190,10 @@ use utoipa::OpenApi;
         orch8_types::diagnosis::Diagnosis,
         orch8_types::diagnosis::DiagnosisCategory,
         orch8_types::diagnosis::DiagnosisHealth,
+        orch8_types::diagnosis::RemediationAction,
+        orch8_types::diagnosis::RemediationPreview,
+        crate::diagnosis::ApplyRemediationRequest,
+        crate::diagnosis::RemediationApplyEvidence,
         orch8_types::template_trace::ResolutionTrace,
         orch8_types::template_trace::ResolutionEntry,
         orch8_types::template_trace::ResolutionStatus,

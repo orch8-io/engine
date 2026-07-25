@@ -168,3 +168,57 @@ async fn due_instance_reports_no_blockers_or_lag_only() {
         "{cs:?}"
     );
 }
+
+#[tokio::test]
+async fn remediation_preview_applies_one_state_bound_resume() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let seq_id = create_sequence(
+        &base,
+        &client,
+        json!([{"type": "step", "id": "a", "handler": "noop", "params": {}}]),
+    )
+    .await;
+    let inst = create_instance(&base, &client, &seq_id, json!({})).await;
+    let paused = client
+        .patch(format!("{base}/instances/{inst}/state"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"state": "paused"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), StatusCode::OK);
+
+    let previews: Value = client
+        .get(format!("{base}/instances/{inst}/remediations"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(previews[0]["action"], "resume_instance");
+    let preview_id = previews[0]["preview_id"].as_str().unwrap();
+    let applied = client
+        .post(format!("{base}/instances/{inst}/remediations/apply"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"preview_id": preview_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), StatusCode::OK);
+    let evidence: Value = applied.json().await.unwrap();
+    assert_eq!(evidence["before_state"], "paused");
+    assert_eq!(evidence["after_state"], "scheduled");
+
+    let replay = client
+        .post(format!("{base}/instances/{inst}/remediations/apply"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"preview_id": preview_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+}

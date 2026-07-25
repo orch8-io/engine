@@ -8,13 +8,15 @@
 
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
-use orch8_engine::doctor::{InstanceDiagnosticContext, diagnose};
-use orch8_types::diagnosis::InstanceDiagnosisReport;
+use orch8_engine::doctor::{InstanceDiagnosticContext, diagnose, remediation_previews};
+use orch8_types::diagnosis::{InstanceDiagnosisReport, RemediationAction, RemediationPreview};
 use orch8_types::execution::NodeState;
 use orch8_types::filter::Pagination;
 use orch8_types::ids::InstanceId;
@@ -28,7 +30,30 @@ use crate::error::ApiError;
 const WORKER_LIVENESS_SECS: i64 = 120;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/instances/{id}/diagnosis", get(get_diagnosis))
+    Router::new()
+        .route("/instances/{id}/diagnosis", get(get_diagnosis))
+        .route("/instances/{id}/remediations", get(preview_remediations))
+        .route(
+            "/instances/{id}/remediations/apply",
+            post(apply_remediation),
+        )
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ApplyRemediationRequest {
+    pub preview_id: String,
+    /// Required for recipes which may repeat an external side effect.
+    #[serde(default)]
+    pub acknowledge_side_effect_risk: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RemediationApplyEvidence {
+    pub preview_id: String,
+    pub action: RemediationAction,
+    pub before_state: String,
+    pub after_state: String,
+    pub applied_at: chrono::DateTime<Utc>,
 }
 
 #[utoipa::path(get, path = "/instances/{id}/diagnosis", tag = "instances",
@@ -43,21 +68,168 @@ pub(crate) async fn get_diagnosis(
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(diagnose_instance(&state, &tenant_ctx, id).await?))
+}
+
+#[utoipa::path(get, path = "/instances/{id}/remediations", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance id")),
+    responses(
+        (status = 200, description = "State-bound remediation previews", body = Vec<RemediationPreview>),
+        (status = 404, description = "Instance not found"),
+    )
+)]
+pub(crate) async fn preview_remediations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let report = diagnose_instance(&state, &tenant_ctx, id).await?;
+    Ok(Json(remediation_previews(&report)))
+}
+
+#[utoipa::path(post, path = "/instances/{id}/remediations/apply", tag = "instances",
+    params(("id" = Uuid, Path, description = "Instance id")),
+    request_body = ApplyRemediationRequest,
+    responses(
+        (status = 200, description = "Post-action remediation evidence", body = RemediationApplyEvidence),
+        (status = 400, description = "Stale, manual, or unacknowledged remediation"),
+        (status = 404, description = "Instance or preview not found"),
+    )
+)]
+pub(crate) async fn apply_remediation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ApplyRemediationRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let report = diagnose_instance(&state, &tenant_ctx, id).await?;
+    let preview = remediation_previews(&report)
+        .into_iter()
+        .find(|preview| preview.preview_id == request.preview_id)
+        .ok_or_else(|| {
+            ApiError::InvalidArgument(
+                "remediation preview is stale or does not belong to this instance".into(),
+            )
+        })?;
+    if preview.side_effect_risk && !request.acknowledge_side_effect_risk {
+        return Err(ApiError::InvalidArgument(
+            "acknowledge_side_effect_risk=true is required for this remediation".into(),
+        ));
+    }
+
     let instance_id = InstanceId::from_uuid(id);
-    let instance = state
+    match preview.action {
+        RemediationAction::ResumeInstance => resume_paused(&state, instance_id).await?,
+        RemediationAction::RetryInstance => {
+            retry_failed(&state, instance_id).await?;
+        }
+        RemediationAction::Manual => {
+            return Err(ApiError::InvalidArgument(
+                "this remediation must be completed manually in its owning system".into(),
+            ));
+        }
+    }
+    let after = state
         .storage
         .get_instance(instance_id)
         .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
         .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-    crate::auth::enforce_tenant_access(
-        &tenant_ctx,
-        &instance.tenant_id,
-        &format!("instance {id}"),
-    )?;
+    Ok(Json(RemediationApplyEvidence {
+        preview_id: preview.preview_id,
+        action: preview.action,
+        before_state: report.state,
+        after_state: after.state.to_string(),
+        applied_at: Utc::now(),
+    }))
+}
 
-    let ctx = collect_context(&state, instance).await;
-    Ok(Json(diagnose(&ctx, Utc::now())))
+async fn diagnose_instance(
+    state: &AppState,
+    tenant_ctx: &crate::auth::OptionalTenant,
+    id: Uuid,
+) -> Result<InstanceDiagnosisReport, ApiError> {
+    let instance = state
+        .storage
+        .get_instance(InstanceId::from_uuid(id))
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+    crate::auth::enforce_tenant_access(tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
+    let ctx = collect_context(state, instance).await;
+    Ok(diagnose(&ctx, Utc::now()))
+}
+
+async fn resume_paused(state: &AppState, instance_id: InstanceId) -> Result<(), ApiError> {
+    let changed = state
+        .storage
+        .conditional_update_instance_state(
+            instance_id,
+            InstanceState::Paused,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?;
+    if !changed {
+        return Err(ApiError::InvalidArgument(
+            "instance state changed after remediation preview".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn retry_failed(state: &AppState, instance_id: InstanceId) -> Result<(), ApiError> {
+    let changed = state
+        .storage
+        .conditional_update_instance_state(
+            instance_id,
+            InstanceState::Failed,
+            InstanceState::Paused,
+            None,
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instance"))?;
+    if !changed {
+        return Err(ApiError::InvalidArgument(
+            "instance state changed after remediation preview".into(),
+        ));
+    }
+    let reset = async {
+        state
+            .storage
+            .delete_execution_tree(instance_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "execution_tree"))?;
+        state
+            .storage
+            .delete_sentinel_block_outputs(instance_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "block_outputs"))?;
+        state
+            .storage
+            .reset_instance_run(instance_id, &Uuid::now_v7().to_string())
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instance"))?;
+        state
+            .storage
+            .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instance"))
+    }
+    .await;
+    if reset.is_err() {
+        let _ = state
+            .storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Paused,
+                InstanceState::Failed,
+                None,
+            )
+            .await;
+    }
+    reset
 }
 
 /// Gather every evidence section, degrading to `None` (not failing) when

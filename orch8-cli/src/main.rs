@@ -14,6 +14,7 @@ use commands::continuity::{ExecutionCmd, RuntimeCmd};
 use commands::cron::CronCmd;
 use commands::demo::DemoCmd;
 use commands::dev::DevCmd;
+use commands::doctor::DoctorCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
 use commands::package_cmd::PackageCmd;
@@ -71,6 +72,8 @@ struct Cli {
 enum Commands {
     /// Check engine health.
     Health,
+    /// Diagnose configuration, connectivity, compatibility, workers, continuity, and an optional instance.
+    Doctor(DoctorCmd),
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
@@ -360,6 +363,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Health => commands::health::run(&client, base).await?,
+        Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
         Commands::Instance(cmd) => commands::instance::run(&client, base, cmd, format).await?,
         Commands::Execution(cmd) => {
             commands::continuity::run_execution(&client, base, cmd, format).await?;
