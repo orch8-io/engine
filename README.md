@@ -34,7 +34,7 @@ Portable Continuity takes that further: a running execution can hand off between
 
 **Multi-tenancy** — Tenant-scoped queries, per-tenant rate limits, per-tenant circuit breakers, tenant isolation middleware, per-tenant noisy-neighbor protection
 
-**Extensibility** — External workers (any language via REST polling), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, and tenant-scoped signed workflow/connector packages with verifiable publication history. See [Package Registry](docs/PACKAGE_REGISTRY.md).
+**Extensibility** — External workers through REST polling or a [negotiated bidirectional gRPC session](docs/GRPC_WORKER_STREAM.md), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, and tenant-scoped signed workflow/connector packages with verifiable publication history. See [Package Registry](docs/PACKAGE_REGISTRY.md).
 
 **Observability** — Prometheus metrics, structured JSON logging, audit log, execution tree visualization, Grafana dashboard template, visual execution workbench (unified timeline, run comparison, fork preview), template debugger and resolution inspector, stuck-instance doctor with ranked diagnostics
 

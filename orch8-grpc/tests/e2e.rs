@@ -10,9 +10,11 @@ use orch8_grpc::proto::{
 };
 use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
 use orch8_storage::InstanceStore;
+use orch8_storage::WorkerStore;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
+use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 /// Spawn the gRPC server on an ephemeral port; return the bound address and
 /// a handle to the storage so tests can force states the RPC surface
@@ -300,4 +302,98 @@ async fn grpc_send_signal_validates_instance_id_field() {
         })
         .await
         .expect("matching instance_id must be accepted");
+}
+
+fn worker_stream_frame(
+    payload: orch8_grpc::proto::worker_stream_client::Payload,
+) -> orch8_grpc::proto::WorkerStreamClient {
+    orch8_grpc::proto::WorkerStreamClient {
+        payload: Some(payload),
+    }
+}
+
+#[tokio::test]
+async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+    use orch8_grpc::proto::worker_stream_server::Payload as ServerPayload;
+
+    let (addr, storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let sequence_id = "00000000-0000-0000-0000-000000000011";
+    let instance_id = "00000000-0000-0000-0000-000000000012";
+    create_seq_and_instance(&mut client, sequence_id, instance_id).await;
+    let task = WorkerTask {
+        id: uuid::Uuid::now_v7(),
+        instance_id: InstanceId::from_uuid(uuid::Uuid::parse_str(instance_id).unwrap()),
+        block_id: orch8_types::ids::BlockId::new("step"),
+        handler_name: "payments".into(),
+        queue_name: None,
+        params: serde_json::json!({"amount": 42}),
+        context: serde_json::json!({}),
+        attempt: 0,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: chrono::Utc::now(),
+    };
+    storage.create_worker_task(&task).await.unwrap();
+    let outbound = tokio_stream::iter(vec![
+        worker_stream_frame(ClientPayload::Open(orch8_grpc::proto::WorkerStreamOpen {
+            worker_id: "worker-a".into(),
+            handler_names: vec!["payments".into()],
+            supported_features: vec!["task_delivery".into(), "heartbeat".into()],
+            max_in_flight: 10_000,
+            protocol_version: 1,
+        })),
+        worker_stream_frame(ClientPayload::Demand(
+            orch8_grpc::proto::WorkerStreamDemand { capacity: 1 },
+        )),
+    ]);
+    let mut inbound = client.worker_stream(outbound).await.unwrap().into_inner();
+
+    let hello = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Hello(hello)) = hello.payload else {
+        panic!("first server frame must be hello");
+    };
+    assert_eq!(hello.protocol_version, 1);
+    assert_eq!(hello.max_in_flight, 256);
+    assert_eq!(hello.negotiated_features, ["task_delivery", "heartbeat"]);
+    let delivered = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Task(delivered)) = delivered.payload else {
+        panic!("demand must produce a task frame");
+    };
+    let claimed: WorkerTask = serde_json::from_str(&delivered.task_json).unwrap();
+    assert_eq!(claimed.id, task.id);
+    assert_eq!(claimed.worker_id.as_deref(), Some("worker-a"));
+}
+
+#[tokio::test]
+async fn grpc_worker_stream_rejects_unsupported_protocol() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+
+    let (addr, _storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let outbound = tokio_stream::iter([worker_stream_frame(ClientPayload::Open(
+        orch8_grpc::proto::WorkerStreamOpen {
+            worker_id: "worker-a".into(),
+            handler_names: vec!["payments".into()],
+            supported_features: vec!["task_delivery".into()],
+            max_in_flight: 1,
+            protocol_version: 99,
+        },
+    ))]);
+    let error = client.worker_stream(outbound).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 }

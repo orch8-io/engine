@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use orch8_types::worker::{WorkerTask, WorkerTaskState};
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
 
+#[derive(Clone)]
 pub struct Orch8GrpcService {
     storage: Arc<dyn StorageBackend>,
     /// Semantic cap on a single instance's serialized `ExecutionContext`.
@@ -151,6 +153,211 @@ impl Orch8GrpcService {
                 Ok(())
             }
             Err(e) => Err(storage_err(e)),
+        }
+    }
+}
+
+const WORKER_STREAM_PROTOCOL_VERSION: u32 = 1;
+const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
+const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
+const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
+const WORKER_STREAM_FEATURES: [&str; 5] = [
+    "task_delivery",
+    "completion",
+    "failure",
+    "heartbeat",
+    "cancellation",
+];
+
+fn negotiated_worker_features(requested: &[String]) -> Vec<String> {
+    WORKER_STREAM_FEATURES
+        .iter()
+        .filter(|feature| requested.iter().any(|requested| requested == **feature))
+        .map(|feature| (*feature).to_owned())
+        .collect()
+}
+
+fn worker_feature_enabled(open: &proto::WorkerStreamOpen, feature: &str) -> bool {
+    WORKER_STREAM_FEATURES.contains(&feature)
+        && open
+            .supported_features
+            .iter()
+            .any(|requested| requested == feature)
+}
+
+fn stream_request<T>(payload: T, tenant: Option<&TenantId>) -> Request<T> {
+    let mut request = Request::new(payload);
+    if let Some(tenant) = tenant {
+        request
+            .extensions_mut()
+            .insert(crate::auth::CallerTenant(tenant.clone()));
+    }
+    request
+}
+
+fn worker_server_frame(payload: proto::worker_stream_server::Payload) -> proto::WorkerStreamServer {
+    proto::WorkerStreamServer {
+        payload: Some(payload),
+    }
+}
+
+impl Orch8GrpcService {
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn handle_worker_stream_frame(
+        &self,
+        frame: proto::WorkerStreamClient,
+        open: &proto::WorkerStreamOpen,
+        tenant: Option<&TenantId>,
+        max_in_flight: u32,
+        outstanding: &mut std::collections::HashSet<Uuid>,
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<(), Status> {
+        if prost::Message::encoded_len(&frame)
+            > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+        {
+            return Err(Status::resource_exhausted(
+                "worker stream frame exceeds negotiated message limit",
+            ));
+        }
+        let payload = frame
+            .payload
+            .ok_or_else(|| Status::invalid_argument("worker stream frame has no payload"))?;
+        match payload {
+            proto::worker_stream_client::Payload::Open(_) => {
+                Err(Status::failed_precondition("worker stream is already open"))
+            }
+            proto::worker_stream_client::Payload::Demand(demand) => {
+                let available = usize::try_from(max_in_flight)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(outstanding.len());
+                let mut remaining = usize::try_from(demand.capacity)
+                    .unwrap_or(usize::MAX)
+                    .min(available);
+                for handler in &open.handler_names {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let limit = u32::try_from(remaining).unwrap_or(u32::MAX);
+                    let tasks = if let Some(tenant) = tenant {
+                        self.storage
+                            .claim_worker_tasks_for_tenant(handler, &open.worker_id, tenant, limit)
+                            .await
+                            .map_err(storage_err)?
+                    } else {
+                        self.storage
+                            .claim_worker_tasks(handler, &open.worker_id, limit)
+                            .await
+                            .map_err(storage_err)?
+                    };
+                    for task in tasks {
+                        let task_json = to_json_string(&task)?;
+                        if task_json.len()
+                            > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+                        {
+                            return Err(Status::resource_exhausted(
+                                "worker task exceeds negotiated message limit",
+                            ));
+                        }
+                        outstanding.insert(task.id);
+                        sender
+                            .send(Ok(worker_server_frame(
+                                proto::worker_stream_server::Payload::Task(
+                                    proto::WorkerStreamTask { task_json },
+                                ),
+                            )))
+                            .await
+                            .map_err(|_| Status::cancelled("worker stream closed"))?;
+                        remaining = remaining.saturating_sub(1);
+                    }
+                }
+                Ok(())
+            }
+            proto::worker_stream_client::Payload::Complete(complete) => {
+                if !worker_feature_enabled(open, "completion") {
+                    return Err(Status::failed_precondition("completion was not negotiated"));
+                }
+                let task_id = parse_uuid(&complete.task_id)?;
+                if complete.worker_id != open.worker_id || !outstanding.contains(&task_id) {
+                    return Err(Status::permission_denied(
+                        "completion does not belong to this worker session",
+                    ));
+                }
+                self.complete_task(stream_request(complete, tenant)).await?;
+                outstanding.remove(&task_id);
+                sender
+                    .send(Ok(worker_server_frame(
+                        proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
+                            operation: "complete".into(),
+                            task_id: task_id.to_string(),
+                        }),
+                    )))
+                    .await
+                    .map_err(|_| Status::cancelled("worker stream closed"))
+            }
+            proto::worker_stream_client::Payload::Fail(failure) => {
+                if !worker_feature_enabled(open, "failure") {
+                    return Err(Status::failed_precondition("failure was not negotiated"));
+                }
+                let task_id = parse_uuid(&failure.task_id)?;
+                if failure.worker_id != open.worker_id || !outstanding.contains(&task_id) {
+                    return Err(Status::permission_denied(
+                        "failure does not belong to this worker session",
+                    ));
+                }
+                self.fail_task(stream_request(failure, tenant)).await?;
+                outstanding.remove(&task_id);
+                sender
+                    .send(Ok(worker_server_frame(
+                        proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
+                            operation: "fail".into(),
+                            task_id: task_id.to_string(),
+                        }),
+                    )))
+                    .await
+                    .map_err(|_| Status::cancelled("worker stream closed"))
+            }
+            proto::worker_stream_client::Payload::Heartbeat(heartbeat) => {
+                if !worker_feature_enabled(open, "heartbeat") {
+                    return Err(Status::failed_precondition("heartbeat was not negotiated"));
+                }
+                let task_id = parse_uuid(&heartbeat.task_id)?;
+                if heartbeat.worker_id != open.worker_id || !outstanding.contains(&task_id) {
+                    return Err(Status::permission_denied(
+                        "heartbeat does not belong to this worker session",
+                    ));
+                }
+                match self.heartbeat_task(stream_request(heartbeat, tenant)).await {
+                    Ok(_) => sender
+                        .send(Ok(worker_server_frame(
+                            proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
+                                operation: "heartbeat".into(),
+                                task_id: task_id.to_string(),
+                            }),
+                        )))
+                        .await
+                        .map_err(|_| Status::cancelled("worker stream closed")),
+                    Err(status)
+                        if matches!(
+                            status.code(),
+                            tonic::Code::NotFound | tonic::Code::FailedPrecondition
+                        ) =>
+                    {
+                        outstanding.remove(&task_id);
+                        sender
+                            .send(Ok(worker_server_frame(
+                                proto::worker_stream_server::Payload::Cancellation(
+                                    proto::WorkerStreamCancellation {
+                                        task_id: task_id.to_string(),
+                                        reason: "task is no longer active".into(),
+                                    },
+                                ),
+                            )))
+                            .await
+                            .map_err(|_| Status::cancelled("worker stream closed"))
+                    }
+                    Err(status) => Err(status),
+                }
+            }
         }
     }
 }
@@ -944,6 +1151,100 @@ impl Orch8Service for Orch8GrpcService {
     }
 
     // --- Workers ---
+
+    type WorkerStreamStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<proto::WorkerStreamServer, Status>> + Send>>;
+
+    async fn worker_stream(
+        &self,
+        req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
+    ) -> Result<Response<Self::WorkerStreamStream>, Status> {
+        let tenant = caller_tenant(&req).cloned();
+        let mut inbound = req.into_inner();
+        let first = inbound
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("worker stream requires an open frame"))?;
+        if prost::Message::encoded_len(&first)
+            > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+        {
+            return Err(Status::resource_exhausted(
+                "worker stream open frame exceeds message limit",
+            ));
+        }
+        let Some(proto::worker_stream_client::Payload::Open(open)) = first.payload else {
+            return Err(Status::invalid_argument(
+                "first worker stream frame must be open",
+            ));
+        };
+        if open.protocol_version != WORKER_STREAM_PROTOCOL_VERSION {
+            return Err(Status::failed_precondition(format!(
+                "unsupported worker stream protocol {}; supported version is {WORKER_STREAM_PROTOCOL_VERSION}",
+                open.protocol_version
+            )));
+        }
+        if open.worker_id.is_empty()
+            || open.worker_id.len() > 128
+            || open.handler_names.is_empty()
+            || open.handler_names.len() > 64
+            || open
+                .handler_names
+                .iter()
+                .any(|handler| handler.is_empty() || handler.len() > 256)
+            || open.supported_features.len() > 64
+        {
+            return Err(Status::invalid_argument(
+                "worker id, handlers, or feature list exceeds protocol bounds",
+            ));
+        }
+        let max_in_flight = open.max_in_flight.clamp(1, WORKER_STREAM_MAX_IN_FLIGHT);
+        let features = negotiated_worker_features(&open.supported_features);
+        if !features.iter().any(|feature| feature == "task_delivery") {
+            return Err(Status::failed_precondition(
+                "worker must negotiate task_delivery",
+            ));
+        }
+
+        let (sender, receiver) =
+            tokio::sync::mpsc::channel(usize::try_from(max_in_flight).unwrap_or(256));
+        sender
+            .send(Ok(worker_server_frame(
+                proto::worker_stream_server::Payload::Hello(proto::WorkerStreamHello {
+                    protocol_version: WORKER_STREAM_PROTOCOL_VERSION,
+                    negotiated_features: features,
+                    max_in_flight,
+                    max_message_bytes: WORKER_STREAM_MAX_MESSAGE_BYTES,
+                    heartbeat_interval_secs: WORKER_STREAM_HEARTBEAT_SECS,
+                }),
+            )))
+            .await
+            .map_err(|_| Status::cancelled("worker stream closed during handshake"))?;
+
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut outstanding = std::collections::HashSet::new();
+            while let Ok(Some(frame)) = inbound.message().await {
+                let result = service
+                    .handle_worker_stream_frame(
+                        frame,
+                        &open,
+                        tenant.as_ref(),
+                        max_in_flight,
+                        &mut outstanding,
+                        &sender,
+                    )
+                    .await;
+                if let Err(status) = result {
+                    let _ = sender.send(Err(status)).await;
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(receiver),
+        )))
+    }
 
     async fn poll_tasks(
         &self,

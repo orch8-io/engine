@@ -181,6 +181,59 @@ message HeartbeatTaskRequest {
   string worker_id = 2;
 }
 
+message WorkerStreamOpen {
+  string worker_id = 1;
+  repeated string handler_names = 2;
+  repeated string supported_features = 3;
+  uint32 max_in_flight = 4;
+  uint32 protocol_version = 5;
+}
+
+message WorkerStreamDemand {
+  uint32 capacity = 1;
+}
+
+message WorkerStreamClient {
+  oneof payload {
+    WorkerStreamOpen open = 1;
+    WorkerStreamDemand demand = 2;
+    CompleteTaskRequest complete = 3;
+    FailTaskRequest fail = 4;
+    HeartbeatTaskRequest heartbeat = 5;
+  }
+}
+
+message WorkerStreamHello {
+  uint32 protocol_version = 1;
+  repeated string negotiated_features = 2;
+  uint32 max_in_flight = 3;
+  uint32 max_message_bytes = 4;
+  uint32 heartbeat_interval_secs = 5;
+}
+
+message WorkerStreamTask {
+  string task_json = 1;
+}
+
+message WorkerStreamCancellation {
+  string task_id = 1;
+  string reason = 2;
+}
+
+message WorkerStreamAck {
+  string operation = 1;
+  string task_id = 2;
+}
+
+message WorkerStreamServer {
+  oneof payload {
+    WorkerStreamHello hello = 1;
+    WorkerStreamTask task = 2;
+    WorkerStreamCancellation cancellation = 3;
+    WorkerStreamAck ack = 4;
+  }
+}
+
 // --- Pools ---
 
 message CreatePoolRequest {
@@ -286,6 +339,7 @@ service Orch8Service {
   rpc CompleteTask(CompleteTaskRequest) returns (Empty);
   rpc FailTask(FailTaskRequest) returns (Empty);
   rpc HeartbeatTask(HeartbeatTaskRequest) returns (Empty);
+  rpc WorkerStream(stream WorkerStreamClient) returns (stream WorkerStreamServer);
 
   // Pools
   rpc CreatePool(CreatePoolRequest) returns (PoolResponse);
