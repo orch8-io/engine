@@ -840,7 +840,9 @@ fn find_parallel_step_pair(
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
 ) -> Option<[usize; 2]> {
-    let mut first_by_parallel: HashMap<ExecutionNodeId, (usize, i16)> = HashMap::new();
+    // ⚡ Bolt: Use a flat Vec instead of a HashMap to avoid allocation overhead on the hot path.
+    // The number of concurrent parallel branches is typically very small.
+    let mut first_by_parallel: Vec<(ExecutionNodeId, usize, i16)> = Vec::new();
 
     for (idx, node) in tree.iter().enumerate() {
         let Some(BlockDefinition::Step(step_def)) = block_map.get(&node.block_id).copied() else {
@@ -859,12 +861,15 @@ fn find_parallel_step_pair(
             continue;
         };
 
-        if let Some((first_idx, first_branch_index)) = first_by_parallel.get(&parallel_id) {
+        if let Some((_, first_idx, first_branch_index)) = first_by_parallel
+            .iter()
+            .find(|(id, _, _)| *id == parallel_id)
+        {
             if branch_index != *first_branch_index {
                 return Some([*first_idx, idx]);
             }
         } else {
-            first_by_parallel.insert(parallel_id, (idx, branch_index));
+            first_by_parallel.push((parallel_id, idx, branch_index));
         }
     }
 

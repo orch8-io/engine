@@ -78,3 +78,7 @@
 ## 2025-11-01 - [Avoid Cloning Strings for Reference Passing]
 **Learning:** In the activepieces integration of the scheduler hot loop (`orch8-engine/src/scheduler.rs`), a `String` field (`step.handler`) was being cloned into a new local variable merely to pass its reference (`&handler_name`) to a downstream handler function. This caused an unnecessary heap allocation on an execution hot path.
 **Action:** When calling functions that require string references (`&str`), always pass a reference directly from the source struct (`&step.handler`) rather than cloning the `String` first.
+
+## 2026-07-25 - [Replace HashMap Allocation with Flat Vec in Hot Execution Path]
+**Learning:** In the `find_parallel_step_pair` function within `orch8-engine/src/evaluator.rs`, allocating a `HashMap<ExecutionNodeId, (usize, i16)>` to group interleaving concurrent nodes introduces unnecessary hashing and memory allocation overhead on the evaluation hot path, which is called every tick. Since the tree size is relatively small and the number of concurrent parallel branches is typically very low, building a `Vec` and querying via `.iter().find()` is dramatically faster on the CPU cache and eliminates the heap allocation cost.
+**Action:** In execution hot paths where the collection size is strictly bounded and expected to be small, always prefer a flat `Vec` with linear search (`.iter().find()` or `.iter().position()`) over a `HashMap` to eliminate hashing and heap allocation overhead.
