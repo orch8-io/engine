@@ -17,6 +17,7 @@ use axum::routing::{delete, post};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use orch8_types::api_key::ApiCapability;
 use orch8_types::ids::TenantId;
 
 use crate::AppState;
@@ -48,6 +49,9 @@ pub struct CreateApiKeyRequest {
     /// Human-readable label.
     #[serde(default)]
     pub name: String,
+    /// Least-privilege roles. Defaults to `operator` when omitted.
+    #[serde(default)]
+    pub capabilities: Vec<ApiCapability>,
     /// Optional expiry. Omit for a non-expiring key.
     #[serde(default)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -59,6 +63,7 @@ pub struct CreatedApiKey {
     pub id: String,
     pub tenant_id: String,
     pub name: String,
+    pub capabilities: Vec<ApiCapability>,
     /// One-time plaintext secret. Store it now — it is unrecoverable.
     pub secret: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -71,6 +76,7 @@ pub struct ApiKeyInfo {
     pub id: String,
     pub tenant_id: String,
     pub name: String,
+    pub capabilities: Vec<ApiCapability>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -83,6 +89,7 @@ impl From<orch8_types::api_key::ApiKeyRecord> for ApiKeyInfo {
             id: r.id,
             tenant_id: r.tenant_id,
             name: r.name,
+            capabilities: r.capabilities,
             created_at: r.created_at,
             last_used_at: r.last_used_at,
             expires_at: r.expires_at,
@@ -106,8 +113,17 @@ async fn create_api_key(
         return Err(ApiError::InvalidArgument("tenant_id is required".into()));
     }
 
-    let minted =
-        orch8_types::api_key::mint(body.tenant_id.clone(), body.name.clone(), body.expires_at);
+    let capabilities = if body.capabilities.is_empty() {
+        vec![ApiCapability::Operator]
+    } else {
+        body.capabilities
+    };
+    let minted = orch8_types::api_key::mint_scoped(
+        body.tenant_id.clone(),
+        body.name.clone(),
+        body.expires_at,
+        capabilities,
+    );
     state
         .storage
         .create_api_key(&minted.record)
@@ -120,6 +136,7 @@ async fn create_api_key(
             id: minted.record.id,
             tenant_id: minted.record.tenant_id,
             name: minted.record.name,
+            capabilities: minted.record.capabilities,
             secret: minted.secret,
             created_at: minted.record.created_at,
             expires_at: minted.record.expires_at,

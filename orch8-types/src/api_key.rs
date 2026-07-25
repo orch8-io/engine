@@ -15,7 +15,36 @@
 //! the operator exactly once at creation and is unrecoverable afterwards.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
+
+/// Coarse principal capabilities enforced before tenant API routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiCapability {
+    Operator,
+    Worker,
+    Device,
+    Publisher,
+    Approver,
+    Auditor,
+}
+
+impl ApiCapability {
+    /// Compatibility grant for keys created before capability persistence.
+    #[must_use]
+    pub fn all() -> Vec<Self> {
+        vec![
+            Self::Operator,
+            Self::Worker,
+            Self::Device,
+            Self::Publisher,
+            Self::Approver,
+            Self::Auditor,
+        ]
+    }
+}
 
 /// Hash an API key secret for storage and lookup.
 ///
@@ -43,6 +72,8 @@ pub struct ApiKeyRecord {
     pub tenant_id: String,
     /// Human label for the key.
     pub name: String,
+    /// Empty is never persisted; legacy rows migrate to [`ApiCapability::all`].
+    pub capabilities: Vec<ApiCapability>,
     /// Hex SHA-256 of the secret.
     pub key_hash: String,
     pub created_at: DateTime<Utc>,
@@ -79,6 +110,18 @@ pub fn mint(
     name: impl Into<String>,
     expires_at: Option<DateTime<Utc>>,
 ) -> NewApiKey {
+    mint_scoped(tenant_id, name, expires_at, ApiCapability::all())
+}
+
+/// Mint a key with the exact least-privilege capability set supplied by the
+/// root administrator.
+#[must_use]
+pub fn mint_scoped(
+    tenant_id: impl Into<String>,
+    name: impl Into<String>,
+    expires_at: Option<DateTime<Utc>>,
+    capabilities: Vec<ApiCapability>,
+) -> NewApiKey {
     let id = format!("ak_{}", uuid::Uuid::new_v4().simple());
     let secret = format!(
         "sk_{}{}",
@@ -92,6 +135,7 @@ pub fn mint(
             id,
             tenant_id: tenant_id.into(),
             name: name.into(),
+            capabilities,
             key_hash,
             created_at: now,
             last_used_at: None,
@@ -120,11 +164,18 @@ mod tests {
         let minted = mint("acme", "ci-key", None);
         assert_eq!(minted.record.tenant_id, "acme");
         assert_eq!(minted.record.name, "ci-key");
+        assert_eq!(minted.record.capabilities, ApiCapability::all());
         assert!(minted.record.id.starts_with("ak_"));
         assert!(minted.secret.starts_with("sk_"));
         // The stored hash matches the plaintext, but the plaintext is not stored.
         assert_eq!(minted.record.key_hash, hash_api_key(&minted.secret));
         assert!(!minted.record.revoked);
+    }
+
+    #[test]
+    fn scoped_mint_preserves_exact_capabilities() {
+        let minted = mint_scoped("acme", "worker", None, vec![ApiCapability::Worker]);
+        assert_eq!(minted.record.capabilities, vec![ApiCapability::Worker]);
     }
 
     #[test]

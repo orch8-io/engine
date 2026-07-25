@@ -198,6 +198,7 @@ use utoipa::OpenApi;
         crate::diagnosis::RemediationApplyEvidence,
         orch8_types::audit::ChangeCursor,
         crate::changes::ChangePage,
+        orch8_types::api_key::ApiCapability,
         orch8_types::template_trace::ResolutionTrace,
         orch8_types::template_trace::ResolutionEntry,
         orch8_types::template_trace::ResolutionStatus,

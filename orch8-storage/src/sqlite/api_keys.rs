@@ -11,12 +11,13 @@ pub(super) async fn create(store: &SqliteStorage, key: &ApiKeyRecord) -> Result<
     let last_used = key.last_used_at.map(|t| t.to_rfc3339());
     let expires = key.expires_at.map(|t| t.to_rfc3339());
     sqlx::query(
-        r"INSERT INTO api_keys (id, tenant_id, name, key_hash, created_at, last_used_at, expires_at, revoked)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        r"INSERT INTO api_keys (id, tenant_id, name, capabilities_json, key_hash, created_at, last_used_at, expires_at, revoked)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
     )
     .bind(&key.id)
     .bind(&key.tenant_id)
     .bind(&key.name)
+    .bind(serde_json::to_string(&key.capabilities)?)
     .bind(&key.key_hash)
     .bind(&created)
     .bind(&last_used)
@@ -32,7 +33,7 @@ pub(super) async fn lookup_by_hash(
     key_hash: &str,
 ) -> Result<Option<ApiKeyRecord>, StorageError> {
     let row: Option<ApiKeyRow> = sqlx::query_as(
-        r"SELECT id, tenant_id, name, key_hash, created_at, last_used_at, expires_at, revoked
+        r"SELECT id, tenant_id, name, capabilities_json, key_hash, created_at, last_used_at, expires_at, revoked
           FROM api_keys WHERE key_hash = ?1",
     )
     .bind(key_hash)
@@ -46,7 +47,7 @@ pub(super) async fn list(
     tenant_id: &TenantId,
 ) -> Result<Vec<ApiKeyRecord>, StorageError> {
     let rows: Vec<ApiKeyRow> = sqlx::query_as(
-        r"SELECT id, tenant_id, name, key_hash, created_at, last_used_at, expires_at, revoked
+        r"SELECT id, tenant_id, name, capabilities_json, key_hash, created_at, last_used_at, expires_at, revoked
           FROM api_keys WHERE tenant_id = ?1 ORDER BY created_at DESC LIMIT 1000",
     )
     .bind(tenant_id.as_str())
@@ -90,6 +91,7 @@ struct ApiKeyRow {
     id: String,
     tenant_id: String,
     name: String,
+    capabilities_json: String,
     key_hash: String,
     created_at: String,
     last_used_at: Option<String>,
@@ -99,10 +101,16 @@ struct ApiKeyRow {
 
 impl ApiKeyRow {
     fn into_record(self) -> Result<ApiKeyRecord, StorageError> {
+        let mut capabilities: Vec<orch8_types::api_key::ApiCapability> =
+            serde_json::from_str(&self.capabilities_json)?;
+        if capabilities.is_empty() {
+            capabilities = orch8_types::api_key::ApiCapability::all();
+        }
         Ok(ApiKeyRecord {
             id: self.id,
             tenant_id: self.tenant_id,
             name: self.name,
+            capabilities,
             key_hash: self.key_hash,
             created_at: parse_ts(&self.created_at)?,
             last_used_at: self.last_used_at.as_deref().map(parse_ts).transpose()?,

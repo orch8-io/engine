@@ -31,6 +31,16 @@ When `ORCH8_API_KEY` is set, every endpoint requires an `x-api-key` header — i
 
 Only the health probes (`/health/live`, `/health/ready`, `/info`) and inbound public webhooks (`POST /webhooks/{slug}`, which use their own per-trigger secrets) stay public, so load-balancer checks and third-party webhook callers keep working.
 
+Tenant API keys are capability-scoped principals. `POST /api/v1/api-keys`
+accepts any combination of `operator`, `worker`, `device`, `publisher`,
+`approver`, and `auditor`; omission defaults to `operator`. The root key alone
+mints/revokes keys. `operator` covers the tenant API, while narrower roles are
+restricted before routing: workers to worker protocol paths, devices to mobile
+paths, publishers to sequence/release/plugin paths, approvers to approvals and
+instance signals, and auditors to read-only requests. Existing keys migrate
+with the compatibility grant and can be replaced progressively with
+least-privilege keys.
+
 ---
 
 ## Health

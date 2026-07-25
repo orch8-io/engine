@@ -6,6 +6,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 use orch8_storage::StorageBackend;
+use orch8_types::api_key::ApiCapability;
 use orch8_types::ids::TenantId;
 
 use crate::error::ApiError;
@@ -28,6 +29,13 @@ pub struct AdminContext;
 
 /// Extract the admin marker from request extensions (if present).
 pub type OptionalAdmin = Option<axum::Extension<AdminContext>>;
+
+/// Authenticated tenant principal and its immutable capability grant.
+#[derive(Clone, Debug)]
+pub struct PrincipalContext {
+    pub key_id: String,
+    pub capabilities: Vec<ApiCapability>,
+}
 
 /// For create/write endpoints: if a tenant header is present, enforce it matches
 /// the body's `tenant_id`. Returns the authoritative `tenant_id` to use.
@@ -150,6 +158,13 @@ pub async fn api_key_middleware(
             request.extensions_mut().insert(TenantContext {
                 tenant_id: TenantId::unchecked(record.tenant_id.clone()),
             });
+            if !capabilities_allow(&record.capabilities, request.method(), request.uri().path()) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            request.extensions_mut().insert(PrincipalContext {
+                key_id: record.id.clone(),
+                capabilities: record.capabilities.clone(),
+            });
             Ok(next.run(request).await)
         }
         // No match, revoked, or expired.
@@ -159,6 +174,34 @@ pub async fn api_key_middleware(
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+fn capabilities_allow(
+    capabilities: &[ApiCapability],
+    method: &axum::http::Method,
+    path: &str,
+) -> bool {
+    if capabilities.contains(&ApiCapability::Operator) {
+        return true;
+    }
+    let path = path.strip_prefix(crate::API_V1_PREFIX).unwrap_or(path);
+    capabilities.iter().any(|capability| match capability {
+        ApiCapability::Operator => true,
+        ApiCapability::Worker => path.starts_with("/workers") || path == "/handlers",
+        ApiCapability::Device => path.starts_with("/mobile"),
+        ApiCapability::Publisher => {
+            path.starts_with("/releases")
+                || path.starts_with("/plugins")
+                || path.starts_with("/sequences")
+        }
+        ApiCapability::Approver => {
+            path.starts_with("/approvals")
+                || (path.starts_with("/instances/") && path.ends_with("/signals"))
+        }
+        ApiCapability::Auditor => {
+            method == axum::http::Method::GET || method == axum::http::Method::HEAD
+        }
+    })
 }
 
 /// Tenant isolation middleware.
@@ -218,6 +261,30 @@ mod tests {
         Some(Extension(TenantContext {
             tenant_id: TenantId::unchecked(t.to_string()),
         }))
+    }
+
+    #[test]
+    fn scoped_capabilities_allow_only_their_route_families() {
+        assert!(capabilities_allow(
+            &[ApiCapability::Worker],
+            &axum::http::Method::POST,
+            "/api/v1/workers/tasks/poll"
+        ));
+        assert!(!capabilities_allow(
+            &[ApiCapability::Worker],
+            &axum::http::Method::POST,
+            "/api/v1/releases"
+        ));
+        assert!(capabilities_allow(
+            &[ApiCapability::Auditor],
+            &axum::http::Method::GET,
+            "/api/v1/changes"
+        ));
+        assert!(!capabilities_allow(
+            &[ApiCapability::Auditor],
+            &axum::http::Method::PATCH,
+            "/api/v1/instances/x/state"
+        ));
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use orch8_storage::StorageBackend;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::api_key;
@@ -41,6 +41,8 @@ async fn spawn(storage: Arc<dyn StorageBackend>, require_tenant: bool) -> Srv {
     let root_digest = orch8_types::auth::precompute_secret_digest(ROOT_KEY);
     let app: Router = Router::new()
         .route("/whoami", get(whoami))
+        .route("/api/v1/workers/tasks/poll", post(whoami))
+        .route("/api/v1/releases", post(whoami))
         .layer(axum::middleware::from_fn(move |req, next| async move {
             orch8_api::auth::tenant_middleware(require_tenant, req, next).await
         }))
@@ -148,6 +150,35 @@ async fn per_tenant_key_binds_tenant_from_record() {
         .await
         .unwrap();
     assert_eq!(body, "tenant:acme");
+}
+
+#[tokio::test]
+async fn worker_principal_cannot_mutate_release_control_plane() {
+    let store = storage().await;
+    let minted = api_key::mint_scoped("acme", "worker", None, vec![api_key::ApiCapability::Worker]);
+    store.create_api_key(&minted.record).await.unwrap();
+    let srv = spawn(store, true).await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .post(format!("{}/api/v1/workers/tasks/poll", srv.base))
+            .header("x-api-key", &minted.secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/api/v1/releases", srv.base))
+            .header("x-api-key", &minted.secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
