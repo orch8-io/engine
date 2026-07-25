@@ -108,7 +108,16 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
 
     loop {
         tokio::select! {
-            () = shutdown.cancelled() => return Ok(()),
+            () = shutdown.cancelled() => {
+                // Withdraw placement capability before closing the outbound
+                // session. The short flush window is bounded and does not
+                // extend the server's 30-second global drain deadline.
+                let _ = sender.send(client_frame(ClientPayload::RuntimeHeartbeat(RuntimeHeartbeat {
+                    runtime_capabilities_json: capabilities_json(config, true)?,
+                }))).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return Ok(());
+            },
             _ = heartbeat.tick() => {
                 sender.send(client_frame(ClientPayload::RuntimeHeartbeat(RuntimeHeartbeat {
                     runtime_capabilities_json: capabilities_json(config, false)?,

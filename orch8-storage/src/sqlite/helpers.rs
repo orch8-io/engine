@@ -339,6 +339,18 @@ pub(super) fn row_to_cluster_node(
         registered_at: parse_ts(row.get::<&str, _>("registered_at"))?,
         last_heartbeat_at: parse_ts(row.get::<&str, _>("last_heartbeat_at"))?,
         drain: row.get::<i32, _>("drain") != 0,
+        drain_started_at: row
+            .get::<Option<String>, _>("drain_started_at")
+            .as_deref()
+            .map(parse_ts)
+            .transpose()?,
+        stopped_at: row
+            .get::<Option<String>, _>("stopped_at")
+            .as_deref()
+            .map(parse_ts)
+            .transpose()?,
+        capabilities_withdrawn: row.get::<i32, _>("capabilities_withdrawn") != 0,
+        execution_handoff_evidence: row.get::<Option<String>, _>("execution_handoff_evidence"),
     })
 }
 

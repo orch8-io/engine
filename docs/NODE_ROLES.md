@@ -84,3 +84,23 @@ task receives it. Environment equivalents are
 `ORCH8_MANAGED_CONTROL_ENDPOINT`, `ORCH8_MANAGED_CONTROL_API_KEY`,
 `ORCH8_MANAGED_CONTROL_TENANT_ID`, `ORCH8_MANAGED_CONTROL_WORKER_ID`, and
 `ORCH8_MANAGED_CONTROL_RUNTIME_ID`.
+
+## Auditable fleet draining
+
+An operator drain transition now persists four distinct facts on the cluster
+node record: `drain_started_at`, capability withdrawal, `stopped_at`, and
+execution handoff evidence. Setting drain immediately changes status to
+`draining` and withdraws new claim/placement capability. The engine then stops
+scheduling, waits its bounded in-flight/background drain, and only on graceful
+deregistration writes:
+
+```text
+scheduler_drained; in_flight_work_completed_or_durably_recoverable
+```
+
+Stale-node reaping records `stopped_at` but never fabricates capability or
+handoff evidence, so operators can distinguish a graceful transfer boundary
+from a crashed node. Managed-control nodes additionally publish one final
+`draining=true` capability heartbeat with a bounded flush window before the
+outbound session closes. The cluster-node row remains as durable evidence
+rather than being deleted at shutdown.

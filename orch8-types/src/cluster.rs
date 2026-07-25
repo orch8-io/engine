@@ -20,6 +20,18 @@ pub struct ClusterNode {
     pub last_heartbeat_at: DateTime<Utc>,
     /// If true, the node should stop accepting new work and drain.
     pub drain: bool,
+    /// First durable transition into draining.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_started_at: Option<DateTime<Utc>>,
+    /// Graceful or stale stop time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// New placement/claim capability was withdrawn before shutdown.
+    #[serde(default)]
+    pub capabilities_withdrawn: bool,
+    /// Durable evidence written only after the local scheduler has drained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_handoff_evidence: Option<String>,
 }
 
 /// Status of a cluster node.

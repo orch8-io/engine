@@ -398,6 +398,10 @@ impl Engine {
             registered_at: now,
             last_heartbeat_at: now,
             drain: false,
+            drain_started_at: None,
+            stopped_at: None,
+            capabilities_withdrawn: false,
+            execution_handoff_evidence: None,
         };
         self.storage.register_node(&node).await?;
         tracing::info!(

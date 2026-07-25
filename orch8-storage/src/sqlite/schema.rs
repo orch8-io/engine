@@ -221,7 +221,11 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
     status TEXT NOT NULL DEFAULT 'active',
     registered_at TEXT NOT NULL,
     last_heartbeat_at TEXT NOT NULL,
-    drain INTEGER NOT NULL DEFAULT 0 CHECK(drain IN (0, 1))
+    drain INTEGER NOT NULL DEFAULT 0 CHECK(drain IN (0, 1)),
+    drain_started_at TEXT,
+    stopped_at TEXT,
+    capabilities_withdrawn INTEGER NOT NULL DEFAULT 0 CHECK(capabilities_withdrawn IN (0, 1)),
+    execution_handoff_evidence TEXT
 );
 
 CREATE TABLE IF NOT EXISTS injected_blocks (
