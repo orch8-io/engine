@@ -10,7 +10,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::error::StorageError;
 #[cfg(test)]
@@ -19,14 +18,13 @@ use orch8_types::ids::{InstanceId, Namespace};
 use orch8_types::instance::{InstanceState, TaskInstance};
 
 use crate::error::MobileError;
-use crate::storage::MobileStorage;
+use crate::storage::{ActiveInstanceProjection, MobileStorage};
 
 /// Manages instance lifecycle operations: creation, cancellation,
 /// completion, querying, and garbage collection.
 pub struct InstanceLifecycleManager {
     storage: Arc<dyn StorageBackend>,
     mobile_storage: Arc<MobileStorage>,
-    sequence_cache: Arc<SequenceCache>,
     dedup_keys: Arc<Mutex<HashMap<String, String>>>,
     max_concurrent_instances: u32,
 }
@@ -35,16 +33,18 @@ impl InstanceLifecycleManager {
     pub fn new(
         storage: Arc<dyn StorageBackend>,
         mobile_storage: Arc<MobileStorage>,
-        sequence_cache: Arc<SequenceCache>,
         max_concurrent_instances: u32,
     ) -> Self {
         Self {
             storage,
             mobile_storage,
-            sequence_cache,
             dedup_keys: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent_instances,
         }
+    }
+
+    pub(crate) fn mobile_storage(&self) -> &MobileStorage {
+        &self.mobile_storage
     }
 
     /// Hydrate the in-memory dedup cache from persistent storage.
@@ -313,38 +313,13 @@ impl InstanceLifecycleManager {
     }
 
     /// List all non-terminal instances with their sequence names.
-    pub async fn active_instances(&self) -> Result<Vec<(TaskInstance, String)>, MobileError> {
-        let filter = orch8_types::filter::InstanceFilter {
-            states: Some(vec![
-                InstanceState::Scheduled,
-                InstanceState::Running,
-                InstanceState::Waiting,
-                InstanceState::Paused,
-            ]),
-            ..Default::default()
-        };
-        let pagination = orch8_types::filter::Pagination {
-            offset: 0,
-            limit: 100,
-            sort_ascending: false,
-        };
-
-        let instances = self.storage.list_instances(&filter, &pagination).await?;
-        let mut result = Vec::with_capacity(instances.len());
-
-        for inst in instances {
-            let seq_name = self
-                .sequence_cache
-                .get_by_id(self.storage.as_ref(), inst.sequence_id)
-                .await
-                .ok()
-                .map(|s| s.name.clone())
-                .unwrap_or_default();
-
-            result.push((inst, seq_name));
-        }
-
-        Ok(result)
+    pub(crate) async fn active_instances(
+        &self,
+    ) -> Result<Vec<(ActiveInstanceProjection, String)>, MobileError> {
+        self.mobile_storage
+            .list_active_instance_summaries(100)
+            .await
+            .map_err(Into::into)
     }
 
     /// Garbage-collect instances that have exceeded their max lifetime.
@@ -354,36 +329,22 @@ impl InstanceLifecycleManager {
         let cutoff = chrono::Utc::now()
             - chrono::Duration::from_std(max_lifetime).unwrap_or(chrono::Duration::hours(24));
 
-        let filter = orch8_types::filter::InstanceFilter {
-            states: Some(vec![
-                InstanceState::Scheduled,
-                InstanceState::Running,
-                InstanceState::Waiting,
-                InstanceState::Paused,
-            ]),
-            ..Default::default()
-        };
-        let pagination = orch8_types::filter::Pagination {
-            offset: 0,
-            limit: 50,
-            sort_ascending: true,
-        };
-
-        let instances = self.storage.list_instances(&filter, &pagination).await?;
+        let instance_ids = self
+            .mobile_storage
+            .list_expired_active_instance_ids(cutoff, 50)
+            .await?;
         let mut expired = 0;
 
-        for inst in instances {
-            if inst.created_at < cutoff {
-                if let Err(e) = self
-                    .storage
-                    .update_instance_state(inst.id, InstanceState::Failed, None)
-                    .await
-                {
-                    warn!(instance_id = %inst.id, error = %e, "failed to expire instance");
-                } else {
-                    info!(instance_id = %inst.id, "expired instance (exceeded max lifetime)");
-                    expired += 1;
-                }
+        for instance_id in instance_ids {
+            if let Err(e) = self
+                .storage
+                .update_instance_state(instance_id, InstanceState::Failed, None)
+                .await
+            {
+                warn!(%instance_id, error = %e, "failed to expire instance");
+            } else {
+                info!(%instance_id, "expired instance (exceeded max lifetime)");
+                expired += 1;
             }
         }
 
@@ -439,13 +400,7 @@ mod tests {
         );
         let storage: Arc<dyn StorageBackend> = sqlite.clone();
         let mobile_storage = Arc::new(MobileStorage::new(sqlite));
-        let sequence_cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
-        let lifecycle = InstanceLifecycleManager::new(
-            storage.clone(),
-            mobile_storage.clone(),
-            sequence_cache.clone(),
-            10,
-        );
+        let lifecycle = InstanceLifecycleManager::new(storage.clone(), mobile_storage.clone(), 10);
         (lifecycle, mobile_storage, dir)
     }
 
@@ -497,12 +452,7 @@ mod tests {
         seed_sequence(&lifecycle.storage, "seq").await;
         let existing = lifecycle.start("seq", "{}", Some("dk1")).await.unwrap();
 
-        let reloaded = InstanceLifecycleManager::new(
-            lifecycle.storage.clone(),
-            mobile_storage,
-            lifecycle.sequence_cache.clone(),
-            10,
-        );
+        let reloaded = InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile_storage, 10);
         reloaded.hydrate_dedup().await.unwrap();
 
         let id = reloaded.start("seq", "{}", Some("dk1")).await.unwrap();
@@ -527,12 +477,8 @@ mod tests {
             .await
             .unwrap();
 
-        let reloaded = InstanceLifecycleManager::new(
-            lifecycle.storage.clone(),
-            mobile_storage.clone(),
-            lifecycle.sequence_cache.clone(),
-            10,
-        );
+        let reloaded =
+            InstanceLifecycleManager::new(lifecycle.storage.clone(), mobile_storage.clone(), 10);
         reloaded.hydrate_dedup().await.unwrap();
 
         assert!(
@@ -570,7 +516,6 @@ mod tests {
         let limited = InstanceLifecycleManager::new(
             lifecycle.storage.clone(),
             lifecycle.mobile_storage.clone(),
-            lifecycle.sequence_cache.clone(),
             2,
         );
 
@@ -680,6 +625,16 @@ mod tests {
 
         let active = lifecycle.active_instances().await.unwrap();
         assert_eq!(active.len(), 2);
+        assert!(
+            active
+                .iter()
+                .all(|(_, sequence_name)| sequence_name == "seq")
+        );
+        assert!(
+            active
+                .iter()
+                .all(|(instance, _)| instance.state == InstanceState::Scheduled)
+        );
 
         // Cancel one instance — it should no longer appear in active_instances.
         lifecycle.cancel_instance(&id1).await.unwrap();

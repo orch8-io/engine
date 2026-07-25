@@ -3,6 +3,7 @@ name: Mobile
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "orch8-mobile/**"
       - "orch8-engine/**"
@@ -203,6 +204,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [android, bindings]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
@@ -238,3 +242,51 @@ jobs:
         with:
           name: orch8-mobile.aar
           path: packages/android/orch8-mobile/build/outputs/aar/orch8-mobile-release.aar
+      - name: Publish Android package
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: packages/android
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+          ORCH8_MOBILE_VERSION: ${{ github.ref_name }}
+        run: gradle :orch8-mobile:publishReleasePublicationToGitHubPackagesRepository
+
+  # -- Publish tagged native artifacts ------------------------------------
+  release:
+    name: Publish native release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    needs: [xcframework, aar]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Orch8Mobile.xcframework
+          path: release/Orch8Mobile.xcframework
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: orch8-mobile.aar
+          path: release/android
+      - name: Archive XCFramework
+        run: ditto -c -k --sequesterRsrc --keepParent release/Orch8Mobile.xcframework release/Orch8Mobile.xcframework.zip
+      - name: Normalize Android artifact name
+        run: cp release/android/orch8-mobile-release.aar release/orch8-mobile.aar
+      - name: Generate checksums
+        working-directory: release
+        run: shasum -a 256 Orch8Mobile.xcframework.zip orch8-mobile.aar > SHA256SUMS
+      - name: Create release when absent
+        id: release_check
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "${GITHUB_REF_NAME}"
+      - name: Create GitHub release
+        if: steps.release_check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --title "Orch8 ${GITHUB_REF_NAME}"
+      - name: Upload native packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" release/Orch8Mobile.xcframework.zip release/orch8-mobile.aar release/SHA256SUMS --clobber

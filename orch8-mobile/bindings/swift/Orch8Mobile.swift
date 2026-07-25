@@ -1266,6 +1266,16 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func resume()
 
     /**
+     * Execute a bounded batch of ticks for an OS-granted background window.
+     *
+     * This method never starts a persistent loop. It returns when the engine
+     * becomes idle, `max_ticks` is reached, or `time_budget_ms` elapses. The
+     * host remains responsible for registering and completing the native
+     * `BGTaskScheduler`/`WorkManager` job.
+     */
+    func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64) throws  -> BackgroundRunResult
+
+    /**
      * Set device context for telemetry.
      */
     func setDeviceContext(ctx: DeviceContext)
@@ -1589,6 +1599,25 @@ open func resume()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
+}
+
+    /**
+     * Execute a bounded batch of ticks for an OS-granted background window.
+     *
+     * This method never starts a persistent loop. It returns when the engine
+     * becomes idle, `max_ticks` is reached, or `time_budget_ms` elapses. The
+     * host remains responsible for registering and completing the native
+     * `BGTaskScheduler`/`WorkManager` job.
+     */
+open func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64)throws  -> BackgroundRunResult  {
+    return try  FfiConverterTypeBackgroundRunResult_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(maxTicks),
+        FfiConverterUInt64.lower(timeBudgetMs),uniffiCallStatus
+    )
+})
 }
 
     /**
@@ -2172,6 +2201,89 @@ public func FfiConverterTypeTokenProvider_lower(_ value: TokenProvider) -> UInt6
 }
 
 
+
+
+/**
+ * Aggregate result from a bounded background execution window.
+ *
+ * Mobile operating systems grant background work for a limited, inexact
+ * amount of time. Hosts should call `run_until_idle` from their platform
+ * scheduler instead of starting the foreground loop.
+ */
+public struct BackgroundRunResult: Equatable, Hashable {
+    public let ticksExecuted: UInt32
+    public let instancesAdvanced: UInt32
+    public let stepsExecuted: UInt32
+    public let hasPendingWork: Bool
+    /**
+     * True when work remains after either the tick or wall-clock budget was
+     * exhausted, or when a tick made no immediate progress. The host should
+     * schedule another background opportunity instead of spinning.
+     */
+    public let budgetExhausted: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(ticksExecuted: UInt32, instancesAdvanced: UInt32, stepsExecuted: UInt32, hasPendingWork: Bool,
+        /**
+         * True when work remains after either the tick or wall-clock budget was
+         * exhausted, or when a tick made no immediate progress. The host should
+         * schedule another background opportunity instead of spinning.
+         */budgetExhausted: Bool) {
+        self.ticksExecuted = ticksExecuted
+        self.instancesAdvanced = instancesAdvanced
+        self.stepsExecuted = stepsExecuted
+        self.hasPendingWork = hasPendingWork
+        self.budgetExhausted = budgetExhausted
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension BackgroundRunResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBackgroundRunResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BackgroundRunResult {
+        return
+            try BackgroundRunResult(
+                ticksExecuted: FfiConverterUInt32.read(from: &buf),
+                instancesAdvanced: FfiConverterUInt32.read(from: &buf),
+                stepsExecuted: FfiConverterUInt32.read(from: &buf),
+                hasPendingWork: FfiConverterBool.read(from: &buf),
+                budgetExhausted: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BackgroundRunResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.ticksExecuted, into: &buf)
+        FfiConverterUInt32.write(value.instancesAdvanced, into: &buf)
+        FfiConverterUInt32.write(value.stepsExecuted, into: &buf)
+        FfiConverterBool.write(value.hasPendingWork, into: &buf)
+        FfiConverterBool.write(value.budgetExhausted, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundRunResult_lift(_ buf: RustBuffer) throws -> BackgroundRunResult {
+    return try FfiConverterTypeBackgroundRunResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBackgroundRunResult_lower(_ value: BackgroundRunResult) -> RustBuffer {
+    return FfiConverterTypeBackgroundRunResult.lower(value)
+}
 
 
 public struct ContinuityExportResult: Equatable, Hashable {
@@ -3746,6 +3858,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_resume() != 35126) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle() != 59390) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context() != 20572) {

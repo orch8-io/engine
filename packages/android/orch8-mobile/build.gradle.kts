@@ -1,7 +1,15 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
+
+group = "io.orch8"
+version = providers.gradleProperty("VERSION_NAME")
+    .orElse(providers.environmentVariable("ORCH8_MOBILE_VERSION"))
+    .orElse("0.0.0-local")
+    .get()
+    .removePrefix("v")
 
 android {
     namespace = "io.orch8.mobile"
@@ -42,4 +50,36 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.15.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                artifactId = "orch8-mobile"
+                pom {
+                    name.set("Orch8 Mobile")
+                    description.set("Embedded durable workflow runtime for Android")
+                    url.set("https://github.com/orch8-io/engine")
+                    licenses {
+                        license {
+                            name.set("Apache License 2.0")
+                            url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                        }
+                    }
+                }
+            }
+        }
+        repositories {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/orch8-io/engine")
+                credentials {
+                    username = providers.environmentVariable("GITHUB_ACTOR").orNull
+                    password = providers.environmentVariable("GITHUB_TOKEN").orNull
+                }
+            }
+        }
+    }
 }

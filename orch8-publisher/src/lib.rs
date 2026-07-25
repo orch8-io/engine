@@ -12,6 +12,7 @@ pub mod grant;
 pub mod manifest;
 pub mod package;
 pub mod publish;
+pub mod registry;
 
 pub use cdn::{CdnBackend, CdnError, MemoryCdnBackend, S3CdnBackend};
 pub use manifest::{
@@ -19,3 +20,7 @@ pub use manifest::{
     SignedManifest,
 };
 pub use publish::{PublishError, SequencePublisher};
+pub use registry::{
+    PackageRegistryPublisher, RegistryError, RegistryIndex, RegistryVersion, TransparencyEntry,
+    TransparencyLedger,
+};

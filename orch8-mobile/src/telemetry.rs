@@ -1,6 +1,7 @@
 //! SDK-side telemetry: event buffering, auto-flush, and batch upload.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -11,8 +12,15 @@ use crate::storage::MobileStorage;
 
 /// Maximum events stored in the local `SQLite` buffer.
 const MAX_BUFFER_SIZE: u32 = 1000;
+/// Maximum events accepted by the mobile telemetry ingestion endpoint.
+/// Keeping this separate from the offline buffer ceiling prevents a full
+/// buffer from producing an oversized request that the server must reject.
+const MAX_UPLOAD_BATCH_SIZE: u32 = 500;
 /// Auto-flush when buffer reaches this percentage of capacity.
 const AUTO_FLUSH_PCT: u32 = 80;
+/// When an offline buffer crosses its hard ceiling, trim a chunk so the next
+/// events need only their durable insert instead of one delete per event.
+const CAPACITY_TRIM_PCT: u32 = 90;
 /// Minimum time between automatic flush attempts triggered by `record()`'s
 /// over-threshold check (H-17). Without this, once the buffer crosses the
 /// threshold every single subsequent `record()` call re-triggers a full
@@ -53,10 +61,16 @@ pub struct TelemetryManager {
     storage: Arc<MobileStorage>,
     enabled: bool,
     device_ctx: std::sync::Mutex<DeviceContext>,
-    http: reqwest::Client,
+    http: OnceLock<reqwest::Client>,
     last_endpoint: std::sync::Mutex<Option<String>>,
     last_flush_attempt: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    buffer_state: tokio::sync::Mutex<TelemetryBufferState>,
     clock: SharedClock,
+}
+
+#[derive(Default)]
+struct TelemetryBufferState {
+    count: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -75,23 +89,21 @@ impl TelemetryManager {
         device_ctx: DeviceContext,
         clock: SharedClock,
     ) -> Self {
-        // The builder only uses constants, so failure is a programming error.
-        #[allow(clippy::expect_used)]
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
-            .build()
-            .expect("reqwest client builds");
         Self {
             storage,
             enabled,
             device_ctx: std::sync::Mutex::new(device_ctx),
-            http,
+            http: OnceLock::new(),
             last_endpoint: std::sync::Mutex::new(None),
             last_flush_attempt: std::sync::Mutex::new(None),
+            buffer_state: tokio::sync::Mutex::new(TelemetryBufferState::default()),
             clock,
         }
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        self.http
+            .get_or_init(|| crate::build_mobile_http_client(std::time::Duration::from_secs(30)))
     }
 
     pub fn set_device_context(&self, ctx: DeviceContext) {
@@ -107,68 +119,91 @@ impl TelemetryManager {
             return Ok(());
         }
 
-        let payload = serde_json::to_string(event)?;
+        let count = self
+            .append_bounded(&event.event_type, &event.payload, &event.timestamp)
+            .await?;
+        self.maybe_auto_flush(count).await;
+        Ok(())
+    }
+
+    async fn append_bounded(
+        &self,
+        event_type: &str,
+        payload: &str,
+        created_at: &str,
+    ) -> Result<u64, MobileError> {
+        let mut state = self.buffer_state.lock().await;
+        let prior_count = match state.count {
+            Some(count) => count,
+            None => self.count_events().await?,
+        };
         self.storage
-            .append_telemetry_event(&event.event_type, &payload)
+            .append_telemetry_event_at(event_type, payload, created_at)
             .await
-            .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
-            })?;
+            .map_err(mobile_storage_error)?;
 
-        // Auto-flush at 80% capacity.
-        let count =
-            self.storage
-                .count_telemetry_events()
+        let mut count = prior_count.saturating_add(1);
+        // The insert is already durable. Publish its count before pruning so
+        // a prune failure cannot leave the in-memory counter one row behind.
+        state.count = Some(count);
+        if count > u64::from(MAX_BUFFER_SIZE) {
+            let target = u64::from(MAX_BUFFER_SIZE) * u64::from(CAPACITY_TRIM_PCT) / 100;
+            let dropped = self
+                .storage
+                .delete_oldest_telemetry_events(count.saturating_sub(target))
                 .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-        self.enforce_capacity_from_count(count).await?;
-        if count >= (u64::from(MAX_BUFFER_SIZE) * u64::from(AUTO_FLUSH_PCT) / 100) {
-            // H-17: only attempt an auto-flush if the cooldown since the last
-            // *attempt* (successful or not) has elapsed. Otherwise, once the
-            // buffer is over threshold, every subsequent `record()` call
-            // would re-attempt a full flush — hammering a failing or
-            // rate-limited endpoint on every single recorded event.
-            let now = self.clock.now();
-            let should_attempt = {
-                let mut last = self
-                    .last_flush_attempt
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let ready = last
-                    .is_none_or(|t| now - t >= chrono::Duration::seconds(AUTO_FLUSH_COOLDOWN_SECS));
-                if ready {
-                    *last = Some(now);
-                }
-                ready
-            };
+                .map_err(mobile_storage_error)?;
+            count = count.saturating_sub(dropped);
+            state.count = Some(count);
+            tracing::info!(dropped, "trimmed oldest telemetry events at capacity");
+        }
+        Ok(count)
+    }
 
-            if should_attempt {
-                tracing::info!(
-                    count,
-                    "telemetry buffer at {}% — auto-flush",
-                    AUTO_FLUSH_PCT
-                );
-                let endpoint = self
-                    .last_endpoint
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(endpoint) = endpoint
-                    && let Err(e) = self.flush(&endpoint).await
-                {
-                    tracing::warn!(error = %e, "auto-flush failed");
-                }
-            } else {
-                tracing::debug!(
-                    count,
-                    "telemetry buffer over threshold but auto-flush is cooling down"
-                );
-            }
+    async fn maybe_auto_flush(&self, count: u64) {
+        let threshold = u64::from(MAX_BUFFER_SIZE) * u64::from(AUTO_FLUSH_PCT) / 100;
+        if count < threshold {
+            return;
+        }
+        if !self.claim_auto_flush_attempt() {
+            tracing::debug!(
+                count,
+                "telemetry buffer over threshold but auto-flush is cooling down"
+            );
+            return;
         }
 
-        Ok(())
+        tracing::info!(
+            count,
+            "telemetry buffer at {}% — auto-flush",
+            AUTO_FLUSH_PCT
+        );
+        let endpoint = self
+            .last_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(endpoint) = endpoint
+            && let Err(error) = self.flush(&endpoint).await
+        {
+            tracing::warn!(%error, "auto-flush failed");
+        }
+    }
+
+    /// Claim one automatic attempt before doing network I/O. Attempts, not
+    /// successes, are throttled so an offline device cannot retry per event.
+    fn claim_auto_flush_attempt(&self) -> bool {
+        let now = self.clock.now();
+        let mut last = self
+            .last_flush_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ready = last
+            .is_none_or(|time| now - time >= chrono::Duration::seconds(AUTO_FLUSH_COOLDOWN_SECS));
+        if ready {
+            *last = Some(now);
+        }
+        ready
     }
 
     /// Flush buffered telemetry to the remote endpoint.
@@ -182,7 +217,7 @@ impl TelemetryManager {
 
         let events = self
             .storage
-            .read_telemetry_events(MAX_BUFFER_SIZE)
+            .read_telemetry_events(MAX_UPLOAD_BATCH_SIZE)
             .await
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
@@ -194,6 +229,26 @@ impl TelemetryManager {
             });
         }
 
+        let response = self.send_batch(endpoint_url, &events).await?;
+        if !response.status().is_success() {
+            return Err(flush_response_error(response).await);
+        }
+        *self
+            .last_endpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(endpoint_url.to_string());
+        let deleted = self.delete_flushed_events(&events).await?;
+        Ok(FlushResult {
+            sent: deleted,
+            dropped: 0,
+        })
+    }
+
+    async fn send_batch(
+        &self,
+        endpoint_url: &str,
+        events: &[crate::storage::TelemetryEvent],
+    ) -> Result<reqwest::Response, MobileError> {
         let device_ctx = self
             .device_ctx
             .lock()
@@ -204,15 +259,13 @@ impl TelemetryManager {
             .map(|e| TelemetryBatchItem {
                 event_type: &e.event_type,
                 payload: &e.payload,
-                timestamp: e.created_at.to_rfc3339(),
+                timestamp: &e.created_at,
                 device: &device_ctx,
             })
             .collect();
 
-        let body = serde_json::to_string(&batch)?;
-
-        let response = self
-            .http
+        let body = serde_json::to_string(&TelemetryBatch { events: batch })?;
+        self.http_client()
             .post(endpoint_url)
             .header("content-type", "application/json")
             .body(body)
@@ -220,66 +273,69 @@ impl TelemetryManager {
             .await
             .map_err(|e| MobileError::Engine {
                 message: e.to_string(),
-            })?;
+            })
+    }
 
-        if response.status().is_success() {
-            *self
-                .last_endpoint
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(endpoint_url.to_string());
-            let ids: Vec<i64> = events.iter().map(|e| e.id).collect();
-            let deleted = self
-                .storage
-                .delete_telemetry_events(&ids)
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-            Ok(FlushResult {
-                sent: deleted,
-                dropped: 0,
-            })
-        } else {
-            let status = response.status();
-            let body_text = response.text().await.unwrap_or_default();
-            tracing::warn!(status = %status, body = %body_text, "telemetry flush failed");
-            Err(MobileError::Engine {
-                message: format!("telemetry flush failed: {status}"),
-            })
+    async fn delete_flushed_events(
+        &self,
+        events: &[crate::storage::TelemetryEvent],
+    ) -> Result<u64, MobileError> {
+        let ids: Vec<i64> = events.iter().map(|event| event.id).collect();
+        let mut state = self.buffer_state.lock().await;
+        let deleted = self
+            .storage
+            .delete_telemetry_events(&ids)
+            .await
+            .map_err(mobile_storage_error)?;
+        if let Some(count) = &mut state.count {
+            *count = count.saturating_sub(deleted);
         }
+        Ok(deleted)
     }
 
     /// Drop oldest events when the buffer is over capacity.
     pub async fn enforce_capacity(&self) -> Result<u64, MobileError> {
-        let count =
-            self.storage
-                .count_telemetry_events()
-                .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
-        self.enforce_capacity_from_count(count).await
-    }
-
-    async fn enforce_capacity_from_count(&self, count: u64) -> Result<u64, MobileError> {
+        let mut state = self.buffer_state.lock().await;
+        let count = self.count_events().await?;
         let excess = count.saturating_sub(u64::from(MAX_BUFFER_SIZE));
-        if excess != 0 {
-            let dropped = self
-                .storage
+        let dropped = if excess == 0 {
+            0
+        } else {
+            self.storage
                 .delete_oldest_telemetry_events(excess)
                 .await
-                .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
-                })?;
+                .map_err(mobile_storage_error)?
+        };
+        state.count = Some(count.saturating_sub(dropped));
+        if dropped != 0 {
             tracing::info!(
                 dropped,
                 "dropped oldest telemetry events to enforce capacity"
             );
-            Ok(dropped)
-        } else {
-            Ok(0)
         }
+        Ok(dropped)
+    }
+
+    async fn count_events(&self) -> Result<u64, MobileError> {
+        self.storage
+            .count_telemetry_events()
+            .await
+            .map_err(mobile_storage_error)
+    }
+}
+
+fn mobile_storage_error(error: orch8_types::error::StorageError) -> MobileError {
+    MobileError::Storage {
+        message: error.to_string(),
+    }
+}
+
+async fn flush_response_error(response: reqwest::Response) -> MobileError {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    tracing::warn!(%status, %body, "telemetry flush failed");
+    MobileError::Engine {
+        message: format!("telemetry flush failed: {status}"),
     }
 }
 
@@ -287,8 +343,13 @@ impl TelemetryManager {
 struct TelemetryBatchItem<'a> {
     event_type: &'a str,
     payload: &'a str,
-    timestamp: String,
+    timestamp: &'a str,
     device: &'a DeviceContext,
+}
+
+#[derive(Serialize)]
+struct TelemetryBatch<'a> {
+    events: Vec<TelemetryBatchItem<'a>>,
 }
 
 /// Result of a telemetry flush operation.
@@ -302,6 +363,35 @@ pub struct FlushResult {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use tokio::io::AsyncReadExt;
+
+    async fn read_http_body(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "connection closed before the request body arrived");
+            request.extend_from_slice(&chunk[..read]);
+
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let body_start = header_end + 4;
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("content-length: ")
+                        .or_else(|| line.strip_prefix("Content-Length: "))
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            if request.len() >= body_start + content_length {
+                return request[body_start..body_start + content_length].to_vec();
+            }
+        }
+    }
 
     async fn setup() -> (TelemetryManager, Arc<MobileStorage>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -335,6 +425,11 @@ mod tests {
 
         let count = storage.count_telemetry_events().await.unwrap();
         assert_eq!(count, 1);
+        assert_eq!(mgr.buffer_state.lock().await.count, Some(1));
+        let stored = storage.read_telemetry_events(1).await.unwrap();
+        assert_eq!(stored[0].event_type, event.event_type);
+        assert_eq!(stored[0].payload, event.payload);
+        assert_eq!(stored[0].created_at, event.timestamp);
     }
 
     #[tokio::test]
@@ -404,17 +499,17 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            storage.count_telemetry_events().await.unwrap(),
-            u64::from(MAX_BUFFER_SIZE)
-        );
+        let trim_target = u64::from(MAX_BUFFER_SIZE) * u64::from(CAPACITY_TRIM_PCT) / 100;
+        assert_eq!(storage.count_telemetry_events().await.unwrap(), trim_target);
+        assert_eq!(mgr.buffer_state.lock().await.count, Some(trim_target));
         let first = storage.read_telemetry_events(1).await.unwrap();
-        assert_eq!(first[0].event_type, "seed", "oldest event must be evicted");
+        assert_eq!(first[0].event_type, "seed", "oldest chunk must be evicted");
     }
 
     #[tokio::test]
     async fn flush_succeeds_and_deletes_events() {
         let (mgr, storage, _dir) = setup().await;
+        assert!(mgr.http.get().is_none());
 
         // Seed 3 events.
         for i in 0..3 {
@@ -426,12 +521,12 @@ mod tests {
         // Spin up a tiny HTTP server that accepts the batch.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
             use tokio::io::AsyncWriteExt;
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _n = socket.read(&mut buf).await.unwrap();
+            let body = read_http_body(&mut socket).await;
+            body_tx.send(body).unwrap();
             let response = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n";
             socket.write_all(response.as_bytes()).await.unwrap();
         });
@@ -439,12 +534,57 @@ mod tests {
         let url = format!("http://127.0.0.1:{port}/telemetry");
         let result = mgr.flush(&url).await.unwrap();
         assert_eq!(result.sent, 3);
+        assert!(mgr.http.get().is_some());
 
         server.await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body_rx.await.unwrap()).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 3);
 
         // Events should be deleted after successful flush.
         let count = storage.count_telemetry_events().await.unwrap();
         assert_eq!(count, 0);
+        assert_eq!(mgr.buffer_state.lock().await.count, Some(0));
+    }
+
+    #[tokio::test]
+    async fn flush_caps_request_at_server_batch_limit() {
+        let (mgr, storage, _dir) = setup().await;
+        for i in 0..=MAX_UPLOAD_BATCH_SIZE {
+            storage
+                .append_telemetry_event("TestEvent", &format!("{{\"i\":{i}}}"))
+                .await
+                .unwrap();
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (count_tx, count_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = read_http_body(&mut socket).await;
+            let batch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            count_tx
+                .send(batch["events"].as_array().unwrap().len())
+                .unwrap();
+            socket
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let result = mgr
+            .flush(&format!("http://127.0.0.1:{port}/telemetry"))
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            count_rx.await.unwrap(),
+            usize::try_from(MAX_UPLOAD_BATCH_SIZE).unwrap()
+        );
+        assert_eq!(result.sent, u64::from(MAX_UPLOAD_BATCH_SIZE));
+        assert_eq!(storage.count_telemetry_events().await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -472,6 +612,18 @@ mod tests {
         let result = mgr.flush("http://127.0.0.1:1/telemetry").await.unwrap();
         assert_eq!(result.sent, 0);
         assert_eq!(result.dropped, 0);
+        assert!(mgr.http.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_flush_does_not_initialize_http_client() {
+        let (mgr, _storage, _dir) = setup().await;
+
+        let result = mgr.flush("http://127.0.0.1:1/telemetry").await.unwrap();
+
+        assert_eq!(result.sent, 0);
+        assert_eq!(result.dropped, 0);
+        assert!(mgr.http.get().is_none());
     }
 
     #[tokio::test]

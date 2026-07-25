@@ -241,6 +241,7 @@ engine.setListener(listener: MyListener())
 | `resume()` | Start the background tick loop |
 | `pause()` | Pause the tick loop (waits for current tick) |
 | `tickOnce()` | Execute a single tick manually |
+| `runUntilIdle(maxTicks, timeBudgetMs)` | Drain work inside a bounded OS-granted background window |
 | `start(sequenceName, input, dedupKey?)` | Start a workflow instance, returns instance ID |
 | `cancelInstance(instanceId)` | Cancel a running instance |
 | `getInstance(instanceId)` | Get instance state snapshot |
@@ -329,8 +330,27 @@ deadlines and SLA checks. Once storage contains no scheduled, running, waiting, 
 workflow, the engine sleeps directly to the next sync or maintenance deadline (normally
 30 or 60 seconds). `start`, `completeStep`, listener registration, and silent pushes wake
 it immediately. Report `LowBattery` or `CriticalBattery` through `reportPowerState` to
-make the real active timer interval 2x or 4x longer. RSS budget checks run at most every
-30 seconds while memory is healthy and every five seconds while over budget.
+make the real active timer interval 2x or 4x longer. RSS budget checks—including rapid
+`tickOnce` calls and `runUntilIdle` batches—run at most every 30 seconds while memory is healthy
+and every five seconds while over budget. Cloud heartbeats
+continue at the configured sync deadline, while full status/database scans run only at startup
+or after actual lifecycle activity. Unchanged waiting workflows do not trigger periodic status
+rescans. Instance summaries, waiting-step notification scans, and the periodic stale-instance
+collector select only the small fields they consume, so they do not deserialize workflow contexts
+(up to 256 KiB each) into memory.
+Cloud status scans read all execution trees in one batch and commit coalesced status/approval
+outbox rows in one transaction instead of issuing per-instance reads and writes.
+Telemetry initializes its durable buffer count once instead of running `COUNT(*)` after every
+event. An offline buffer that crosses 1,000 rows trims back to 900 in one operation, avoiding a
+separate delete transaction for every subsequent event while preserving the hard row ceiling.
+Each row stores the original payload and its already-captured timestamp directly, avoiding
+whole-record JSON duplication and a second clock read/string allocation for every event.
+Uploads drain at most 500 events per request—the ingestion API's accepted batch size—so a full
+offline buffer cannot waste radio time on an oversized request that the server will reject.
+Telemetry, manifest-sync, and device-sync HTTP clients are initialized only on their first real
+request, keeping offline and local-only engine instances free of retained networking state.
+Burst SQLite reader connections retire after 30 seconds of inactivity instead of remaining
+resident for SQLx's ten-minute default; the pool keeps no minimum warm connections.
 
 Always call `pause()` when the app leaves the foreground. The host operating system's
 background task APIs should own longer-running background execution.
@@ -353,8 +373,16 @@ func scheduleSync() {
 
 BGTaskScheduler.shared.register(forTaskWithIdentifier: "io.orch8.sync", using: nil) { task in
     let syncTask = task as! BGProcessingTask
-    let result = try? engine.sync(manifestUrl: manifestUrl, tokenProvider: nil)
-    syncTask.setTaskCompleted(success: result != nil)
+    task.expirationHandler = { engine.pause() }
+    do {
+        _ = try engine.sync(manifestUrl: manifestUrl, tokenProvider: nil)
+        let result = try engine.runUntilIdle(maxTicks: 25, timeBudgetMs: 20_000)
+        if result.budgetExhausted { scheduleSync() }
+        syncTask.setTaskCompleted(success: true)
+    } catch {
+        scheduleSync()
+        syncTask.setTaskCompleted(success: false)
+    }
 }
 ```
 
@@ -369,7 +397,8 @@ class Orch8SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
     override suspend fun doWork(): Result {
         return try {
             engine.sync(manifestUrl, null)
-            Result.success()
+            val result = engine.runUntilIdle(maxTicks = 25u, timeBudgetMs = 20_000u)
+            if (result.budgetExhausted) Result.retry() else Result.success()
         } catch (e: Exception) {
             Result.retry()
         }
@@ -390,6 +419,12 @@ class Orch8LifecycleObserver(private val engine: MobileEngine) : DefaultLifecycl
     override fun onStop(owner: LifecycleOwner) { engine.pause() }
 }
 ```
+
+`runUntilIdle` is bounded by both tick count and elapsed wall time. It does not
+keep the application alive, request execution privileges, or guarantee a
+schedule. `BGTaskScheduler` and `WorkManager` remain the authority for when the
+host process may run. Treat `budgetExhausted` as a request to schedule another
+opportunity, not as a reason to spin in-process.
 
 ## Troubleshooting
 

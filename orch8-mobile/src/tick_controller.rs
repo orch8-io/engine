@@ -38,8 +38,6 @@ pub(crate) struct TickController {
     dirty: Arc<AtomicBool>,
 }
 
-const RSS_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
-const RSS_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const SYNC_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const INSTANCE_GC_INTERVAL: Duration = Duration::from_secs(60);
@@ -166,7 +164,7 @@ impl TickController {
             let mut next_memory_check = Instant::now();
             let mut memory_budget_exceeded = false;
             let mut idle_streak: u32 = 0;
-            let mut next_sync_scan = Instant::now();
+            let mut sync_scan = SyncScanSchedule::new(Instant::now());
             let mut next_instance_gc = Instant::now() + INSTANCE_GC_INTERVAL;
             let mut notification_scan_due = true;
             let mut scheduler_is_quiescent = false;
@@ -292,12 +290,18 @@ impl TickController {
                         // have changed. The startup scan covers persisted events;
                         // settled idle ticks contain no new information.
                         if notification_scan_due || lifecycle_may_have_changed || woke_for_work {
-                            let terminal_ids = notifier.fire_terminal_events(&storage).await;
+                            let terminal_ids = notifier
+                                .fire_terminal_events(&storage, lifecycle.mobile_storage())
+                                .await;
                             for id in terminal_ids {
                                 lifecycle.cleanup_dedup(&id).await;
                             }
                             notifier
-                                .fire_step_pending_events(&storage, &seq_cache)
+                                .fire_step_pending_events(
+                                    &storage,
+                                    lifecycle.mobile_storage(),
+                                    &seq_cache,
+                                )
                                 .await;
                             notification_scan_due = false;
                         }
@@ -307,14 +311,25 @@ impl TickController {
                         if let Some(ref reporter) = sync_reporter {
                             let now = Instant::now();
                             let should_sync = reporter.should_sync();
-                            let activity_scan_due =
-                                (scheduler_has_work || woke_for_work) && now >= next_sync_scan;
-                            if should_sync || activity_scan_due {
-                                reporter.scan_and_queue(&storage, &seq_cache).await;
-                                next_sync_scan = now + SYNC_SCAN_INTERVAL;
+                            let activity_detected = lifecycle_may_have_changed || woke_for_work;
+                            if activity_detected {
+                                sync_scan.mark_dirty();
+                            }
+                            if sync_scan.is_due(now, should_sync) {
+                                let succeeded =
+                                    reporter
+                                        .scan_and_queue(
+                                            &storage,
+                                            lifecycle.mobile_storage(),
+                                            &seq_cache,
+                                        )
+                                        .await;
+                                sync_scan.record_attempt(now, succeeded);
                             }
                             if should_sync {
-                                reporter.sync_once(&storage, &lifecycle).await;
+                                if reporter.sync_once(&storage, &lifecycle).await {
+                                    sync_scan.mark_dirty();
+                                }
                                 // Server commands may have scheduled work after
                                 // `tick_once` computed its result. Re-check the
                                 // cheap state count instead of forcing another
@@ -335,14 +350,15 @@ impl TickController {
 
                         tick_count += 1;
                         let now = Instant::now();
-                        if now >= next_instance_gc
-                            && let Err(e) = lifecycle
+                        if now >= next_instance_gc {
+                            match lifecycle
                                 .gc_expired_instances(max_instance_lifetime_secs)
                                 .await
-                        {
-                            warn!(error = %e, "periodic instance GC failed");
-                        }
-                        if now >= next_instance_gc {
+                            {
+                                Ok(expired) if expired != 0 => sync_scan.mark_dirty(),
+                                Ok(_) => {}
+                                Err(e) => warn!(error = %e, "periodic instance GC failed"),
+                            }
                             next_instance_gc = now + INSTANCE_GC_INTERVAL;
                         }
 
@@ -446,11 +462,40 @@ fn scheduler_active_instance_filter() -> InstanceFilter {
     }
 }
 
+struct SyncScanSchedule {
+    dirty: bool,
+    next_attempt: Instant,
+}
+
+impl SyncScanSchedule {
+    fn new(now: Instant) -> Self {
+        Self {
+            dirty: true,
+            next_attempt: now,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn is_due(&self, now: Instant, sync_due: bool) -> bool {
+        self.dirty && (sync_due || now >= self.next_attempt)
+    }
+
+    fn record_attempt(&mut self, now: Instant, succeeded: bool) {
+        self.next_attempt = now + SYNC_SCAN_INTERVAL;
+        if succeeded {
+            self.dirty = false;
+        }
+    }
+}
+
 const fn memory_sample_interval(budget_exceeded: bool) -> Duration {
     if budget_exceeded {
-        RSS_RETRY_INTERVAL
+        memory::EXCEEDED_SAMPLE_INTERVAL
     } else {
-        RSS_SAMPLE_INTERVAL
+        memory::HEALTHY_SAMPLE_INTERVAL
     }
 }
 
@@ -571,5 +616,23 @@ mod tests {
                 InstanceState::Paused,
             ])
         );
+    }
+
+    #[test]
+    fn sync_status_scans_only_when_dirty() {
+        let now = Instant::now();
+        let mut schedule = SyncScanSchedule::new(now);
+        assert!(schedule.is_due(now, false), "startup must scan once");
+
+        schedule.record_attempt(now, true);
+        assert!(!schedule.is_due(now + Duration::from_secs(60), true));
+
+        schedule.mark_dirty();
+        assert!(!schedule.is_due(now + Duration::from_secs(1), false));
+        assert!(schedule.is_due(now + SYNC_SCAN_INTERVAL, false));
+        assert!(schedule.is_due(now + Duration::from_secs(1), true));
+
+        schedule.record_attempt(now + Duration::from_secs(1), false);
+        assert!(schedule.dirty, "failed scans must remain pending");
     }
 }

@@ -2,7 +2,7 @@
 //! and reconciliation.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -198,7 +198,7 @@ pub struct SyncOrchestrator {
     mobile_storage: Arc<MobileStorage>,
     backend: Arc<dyn StorageBackend>,
     root_key: RootKey,
-    http: reqwest::Client,
+    http: OnceLock<reqwest::Client>,
     sdk_version: String,
     max_stored_sequences: u32,
 }
@@ -211,22 +211,19 @@ impl SyncOrchestrator {
         sdk_version: String,
         max_stored_sequences: u32,
     ) -> Self {
-        // The builder only uses constants, so failure is a programming error.
-        #[allow(clippy::expect_used)]
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
-            .build()
-            .expect("reqwest client builds");
         Self {
             mobile_storage,
             backend,
             root_key,
-            http,
+            http: OnceLock::new(),
             sdk_version,
             max_stored_sequences,
         }
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        self.http
+            .get_or_init(|| crate::build_mobile_http_client(Duration::from_secs(30)))
     }
 
     /// HTTP GET with exponential backoff and jitter for retryable errors
@@ -244,7 +241,7 @@ impl SyncOrchestrator {
         let mut last_err = None;
 
         for attempt in 0..=max_retries {
-            let mut req = self.http.get(url);
+            let mut req = self.http_client().get(url);
             match auth {
                 SyncAuth::Bearer(token) => {
                     req = req.header("authorization", format!("Bearer {token}"));
@@ -977,6 +974,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn constructor_does_not_initialize_http_client() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let orchestrator = SyncOrchestrator::new(
+            mobile_storage,
+            sqlite,
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            50,
+        );
+
+        assert!(orchestrator.http.get().is_none());
+    }
+
+    #[tokio::test]
     async fn version_meets_min_works() {
         let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
@@ -1460,6 +1474,7 @@ mod tests {
             .sync(&url, &SyncAuth::UrlToken, &HashSet::new())
             .await
             .unwrap();
+        assert!(orch.http.get().is_some());
 
         server.await.unwrap();
 

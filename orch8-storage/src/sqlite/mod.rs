@@ -190,8 +190,9 @@ impl SqliteStorage {
     /// Create a file-backed SQLite storage tuned for mobile use.
     ///
     /// Uses WAL journal mode for concurrent reads during writes, 5 connections
-    /// (1 writer + 4 reader capacity under WAL), a 5-second busy timeout to
-    /// handle contention gracefully, and foreign keys for cascade deletes.
+    /// (1 writer + 4 reader capacity under WAL), a short idle timeout so burst
+    /// readers do not remain resident for SQLx's default 10 minutes, a
+    /// 5-second busy timeout, and foreign keys for cascade deletes.
     pub async fn file_mobile(path: &str) -> Result<Self, StorageError> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
             .map_err(|e| StorageError::Connection(e.to_string()))?
@@ -202,6 +203,7 @@ impl SqliteStorage {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
+            .idle_timeout(Duration::from_secs(30))
             .connect_with(opts)
             .await
             .map_err(|e| StorageError::Connection(e.to_string()))?;
@@ -2739,6 +2741,16 @@ mod tests {
     use orch8_types::context::ExecutionContext;
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
     use orch8_types::sequence::{BlockDefinition, SequenceStatus, StepDef};
+
+    #[tokio::test]
+    async fn mobile_pool_bounds_idle_connection_retention() {
+        let storage = SqliteStorage::file_mobile(":memory:").await.unwrap();
+        let options = storage.pool.options();
+
+        assert_eq!(options.get_min_connections(), 0);
+        assert_eq!(options.get_max_connections(), 5);
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(30)));
+    }
 
     /// Simulates an on-device DB created by an older binary: a `task_instances`
     /// table missing a column that a later schema added. `reconcile_columns`

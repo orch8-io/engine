@@ -34,7 +34,7 @@ Portable Continuity takes that further: a running execution can hand off between
 
 **Multi-tenancy** — Tenant-scoped queries, per-tenant rate limits, per-tenant circuit breakers, tenant isolation middleware, per-tenant noisy-neighbor protection
 
-**Extensibility** — External workers (any language via REST polling), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, signed workflow/connector packages
+**Extensibility** — External workers (any language via REST polling), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, and tenant-scoped signed workflow/connector packages with verifiable publication history. See [Package Registry](docs/PACKAGE_REGISTRY.md).
 
 **Observability** — Prometheus metrics, structured JSON logging, audit log, execution tree visualization, Grafana dashboard template, visual execution workbench (unified timeline, run comparison, fork preview), template debugger and resolution inspector, stuck-instance doctor with ranked diagnostics
 
@@ -144,7 +144,7 @@ orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
     |
 orch8-push            APNs/FCM push notification providers
     |
-orch8-publisher       Event publishing (webhooks, NATS)
+orch8-publisher       Signed sequence/package publication and CDN registry
     |
 orch8-cli             CLI tool (init, doctor, release gate, sequence, instance, signal, health)
 ```
@@ -255,7 +255,7 @@ engine/
   orch8-engine/       Core scheduler, evaluator, handlers
   orch8-grpc/         gRPC service (tonic + protobuf)
   orch8-mobile/       UniFFI bindings for iOS/Android
-  orch8-publisher/    Event publishing (webhooks, NATS)
+  orch8-publisher/    Signed sequence/package publication and CDN registry
   orch8-push/         Push notification providers (APNs/FCM)
   orch8-server/       Server binary, config, startup
   orch8-storage/      Storage trait + Postgres + SQLite impls

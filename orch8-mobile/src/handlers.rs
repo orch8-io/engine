@@ -42,12 +42,10 @@ pub(crate) fn register_foreign_handler(
         async move {
             let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
-            let handler_clone = Arc::clone(&handler);
-            let name_clone = name.clone();
-            let input_clone = input.clone();
+            let name_for_call = name.clone();
 
-            let result = tokio::time::timeout(timeout, async {
-                tokio::task::spawn_blocking(move || handler_clone.execute(name_clone, input_clone))
+            let result = tokio::time::timeout(timeout, async move {
+                tokio::task::spawn_blocking(move || handler.execute(name_for_call, input))
                     .await
                     .map_err(|e| HandlerError::Permanent {
                         message: format!("handler task panicked: {e}"),

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -10,10 +12,11 @@ use crate::lifecycle::InstanceLifecycleManager;
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::clock::SharedClock;
-use orch8_types::filter::{InstanceFilter, Pagination};
-use orch8_types::ids::{BlockId, InstanceId};
+use orch8_types::ids::{BlockId, InstanceId, SequenceId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
+
+use crate::storage::{MobileStorage, SyncExecutionStepProjection, SyncInstanceProjection};
 
 /// Bounds for the server-suggested sync interval. A buggy (or malicious, if
 /// the API key/channel is ever abused) response must not be able to turn the
@@ -27,7 +30,7 @@ const MAX_SYNC_INTERVAL_SECS: u32 = 3600;
 /// them locally.
 pub(crate) struct SyncReporter {
     pool: SqlitePool,
-    http: reqwest::Client,
+    http: OnceLock<reqwest::Client>,
     sync_url: String,
     device_id: String,
     api_key: String,
@@ -78,6 +81,13 @@ enum CommandOutcome {
     Retryable,
 }
 
+type OutboxEntry = (String, String);
+
+struct ScanOutboxEntries {
+    statuses: Vec<OutboxEntry>,
+    approvals: Vec<OutboxEntry>,
+}
+
 impl SyncReporter {
     pub fn new(pool: SqlitePool, sync_url: String, device_id: String, api_key: String) -> Self {
         Self::new_with_clock(pool, sync_url, device_id, api_key, SharedClock::default())
@@ -90,20 +100,11 @@ impl SyncReporter {
         api_key: String,
         clock: SharedClock,
     ) -> Self {
-        // The builder only uses constants, so failure is a programming error.
-        #[allow(clippy::expect_used)]
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
-            .build()
-            .expect("reqwest client");
-
         let now = clock.now();
 
         Self {
             pool,
-            http,
+            http: OnceLock::new(),
             sync_url,
             device_id,
             api_key,
@@ -113,6 +114,11 @@ impl SyncReporter {
             push_generation: AtomicU64::new(0),
             completed_push_generation: AtomicU64::new(0),
         }
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        self.http
+            .get_or_init(|| crate::build_mobile_http_client(Duration::from_secs(15)))
     }
 
     /// Called by host app when a silent push notification arrives.
@@ -230,71 +236,6 @@ impl SyncReporter {
         }
     }
 
-    /// Write a status update to the outbox. Coalesces per `instance_id`.
-    pub async fn queue_status(
-        &self,
-        instance_id: &str,
-        sequence_name: Option<&str>,
-        state: &str,
-        current_step: Option<&str>,
-        handler: Option<&str>,
-        steps: Option<serde_json::Value>,
-    ) {
-        let payload = serde_json::json!({
-            "instance_id": instance_id,
-            "sequence_name": sequence_name,
-            "state": state,
-            "current_step": current_step,
-            "handler": handler,
-            "steps": steps,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-        if let Err(e) = sqlx::query(
-            "INSERT INTO sync_outbox (entry_type, instance_id, payload) VALUES ('status', ?, ?)",
-        )
-        .bind(instance_id)
-        .bind(payload.to_string())
-        .execute(&self.pool)
-        .await
-        {
-            warn!(error = %e, instance_id, "failed to queue mobile status update");
-        }
-    }
-
-    /// Write an approval request to the outbox.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn queue_approval(
-        &self,
-        instance_id: &str,
-        block_id: &str,
-        sequence_name: Option<&str>,
-        prompt: Option<&str>,
-        choices: Option<&str>,
-        store_as: Option<&str>,
-        timeout_seconds: Option<i64>,
-    ) {
-        let payload = serde_json::json!({
-            "instance_id": instance_id,
-            "block_id": block_id,
-            "sequence_name": sequence_name,
-            "prompt": prompt,
-            "choices": choices.and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok()),
-            "store_as": store_as,
-            "timeout_seconds": timeout_seconds,
-        });
-        let key = format!("{instance_id}:{block_id}");
-        if let Err(e) = sqlx::query(
-            "INSERT OR IGNORE INTO sync_outbox (entry_type, instance_id, payload) VALUES ('approval', ?, ?)",
-        )
-        .bind(&key)
-        .bind(payload.to_string())
-        .execute(&self.pool)
-        .await
-        {
-            warn!(error = %e, instance_id, block_id, "failed to queue mobile approval request");
-        }
-    }
-
     /// Queue a step delegation request to the server.
     /// The server resolves `credentials://` references and returns
     /// resolved params as a `step_result` command.
@@ -334,83 +275,79 @@ impl SyncReporter {
     pub async fn scan_and_queue(
         &self,
         storage: &Arc<dyn StorageBackend>,
+        mobile_storage: &MobileStorage,
         sequence_cache: &Arc<SequenceCache>,
-    ) {
-        let filter = InstanceFilter {
-            states: Some(vec![
-                InstanceState::Scheduled,
-                InstanceState::Running,
-                InstanceState::Waiting,
-                InstanceState::Completed,
-                InstanceState::Failed,
-                InstanceState::Cancelled,
-            ]),
-            ..Default::default()
-        };
-        let pagination = Pagination {
-            offset: 0,
-            limit: 100,
-            sort_ascending: false,
-        };
-
-        let instances = match storage.list_instances(&filter, &pagination).await {
+    ) -> bool {
+        let instances = match mobile_storage.list_sync_instances(100).await {
             Ok(list) => list,
             Err(e) => {
                 debug!(error = %e, "scan_and_queue: failed to list instances");
-                return;
+                return false;
             }
         };
 
-        for inst in &instances {
-            let id_str = inst.id.to_string();
-            let current_step: Option<&BlockId> = inst.context.runtime.current_step.as_ref();
-            let step_str = current_step.map(BlockId::as_str);
-            let state_str = format!("{:?}", inst.state);
-
-            let seq = sequence_cache
-                .get_by_id(storage.as_ref(), inst.sequence_id)
-                .await
-                .ok();
-
-            let seq_name = seq.as_ref().map(|s| s.name.clone());
-
-            let handler = current_step
-                .and_then(|step_id| seq.as_ref().and_then(|s| find_handler(&s.blocks, step_id)));
-
-            let steps = build_steps_payload(storage.as_ref(), inst.id, seq.as_deref()).await;
-
-            self.queue_status(
-                &id_str,
-                seq_name.as_deref(),
-                &state_str,
-                step_str,
-                handler.as_deref(),
-                steps,
-            )
-            .await;
-
-            if inst.state == InstanceState::Waiting
-                && let Some(step_id) = current_step
-            {
-                let wait_info = seq
-                    .as_ref()
-                    .and_then(|s| find_wait_info(&s.blocks, step_id));
-
-                let (prompt, choices, store_as, timeout) =
-                    wait_info.unwrap_or((None, None, None, None));
-
-                self.queue_approval(
-                    &id_str,
-                    step_id.as_str(),
-                    seq_name.as_deref(),
-                    prompt.as_deref(),
-                    choices.as_deref(),
-                    store_as.as_deref(),
-                    timeout,
-                )
-                .await;
+        let instance_ids: Vec<_> = instances.iter().map(|instance| instance.id).collect();
+        let execution_steps = match mobile_storage
+            .list_sync_execution_steps(&instance_ids)
+            .await
+        {
+            Ok(steps) => Some(group_execution_steps(steps)),
+            Err(error) => {
+                debug!(%error, "scan_and_queue: failed to load execution steps");
+                None
             }
+        };
+
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let entries = collect_scan_entries(
+            storage.as_ref(),
+            sequence_cache,
+            instances,
+            execution_steps.as_ref(),
+            &timestamp,
+        )
+        .await;
+
+        self.queue_scan_entries(&entries.statuses, &entries.approvals)
+            .await
+    }
+
+    async fn queue_scan_entries(
+        &self,
+        status_entries: &[(String, String)],
+        approval_entries: &[(String, String)],
+    ) -> bool {
+        let mut transaction = match self.pool.begin().await {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                warn!(%error, "failed to begin mobile status outbox batch");
+                return false;
+            }
+        };
+
+        let result = async {
+            insert_outbox_entries(
+                &mut transaction,
+                "INSERT OR REPLACE INTO sync_outbox (entry_type, instance_id, payload) ",
+                "status",
+                status_entries,
+            )
+            .await?;
+            insert_outbox_entries(
+                &mut transaction,
+                "INSERT OR IGNORE INTO sync_outbox (entry_type, instance_id, payload) ",
+                "approval",
+                approval_entries,
+            )
+            .await?;
+            transaction.commit().await
         }
+        .await;
+        if let Err(error) = result {
+            warn!(%error, "failed to commit mobile status/approval outbox batch");
+            return false;
+        }
+        true
     }
 
     /// Execute one sync cycle: drain outbox, POST to server, process commands.
@@ -419,7 +356,7 @@ impl SyncReporter {
         &self,
         storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
-    ) {
+    ) -> bool {
         // Capture only pushes known when this request begins. A newer push
         // arriving during the HTTP round trip must remain pending afterward.
         let attempted_push_generation = self.push_generation.load(Ordering::Acquire);
@@ -445,7 +382,7 @@ impl SyncReporter {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(%error, "failed to read pending mobile sync data");
-                return;
+                return false;
             }
         };
 
@@ -475,7 +412,7 @@ impl SyncReporter {
         };
 
         let result = self
-            .http
+            .http_client()
             .post(&self.sync_url)
             .header("x-api-key", &self.api_key)
             .header("x-device-id", &self.device_id)
@@ -487,11 +424,11 @@ impl SyncReporter {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 warn!(status = %r.status(), "sync request failed");
-                return;
+                return false;
             }
             Err(e) => {
                 debug!(error = %e, "sync request error (offline?)");
-                return;
+                return false;
             }
         };
 
@@ -499,9 +436,10 @@ impl SyncReporter {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "failed to parse sync response");
-                return;
+                return false;
             }
         };
+        let commands_received = !sync_resp.commands.is_empty();
 
         // Clean up sent outbox entries.
         let sent_status_ids: Vec<i64> = status_rows.iter().map(|(id, _)| *id).collect();
@@ -619,6 +557,7 @@ impl SyncReporter {
         // Mark only the pushes covered by this successful round-trip. `fetch_max`
         // also keeps concurrent sync completions from moving the marker backward.
         self.mark_pushes_completed(attempted_push_generation);
+        commands_received
     }
 
     #[allow(clippy::too_many_lines)]
@@ -932,19 +871,175 @@ async fn delete_command_acks(pool: &SqlitePool, ids: &[String]) -> Result<(), sq
     Ok(())
 }
 
-async fn build_steps_payload(
+async fn insert_outbox_entries(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    insert_sql: &str,
+    entry_type: &str,
+    entries: &[OutboxEntry],
+) -> Result<(), sqlx::Error> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut query = sqlx::QueryBuilder::new(insert_sql);
+    query.push_values(entries, |mut row, (instance_id, payload)| {
+        row.push_bind(entry_type)
+            .push_bind(instance_id)
+            .push_bind(payload);
+    });
+    query.build().execute(&mut **transaction).await?;
+    Ok(())
+}
+
+fn group_execution_steps(
+    steps: Vec<SyncExecutionStepProjection>,
+) -> HashMap<InstanceId, Vec<SyncExecutionStepProjection>> {
+    let mut grouped = HashMap::new();
+    for step in steps {
+        grouped
+            .entry(step.instance_id)
+            .or_insert_with(Vec::new)
+            .push(step);
+    }
+    grouped
+}
+
+async fn collect_scan_entries(
     storage: &dyn StorageBackend,
-    instance_id: InstanceId,
-    seq: Option<&SequenceDefinition>,
-) -> Option<serde_json::Value> {
-    let tree = match storage.get_execution_tree(instance_id).await {
-        Ok(tree) => tree,
-        Err(e) => {
-            debug!(instance_id = %instance_id, error = %e, "failed to load execution tree for steps payload");
-            return None;
-        }
+    sequence_cache: &SequenceCache,
+    instances: Vec<SyncInstanceProjection>,
+    execution_steps: Option<&HashMap<InstanceId, Vec<SyncExecutionStepProjection>>>,
+    timestamp: &str,
+) -> ScanOutboxEntries {
+    let mut sequences: HashMap<SequenceId, Option<Arc<SequenceDefinition>>> = HashMap::new();
+    let mut entries = ScanOutboxEntries {
+        statuses: Vec::with_capacity(instances.len()),
+        approvals: Vec::new(),
     };
 
+    for instance in instances {
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            sequences.entry(instance.sequence_id)
+        {
+            entry.insert(
+                sequence_cache
+                    .get_by_id(storage, instance.sequence_id)
+                    .await
+                    .ok(),
+            );
+        }
+        let sequence = sequences
+            .get(&instance.sequence_id)
+            .and_then(Option::as_deref);
+        let steps = execution_steps.and_then(|grouped| {
+            build_steps_payload(
+                grouped.get(&instance.id).map_or(&[], Vec::as_slice),
+                sequence,
+            )
+        });
+
+        entries
+            .statuses
+            .push(build_status_entry(&instance, sequence, steps, timestamp));
+        if let Some(approval) = build_approval_entry(&instance, sequence) {
+            entries.approvals.push(approval);
+        }
+    }
+    entries
+}
+
+fn build_status_entry(
+    instance: &SyncInstanceProjection,
+    sequence: Option<&SequenceDefinition>,
+    steps: Option<serde_json::Value>,
+    timestamp: &str,
+) -> OutboxEntry {
+    let instance_id = instance.id.to_string();
+    let handler = instance.current_step.as_ref().and_then(|step_id| {
+        sequence.and_then(|definition| find_handler(&definition.blocks, step_id))
+    });
+    let payload = status_payload(
+        &instance_id,
+        sequence.map(|definition| definition.name.as_str()),
+        &format!("{:?}", instance.state),
+        instance.current_step.as_ref().map(BlockId::as_str),
+        handler.as_deref(),
+        steps,
+        timestamp,
+    );
+    (instance_id, payload)
+}
+
+fn build_approval_entry(
+    instance: &SyncInstanceProjection,
+    sequence: Option<&SequenceDefinition>,
+) -> Option<OutboxEntry> {
+    if instance.state != InstanceState::Waiting {
+        return None;
+    }
+    let step_id = instance.current_step.as_ref()?;
+    let instance_id = instance.id.to_string();
+    let (prompt, choices, store_as, timeout) = sequence
+        .and_then(|definition| find_wait_info(&definition.blocks, step_id))
+        .unwrap_or((None, None, None, None));
+    let payload = approval_payload(
+        &instance_id,
+        step_id.as_str(),
+        sequence.map(|definition| definition.name.as_str()),
+        prompt.as_deref(),
+        choices.as_deref(),
+        store_as.as_deref(),
+        timeout,
+    );
+    Some((format!("{instance_id}:{step_id}"), payload))
+}
+
+fn status_payload(
+    instance_id: &str,
+    sequence_name: Option<&str>,
+    state: &str,
+    current_step: Option<&str>,
+    handler: Option<&str>,
+    steps: Option<serde_json::Value>,
+    timestamp: &str,
+) -> String {
+    serde_json::json!({
+        "instance_id": instance_id,
+        "sequence_name": sequence_name,
+        "state": state,
+        "current_step": current_step,
+        "handler": handler,
+        "steps": steps,
+        "timestamp": timestamp,
+    })
+    .to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn approval_payload(
+    instance_id: &str,
+    block_id: &str,
+    sequence_name: Option<&str>,
+    prompt: Option<&str>,
+    choices: Option<&str>,
+    store_as: Option<&str>,
+    timeout_seconds: Option<i64>,
+) -> String {
+    serde_json::json!({
+        "instance_id": instance_id,
+        "block_id": block_id,
+        "sequence_name": sequence_name,
+        "prompt": prompt,
+        "choices": choices.and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+        "store_as": store_as,
+        "timeout_seconds": timeout_seconds,
+    })
+    .to_string()
+}
+
+fn build_steps_payload(
+    tree: &[SyncExecutionStepProjection],
+    seq: Option<&SequenceDefinition>,
+) -> Option<serde_json::Value> {
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     if let Some(seq) = seq {
@@ -959,9 +1054,9 @@ async fn build_steps_payload(
             let node = nodes_by_block.get(block_id.as_str());
             let (state, started_at, completed_at) = match node {
                 Some(n) => (
-                    n.state.to_string(),
-                    n.started_at.map(|t| t.to_rfc3339()),
-                    n.completed_at.map(|t| t.to_rfc3339()),
+                    n.state.clone(),
+                    n.started_at.clone(),
+                    n.completed_at.clone(),
                 ),
                 None => ("pending".into(), None, None),
             };
@@ -975,14 +1070,14 @@ async fn build_steps_payload(
             }));
         }
     } else {
-        for node in &tree {
+        for node in tree {
             entries.push(serde_json::json!({
                 "block_id": node.block_id.as_str(),
-                "block_type": node.block_type.to_string(),
-                "state": node.state.to_string(),
+                "block_type": node.block_type,
+                "state": node.state,
                 "handler": null,
-                "started_at": node.started_at.map(|t| t.to_rfc3339()),
-                "completed_at": node.completed_at.map(|t| t.to_rfc3339()),
+                "started_at": node.started_at,
+                "completed_at": node.completed_at,
             }));
         }
     }
@@ -1110,6 +1205,7 @@ fn find_wait_info(
 mod tests {
     use super::*;
     use orch8_types::clock::{Clock, ManualClock};
+    use orch8_types::filter::{InstanceFilter, Pagination};
     use orch8_types::ids::{SequenceId, TenantId};
     use orch8_types::sequence::{SequenceStatus, StepDef};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1128,11 +1224,9 @@ mod tests {
         );
         let storage: Arc<dyn StorageBackend> = sqlite.clone();
         let mobile_storage = Arc::new(crate::storage::MobileStorage::new(sqlite));
-        let sequence_cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
         let lifecycle = Arc::new(InstanceLifecycleManager::new(
             storage.clone(),
             mobile_storage,
-            sequence_cache,
             10,
         ));
 
@@ -1146,15 +1240,20 @@ mod tests {
     #[tokio::test]
     async fn sync_read_failure_keeps_forced_retry_throttled() {
         let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        assert!(reporter.http.get().is_none());
         reporter.on_push_received();
         assert!(reporter.should_sync(), "push should be immediately due");
         reporter.pool.close().await;
 
-        reporter.sync_once(&storage, &lifecycle).await;
+        assert!(!reporter.sync_once(&storage, &lifecycle).await);
 
         assert!(
             !reporter.should_sync(),
             "failed forced sync must wait before retrying"
+        );
+        assert!(
+            reporter.http.get().is_none(),
+            "outbox read failure must not initialize networking"
         );
     }
 
@@ -1196,6 +1295,88 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         storage.create_sequence(&seq).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_scan_reports_outbox_write_failure_for_retry() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        seed_sequence(&storage, "wf-a").await;
+        lifecycle.start("wf-a", "{}", None).await.unwrap();
+        reporter.pool.close().await;
+        let sequence_cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
+
+        assert!(
+            !reporter
+                .scan_and_queue(&storage, lifecycle.mobile_storage(), &sequence_cache)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn status_scan_batches_and_coalesces_status_and_approval_rows() {
+        let (reporter, storage, lifecycle) = setup("http://127.0.0.1:1/sync".into()).await;
+        let sequence: SequenceDefinition = serde_json::from_value(serde_json::json!({
+            "id": SequenceId::new(),
+            "tenant_id": "mobile",
+            "namespace": "default",
+            "name": "approval-flow",
+            "version": 1,
+            "deprecated": false,
+            "blocks": [{
+                "type": "step",
+                "id": "review",
+                "handler": "human_review",
+                "params": {},
+                "wait_for_input": {
+                    "prompt": "Approve?",
+                    "store_as": "decision"
+                }
+            }],
+            "created_at": chrono::Utc::now()
+        }))
+        .unwrap();
+        storage.create_sequence(&sequence).await.unwrap();
+        let instance_id_text = lifecycle.start("approval-flow", "{}", None).await.unwrap();
+        let instance_id = InstanceId::from_uuid(uuid::Uuid::parse_str(&instance_id_text).unwrap());
+        let mut instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+        instance.context.runtime.current_step = Some(BlockId::new("review"));
+        storage
+            .update_instance_context(instance_id, &instance.context)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(instance_id, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+
+        let sequence_cache = Arc::new(SequenceCache::new(50, Duration::from_secs(3600)));
+        for _ in 0..2 {
+            assert!(
+                reporter
+                    .scan_and_queue(&storage, lifecycle.mobile_storage(), &sequence_cache)
+                    .await
+            );
+        }
+
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT entry_type, payload FROM sync_outbox ORDER BY entry_type")
+                .fetch_all(&reporter.pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2, "repeated scans must coalesce both rows");
+
+        let approval: serde_json::Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(rows[0].0, "approval");
+        assert_eq!(approval["block_id"], "review");
+        assert_eq!(approval["prompt"], "Approve?");
+
+        let status: serde_json::Value = serde_json::from_str(&rows[1].1).unwrap();
+        assert_eq!(rows[1].0, "status");
+        assert_eq!(status["instance_id"], instance_id_text);
+        assert_eq!(status["state"], "Waiting");
+        assert_eq!(status["current_step"], "review");
+        assert_eq!(status["handler"], "human_review");
+        assert_eq!(status["steps"][0]["block_id"], "review");
     }
 
     async fn count_instances(storage: &Arc<dyn StorageBackend>) -> usize {
@@ -1254,8 +1435,9 @@ mod tests {
         // Two independent sync cycles — each fetches its own copy of the
         // same command from the "server", simulating a redelivery of a
         // command whose ack the server never confirmed.
-        reporter.sync_once(&storage, &lifecycle).await;
-        reporter.sync_once(&storage, &lifecycle).await;
+        assert!(reporter.sync_once(&storage, &lifecycle).await);
+        assert!(reporter.sync_once(&storage, &lifecycle).await);
+        assert!(reporter.http.get().is_some());
 
         server.await.unwrap();
 

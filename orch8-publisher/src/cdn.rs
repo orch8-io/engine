@@ -83,6 +83,29 @@ pub trait CdnBackend: Send + Sync {
     async fn get_etag(&self, path: &str) -> Result<Option<String>, CdnError>;
 }
 
+#[async_trait::async_trait]
+impl<T: CdnBackend + ?Sized> CdnBackend for std::sync::Arc<T> {
+    async fn upload(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        content_type: Option<&str>,
+        cache_control: Option<&str>,
+    ) -> Result<(), CdnError> {
+        (**self)
+            .upload(path, bytes, content_type, cache_control)
+            .await
+    }
+
+    async fn delete(&self, path: &str) -> Result<(), CdnError> {
+        (**self).delete(path).await
+    }
+
+    async fn get_etag(&self, path: &str) -> Result<Option<String>, CdnError> {
+        (**self).get_etag(path).await
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CdnError {
     #[error("upload failed: {0}")]

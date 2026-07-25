@@ -8,6 +8,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::error::StorageError;
+use orch8_types::ids::{BlockId, InstanceId, SequenceId};
+use orch8_types::instance::InstanceState;
 
 /// Mobile-specific storage wrapper.
 pub struct MobileStorage {
@@ -32,12 +34,25 @@ impl MobileStorage {
         event_type: &str,
         payload: &str,
     ) -> Result<(), StorageError> {
+        let created_at = Utc::now().to_rfc3339();
+        self.append_telemetry_event_at(event_type, payload, &created_at)
+            .await
+    }
+
+    /// Append a telemetry event whose timestamp was already captured by the
+    /// caller, avoiding a second clock read and RFC 3339 allocation.
+    pub async fn append_telemetry_event_at(
+        &self,
+        event_type: &str,
+        payload: &str,
+        created_at: &str,
+    ) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO telemetry_events (event_type, payload, created_at) VALUES (?1, ?2, ?3)",
         )
         .bind(event_type)
         .bind(payload)
-        .bind(Utc::now().to_rfc3339())
+        .bind(created_at)
         .execute(self.pool())
         .await?;
         Ok(())
@@ -225,6 +240,295 @@ impl MobileStorage {
                 .await?;
         Ok(rows)
     }
+
+    // ── Lightweight instance projections ──
+
+    /// List active instances without loading their metadata, context, budget,
+    /// or other scheduler-only columns. The join also avoids one sequence
+    /// lookup per summary returned across the mobile FFI boundary.
+    pub(crate) async fn list_active_instance_summaries(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(ActiveInstanceProjection, String)>, StorageError> {
+        let rows = sqlx::query_as::<_, ActiveInstanceProjectionRow>(
+            "SELECT i.id, i.state, i.created_at, COALESCE(s.name, '') AS sequence_name
+             FROM task_instances i
+             LEFT JOIN sequences s ON s.id = i.sequence_id
+             WHERE i.state IN ('scheduled', 'running', 'waiting', 'paused')
+             ORDER BY i.updated_at DESC
+             LIMIT ?1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Return only IDs of active instances older than `cutoff`. GC does not
+    /// inspect workflow context, so materializing complete `TaskInstance`
+    /// values would waste memory proportional to every context payload.
+    pub(crate) async fn list_expired_active_instance_ids(
+        &self,
+        cutoff: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<InstanceId>, StorageError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM task_instances
+             WHERE state IN ('scheduled', 'running', 'waiting', 'paused')
+               AND created_at < ?1
+             ORDER BY created_at ASC
+             LIMIT ?2",
+        )
+        .bind(cutoff.to_rfc3339())
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|(id,)| parse_instance_id(&id))
+            .collect()
+    }
+
+    /// List terminal instance identifiers and states without loading context.
+    /// Notification delivery fetches a complete row only for a newly observed
+    /// callback, while listener-free dedup cleanup needs IDs alone.
+    pub(crate) async fn list_terminal_instance_states(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, state FROM task_instances
+             WHERE state IN ('completed', 'failed', 'cancelled')
+             ORDER BY updated_at DESC
+             LIMIT ?1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, state)| {
+                let id = parse_instance_id(&id)?;
+                let state = state
+                    .parse()
+                    .map_err(|error| projection_error("state", &state, error))?;
+                Ok((id, state))
+            })
+            .collect()
+    }
+
+    /// List only the identifiers needed to emit waiting-step callbacks.
+    /// Extracting `current_step` inside `SQLite` avoids parsing and retaining up
+    /// to `limit` complete execution contexts on every notification scan.
+    pub(crate) async fn list_waiting_steps(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<WaitingStepProjection>, StorageError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, sequence_id, json_extract(context, '$.runtime.current_step')
+             FROM task_instances
+             WHERE state = 'waiting'
+               AND json_type(context, '$.runtime.current_step') = 'text'
+             ORDER BY updated_at DESC
+             LIMIT ?1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter()
+            .map(|(id, sequence_id, step_id)| {
+                Ok(WaitingStepProjection {
+                    id: parse_instance_id(&id)?,
+                    sequence_id: parse_sequence_id(&sequence_id)?,
+                    step_id: BlockId::new(step_id),
+                })
+            })
+            .collect()
+    }
+
+    /// Read the small instance header needed for cloud status reporting.
+    /// Context JSON can approach the mobile context ceiling and is deliberately
+    /// reduced to its current-step string inside `SQLite`.
+    pub(crate) async fn list_sync_instances(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<SyncInstanceProjection>, StorageError> {
+        let rows = sqlx::query_as::<_, SyncInstanceProjectionRow>(
+            "SELECT i.id, i.sequence_id, i.state,
+                    CASE WHEN json_valid(i.context)
+                         THEN json_extract(i.context, '$.runtime.current_step')
+                    END AS current_step
+             FROM task_instances i
+             WHERE i.state IN ('scheduled', 'running', 'waiting',
+                               'completed', 'failed', 'cancelled')
+             ORDER BY i.updated_at DESC
+             LIMIT ?1",
+        )
+        .bind(i64::from(limit))
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Fetch execution-tree fields for a status batch in one query instead of
+    /// issuing one `get_execution_tree` query per instance.
+    pub(crate) async fn list_sync_execution_steps(
+        &self,
+        instance_ids: &[InstanceId],
+    ) -> Result<Vec<SyncExecutionStepProjection>, StorageError> {
+        if instance_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT instance_id, block_id, block_type, state, started_at, completed_at
+             FROM execution_tree WHERE instance_id IN (",
+        );
+        let mut ids = query.separated(",");
+        for instance_id in instance_ids {
+            ids.push_bind(instance_id.to_string());
+        }
+        ids.push_unseparated(") ORDER BY instance_id, id");
+
+        let rows = query
+            .build_query_as::<SyncExecutionStepProjectionRow>()
+            .fetch_all(self.pool())
+            .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+}
+
+/// Fields needed by `MobileEngine::active_instances`; intentionally excludes
+/// the potentially large execution context.
+pub(crate) struct ActiveInstanceProjection {
+    pub id: InstanceId,
+    pub state: InstanceState,
+    pub created_at: DateTime<Utc>,
+}
+
+pub(crate) struct WaitingStepProjection {
+    pub id: InstanceId,
+    pub sequence_id: SequenceId,
+    pub step_id: BlockId,
+}
+
+pub(crate) struct SyncInstanceProjection {
+    pub id: InstanceId,
+    pub sequence_id: SequenceId,
+    pub state: InstanceState,
+    pub current_step: Option<BlockId>,
+}
+
+pub(crate) struct SyncExecutionStepProjection {
+    pub instance_id: InstanceId,
+    pub block_id: BlockId,
+    pub block_type: String,
+    pub state: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SyncInstanceProjectionRow {
+    id: String,
+    sequence_id: String,
+    state: String,
+    current_step: Option<String>,
+}
+
+impl TryFrom<SyncInstanceProjectionRow> for SyncInstanceProjection {
+    type Error = StorageError;
+
+    fn try_from(row: SyncInstanceProjectionRow) -> Result<Self, Self::Error> {
+        let state = row
+            .state
+            .parse()
+            .map_err(|error| projection_error("state", &row.state, error))?;
+        Ok(Self {
+            id: parse_instance_id(&row.id)?,
+            sequence_id: parse_sequence_id(&row.sequence_id)?,
+            state,
+            current_step: row.current_step.map(BlockId::new),
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SyncExecutionStepProjectionRow {
+    instance_id: String,
+    block_id: String,
+    block_type: String,
+    state: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+impl TryFrom<SyncExecutionStepProjectionRow> for SyncExecutionStepProjection {
+    type Error = StorageError;
+
+    fn try_from(row: SyncExecutionStepProjectionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            instance_id: parse_instance_id(&row.instance_id)?,
+            block_id: BlockId::new(row.block_id),
+            block_type: row.block_type,
+            state: row.state,
+            started_at: row.started_at,
+            completed_at: row.completed_at,
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ActiveInstanceProjectionRow {
+    id: String,
+    state: String,
+    created_at: String,
+    sequence_name: String,
+}
+
+impl TryFrom<ActiveInstanceProjectionRow> for (ActiveInstanceProjection, String) {
+    type Error = StorageError;
+
+    fn try_from(row: ActiveInstanceProjectionRow) -> Result<Self, Self::Error> {
+        let id = parse_instance_id(&row.id)?;
+        let state = row
+            .state
+            .parse()
+            .map_err(|error| projection_error("state", &row.state, error))?;
+        let created_at = row
+            .created_at
+            .parse()
+            .map_err(|error| projection_error("created_at", &row.created_at, error))?;
+        Ok((
+            ActiveInstanceProjection {
+                id,
+                state,
+                created_at,
+            },
+            row.sequence_name,
+        ))
+    }
+}
+
+fn parse_instance_id(value: &str) -> Result<InstanceId, StorageError> {
+    uuid::Uuid::parse_str(value)
+        .map(InstanceId::from_uuid)
+        .map_err(|error| projection_error("id", value, error))
+}
+
+fn parse_sequence_id(value: &str) -> Result<SequenceId, StorageError> {
+    uuid::Uuid::parse_str(value)
+        .map(SequenceId::from_uuid)
+        .map_err(|error| projection_error("sequence_id", value, error))
+}
+
+fn projection_error(field: &str, value: &str, error: impl std::fmt::Display) -> StorageError {
+    StorageError::Query(format!(
+        "invalid task_instances.{field} value '{value}': {error}"
+    ))
 }
 
 /// A telemetry event stored in the local `SQLite` buffer.
@@ -233,7 +537,9 @@ pub struct TelemetryEvent {
     pub id: i64,
     pub event_type: String,
     pub payload: String,
-    pub created_at: DateTime<Utc>,
+    /// Already stored as RFC 3339; keeping it borrowed-ready avoids parsing
+    /// and formatting every timestamp again during a telemetry flush.
+    pub created_at: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -250,7 +556,7 @@ impl From<TelemetryEventRow> for TelemetryEvent {
             id: row.id,
             event_type: row.event_type,
             payload: row.payload,
-            created_at: row.created_at.parse().unwrap_or_else(|_| Utc::now()),
+            created_at: row.created_at,
         }
     }
 }
@@ -367,6 +673,116 @@ mod tests {
 
         assert_eq!(storage.prune_stale_dedup().await.unwrap(), 1);
         assert!(storage.list_all_dedup().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn terminal_projection_does_not_deserialize_context() {
+        let (storage, _dir) = setup().await;
+        let id = InstanceId::new();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', 'completed', 'not-json', ?3, ?3)",
+        )
+        .bind(id.to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(now)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let projected = storage.list_terminal_instance_states(100).await.unwrap();
+        assert_eq!(projected, vec![(id, InstanceState::Completed)]);
+    }
+
+    #[tokio::test]
+    async fn waiting_projection_extracts_step_without_deserializing_context() {
+        let (storage, _dir) = setup().await;
+        let id = InstanceId::new();
+        let sequence_id = SequenceId::new();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', 'waiting',
+                     '{\"runtime\":{\"current_step\":\"review\"},\"audit\":\"not-an-array\"}',
+                     ?3, ?3)",
+        )
+        .bind(id.to_string())
+        .bind(sequence_id.to_string())
+        .bind(now)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let projected = storage.list_waiting_steps(100).await.unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].id, id);
+        assert_eq!(projected[0].sequence_id, sequence_id);
+        assert_eq!(projected[0].step_id.as_str(), "review");
+    }
+
+    #[tokio::test]
+    async fn sync_projection_excludes_large_context_and_batches_tree_rows() {
+        let (storage, _dir) = setup().await;
+        let id = InstanceId::new();
+        let sequence_id = SequenceId::new();
+        let now = Utc::now().to_rfc3339();
+        let context = serde_json::json!({
+            "data": "x".repeat(256 * 1024),
+            "runtime": {"current_step": "review"},
+            // This valid JSON intentionally cannot deserialize as ExecutionContext.
+            "audit": "not-an-array"
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO task_instances
+             (id, sequence_id, tenant_id, namespace, state, context, created_at, updated_at)
+             VALUES (?1, ?2, 'mobile', 'default', 'waiting', ?3, ?4, ?4)",
+        )
+        .bind(id.to_string())
+        .bind(sequence_id.to_string())
+        .bind(&context)
+        .bind(&now)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO execution_tree
+             (id, instance_id, block_id, block_type, state)
+             VALUES (?1, ?2, 'review', 'step', 'waiting')",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+        let projected = storage.list_sync_instances(100).await.unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].id, id);
+        assert_eq!(projected[0].sequence_id, sequence_id);
+        assert_eq!(
+            projected[0].current_step.as_ref().map(BlockId::as_str),
+            Some("review")
+        );
+
+        let projected_bytes = id.to_string().len()
+            + sequence_id.to_string().len()
+            + projected[0].state.to_string().len()
+            + projected[0]
+                .current_step
+                .as_ref()
+                .map_or(0, |step| step.as_str().len());
+        assert!(context.len() > 256 * 1024);
+        assert!(projected_bytes < 128);
+
+        let tree = storage.list_sync_execution_steps(&[id]).await.unwrap();
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].instance_id, id);
+        assert_eq!(tree[0].block_id.as_str(), "review");
+        assert_eq!(tree[0].state, "waiting");
     }
 
     #[tokio::test]

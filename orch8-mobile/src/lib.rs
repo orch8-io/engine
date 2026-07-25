@@ -76,7 +76,8 @@ pub struct BackgroundRunResult {
     pub steps_executed: u32,
     pub has_pending_work: bool,
     /// True when work remains after either the tick or wall-clock budget was
-    /// exhausted. The host should schedule another background opportunity.
+    /// exhausted, or when a tick made no immediate progress. The host should
+    /// schedule another background opportunity instead of spinning.
     pub budget_exhausted: bool,
 }
 
@@ -88,6 +89,10 @@ impl From<TickOnceResult> for TickResult {
             has_pending_work: r.has_pending_work,
         }
     }
+}
+
+fn background_tick_should_stop(tick: &TickResult) -> bool {
+    !tick.has_pending_work || (tick.instances_advanced == 0 && tick.steps_executed == 0)
 }
 
 /// Instance lifecycle state, exposed to mobile hosts.
@@ -201,6 +206,7 @@ pub struct MobileEngine {
     notifier: Arc<notifier::MobileNotifier>,
     tick_controller: tick_controller::TickController,
     telemetry: Arc<telemetry::TelemetryManager>,
+    memory_sampler: memory::MemoryBudgetSampler,
     sync_orchestrator: Arc<tokio::sync::Mutex<Option<Arc<sync::SyncOrchestrator>>>>,
     lifecycle: Arc<lifecycle::InstanceLifecycleManager>,
     sync_reporter: Option<Arc<sync_reporter::SyncReporter>>,
@@ -208,6 +214,18 @@ pub struct MobileEngine {
 
 /// Maximum response body size for `load_sequences_from_url`.
 const MAX_SEQUENCES_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+
+fn build_mobile_http_client(timeout: Duration) -> reqwest::Client {
+    // The builder only uses constants and a validated duration, so failure is
+    // a programming/environment error rather than a recoverable SDK input.
+    #[allow(clippy::expect_used)]
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(Arc::new(orch8_engine::handlers::builtin::SsrfGuardResolver))
+        .build()
+        .expect("mobile HTTP client builds")
+}
 
 /// Validate that an HTTPS endpoint URL is safe to call.
 /// Requires `https://`, rejects private/loopback/link-local IPs, and refuses
@@ -278,7 +296,6 @@ impl MobileEngine {
         let lifecycle = Arc::new(lifecycle::InstanceLifecycleManager::new(
             storage.clone(),
             mobile_storage.clone(),
-            sequence_cache.clone(),
             config.max_concurrent_instances,
         ));
 
@@ -354,6 +371,7 @@ impl MobileEngine {
             notifier: Arc::new(notifier::MobileNotifier::new()),
             tick_controller: tick_controller::TickController::new(),
             telemetry: telemetry_mgr,
+            memory_sampler: memory::MemoryBudgetSampler::default(),
             sync_orchestrator: Arc::new(tokio::sync::Mutex::new(sync_orch)),
             lifecycle,
             sync_reporter,
@@ -389,7 +407,10 @@ impl MobileEngine {
 
     /// Execute a single tick.
     pub fn tick_once(&self) -> Result<TickResult, MobileError> {
-        if let Some(rss) = memory::rss_over_budget(self.config.memory_budget_bytes) {
+        if let Some(rss) = self
+            .memory_sampler
+            .over_budget(self.config.memory_budget_bytes)
+        {
             warn!(
                 budget = self.config.memory_budget_bytes,
                 rss, "tick skipped — memory budget exceeded"
@@ -472,13 +493,12 @@ impl MobileEngine {
             aggregate.steps_executed = aggregate.steps_executed.saturating_add(tick.steps_executed);
             aggregate.has_pending_work = tick.has_pending_work;
 
-            if !tick.has_pending_work {
+            if background_tick_should_stop(&tick) {
                 break;
             }
         }
 
-        aggregate.budget_exhausted = aggregate.has_pending_work
-            && (aggregate.ticks_executed >= max_ticks || started.elapsed() >= budget);
+        aggregate.budget_exhausted = aggregate.has_pending_work;
         Ok(aggregate)
     }
 
@@ -935,7 +955,10 @@ impl MobileEngine {
     }
 
     async fn fire_terminal_events(&self) {
-        let terminal_ids = self.notifier.fire_terminal_events(&self.storage).await;
+        let terminal_ids = self
+            .notifier
+            .fire_terminal_events(&self.storage, self.lifecycle.mobile_storage())
+            .await;
         for id in terminal_ids {
             self.lifecycle.cleanup_dedup(&id).await;
         }
@@ -943,7 +966,11 @@ impl MobileEngine {
 
     async fn fire_step_pending_events(&self) {
         self.notifier
-            .fire_step_pending_events(&self.storage, &self.sequence_cache)
+            .fire_step_pending_events(
+                &self.storage,
+                self.lifecycle.mobile_storage(),
+                &self.sequence_cache,
+            )
             .await;
     }
 
@@ -1000,6 +1027,25 @@ mod tests {
         assert_eq!(result.instances_advanced, 3);
         assert_eq!(result.steps_executed, 5);
         assert!(result.has_pending_work);
+    }
+
+    #[test]
+    fn background_run_stops_when_idle_or_pending_without_progress() {
+        assert!(background_tick_should_stop(&TickResult {
+            instances_advanced: 0,
+            steps_executed: 0,
+            has_pending_work: false,
+        }));
+        assert!(background_tick_should_stop(&TickResult {
+            instances_advanced: 0,
+            steps_executed: 0,
+            has_pending_work: true,
+        }));
+        assert!(!background_tick_should_stop(&TickResult {
+            instances_advanced: 1,
+            steps_executed: 0,
+            has_pending_work: true,
+        }));
     }
 
     #[test]
