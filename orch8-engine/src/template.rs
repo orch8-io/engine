@@ -3,6 +3,13 @@ use tracing::warn;
 
 use crate::error::EngineError;
 
+/// Hard ceiling for the value produced by any individual template filter.
+///
+/// Filters operate on workflow-controlled input and several of them can expand
+/// it. Keeping every intermediate value bounded prevents a short filter chain
+/// from exhausting the worker's memory before downstream payload limits run.
+const MAX_TEMPLATE_FILTER_RESULT_BYTES: usize = 4 * 1024 * 1024;
+
 pub fn contains_template(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::String(s) => s.contains("{{"),
@@ -236,6 +243,7 @@ fn resolve_path(
         let seg = segment.trim();
         if is_pipe_filter(seg) {
             result = apply_pipe_filter(seg, &result, context, outputs, state)?;
+            ensure_filter_result_size(&result)?;
         }
     }
 
@@ -287,12 +295,14 @@ fn apply_pipe_filter(
     {
         let (search, replacement) = parse_replace_args(inner, context, outputs, state)?;
         let text = match value {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
+            serde_json::Value::String(s) => std::borrow::Cow::Borrowed(s.as_str()),
+            other => std::borrow::Cow::Owned(other.to_string()),
         };
-        return Ok(serde_json::Value::String(
-            text.replace(&search, &replacement),
-        ));
+        return Ok(serde_json::Value::String(bounded_replace(
+            text.as_ref(),
+            &search,
+            &replacement,
+        )?));
     }
     match filter {
         "upper" => Ok(serde_json::json!(
@@ -326,6 +336,66 @@ fn apply_pipe_filter(
         }
         _ => apply_pipe_filter_with_args(filter, value),
     }
+}
+
+fn bounded_replace(text: &str, search: &str, replacement: &str) -> Result<String, EngineError> {
+    if search.is_empty() {
+        return Err(EngineError::TemplateError(
+            "replace() search string cannot be empty".into(),
+        ));
+    }
+
+    let matches = text.matches(search).count();
+    let removed = matches.checked_mul(search.len());
+    let added = matches.checked_mul(replacement.len());
+    let output_len = removed
+        .and_then(|removed| text.len().checked_sub(removed))
+        .and_then(|retained| added.and_then(|added| retained.checked_add(added)))
+        .ok_or_else(filter_result_too_large)?;
+
+    if output_len > MAX_TEMPLATE_FILTER_RESULT_BYTES {
+        return Err(filter_result_too_large());
+    }
+
+    Ok(text.replace(search, replacement))
+}
+
+fn ensure_filter_result_size(value: &serde_json::Value) -> Result<(), EngineError> {
+    let exceeds_limit = match value {
+        serde_json::Value::String(s) => s.len() > MAX_TEMPLATE_FILTER_RESULT_BYTES,
+        // Collection-producing filters are uncommon. Counting their encoded
+        // size avoids allocating a second copy merely to enforce the limit.
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            struct ByteCounter(usize);
+
+            impl std::io::Write for ByteCounter {
+                fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                    self.0 = self.0.saturating_add(bytes.len());
+                    Ok(bytes.len())
+                }
+
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let mut counter = ByteCounter(0);
+            serde_json::to_writer(&mut counter, value).is_err()
+                || counter.0 > MAX_TEMPLATE_FILTER_RESULT_BYTES
+        }
+        _ => false,
+    };
+
+    if exceeds_limit {
+        return Err(filter_result_too_large());
+    }
+    Ok(())
+}
+
+fn filter_result_too_large() -> EngineError {
+    EngineError::TemplateError(format!(
+        "template filter result exceeds {MAX_TEMPLATE_FILTER_RESULT_BYTES} byte limit"
+    ))
 }
 
 fn apply_pipe_filter_with_args(
@@ -1576,6 +1646,35 @@ mod tests {
         let input = json!("{{ steps.s.text | replace('missing', 'found') }}");
         let result = resolve(&input, &ctx, &outputs).unwrap();
         assert_eq!(result, json!("no match here"));
+    }
+
+    #[test]
+    fn resolve_replace_rejects_empty_search() {
+        let ctx = test_context();
+        for input in [
+            json!("{{ context.data.user.name | replace('', 'x') }}"),
+            json!("{{ context.data.user.name | replace(, 'x') }}"),
+        ] {
+            let err = resolve(&input, &ctx, &json!({})).unwrap_err();
+            assert!(
+                matches!(err, EngineError::TemplateError(ref message) if message.contains("search string cannot be empty"))
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_replace_rejects_exponential_filter_expansion() {
+        let ctx = ExecutionContext {
+            data: json!({"text": "a"}),
+            ..Default::default()
+        };
+        let filters = " | replace('a', 'aa')".repeat(23);
+        let input = json!(format!("{{{{ context.data.text{filters} }}}}"));
+
+        let err = resolve(&input, &ctx, &json!({})).unwrap_err();
+        assert!(
+            matches!(err, EngineError::TemplateError(ref message) if message.contains("filter result exceeds"))
+        );
     }
 
     // --- upper filter ---
