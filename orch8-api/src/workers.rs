@@ -138,7 +138,7 @@ pub(crate) async fn delete_version_pin(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct EnqueueCommandRequest {
     worker_id: String,
-    /// `drain`, `reload`, or `ping`.
+    /// `drain`, `reload`, `ping`, or `place`.
     command: orch8_types::worker::WorkerCommandKind,
     #[serde(default)]
     payload: serde_json::Value,

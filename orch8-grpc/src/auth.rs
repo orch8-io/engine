@@ -67,10 +67,12 @@ impl WorkloadIdentityRegistry {
         let raw: HashMap<String, WorkloadIdentity> =
             serde_json::from_str(json).map_err(|error| error.to_string())?;
         let mut normalized = HashMap::with_capacity(raw.len());
-        for (fingerprint, mut identity) in raw {
+        for (fingerprint, identity) in raw {
             let fingerprint = normalize_fingerprint(&fingerprint)?;
-            identity.tenant_id = identity.tenant_id.trim().to_owned();
-            identity.identity = identity.identity.trim().to_owned();
+            let identity = WorkloadIdentity {
+                tenant_id: identity.tenant_id.trim().to_owned(),
+                identity: identity.identity.trim().to_owned(),
+            };
             if identity.tenant_id.is_empty()
                 || identity.identity.is_empty()
                 || identity.tenant_id.len() > 128

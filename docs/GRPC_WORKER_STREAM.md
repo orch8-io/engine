@@ -17,9 +17,10 @@ The first client frame must be `WorkerStreamOpen` and declares:
 The server replies with `WorkerStreamHello`, containing the exact feature
 intersection and authoritative bounds. Version mismatches fail with
 `FAILED_PRECONDITION`; oversized or malformed opens fail before task claims.
-Version 1 supports `task_delivery`, `completion`, `failure`, `heartbeat`, and
-`cancellation`. `task_delivery` is mandatory. Operations not negotiated by the
-client are rejected.
+Version 1 supports `task_delivery`, `completion`, `failure`, `heartbeat`,
+`cancellation`, `runtime_capabilities`, `draining`, and
+`placement_commands`. `task_delivery` is mandatory. Operations not negotiated
+by the client are rejected.
 
 Current limits are 256 in-flight tasks, 1 MiB per protocol frame, 64 handlers,
 and a recommended 15-second heartbeat interval. A client controls backpressure
@@ -46,6 +47,31 @@ stream itself is not a durable log. After disconnect, uncompleted claims are
 recovered by the existing stale-worker reaper and can be claimed by a later
 session. Clients must treat task identifiers as idempotency keys and reconnect
 with a new open handshake.
+
+## Durable runtime sessions and control
+
+A worker can attach a canonical `RuntimeCapabilities` advertisement to its
+open frame and refresh it with `RuntimeHeartbeat`. The authenticated tenant is
+authoritative; permissive development listeners may instead use the open
+frame's explicit tenant. Each accepted advertisement is persisted in the
+tenant-scoped runtime registry with a server-authored observation time and a
+45-second lease. Handler/plugin/credential/region/hardware lists are bounded,
+and the advertisement must include every handler claimed by the session.
+
+Runtime self-reporting cannot elevate trust: the stream stores advertisements
+as `registered` even if a client claims `signed` or `attested`. Higher trust
+remains a separate control-plane decision. Heartbeats cannot swap the
+session's runtime ID. Expired leases remain historical evidence but are
+ineligible for placement through the existing placement engine.
+
+The stream also consumes the durable worker-command queue. Pending `drain`,
+`reload`, `ping`, and `place` commands are sent after the hello frame and again
+on heartbeats until `WorkerCommandAck` removes the exact command. A `place`
+payload carries the operator-authored placement instruction without inventing
+a second persistence path. Once either the runtime advertises `draining` or a
+pending drain command is observed, the session finishes existing in-flight
+tasks but rejects all later demand; draining cannot be reversed by a heartbeat
+on the same connection.
 
 ## Resumable artifact and continuity transfer
 

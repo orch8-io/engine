@@ -11,7 +11,8 @@ use orch8_grpc::proto::{
 use orch8_grpc::{Orch8ServiceServer, service::Orch8GrpcService};
 use orch8_storage::WorkerStore;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{InstanceStore, ResourceStore};
+use orch8_storage::{ContinuityStore, InstanceStore, ResourceStore};
+use orch8_types::continuity::RuntimeTrustLevel;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::InstanceState;
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
@@ -402,6 +403,8 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
             supported_features: vec!["task_delivery".into(), "heartbeat".into()],
             max_in_flight: 10_000,
             protocol_version: 1,
+            runtime_capabilities_json: String::new(),
+            tenant_id: "test".into(),
         })),
         worker_stream_frame(ClientPayload::Demand(
             orch8_grpc::proto::WorkerStreamDemand { capacity: 1 },
@@ -440,10 +443,125 @@ async fn grpc_worker_stream_rejects_unsupported_protocol() {
             supported_features: vec!["task_delivery".into()],
             max_in_flight: 1,
             protocol_version: 99,
+            runtime_capabilities_json: String::new(),
+            tenant_id: "test".into(),
         },
     ))]);
     let error = client.worker_stream(outbound).await.unwrap_err();
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn grpc_runtime_session_persists_capabilities_streams_commands_and_drains() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+    use orch8_grpc::proto::worker_stream_server::Payload as ServerPayload;
+    use orch8_types::worker::{WorkerCommand, WorkerCommandKind};
+
+    let (addr, storage) = spawn_test_server().await;
+    let command = WorkerCommand {
+        id: uuid::Uuid::now_v7(),
+        worker_id: "runtime-worker".into(),
+        command: WorkerCommandKind::Place,
+        payload: serde_json::json!({"instance_id": "instance-1", "target": "edge"}),
+        created_at: chrono::Utc::now(),
+    };
+    storage.enqueue_worker_command(&command).await.unwrap();
+    let runtime_id = uuid::Uuid::now_v7();
+    let capabilities = |draining: bool| {
+        serde_json::json!({
+            "runtime_id": runtime_id,
+            "kind": "edge",
+            "trust": "attested",
+            "handlers": ["payments"],
+            "plugins": ["card-reader"],
+            "credentials": [],
+            "regions": ["br-south"],
+            "hardware": ["secure-enclave"],
+            "offline_capable": true,
+            "connectivity": "ethernet",
+            "draining": draining,
+            "observed_at": "2020-01-01T00:00:00Z",
+            "expires_at": "2020-01-01T00:00:01Z"
+        })
+        .to_string()
+    };
+    let outbound = tokio_stream::iter(vec![
+        worker_stream_frame(ClientPayload::Open(orch8_grpc::proto::WorkerStreamOpen {
+            worker_id: "runtime-worker".into(),
+            handler_names: vec!["payments".into()],
+            supported_features: vec![
+                "task_delivery".into(),
+                "runtime_capabilities".into(),
+                "draining".into(),
+                "placement_commands".into(),
+            ],
+            max_in_flight: 4,
+            protocol_version: 1,
+            runtime_capabilities_json: capabilities(false),
+            tenant_id: "test".into(),
+        })),
+        worker_stream_frame(ClientPayload::CommandAck(
+            orch8_grpc::proto::WorkerCommandAck {
+                command_id: command.id.to_string(),
+            },
+        )),
+        worker_stream_frame(ClientPayload::RuntimeHeartbeat(
+            orch8_grpc::proto::RuntimeHeartbeat {
+                runtime_capabilities_json: capabilities(true),
+            },
+        )),
+        worker_stream_frame(ClientPayload::Demand(
+            orch8_grpc::proto::WorkerStreamDemand { capacity: 1 },
+        )),
+    ]);
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let mut inbound = client.worker_stream(outbound).await.unwrap().into_inner();
+
+    assert!(matches!(
+        inbound.message().await.unwrap().unwrap().payload,
+        Some(ServerPayload::Hello(_))
+    ));
+    let streamed = inbound.message().await.unwrap().unwrap();
+    let Some(ServerPayload::Command(streamed)) = streamed.payload else {
+        panic!("durable placement command must follow hello");
+    };
+    let streamed: WorkerCommand = serde_json::from_str(&streamed.command_json).unwrap();
+    assert_eq!(streamed.id, command.id);
+    assert_eq!(streamed.command, WorkerCommandKind::Place);
+    assert!(matches!(
+        inbound.message().await.unwrap().unwrap().payload,
+        Some(ServerPayload::Ack(_))
+    ));
+    assert!(matches!(
+        inbound.message().await.unwrap().unwrap().payload,
+        Some(ServerPayload::Ack(_))
+    ));
+    let drain_error = inbound.message().await.unwrap_err();
+    assert_eq!(drain_error.code(), tonic::Code::FailedPrecondition);
+
+    assert!(
+        storage
+            .list_worker_commands("runtime-worker")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let persisted = storage
+        .list_runtime_capabilities(
+            &orch8_types::ids::TenantId::unchecked("test"),
+            chrono::Utc::now() - chrono::Duration::minutes(1),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].runtime_id.to_string(), runtime_id.to_string());
+    assert_eq!(persisted[0].trust, RuntimeTrustLevel::Registered);
+    assert!(persisted[0].draining);
+    assert!(persisted[0].expires_at > chrono::Utc::now());
 }
 
 #[tokio::test]

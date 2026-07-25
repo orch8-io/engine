@@ -8,6 +8,7 @@ use tracing;
 use uuid::Uuid;
 
 use orch8_storage::{StorageBackend, TelemetryEvent};
+use orch8_types::continuity::{RuntimeCapabilities, RuntimeId, RuntimeTrustLevel};
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
@@ -167,12 +168,16 @@ const MAX_TRANSFER_CHUNK_BYTES: u32 = 1024 * 1024;
 const MAX_TELEMETRY_EVENTS: usize = 1_000;
 const MAX_TELEMETRY_BATCH_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TELEMETRY_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
-const WORKER_STREAM_FEATURES: [&str; 5] = [
+const RUNTIME_CAPABILITY_LEASE_SECS: i64 = 45;
+const WORKER_STREAM_FEATURES: [&str; 8] = [
     "task_delivery",
     "completion",
     "failure",
     "heartbeat",
     "cancellation",
+    "runtime_capabilities",
+    "draining",
+    "placement_commands",
 ];
 
 fn negotiated_worker_features(requested: &[String]) -> Vec<String> {
@@ -277,6 +282,50 @@ fn worker_feature_enabled(open: &proto::WorkerStreamOpen, feature: &str) -> bool
             .any(|requested| requested == feature)
 }
 
+fn bounded_runtime_list(values: &[String]) -> bool {
+    values.len() <= 64
+        && values
+            .iter()
+            .all(|value| !value.is_empty() && value.len() <= 256)
+}
+
+fn prepare_runtime_capabilities(
+    json: &str,
+    handlers: &[String],
+    expected_runtime_id: Option<RuntimeId>,
+) -> Result<RuntimeCapabilities, Status> {
+    let mut capabilities: RuntimeCapabilities = from_json_str(json)?;
+    if expected_runtime_id.is_some_and(|runtime_id| runtime_id != capabilities.runtime_id) {
+        return Err(Status::permission_denied(
+            "runtime heartbeat cannot change session runtime_id",
+        ));
+    }
+    if handlers
+        .iter()
+        .any(|handler| !capabilities.handlers.contains(handler))
+        || !bounded_runtime_list(&capabilities.handlers)
+        || !bounded_runtime_list(&capabilities.plugins)
+        || !bounded_runtime_list(&capabilities.credentials)
+        || !bounded_runtime_list(&capabilities.regions)
+        || !bounded_runtime_list(&capabilities.hardware)
+        || capabilities
+            .capsule_signing_public_key
+            .as_ref()
+            .is_some_and(|key| key.len() > 1_024)
+    {
+        return Err(Status::invalid_argument(
+            "runtime capabilities exceed bounds or omit a session handler",
+        ));
+    }
+    let now = chrono::Utc::now();
+    // Runtime self-reports may describe features, never elevate their own
+    // trust. Signed/attested promotion remains a server-side control-plane act.
+    capabilities.trust = RuntimeTrustLevel::Registered;
+    capabilities.observed_at = now;
+    capabilities.expires_at = now + chrono::Duration::seconds(RUNTIME_CAPABILITY_LEASE_SECS);
+    Ok(capabilities)
+}
+
 fn stream_request<T>(payload: T, tenant: Option<&TenantId>) -> Request<T> {
     let mut request = Request::new(payload);
     if let Some(tenant) = tenant {
@@ -311,6 +360,78 @@ struct PreparedArtifactTransfer {
 }
 
 impl Orch8GrpcService {
+    async fn persist_runtime_capabilities(
+        &self,
+        json: &str,
+        handlers: &[String],
+        tenant: Option<&TenantId>,
+        expected_runtime_id: Option<RuntimeId>,
+    ) -> Result<RuntimeCapabilities, Status> {
+        let tenant = tenant.ok_or_else(|| {
+            Status::failed_precondition(
+                "runtime capability advertisement requires an authenticated tenant",
+            )
+        })?;
+        let capabilities = prepare_runtime_capabilities(json, handlers, expected_runtime_id)?;
+        self.storage
+            .upsert_runtime_capabilities(tenant, &capabilities)
+            .await
+            .map_err(storage_err)?;
+        Ok(capabilities)
+    }
+
+    async fn send_worker_commands(
+        &self,
+        worker_id: &str,
+        sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
+    ) -> Result<bool, Status> {
+        let commands = self
+            .storage
+            .list_worker_commands(worker_id)
+            .await
+            .map_err(storage_err)?;
+        let mut drain_requested = false;
+        for command in commands {
+            drain_requested |= command.command == orch8_types::worker::WorkerCommandKind::Drain;
+            let command_json = to_json_string(&command)?;
+            if command_json.len()
+                > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
+            {
+                return Err(Status::resource_exhausted(
+                    "worker control command exceeds negotiated message limit",
+                ));
+            }
+            sender
+                .send(Ok(worker_server_frame(
+                    proto::worker_stream_server::Payload::Command(proto::WorkerControlCommand {
+                        command_json,
+                    }),
+                )))
+                .await
+                .map_err(|_| Status::cancelled("worker stream closed"))?;
+        }
+        Ok(drain_requested)
+    }
+
+    async fn acknowledge_worker_command(
+        &self,
+        worker_id: &str,
+        command_id: Uuid,
+    ) -> Result<(), Status> {
+        let commands = self
+            .storage
+            .list_worker_commands(worker_id)
+            .await
+            .map_err(storage_err)?;
+        if commands.iter().any(|command| command.id == command_id) {
+            self.storage
+                .delete_worker_command(command_id)
+                .await
+                .map_err(storage_err)?;
+        }
+        Ok(())
+    }
+
     async fn prepare_artifact_transfer(
         &self,
         open: proto::ArtifactTransferOpen,
@@ -377,6 +498,8 @@ impl Orch8GrpcService {
         tenant: Option<&TenantId>,
         max_in_flight: u32,
         outstanding: &mut std::collections::HashSet<Uuid>,
+        runtime_id: &mut Option<RuntimeId>,
+        draining: &mut bool,
         sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     ) -> Result<(), Status> {
         if prost::Message::encoded_len(&frame)
@@ -394,6 +517,11 @@ impl Orch8GrpcService {
                 Err(Status::failed_precondition("worker stream is already open"))
             }
             proto::worker_stream_client::Payload::Demand(demand) => {
+                if *draining {
+                    return Err(Status::failed_precondition(
+                        "worker session is draining and cannot claim new tasks",
+                    ));
+                }
                 let available = usize::try_from(max_in_flight)
                     .unwrap_or(usize::MAX)
                     .saturating_sub(outstanding.len());
@@ -437,6 +565,54 @@ impl Orch8GrpcService {
                         remaining = remaining.saturating_sub(1);
                     }
                 }
+                Ok(())
+            }
+            proto::worker_stream_client::Payload::RuntimeHeartbeat(heartbeat) => {
+                if !worker_feature_enabled(open, "runtime_capabilities") {
+                    return Err(Status::failed_precondition(
+                        "runtime capabilities were not negotiated",
+                    ));
+                }
+                let capabilities = self
+                    .persist_runtime_capabilities(
+                        &heartbeat.runtime_capabilities_json,
+                        &open.handler_names,
+                        tenant,
+                        *runtime_id,
+                    )
+                    .await?;
+                *runtime_id = Some(capabilities.runtime_id);
+                *draining |= capabilities.draining;
+                *draining |= self.send_worker_commands(&open.worker_id, sender).await?;
+                sender
+                    .send(Ok(worker_server_frame(
+                        proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
+                            operation: "runtime_heartbeat".into(),
+                            task_id: capabilities.runtime_id.to_string(),
+                        }),
+                    )))
+                    .await
+                    .map_err(|_| Status::cancelled("worker stream closed"))?;
+                Ok(())
+            }
+            proto::worker_stream_client::Payload::CommandAck(ack) => {
+                if !worker_feature_enabled(open, "placement_commands") {
+                    return Err(Status::failed_precondition(
+                        "worker commands were not negotiated",
+                    ));
+                }
+                let command_id = parse_uuid(&ack.command_id)?;
+                self.acknowledge_worker_command(&open.worker_id, command_id)
+                    .await?;
+                sender
+                    .send(Ok(worker_server_frame(
+                        proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
+                            operation: "command".into(),
+                            task_id: command_id.to_string(),
+                        }),
+                    )))
+                    .await
+                    .map_err(|_| Status::cancelled("worker stream closed"))?;
                 Ok(())
             }
             proto::worker_stream_client::Payload::Complete(complete) => {
@@ -741,6 +917,7 @@ fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
 }
 
 #[tonic::async_trait]
+#[allow(clippy::too_many_lines)]
 impl Orch8Service for Orch8GrpcService {
     // --- Health ---
 
@@ -1475,7 +1652,7 @@ impl Orch8Service for Orch8GrpcService {
         &self,
         req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
     ) -> Result<Response<Self::WorkerStreamStream>, Status> {
-        let tenant = caller_tenant(&req).cloned();
+        let caller_tenant = caller_tenant(&req).cloned();
         let mut inbound = req.into_inner();
         let first = inbound
             .message()
@@ -1492,6 +1669,19 @@ impl Orch8Service for Orch8GrpcService {
             return Err(Status::invalid_argument(
                 "first worker stream frame must be open",
             ));
+        };
+        let requested_tenant = TenantId::unchecked(open.tenant_id.clone());
+        let tenant = if let Some(caller) = caller_tenant {
+            if !requested_tenant.as_str().is_empty() && requested_tenant != caller {
+                return Err(Status::permission_denied(
+                    "worker stream tenant_id does not match caller tenant",
+                ));
+            }
+            Some(caller)
+        } else if requested_tenant.as_str().is_empty() {
+            None
+        } else {
+            Some(requested_tenant)
         };
         if open.protocol_version != WORKER_STREAM_PROTOCOL_VERSION {
             return Err(Status::failed_precondition(format!(
@@ -1520,6 +1710,28 @@ impl Orch8Service for Orch8GrpcService {
                 "worker must negotiate task_delivery",
             ));
         }
+        if !open.runtime_capabilities_json.is_empty()
+            && !features
+                .iter()
+                .any(|feature| feature == "runtime_capabilities")
+        {
+            return Err(Status::failed_precondition(
+                "runtime capability advertisement was not negotiated",
+            ));
+        }
+        let initial_capabilities = if open.runtime_capabilities_json.is_empty() {
+            None
+        } else {
+            Some(
+                self.persist_runtime_capabilities(
+                    &open.runtime_capabilities_json,
+                    &open.handler_names,
+                    tenant.as_ref(),
+                    None,
+                )
+                .await?,
+            )
+        };
 
         let (sender, receiver) =
             tokio::sync::mpsc::channel(usize::try_from(max_in_flight).unwrap_or(256));
@@ -1527,7 +1739,7 @@ impl Orch8Service for Orch8GrpcService {
             .send(Ok(worker_server_frame(
                 proto::worker_stream_server::Payload::Hello(proto::WorkerStreamHello {
                     protocol_version: WORKER_STREAM_PROTOCOL_VERSION,
-                    negotiated_features: features,
+                    negotiated_features: features.clone(),
                     max_in_flight,
                     max_message_bytes: WORKER_STREAM_MAX_MESSAGE_BYTES,
                     heartbeat_interval_secs: WORKER_STREAM_HEARTBEAT_SECS,
@@ -1536,9 +1748,20 @@ impl Orch8Service for Orch8GrpcService {
             .await
             .map_err(|_| Status::cancelled("worker stream closed during handshake"))?;
 
+        let mut draining = initial_capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.draining);
+        if features
+            .iter()
+            .any(|feature| feature == "placement_commands")
+        {
+            draining |= self.send_worker_commands(&open.worker_id, &sender).await?;
+        }
+
         let service = self.clone();
         tokio::spawn(async move {
             let mut outstanding = std::collections::HashSet::new();
+            let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
             while let Ok(Some(frame)) = inbound.message().await {
                 let result = service
                     .handle_worker_stream_frame(
@@ -1547,6 +1770,8 @@ impl Orch8Service for Orch8GrpcService {
                         tenant.as_ref(),
                         max_in_flight,
                         &mut outstanding,
+                        &mut runtime_id,
+                        &mut draining,
                         &sender,
                     )
                     .await;

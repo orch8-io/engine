@@ -187,10 +187,20 @@ message WorkerStreamOpen {
   repeated string supported_features = 3;
   uint32 max_in_flight = 4;
   uint32 protocol_version = 5;
+  string runtime_capabilities_json = 6;
+  string tenant_id = 7;
 }
 
 message WorkerStreamDemand {
   uint32 capacity = 1;
+}
+
+message RuntimeHeartbeat {
+  string runtime_capabilities_json = 1;
+}
+
+message WorkerCommandAck {
+  string command_id = 1;
 }
 
 message WorkerStreamClient {
@@ -200,6 +210,8 @@ message WorkerStreamClient {
     CompleteTaskRequest complete = 3;
     FailTaskRequest fail = 4;
     HeartbeatTaskRequest heartbeat = 5;
+    RuntimeHeartbeat runtime_heartbeat = 6;
+    WorkerCommandAck command_ack = 7;
   }
 }
 
@@ -225,12 +237,17 @@ message WorkerStreamAck {
   string task_id = 2;
 }
 
+message WorkerControlCommand {
+  string command_json = 1;
+}
+
 message WorkerStreamServer {
   oneof payload {
     WorkerStreamHello hello = 1;
     WorkerStreamTask task = 2;
     WorkerStreamCancellation cancellation = 3;
     WorkerStreamAck ack = 4;
+    WorkerControlCommand command = 5;
   }
 }
 

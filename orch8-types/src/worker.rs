@@ -173,7 +173,8 @@ pub struct WorkerCommand {
     /// The worker this command targets.
     pub worker_id: String,
     /// `drain` (stop claiming new tasks, finish in-flight), `reload`
-    /// (re-read config / re-register handlers), or `ping` (liveness probe).
+    /// (re-read config / re-register handlers), `ping` (liveness probe), or
+    /// `place` (accept a placement payload for runtime-local execution).
     pub command: WorkerCommandKind,
     /// Optional command parameters (e.g. a drain deadline).
     #[serde(default)]
@@ -188,6 +189,7 @@ pub enum WorkerCommandKind {
     Drain,
     Reload,
     Ping,
+    Place,
 }
 
 impl std::fmt::Display for WorkerCommandKind {
@@ -196,6 +198,7 @@ impl std::fmt::Display for WorkerCommandKind {
             Self::Drain => f.write_str("drain"),
             Self::Reload => f.write_str("reload"),
             Self::Ping => f.write_str("ping"),
+            Self::Place => f.write_str("place"),
         }
     }
 }
@@ -207,6 +210,7 @@ impl std::str::FromStr for WorkerCommandKind {
             "drain" => Ok(Self::Drain),
             "reload" => Ok(Self::Reload),
             "ping" => Ok(Self::Ping),
+            "place" => Ok(Self::Place),
             other => Err(format!("unknown worker command: {other}")),
         }
     }
