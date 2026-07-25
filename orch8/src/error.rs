@@ -30,6 +30,10 @@ pub enum Error {
     /// Error from the scheduling engine.
     #[error(transparent)]
     Engine(Box<orch8_engine::error::EngineError>),
+
+    /// Portable capsule export, verification, or import failed.
+    #[error(transparent)]
+    Capsule(#[from] orch8_engine::capsule::CapsuleServiceError),
 }
 
 impl From<orch8_types::error::StorageError> for Error {

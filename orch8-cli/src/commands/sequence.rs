@@ -57,7 +57,7 @@ pub enum SequenceCmd {
         file: Option<PathBuf>,
     },
     /// Compile typed producer/consumer references and generate deterministic
-    /// TypeScript, Python, and canonical schema artifacts.
+    /// TypeScript, Python, Swift, Kotlin, and canonical schema artifacts.
     Dataflow {
         /// Stored sequence id to compile.
         #[arg(long, conflicts_with = "file")]
@@ -65,7 +65,7 @@ pub enum SequenceCmd {
         /// Local draft definition to compile instead of a stored sequence.
         #[arg(long, short)]
         file: Option<PathBuf>,
-        /// Atomically write types.ts, types.py, schema.json, and report.json.
+        /// Atomically write TS/Python/Swift/Kotlin types, schema, and report.
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
@@ -378,6 +378,8 @@ pub async fn run(
                 })?;
                 atomic_write(&directory.join("types.ts"), generated.typescript.as_bytes())?;
                 atomic_write(&directory.join("types.py"), generated.python.as_bytes())?;
+                atomic_write(&directory.join("Types.swift"), generated.swift.as_bytes())?;
+                atomic_write(&directory.join("Types.kt"), generated.kotlin.as_bytes())?;
                 atomic_write(
                     &directory.join("schema.json"),
                     serde_json::to_string_pretty(&generated.schema)?.as_bytes(),

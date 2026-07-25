@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use orch8_engine::handlers::{HandlerRegistry, StepContext};
@@ -8,6 +9,7 @@ use orch8_types::config::SchedulerConfig;
 use orch8_types::error::StepError;
 use orch8_types::ids::TenantId;
 
+use crate::effect::EffectContext;
 use crate::engine::Engine;
 use crate::error::Error;
 use crate::storage::Storage;
@@ -58,6 +60,30 @@ impl EngineBuilder {
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
         self.handlers.register(name, handler);
+        self
+    }
+
+    /// Register an externally visible effect handler with durable dispatch
+    /// evidence and a provider idempotency key.
+    ///
+    /// Before the handler runs, Orch8 persists an effect receipt. Return the
+    /// provider's receipt in the output as `provider_receipt_id`; Orch8 copies
+    /// it into the committed durable receipt. During a dry run,
+    /// [`EffectContext::dispatch_idempotency_key`] is `None` and the handler
+    /// must skip the external call.
+    pub fn effect_handler<F, Fut>(mut self, name: &str, handler: F) -> Self
+    where
+        F: Fn(EffectContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+        self.handlers.register(name, move |step| {
+            let handler = Arc::clone(&handler);
+            async move {
+                let context = EffectContext::load(step).await?;
+                handler(context).await
+            }
+        });
         self
     }
 

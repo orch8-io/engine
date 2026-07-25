@@ -1,9 +1,10 @@
 //! `orch8 release` — the safe workflow release control plane.
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use reqwest::Client;
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{OutputFormat, print_response};
@@ -64,6 +65,22 @@ pub enum ReleaseCmd {
     Rollback { id: Uuid },
     /// Show the immutable decision audit trail.
     Decisions { id: Uuid },
+    /// Run the non-interactive release proof gate used by CI.
+    Gate {
+        id: Uuid,
+        /// Number of baseline executions to replay when validation has not run.
+        #[arg(long)]
+        sample: Option<u32>,
+        /// Permit semantic diff entries classified as side-effect risk.
+        #[arg(long)]
+        allow_side_effect_risk: bool,
+        /// Maximum historical replay divergences accepted by the gate.
+        #[arg(long, default_value = "0")]
+        max_divergences: u32,
+        /// Maximum inconclusive historical replays accepted by the gate.
+        #[arg(long, default_value = "0")]
+        max_inconclusive: u32,
+    },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -182,6 +199,193 @@ pub async fn run(client: &Client, base: &str, cmd: ReleaseCmd, format: OutputFor
                 .await?;
             print_response(resp, format).await?;
         }
+        ReleaseCmd::Gate {
+            id,
+            sample,
+            allow_side_effect_risk,
+            max_divergences,
+            max_inconclusive,
+        } => {
+            run_gate(
+                client,
+                base,
+                id,
+                sample,
+                allow_side_effect_risk,
+                max_divergences,
+                max_inconclusive,
+                format,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct GateCheck {
+    name: &'static str,
+    passed: bool,
+    evidence: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GateReport {
+    release_id: Uuid,
+    passed: bool,
+    checks: Vec<GateCheck>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_gate(
+    client: &Client,
+    base: &str,
+    id: Uuid,
+    sample: Option<u32>,
+    allow_side_effect_risk: bool,
+    max_divergences: u32,
+    max_inconclusive: u32,
+    format: OutputFormat,
+) -> Result<()> {
+    let release = get_json(client, format!("{base}/releases/{id}"), "release").await?;
+    let candidate = release["candidate_sequence_id"]
+        .as_str()
+        .context("release response is missing candidate_sequence_id")?;
+    let (diff, preflight) = tokio::try_join!(
+        get_json(
+            client,
+            format!("{base}/releases/{id}/diff"),
+            "semantic diff"
+        ),
+        get_json(
+            client,
+            format!("{base}/sequences/{candidate}/preflight"),
+            "candidate preflight"
+        )
+    )?;
+    let validation = if release["state"] == "draft" {
+        post_json(
+            client,
+            format!("{base}/releases/{id}/validate"),
+            json!({"sample": sample, "skip": false}),
+            "historical validation",
+        )
+        .await?
+    } else {
+        release["validation_summary"].clone()
+    };
+
+    let report = evaluate_gate(
+        id,
+        &diff,
+        &preflight,
+        &validation,
+        allow_side_effect_risk,
+        max_divergences,
+        max_inconclusive,
+    );
+    print_gate_report(&report, format)?;
+    if !report.passed {
+        bail!("release proof gate failed");
+    }
+    Ok(())
+}
+
+async fn get_json(client: &Client, url: String, label: &str) -> Result<Value> {
+    let response = client.get(url).send().await?;
+    response_json(response, label).await
+}
+
+async fn post_json(client: &Client, url: String, body: Value, label: &str) -> Result<Value> {
+    let response = client.post(url).json(&body).send().await?;
+    response_json(response, label).await
+}
+
+async fn response_json(response: reqwest::Response, label: &str) -> Result<Value> {
+    let status = response.status();
+    let bytes = response.bytes().await?;
+    if !status.is_success() {
+        bail!(
+            "{label} request failed ({status}): {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    serde_json::from_slice(&bytes).with_context(|| format!("{label} returned invalid JSON"))
+}
+
+fn evaluate_gate(
+    release_id: Uuid,
+    diff: &Value,
+    preflight: &Value,
+    validation: &Value,
+    allow_side_effect_risk: bool,
+    max_divergences: u32,
+    max_inconclusive: u32,
+) -> GateReport {
+    let severity = diff["max_severity"].as_str().unwrap_or_else(|| {
+        if diff["entries"].as_array().is_none_or(Vec::is_empty) {
+            "none"
+        } else {
+            "unknown"
+        }
+    });
+    let diff_passed = match severity {
+        "none" | "informational" | "behavioral" => true,
+        "side_effect_risk" => allow_side_effect_risk,
+        _ => false,
+    };
+    let preflight_status = preflight["overall"].as_str().unwrap_or("unknown");
+    let preflight_passed = matches!(preflight_status, "pass" | "warning");
+    let divergences = validation["divergences"]
+        .as_array()
+        .map_or(u32::MAX, |values| {
+            u32::try_from(values.len()).unwrap_or(u32::MAX)
+        });
+    let inconclusive = validation["inconclusive"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(u32::MAX);
+    let validation_passed = divergences <= max_divergences && inconclusive <= max_inconclusive;
+    let checks = vec![
+        GateCheck {
+            name: "semantic_diff",
+            passed: diff_passed,
+            evidence: format!("max severity: {severity}"),
+        },
+        GateCheck {
+            name: "candidate_preflight",
+            passed: preflight_passed,
+            evidence: format!("overall: {preflight_status}"),
+        },
+        GateCheck {
+            name: "historical_validation",
+            passed: validation_passed,
+            evidence: format!(
+                "divergences: {divergences}/{max_divergences}, inconclusive: {inconclusive}/{max_inconclusive}"
+            ),
+        },
+    ];
+    GateReport {
+        release_id,
+        passed: checks.iter().all(|check| check.passed),
+        checks,
+    }
+}
+
+fn print_gate_report(report: &GateReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        OutputFormat::Table => {
+            for check in &report.checks {
+                println!(
+                    "{} {:<24} {}",
+                    if check.passed { "PASS" } else { "FAIL" },
+                    check.name,
+                    check.evidence
+                );
+            }
+            println!("gate: {}", if report.passed { "PASS" } else { "FAIL" });
+        }
     }
     Ok(())
 }
@@ -206,5 +410,68 @@ fn print_diff(diff: &Value) {
     }
     for warning in diff["candidate_lint"].as_array().into_iter().flatten() {
         println!("  lint: {}", warning.as_str().unwrap_or(""));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_gate_accepts_clean_evidence() {
+        let report = evaluate_gate(
+            Uuid::nil(),
+            &json!({"max_severity": "behavioral"}),
+            &json!({"overall": "warning"}),
+            &json!({"divergences": [], "inconclusive": 0}),
+            false,
+            0,
+            0,
+        );
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn strict_gate_rejects_each_unsafe_proof() {
+        let report = evaluate_gate(
+            Uuid::nil(),
+            &json!({"max_severity": "side_effect_risk"}),
+            &json!({"overall": "fail"}),
+            &json!({"divergences": [{}], "inconclusive": 1}),
+            false,
+            0,
+            0,
+        );
+        assert!(!report.passed);
+        assert!(report.checks.iter().all(|check| !check.passed));
+    }
+
+    #[test]
+    fn explicit_thresholds_relax_only_requested_checks() {
+        let report = evaluate_gate(
+            Uuid::nil(),
+            &json!({"max_severity": "side_effect_risk"}),
+            &json!({"overall": "pass"}),
+            &json!({"divergences": [{}], "inconclusive": 2}),
+            true,
+            1,
+            2,
+        );
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn malformed_diff_evidence_fails_closed() {
+        let report = evaluate_gate(
+            Uuid::nil(),
+            &json!({"entries": [{"severity": "behavioral"}]}),
+            &json!({"overall": "pass"}),
+            &json!({"divergences": [], "inconclusive": 0}),
+            true,
+            0,
+            0,
+        );
+        assert!(!report.passed);
+        assert!(!report.checks[0].passed);
     }
 }

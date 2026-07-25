@@ -1,6 +1,7 @@
 pub mod api_key_cache;
 pub mod artifacts;
 pub mod compression;
+pub mod conformance;
 pub mod encrypting;
 pub mod externalizing;
 pub mod postgres;

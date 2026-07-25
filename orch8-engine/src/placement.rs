@@ -1,12 +1,12 @@
 //! Deterministic capability routing and bounded locality-policy evaluation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use orch8_types::continuity::{
     CapsuleRequirements, ContinuityId, DataClassification, ExecutionEpoch, LocalityPolicy,
-    LocalityRule, PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome,
-    RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
+    LocalityRule, PlacementDecision, PlacementDecisionId, PlacementEvidence, PlacementScoreFactors,
+    PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
 };
 use orch8_types::ids::TenantId;
 use thiserror::Error;
@@ -391,6 +391,22 @@ pub fn choose_runtime(
     current_runtime: Option<RuntimeId>,
     now: DateTime<Utc>,
 ) -> PlacementDecision {
+    let bounded_candidates = &candidates[..candidates.len().min(MAX_CANDIDATES)];
+    let battery_ranks = rank_candidate_metric(
+        bounded_candidates,
+        |runtime| runtime.battery_percent.map(u64::from),
+        true,
+    );
+    let cost_ranks = rank_candidate_metric(
+        bounded_candidates,
+        |runtime| runtime.estimated_cost_microunits,
+        false,
+    );
+    let latency_ranks = rank_candidate_metric(
+        bounded_candidates,
+        |runtime| runtime.estimated_latency_ms,
+        false,
+    );
     let mut evidence: Vec<_> = candidates
         .iter()
         .take(MAX_CANDIDATES)
@@ -417,13 +433,34 @@ pub fn choose_runtime(
                 .collect();
             finding_codes.sort();
             finding_codes.dedup();
-            let score = trust_score(runtime.trust)
-                + i64::from(runtime.offline_capable) * 3
-                + i64::from(current_runtime == Some(runtime.runtime_id)) * 5;
+            let score_factors = PlacementScoreFactors {
+                trust: trust_score(runtime.trust),
+                current_runtime: i64::from(current_runtime == Some(runtime.runtime_id)) * 5,
+                offline_capable: i64::from(runtime.offline_capable) * 3,
+                battery_rank: battery_ranks
+                    .get(&runtime.runtime_id)
+                    .copied()
+                    .unwrap_or_default(),
+                cost_rank: cost_ranks
+                    .get(&runtime.runtime_id)
+                    .copied()
+                    .unwrap_or_default(),
+                latency_rank: latency_ranks
+                    .get(&runtime.runtime_id)
+                    .copied()
+                    .unwrap_or_default(),
+            };
+            let score = score_factors.trust
+                + score_factors.current_runtime
+                + score_factors.offline_capable
+                + score_factors.battery_rank
+                + score_factors.cost_rank
+                + score_factors.latency_rank;
             PlacementEvidence {
                 runtime_id: runtime.runtime_id,
                 outcome,
                 score,
+                score_factors,
                 finding_codes,
             }
         })
@@ -451,6 +488,37 @@ pub fn choose_runtime(
         candidates: evidence,
         created_at: now,
     }
+}
+
+fn rank_candidate_metric(
+    candidates: &[RuntimeCapabilities],
+    value: impl Fn(&RuntimeCapabilities) -> Option<u64>,
+    prefer_high: bool,
+) -> BTreeMap<RuntimeId, i64> {
+    let mut known: Vec<(RuntimeId, u64)> = candidates
+        .iter()
+        .filter_map(|runtime| value(runtime).map(|metric| (runtime.runtime_id, metric)))
+        .collect();
+    known.sort_by(|left, right| {
+        let order = left.1.cmp(&right.1);
+        let order = if prefer_high { order.reverse() } else { order };
+        order.then_with(|| left.0.cmp(&right.0))
+    });
+    let count = known.len();
+    let mut scores = BTreeMap::new();
+    let mut previous_value = None;
+    let mut previous_score = 0;
+    for (index, (runtime_id, metric)) in known.into_iter().enumerate() {
+        let score = if previous_value == Some(metric) {
+            previous_score
+        } else {
+            i64::try_from((count - index) * 10 / count).unwrap_or(10)
+        };
+        scores.insert(runtime_id, score);
+        previous_value = Some(metric);
+        previous_score = score;
+    }
+    scores
 }
 
 #[cfg(test)]
@@ -710,5 +778,47 @@ mod tests {
                 .contains(&"CONNECTIVITY_DENIED".into())
         );
         assert!(rejected.finding_codes.contains(&"COST_DENIED".into()));
+    }
+
+    #[test]
+    fn placement_score_explains_battery_cost_and_latency_tradeoffs() {
+        let preferred_id = RuntimeId::new();
+        let other_id = RuntimeId::new();
+        let mut preferred = runtime(preferred_id, "br-south", RuntimeTrustLevel::Registered);
+        preferred.battery_percent = Some(90);
+        preferred.estimated_cost_microunits = Some(10);
+        preferred.estimated_latency_ms = Some(50);
+        let mut other = runtime(other_id, "br-south", RuntimeTrustLevel::Registered);
+        other.battery_percent = Some(20);
+        other.estimated_cost_microunits = Some(1_000);
+        other.estimated_latency_ms = Some(500);
+
+        let decision = choose_runtime(
+            TenantId::new("tenant-a").unwrap(),
+            ContinuityId::new(),
+            ExecutionEpoch::initial(),
+            &CapsuleRequirements::default(),
+            None,
+            DataClassification::Internal,
+            &[other, preferred],
+            None,
+            Utc::now(),
+        );
+
+        assert_eq!(decision.selected_runtime_id, Some(preferred_id));
+        let preferred = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.runtime_id == preferred_id)
+            .unwrap();
+        let other = decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.runtime_id == other_id)
+            .unwrap();
+        assert!(preferred.score_factors.battery_rank > other.score_factors.battery_rank);
+        assert!(preferred.score_factors.cost_rank > other.score_factors.cost_rank);
+        assert!(preferred.score_factors.latency_rank > other.score_factors.latency_rank);
+        assert!(preferred.score > other.score);
     }
 }

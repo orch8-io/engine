@@ -7,9 +7,9 @@ use orch8_types::continuity::{
     ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
     ContinuityId, ContinuityStream, EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt,
     EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
-    OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence, PolicyOutcome,
-    ProvenanceEntry, RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel, StreamFrame,
-    StreamFrameState, StreamId,
+    OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence,
+    PlacementScoreFactors, PolicyOutcome, ProvenanceEntry, RuntimeCapabilities, RuntimeId,
+    RuntimeKind, RuntimeTrustLevel, StreamFrame, StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::IncidentCaseId;
 use orch8_types::continuity_advanced::{
@@ -988,6 +988,7 @@ async fn grants_are_single_use_and_stream_retractions_are_resumable() {
             runtime_id: runtime,
             outcome: PolicyOutcome::Allow,
             score: 10,
+            score_factors: PlacementScoreFactors::default(),
             finding_codes: vec!["POLICY_ALLOW".into()],
         }],
         created_at: now,

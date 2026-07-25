@@ -20,3 +20,16 @@ orch8 templates list
 orch8 init ./demo --template approval-flow
 ```
 
+## Portable agent continuity
+
+Run the built-in protocol demonstration when you want to verify portable
+execution without provisioning a server or attaching a physical device:
+
+```bash
+orch8 demo portable-agent
+orch8 --output json demo portable-agent
+```
+
+This is not a mocked workflow template. It exports, signs, encrypts, imports,
+activates, and returns one execution across isolated in-memory cloud/device
+runtimes while checking ownership, trust, privacy, and redelivery invariants.

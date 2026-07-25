@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use orch8::{
-    CreateInstanceOptions, Engine, InstanceId, InstanceState, SignalType, StepContext, Storage,
+    AgentRuntime, CapsuleExportOptions, CapsuleRequirements, CapsuleSigningKey,
+    CreateInstanceOptions, EffectContext, Engine, FieldEncryptor, InstanceId, InstanceState,
+    RuntimeId, SignalType, StepContext, Storage,
 };
 
 /// Bounded-wait helper: poll `get_instance` until the predicate holds.
@@ -115,6 +117,336 @@ async fn manual_tick_once_completes_instance() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(completed, "instance did not complete via manual ticking");
+}
+
+/// Effect handlers receive the exact durable dispatch identity before their
+/// external call, and successful provider evidence is committed to the
+/// instance effect ledger.
+#[tokio::test]
+async fn effect_handler_exposes_and_commits_durable_receipt() {
+    let engine = Engine::builder()
+        .storage(Storage::sqlite_in_memory())
+        .effect_handler("charge", |ctx: EffectContext| async move {
+            let dispatch_key = ctx
+                .dispatch_idempotency_key()
+                .expect("live effect has dispatch identity");
+            let receipt_id = ctx
+                .receipt()
+                .expect("live effect has receipt")
+                .id
+                .to_string();
+            assert_eq!(dispatch_key, receipt_id);
+            Ok(serde_json::json!({
+                "dispatch_key": dispatch_key,
+                "provider_receipt_id": "provider-charge-42"
+            }))
+        })
+        .build()
+        .await
+        .expect("engine builds");
+
+    let seq_id = engine
+        .upsert_sequence(two_step_sequence("effect-seq", "charge"))
+        .await
+        .expect("upsert");
+    let inst = engine
+        .create_instance(seq_id, CreateInstanceOptions::default())
+        .await
+        .expect("create");
+
+    for _ in 0..100 {
+        engine.tick_once().await.expect("tick");
+        if engine.get_instance(inst).await.expect("get").state == InstanceState::Completed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        engine.get_instance(inst).await.expect("get").state,
+        InstanceState::Completed
+    );
+
+    let receipts = engine.effect_receipts(inst).await.expect("effect ledger");
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].state, orch8::EffectState::Committed);
+    assert_eq!(
+        receipts[0].provider_receipt_id.as_deref(),
+        Some("provider-charge-42")
+    );
+}
+
+/// Dry runs preserve handler control flow but never mint a dispatch identity,
+/// making an accidental provider call straightforward to reject in user code.
+#[tokio::test]
+async fn effect_handler_dry_run_has_no_dispatch_identity() {
+    let engine = Engine::builder()
+        .storage(Storage::sqlite_in_memory())
+        .effect_handler("charge", |ctx: EffectContext| async move {
+            assert!(ctx.is_dry_run());
+            assert!(ctx.dispatch_idempotency_key().is_none());
+            assert!(ctx.receipt().is_none());
+            Ok(serde_json::json!({ "dry_run": true }))
+        })
+        .build()
+        .await
+        .expect("engine builds");
+    let seq_id = engine
+        .upsert_sequence(two_step_sequence("effect-dry-run", "charge"))
+        .await
+        .expect("upsert");
+    let mut options = CreateInstanceOptions::default();
+    options.context.runtime.dry_run = true;
+    let inst = engine
+        .create_instance(seq_id, options)
+        .await
+        .expect("create");
+
+    for _ in 0..100 {
+        engine.tick_once().await.expect("tick");
+        if engine.get_instance(inst).await.expect("get").state == InstanceState::Completed {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        engine.get_instance(inst).await.expect("get").state,
+        InstanceState::Completed
+    );
+    assert!(
+        engine
+            .effect_receipts(inst)
+            .await
+            .expect("ledger")
+            .is_empty()
+    );
+}
+
+async fn portable_fixture() -> (Engine, Engine, InstanceId) {
+    let source = Engine::builder()
+        .storage(Storage::sqlite_in_memory().artifacts_in_memory())
+        .build()
+        .await
+        .expect("source engine");
+    let destination = Engine::builder()
+        .storage(Storage::sqlite_in_memory().artifacts_in_memory())
+        .build()
+        .await
+        .expect("destination engine");
+    let sequence: orch8::SequenceDefinition = serde_json::from_value(serde_json::json!({
+        "id": uuid::Uuid::now_v7(),
+        "tenant_id": "default",
+        "namespace": "default",
+        "name": "portable-facade",
+        "version": 1,
+        "blocks": [{
+            "type": "step",
+            "id": "approval",
+            "handler": "noop",
+            "params": {},
+            "wait_for_input": { "prompt": "continue?" }
+        }],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    }))
+    .expect("sequence");
+    let sequence_id = source
+        .upsert_sequence(sequence.clone())
+        .await
+        .expect("source sequence");
+    destination
+        .upsert_sequence(sequence)
+        .await
+        .expect("destination sequence");
+    let source_instance = source
+        .create_instance(sequence_id, CreateInstanceOptions::default())
+        .await
+        .expect("source instance");
+    for _ in 0..20 {
+        source.tick_once().await.expect("source tick");
+        if source
+            .get_instance(source_instance)
+            .await
+            .expect("source snapshot")
+            .state
+            == InstanceState::Waiting
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        source
+            .get_instance(source_instance)
+            .await
+            .expect("source snapshot")
+            .state,
+        InstanceState::Waiting
+    );
+    source
+        .portable_checkpoint(
+            source_instance,
+            serde_json::json!({"safe_boundary": "awaiting_approval"}),
+        )
+        .await
+        .expect("checkpoint");
+
+    (source, destination, source_instance)
+}
+
+async fn export_test_capsule(
+    source: &Engine,
+    source_instance: InstanceId,
+) -> (orch8::PortableCapsule, RuntimeId, FieldEncryptor) {
+    let source_runtime = RuntimeId::new();
+    let destination_runtime = RuntimeId::new();
+    let signing_key = CapsuleSigningKey::from_bytes(&[7_u8; 32]);
+    let encryptor = FieldEncryptor::from_bytes(&[9_u8; 32]);
+    let capsule = source
+        .export_portable_capsule(
+            source_instance,
+            CapsuleExportOptions {
+                source_runtime_id: source_runtime,
+                destination_runtime_id: Some(destination_runtime),
+                requirements: CapsuleRequirements::default(),
+                expires_in_seconds: 300,
+                signing_key_id: "test-signing-key".into(),
+                encryption_key_id: "test-payload-key".into(),
+            },
+            &signing_key,
+            &encryptor,
+        )
+        .await
+        .expect("capsule export");
+    (capsule, destination_runtime, encryptor)
+}
+
+async fn assert_capsule_rejections(
+    destination: &Engine,
+    capsule: &orch8::PortableCapsule,
+    destination_runtime: RuntimeId,
+    trusted_keys: &[String],
+    encryptor: &FieldEncryptor,
+) {
+    let wrong_tenant = Engine::builder()
+        .storage(Storage::sqlite_in_memory().artifacts_in_memory())
+        .tenant("other")
+        .build()
+        .await
+        .expect("wrong-tenant engine");
+    assert!(matches!(
+        wrong_tenant
+            .import_portable_capsule(capsule, destination_runtime, None, trusted_keys, encryptor,)
+            .await,
+        Err(orch8::Error::NotFound(_))
+    ));
+
+    let mut tampered = capsule.clone();
+    tampered.encrypted_payload[0] ^= 1;
+    assert!(
+        destination
+            .import_portable_capsule(
+                &tampered,
+                destination_runtime,
+                None,
+                trusted_keys,
+                encryptor,
+            )
+            .await
+            .is_err()
+    );
+}
+
+/// The facade moves a bounded checkpoint between isolated stores while
+/// enforcing signature, payload integrity, tenant, destination, and
+/// idempotent-redelivery rules.
+#[tokio::test]
+async fn portable_capsule_round_trip_is_verified_and_idempotent() {
+    let (source, destination, source_instance) = portable_fixture().await;
+    let (capsule, destination_runtime, encryptor) =
+        export_test_capsule(&source, source_instance).await;
+    let trusted_keys = [capsule.signed_manifest.public_key.clone()];
+    assert_capsule_rejections(
+        &destination,
+        &capsule,
+        destination_runtime,
+        &trusted_keys,
+        &encryptor,
+    )
+    .await;
+
+    let imported = destination
+        .import_portable_capsule(
+            &capsule,
+            destination_runtime,
+            None,
+            &trusted_keys,
+            &encryptor,
+        )
+        .await
+        .expect("capsule import");
+    let redelivered = destination
+        .import_portable_capsule(
+            &capsule,
+            destination_runtime,
+            Some(imported.id),
+            &trusted_keys,
+            &encryptor,
+        )
+        .await
+        .expect("idempotent capsule redelivery");
+    assert_eq!(redelivered.id, imported.id);
+    assert_eq!(redelivered.state, InstanceState::Paused);
+}
+
+/// The agent preset includes the native durable agent stack and can execute a
+/// no-network dry run through the same Engine API exposed by `Deref`.
+#[tokio::test]
+async fn agent_runtime_preset_executes_bounded_dry_run() {
+    let runtime_id = RuntimeId::new();
+    let runtime = AgentRuntime::builder(Storage::sqlite_in_memory())
+        .runtime_id(runtime_id)
+        .build()
+        .await
+        .expect("agent runtime");
+    assert_eq!(runtime.runtime_id(), runtime_id);
+    let sequence: orch8::SequenceDefinition = serde_json::from_value(serde_json::json!({
+        "id": uuid::Uuid::now_v7(),
+        "tenant_id": "default",
+        "namespace": "default",
+        "name": "agent-runtime-preset",
+        "version": 1,
+        "blocks": [{
+            "type": "step",
+            "id": "agent",
+            "handler": "agent",
+            "params": {"goal": "do not call a provider", "max_iterations": 1}
+        }],
+        "created_at": chrono::Utc::now().to_rfc3339()
+    }))
+    .expect("sequence");
+    let sequence_id = runtime.upsert_sequence(sequence).await.expect("upsert");
+    let mut options = CreateInstanceOptions::default();
+    options.context.runtime.dry_run = true;
+    let instance_id = runtime
+        .create_instance(sequence_id, options)
+        .await
+        .expect("instance");
+
+    for _ in 0..20 {
+        runtime.tick_once().await.expect("tick");
+        if runtime
+            .get_instance(instance_id)
+            .await
+            .expect("snapshot")
+            .state
+            == InstanceState::Completed
+        {
+            break;
+        }
+    }
+    let outputs = runtime.block_outputs(instance_id).await.expect("outputs");
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].output["stop_reason"], "dry_run");
+    assert_eq!(outputs[0].output["iterations"], 0);
 }
 
 /// `send_signal` resolves a `wait_for_input` gate: the instance parks

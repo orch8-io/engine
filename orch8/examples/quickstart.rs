@@ -42,13 +42,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = Engine::builder()
         .storage(Storage::sqlite(&db_path))
-        .handler("charge_card", |ctx: orch8::StepContext| async move {
+        .effect_handler("charge_card", |ctx: orch8::EffectContext| async move {
             let amount = ctx.params.get("amount_cents").cloned().unwrap_or_default();
-            println!("[charge_card] charging {amount} cents");
+            let dispatch_key = ctx
+                .dispatch_idempotency_key()
+                .expect("live effect has a durable dispatch key");
+            println!("[charge_card] charging {amount} cents (idempotency: {dispatch_key})");
             Ok(serde_json::json!({
                 "charged": true,
                 "amount_cents": amount,
                 "reference": "ch_12345",
+                "provider_receipt_id": "ch_12345",
             }))
         })
         .handler("send_receipt", |ctx: orch8::StepContext| async move {
@@ -92,6 +96,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => tokio::time::sleep(Duration::from_millis(50)).await,
         }
+    }
+
+    for receipt in engine.effect_receipts(inst).await? {
+        println!(
+            "effect {}: {:?} (provider receipt: {:?})",
+            receipt.id, receipt.state, receipt.provider_receipt_id
+        );
     }
 
     engine.shutdown().await;

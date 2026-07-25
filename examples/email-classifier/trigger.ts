@@ -8,7 +8,7 @@
  * Run: npm run trigger
  * Run with non-matching subject: npm run trigger -- --skip
  */
-const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080";
+const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080/api/v1";
 const shouldSkip = process.argv.includes("--skip");
 
 const emailPayload = shouldSkip

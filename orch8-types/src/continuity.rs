@@ -505,7 +505,23 @@ pub struct PlacementEvidence {
     pub runtime_id: RuntimeId,
     pub outcome: PolicyOutcome,
     pub score: i64,
+    /// Auditable components of `score`; absent values contribute zero.
+    #[serde(default)]
+    pub score_factors: PlacementScoreFactors,
     pub finding_codes: Vec<String>,
+}
+
+/// Explainable inputs to one placement score. Battery, cost, and latency are
+/// ranked only against the bounded candidate set, avoiding arbitrary unit
+/// conversion constants while keeping selection deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PlacementScoreFactors {
+    pub trust: i64,
+    pub current_runtime: i64,
+    pub offline_capable: i64,
+    pub battery_rank: i64,
+    pub cost_rank: i64,
+    pub latency_rank: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

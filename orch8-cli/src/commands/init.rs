@@ -41,7 +41,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
     println!("  docker compose up -d");
     println!();
     println!("Then create a sequence:");
-    println!("  curl -X POST http://localhost:8080/sequences \\");
+    println!("  curl -X POST http://localhost:8080/api/v1/sequences \\");
     println!("    -H 'Content-Type: application/json' \\");
     println!("    -d @sequence.json");
 

@@ -79,6 +79,8 @@ The directory contains:
 ```text
 report.json  findings and checked references
 schema.json  normalized sequence data contract
+Types.kt     generated Kotlin kotlinx.serialization types
+Types.swift  generated Swift Codable types
 types.py     generated Python types
 types.ts     generated TypeScript types
 ```
@@ -90,6 +92,8 @@ jq '{references_checked, findings}' \
   generated-dataflow/report.json
 sed -n '1,120p' generated-dataflow/types.ts
 sed -n '1,120p' generated-dataflow/types.py
+sed -n '1,120p' generated-dataflow/Types.swift
+sed -n '1,120p' generated-dataflow/Types.kt
 ```
 
 ## 3. Prove generation is deterministic

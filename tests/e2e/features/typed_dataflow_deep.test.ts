@@ -710,11 +710,11 @@ describe("Typed Dataflow — deep coverage", () => {
       assert.deepEqual(second.generated, third.generated);
     });
 
-    it("tags generated output with the orch8-dataflow-v1 generator version", async () => {
+    it("tags generated output with the orch8-dataflow-v2 generator version", async () => {
       const seq = testSequence("df-gen-tag", [step("s1", "noop")]);
       const r = await client.compileSequenceDataflow(seq);
-      assert.equal(r.generated.generator_version, "orch8-dataflow-v1");
-      assert.equal(r.generated.schema.generator_version, "orch8-dataflow-v1");
+      assert.equal(r.generated.generator_version, "orch8-dataflow-v2");
+      assert.equal(r.generated.schema.generator_version, "orch8-dataflow-v2");
     });
 
     it("produces a 64-hex-char sha256 of the canonical sequence", async () => {

@@ -43,13 +43,15 @@ orch8 sequence dataflow --file checkout.json --out-dir generated
 orch8 sequence dataflow --id 019abcde-0000-7000-8000-000000000001 --out-dir generated
 ```
 
-The output directory receives `types.ts`, `types.py`, `schema.json`, and
-`report.json`. Files are written atomically. The command exits non-zero when
-the report contains an error, so an unsafe sequence cannot pass a CI gate.
+The output directory receives `types.ts`, `types.py`, `Types.swift`,
+`Types.kt`, `schema.json`, and `report.json`. Files are written atomically. The
+command exits non-zero when the report contains an error, so an unsafe
+sequence cannot pass a CI gate.
 
-Generated files carry `orch8-dataflow-v1` and the normalized sequence hash.
-Regenerating an unchanged sequence produces byte-identical TypeScript, Python,
-and schema artifacts.
+Generated files carry `orch8-dataflow-v2` and the same normalized sequence
+hash. Regenerating an unchanged sequence produces byte-identical TypeScript,
+Python, Swift, Kotlin, and schema artifacts. Swift uses Foundation `Codable`;
+Kotlin targets `kotlinx.serialization`.
 
 ## Schema authoring rules
 

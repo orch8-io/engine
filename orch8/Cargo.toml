@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 orch8-engine = { path = "../orch8-engine", default-features = false }
+orch8-publisher = { path = "../orch8-publisher" }
 orch8-storage = { path = "../orch8-storage" }
 orch8-types = { path = "../orch8-types" }
 tokio = { workspace = true }
@@ -20,6 +21,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 [features]
 default = ["compression"]

@@ -13,6 +13,8 @@ path = "src/main.rs"
 clap.workspace = true
 clap_complete = "4"
 serde_json.workspace = true
+serde.workspace = true
+sha2.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time"] }

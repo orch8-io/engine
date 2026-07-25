@@ -8,7 +8,7 @@
  */
 import { createServer } from "node:http";
 
-const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080";
+const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080/api/v1";
 const PORT = parseInt(process.env.WEBHOOK_PORT ?? "3333", 10);
 
 // You must deploy the sequence first (`npm run deploy`) and paste the ID here,

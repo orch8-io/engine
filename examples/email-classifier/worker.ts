@@ -12,7 +12,7 @@
  */
 import { Orch8Worker } from "@orch8.io/sdk";
 
-const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080";
+const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080/api/v1";
 
 const worker = new Orch8Worker({
   engineUrl: ORCH8_URL,

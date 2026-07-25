@@ -79,6 +79,30 @@ Then follow the [progressive quick starts](docs/quick-starts/README.md) to add
 dataflow, the durable API server, external workers, failure recovery, and safe
 production releases.
 
+To exercise portable continuity without a server or physical device, run the
+real signed/encrypted cloud-to-device-to-cloud protocol against three isolated
+local runtimes:
+
+```bash
+orch8 demo portable-agent
+# Add --output json for machine-readable invariant evidence.
+```
+
+The demonstration rejects an untrusted capsule, verifies idempotent
+redelivery, advances ownership epochs `0 -> 1 -> 2`, and returns only a digest
+of the simulated device-private input.
+
+In CI, collapse the candidate preflight, semantic diff, and historical replay
+proofs into one strict exit code:
+
+```bash
+orch8 release gate <release-id> --sample 50
+```
+
+The gate rejects failed/unknown preflight checks, incompatible or
+side-effect-risking diffs, replay divergences, and inconclusive replays by
+default. Each risk allowance must be opted into explicitly.
+
 ## SDKs
 
 All SDKs live in their own repositories under the [orch8-io](https://github.com/orch8-io) GitHub organization.

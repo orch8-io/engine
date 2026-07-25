@@ -120,7 +120,7 @@ cp .env.example .env
 | `DEEPSEEK_API_KEY` | https://platform.deepseek.com/api_keys (free tier: $5 credit) |
 | `SLACK_ACCESS_TOKEN` | Slack app → OAuth & Permissions → Bot Token (`xoxb-...`) |
 | `SLACK_CHANNEL_ID` | Right-click channel → View details → ID at bottom |
-| `ORCH8_URL` | Default: `http://localhost:8080` |
+| `ORCH8_URL` | Default: `http://localhost:8080/api/v1` |
 
 ### 2. Slack app setup
 

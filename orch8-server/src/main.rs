@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
     let auth_storage = storage.clone();
     let mut app = build_router(app_state.clone())
         .nest(API_V1_PREFIX, cb_routes.clone())
-        .merge(cb_routes)
+        .merge(orch8_api::mark_unversioned_deprecated(cb_routes))
         // Metrics and Swagger UI must carry the same API key as the rest of the
         // management surface. A tower `.layer()` only wraps routes registered
         // *before* it, so these are merged here — ABOVE the auth layers — to be

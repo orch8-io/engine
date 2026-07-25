@@ -8,7 +8,7 @@
  *
  * Run: npm run deploy
  */
-const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080";
+const ORCH8_URL = process.env.ORCH8_URL ?? "http://localhost:8080/api/v1";
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY ?? "";
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID ?? "C0123456789";
 const SLACK_ACCESS_TOKEN = process.env.SLACK_ACCESS_TOKEN ?? "";

@@ -75,21 +75,71 @@
 //!   test harnesses and hosts that control their own cadence. Don't mix the
 //!   two concurrently.
 //!
+//! ## Crash-safe external effects
+//!
+//! Register payments, messages, and other externally visible calls with
+//! [`EngineBuilder::effect_handler`]. Its [`EffectContext`] exposes the
+//! durable dispatch identity to use as the provider idempotency key. Orch8
+//! writes the receipt before invoking the handler and makes the resulting
+//! ledger available through [`Engine::effect_receipts`].
+//!
+//! ## Portable checkpoints
+//!
+//! [`Engine::portable_checkpoint`], [`Engine::export_portable_capsule`], and
+//! [`Engine::import_portable_capsule`] form the embeddable handoff boundary.
+//! Export is allowed only from paused/waiting instances, is signed with a
+//! host-owned Ed25519 key, and encrypts the bounded payload with AES-256-GCM.
+//! Import verifies tenant, destination, epoch, signature, trust, size, and
+//! digest before writing an idempotent paused instance. Capsules intentionally
+//! reference—rather than embed—the immutable sequence definition, so the
+//! destination must provision that definition first. Import does not transfer
+//! ownership by itself; the control plane or host must complete the continuity
+//! handoff before resuming the destination.
+//!
+//! ## Agent runtime preset
+//!
+//! [`AgentRuntime`] is the opinionated entry point for an embedded durable
+//! agent. It enables the built-in agent/LLM/tool/MCP/memory/approval stack,
+//! assigns a portable runtime identity, accepts effect-safe host tools, and
+//! otherwise exposes the normal [`Engine`] API:
+//!
+//! ```no_run
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let runtime = orch8::AgentRuntime::builder(orch8::Storage::sqlite("agent.db"))
+//!     .effect_handler("charge", |ctx: orch8::EffectContext| async move {
+//!         let key = ctx.dispatch_idempotency_key();
+//!         // Pass `key` to the provider; omit the call when it is `None` (dry run).
+//!         Ok(serde_json::json!({"provider_receipt_id": "provider-42"}))
+//!     })
+//!     .build()
+//!     .await?;
+//! runtime.start();
+//! # runtime.shutdown().await;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Stability
 //!
 //! This crate is a **pre-1.0 facade**: it re-exports a curated, intentionally
 //! small subset of the internal crates so internals can evolve behind it.
 //! Expect breaking changes between minor versions until 1.0.
 
+mod agent_runtime;
 mod builder;
 pub mod contract;
+mod effect;
 mod engine;
 mod error;
+mod portable;
 mod storage;
 
+pub use agent_runtime::{AgentRuntime, AgentRuntimeBuilder};
 pub use builder::EngineBuilder;
+pub use effect::EffectContext;
 pub use engine::{CreateInstanceOptions, Engine};
 pub use error::Error;
+pub use portable::{CapsuleExportOptions, PortableCapsule};
 pub use storage::Storage;
 
 // ---------------------------------------------------------------------------
@@ -98,6 +148,8 @@ pub use storage::Storage;
 // orch8-types is free to churn without affecting embedders.
 // ---------------------------------------------------------------------------
 
+/// Ed25519 key used to sign a portable execution capsule.
+pub use ed25519_dalek::SigningKey as CapsuleSigningKey;
 /// Context passed to step handlers during execution (params, instance
 /// context, attempt counter, storage handle).
 pub use orch8_engine::handlers::StepContext;
@@ -109,6 +161,13 @@ pub use orch8_engine::scheduler::TickOnceResult as TickResult;
 pub use orch8_types::clock::{Clock, ManualClock, SharedClock, SystemClock};
 /// Per-instance execution context (`data`, `config`, audit trail).
 pub use orch8_types::context::ExecutionContext;
+/// Durable evidence and lifecycle state for one externally visible handler
+/// effect.
+pub use orch8_types::continuity::{
+    CapsuleRequirements, EffectReceipt, EffectState, ExecutionEpoch, RuntimeId,
+};
+/// AES-256-GCM payload encryptor used for portable execution capsules.
+pub use orch8_types::encryption::FieldEncryptor;
 /// Error type returned by step handlers — `Retryable` errors are retried per
 /// the step's retry policy, `Permanent` errors fail the step immediately.
 pub use orch8_types::error::StepError;

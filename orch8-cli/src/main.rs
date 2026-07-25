@@ -12,6 +12,7 @@ use commands::checkpoint::CheckpointCmd;
 use commands::config::ConfigCmd;
 use commands::continuity::{ExecutionCmd, RuntimeCmd};
 use commands::cron::CronCmd;
+use commands::demo::DemoCmd;
 use commands::dev::DevCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
@@ -40,7 +41,11 @@ pub enum OutputFormat {
 )]
 struct Cli {
     /// Base URL of the Orch8 API server.
-    #[arg(long, env = "ORCH8_URL", default_value = "http://127.0.0.1:8080")]
+    #[arg(
+        long,
+        env = "ORCH8_URL",
+        default_value = "http://127.0.0.1:8080/api/v1"
+    )]
     url: String,
 
     /// API key sent as `x-api-key`. Required when the server runs with auth
@@ -118,6 +123,9 @@ enum Commands {
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
+    /// Run self-contained demonstrations backed by real engine protocols.
+    #[command(subcommand)]
+    Demo(DemoCmd),
     /// Local workflow studio: run sequences with hot reload, optional HTTP
     /// API server, embedded dashboard, directory watching, and virtual time.
     Dev(DevCmd),
@@ -330,6 +338,12 @@ async fn main() -> Result<()> {
         return commands::dev::run(cmd).await;
     }
 
+    // Demonstrations are self-contained and deliberately do not require a
+    // running API server or credentials.
+    if let Commands::Demo(cmd) = cli.command {
+        return commands::demo::run(cmd, format).await;
+    }
+
     // Handle migrate before building the HTTP client — it does not need one.
     if let Commands::Migrate { database_url } = cli.command {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -370,7 +384,10 @@ async fn main() -> Result<()> {
         Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
         Commands::Templates(cmd) => commands::templates::run(cmd)?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
-        Commands::Dev(..) | Commands::Migrate { .. } | Commands::Completions { .. } => {
+        Commands::Dev(..)
+        | Commands::Demo(..)
+        | Commands::Migrate { .. }
+        | Commands::Completions { .. } => {
             anyhow::bail!("internal error: command should have been handled before dispatch")
         }
     }

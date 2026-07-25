@@ -296,6 +296,13 @@ advertisement returns conflict before transfer begins. An explicit destination
 may override a soft score preference, such as remaining on the current
 runtime, but cannot override a hard denial.
 
+Each candidate also carries `score_factors`: trust, current-runtime affinity,
+offline capability, and bounded candidate-relative battery, cost, and latency
+ranks. Ranks avoid hidden currency/time conversion constants: higher battery,
+lower advertised cost, and lower advertised latency score better only relative
+to the current eligible set. Missing optional metrics contribute zero and stay
+visible in the evidence rather than being guessed.
+
 ## Portable mobile capsule transport
 
 An isolated mobile runtime cannot read the server's object store and must

@@ -7,7 +7,7 @@ use utoipa::OpenApi;
         description = "Durable task sequencing engine — REST API.\n\n\
             All versioned endpoints are available under the `/api/v1` prefix \
             (canonical) and also at the bare path for backward compatibility. \
-            Health and metrics endpoints remain at the root (`/health/*`, `/metrics`).",
+            Bare-path responses carry Deprecation, Sunset, and successor-version +            Link headers. Health and metrics endpoints remain at the root +            (`/health/*`, `/metrics`).",
         version = "1.0.0",
         license(name = "BUSL-1.1"),
     ),

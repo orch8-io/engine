@@ -13,6 +13,18 @@ Product routes are served under `/api/v1`. Bare product paths remain compatibili
 aliases for pre-versioned clients. New integrations should always use `/api/v1`.
 Health, metrics, Swagger UI, and the OpenAPI JSON remain at root paths.
 
+Bare compatibility responses advertise their lifecycle at runtime:
+
+- `Deprecation: @1767225600` marks them deprecated since 2026-01-01 using the
+  RFC 9745 structured timestamp.
+- `Sunset: Sat, 01 Jan 2028 00:00:00 GMT` is the earliest planned removal date.
+- `Link: </api/v1/...>; rel="successor-version"` preserves the path and query
+  of the canonical replacement.
+
+The headers do not change legacy response behavior. `/api/v1` responses omit
+them. CI exercises both mounts so new route groups cannot silently escape the
+version lifecycle contract.
+
 ## Authentication
 
 When `ORCH8_API_KEY` is set, every endpoint requires an `x-api-key` header — including `/metrics`, `/swagger-ui`, and `/api-docs/openapi.json`. When `ORCH8_REQUIRE_TENANT_HEADER` is set, requests must also carry an `x-tenant-id` header, and tenant-owned resources are scoped to that tenant.

@@ -12,6 +12,7 @@ use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::StorageBackend;
 use orch8_types::config::SchedulerConfig;
 use orch8_types::context::ExecutionContext;
+use orch8_types::continuity::EffectReceipt;
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
@@ -90,6 +91,14 @@ impl Engine {
     /// Start configuring an embedded engine.
     pub fn builder() -> EngineBuilder {
         EngineBuilder::new()
+    }
+
+    pub(crate) fn storage_backend(&self) -> &Arc<dyn StorageBackend> {
+        &self.inner.storage
+    }
+
+    pub(crate) fn tenant_id(&self) -> &TenantId {
+        &self.inner.tenant
     }
 
     pub(crate) fn from_parts(
@@ -312,6 +321,26 @@ impl Engine {
         id: InstanceId,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
         Ok(self.inner.storage.get_all_outputs(id).await?)
+    }
+
+    /// List the durable effect ledger for an instance (oldest first).
+    ///
+    /// This includes planned, dispatched, committed, and ambiguous receipts,
+    /// allowing an operator or host application to reconcile external side
+    /// effects without inspecting Orch8's database directly. At most 1,000
+    /// receipts are returned.
+    pub async fn effect_receipts(&self, id: InstanceId) -> Result<Vec<EffectReceipt>, Error> {
+        // Resolve through the tenant-scoped instance API first so an unknown
+        // ID is distinguishable from a known instance with no effects.
+        let instance = self.get_instance(id).await?;
+        if instance.tenant_id != self.inner.tenant {
+            return Err(Error::NotFound(format!("instance {id}")));
+        }
+        Ok(self
+            .inner
+            .storage
+            .list_instance_effect_receipts(&self.inner.tenant, id, 1_000)
+            .await?)
     }
 
     /// Seed a durable block output before manual execution starts.

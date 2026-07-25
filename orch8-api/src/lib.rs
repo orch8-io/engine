@@ -58,6 +58,12 @@ pub const DEFAULT_MAX_CONCURRENT_STREAMS: usize = 256;
 /// Canonical API version prefix. All versioned endpoints live under this path.
 /// Operational endpoints (health, metrics) remain at the root.
 pub const API_V1_PREFIX: &str = "/api/v1";
+/// RFC 9745 structured-date marking the unversioned compatibility mount as
+/// deprecated since 2026-01-01T00:00:00Z.
+pub const UNVERSIONED_DEPRECATION: &str = "@1767225600";
+/// RFC 8594 HTTP-date after which the unversioned compatibility mount may be
+/// removed. Canonical `/api/v1` routes do not carry this header.
+pub const UNVERSIONED_SUNSET: &str = "Sat, 01 Jan 2028 00:00:00 GMT";
 
 /// Generic paginated response envelope for list endpoints.
 #[derive(Debug, Serialize)]
@@ -239,7 +245,7 @@ pub fn build_router(state: AppState) -> Router {
         // Backward-compat: keep the same routes at the root so existing
         // clients and SDKs continue to work during the migration window.
         // TODO(v2): remove this bare merge once all clients use /api/v1.
-        .merge(api)
+        .merge(mark_unversioned_deprecated(api))
         // NOTE: health/info routes are intentionally NOT mounted here.
         // `orch8-server` mounts them *after* the auth layers so liveness/
         // readiness probes stay reachable when an API key is configured.
@@ -247,6 +253,39 @@ pub fn build_router(state: AppState) -> Router {
         // panics on overlapping routes) and would also place them behind
         // auth. The test harness mounts them separately.
         .with_state(state)
+}
+
+/// Add standards-based migration metadata to a legacy unversioned router.
+/// Exported so server-owned route groups (for example circuit breakers) use
+/// the exact same lifecycle contract as routes assembled by [`build_router`].
+pub fn mark_unversioned_deprecated<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router.layer(axum::middleware::from_fn(unversioned_lifecycle_headers))
+}
+
+async fn unversioned_lifecycle_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let successor = format!("{API_V1_PREFIX}{}", request.uri());
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::HeaderName::from_static("deprecation"),
+        axum::http::header::HeaderValue::from_static(UNVERSIONED_DEPRECATION),
+    );
+    headers.insert(
+        axum::http::header::HeaderName::from_static("sunset"),
+        axum::http::header::HeaderValue::from_static(UNVERSIONED_SUNSET),
+    );
+    if let Ok(value) = axum::http::header::HeaderValue::from_str(&format!(
+        "<{successor}>; rel=\"successor-version\""
+    )) {
+        headers.insert(axum::http::header::LINK, value);
+    }
+    response
 }
 
 #[cfg(test)]
