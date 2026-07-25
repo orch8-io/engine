@@ -21,6 +21,7 @@ use commands::instance::InstanceCmd;
 use commands::package_cmd::PackageCmd;
 use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
+use commands::support_bundle::SupportBundleCmd;
 use commands::templates::TemplatesCmd;
 
 /// Output format for CLI commands.
@@ -77,6 +78,8 @@ enum Commands {
     Bootstrap(BootstrapCmd),
     /// Diagnose configuration, connectivity, compatibility, workers, continuity, and an optional instance.
     Doctor(DoctorCmd),
+    /// Export a strictly redacted operational support bundle.
+    SupportBundle(SupportBundleCmd),
     /// Instance management.
     #[command(subcommand)]
     Instance(InstanceCmd),
@@ -371,6 +374,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Health => commands::health::run(&client, base).await?,
         Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
+        Commands::SupportBundle(cmd) => commands::support_bundle::run(&client, base, cmd).await?,
         Commands::Instance(cmd) => commands::instance::run(&client, base, cmd, format).await?,
         Commands::Execution(cmd) => {
             commands::continuity::run_execution(&client, base, cmd, format).await?;

@@ -15,5 +15,6 @@ pub mod package_cmd;
 pub mod release;
 pub mod sequence;
 pub mod signal;
+pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;

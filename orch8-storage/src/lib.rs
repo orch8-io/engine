@@ -44,6 +44,9 @@ use orch8_types::signal::Signal;
 use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::WorkerTask;
 
+/// Latest durable schema migration compiled into this release.
+pub const STORAGE_SCHEMA_VERSION: u32 = 76;
+
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
 pub struct TelemetryEvent {
