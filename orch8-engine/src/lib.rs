@@ -25,6 +25,7 @@ pub mod interceptors;
 pub mod lifecycle;
 pub mod lint;
 pub mod metrics;
+pub mod optimizer;
 pub mod placement;
 pub mod preflight;
 pub mod preload;

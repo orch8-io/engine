@@ -26,6 +26,7 @@ use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::sequence::SequenceDefinition;
 
 use crate::error::EngineError;
+use crate::optimizer::{OptimizationIr, optimize};
 
 type ByNameKey = (TenantId, Namespace, Arc<str>, Option<i32>);
 
@@ -35,6 +36,7 @@ type ByNameKey = (TenantId, Namespace, Arc<str>, Option<i32>);
 pub struct SequenceCache {
     by_id: Cache<SequenceId, Arc<SequenceDefinition>>,
     by_name: Cache<ByNameKey, Arc<SequenceDefinition>>,
+    optimized: Cache<SequenceId, Arc<OptimizationIr>>,
 }
 
 impl SequenceCache {
@@ -49,6 +51,10 @@ impl SequenceCache {
                 .time_to_live(ttl)
                 .build(),
             by_name: Cache::builder()
+                .max_capacity(max_capacity)
+                .time_to_live(ttl)
+                .build(),
+            optimized: Cache::builder()
                 .max_capacity(max_capacity)
                 .time_to_live(ttl)
                 .build(),
@@ -125,6 +131,31 @@ impl SequenceCache {
             Some(seq.version),
         );
         self.by_name.insert(name_key, Arc::clone(seq)).await;
+        if let Ok(ir) = optimize(seq) {
+            self.optimized.insert(seq.id, Arc::new(ir)).await;
+        }
+    }
+
+    /// Return the compiled optimization sidecar for this exact definition.
+    /// A compiler refusal is a safe cache miss: callers retain the original
+    /// execution scan and therefore never trade correctness for optimization.
+    pub async fn optimization_for(&self, seq: &SequenceDefinition) -> Option<Arc<OptimizationIr>> {
+        if let Some(ir) = self.optimized.get(&seq.id).await
+            && ir.verify_equivalent(seq).is_ok()
+        {
+            return Some(ir);
+        }
+        match optimize(seq) {
+            Ok(ir) => {
+                let ir = Arc::new(ir);
+                self.optimized.insert(seq.id, Arc::clone(&ir)).await;
+                Some(ir)
+            }
+            Err(error) => {
+                tracing::warn!(sequence_id = %seq.id, %error, "workflow optimization skipped");
+                None
+            }
+        }
     }
 
     /// Invalidate one id and any by-name entries that reference it. Call this
@@ -134,6 +165,7 @@ impl SequenceCache {
         // Capture name-key view while the entry is still present.
         let seq_view = self.by_id.get(&sequence_id).await;
         self.by_id.invalidate(&sequence_id).await;
+        self.optimized.invalidate(&sequence_id).await;
         if let Some(seq) = seq_view {
             let tid = seq.tenant_id.clone();
             let ns = seq.namespace.clone();
@@ -155,6 +187,7 @@ impl SequenceCache {
     pub fn invalidate_all(&self) {
         self.by_id.invalidate_all();
         self.by_name.invalidate_all();
+        self.optimized.invalidate_all();
     }
 }
 
@@ -224,6 +257,10 @@ mod tests {
         // or simply that it returns the same Arc).
         let got2 = cache.get_by_id(&storage, seq.id).await.unwrap();
         assert_eq!(got2.name, "flow-a");
+
+        let optimized = cache.optimization_for(&got2).await.unwrap();
+        optimized.verify_equivalent(&got2).unwrap();
+        assert_eq!(optimized.nodes.len(), 1);
     }
 
     #[tokio::test]
