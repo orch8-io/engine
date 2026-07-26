@@ -91,6 +91,11 @@ describe("Cancel signal deferral during finally / cancellation_scope", () => {
           catch_block: [step("c", "noop")],
           finally_block: [step("fin", "sleep", { duration_ms: 2000 })],
         } as Block,
+        // Give the deferred cancel a post-finally scheduling boundary to
+        // intercept. If the sequence ends at `tc`, the evaluator may
+        // legitimately complete the instance in the same pass that drains
+        // `finally`, leaving no subsequent work for cancellation to stop.
+        step("after", "noop"),
       ],
       { tenantId, namespace },
     );
@@ -133,6 +138,12 @@ describe("Cancel signal deferral during finally / cancellation_scope", () => {
     // ...and only then does the deferred cancel land.
     const final = await client.waitForState(id, "cancelled", { timeoutMs: 15_000 });
     assert.equal(final.state, "cancelled");
+
+    const outputs = await client.getOutputs(id);
+    assert.ok(
+      !outputs.some((o) => o.block_id === "after"),
+      "post-finally step must not run after the deferred cancel lands",
+    );
   });
 
   it("defers cancel while a cancellation_scope child is executing", async () => {
