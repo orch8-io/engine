@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "orch8"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "axum",
  "chrono",
@@ -2976,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-api"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "axum",
  "base64",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-cli"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-engine"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "async-nats",
  "base64",
@@ -3091,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-grpc"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3113,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-mobile"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "base64",
  "chrono",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-publisher"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -3164,7 +3164,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-push"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -3186,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-server"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.7.0-dev"
+version = "0.7.0-rc.1"
 dependencies = [
  "aes-gcm",
  "base64",
