@@ -90,6 +90,12 @@ impl Sandbox {
         );
         stderr
     }
+
+    fn write_sequence(&self, name: &str, definition: &str) -> PathBuf {
+        let path = self.root.join(name);
+        std::fs::write(&path, definition).expect("write sequence fixture");
+        path
+    }
 }
 
 #[cfg(unix)]
@@ -325,6 +331,88 @@ fn init_scaffolds_project_and_never_clobbers() {
         seq_before,
         "second init must not rewrite sequence.json"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Local terminal execution (`orch8 dev --once`)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dev_once_completes_sequence_and_prints_mocked_output() {
+    let sb = Sandbox::new();
+    let sequence = sb.write_sequence(
+        "success.json",
+        r#"{"name":"terminal-success","blocks":[{"type":"step","id":"emit","handler":"probe"}]}"#,
+    );
+
+    let stdout = sb.run_ok(&[
+        "dev",
+        sequence.to_str().unwrap(),
+        "--once",
+        "--mock",
+        r#"probe={"outcome":"accepted"}"#,
+    ]);
+
+    assert!(stdout.contains("emit"), "step output missing:\n{stdout}");
+    assert!(
+        stdout.contains("accepted"),
+        "mocked result missing:\n{stdout}"
+    );
+    assert!(stdout.contains("instance completed"), "{stdout}");
+    assert!(stdout.contains("1 step(s) executed"), "{stdout}");
+}
+
+#[test]
+fn dev_once_returns_failure_and_prints_handler_error() {
+    let sb = Sandbox::new();
+    let sequence = sb.write_sequence(
+        "failure.json",
+        r#"{"name":"terminal-failure","blocks":[{"type":"step","id":"boom","handler":"fail","params":{"message":"terminal boom"}}]}"#,
+    );
+
+    let output = sb
+        .cmd()
+        .args(["dev", sequence.to_str().unwrap(), "--once"])
+        .output()
+        .expect("spawn orch8 dev failure scenario");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "failure scenario must exit non-zero"
+    );
+    assert!(stdout.contains("instance failed"), "{stdout}");
+    assert!(stdout.contains("step failed: boom"), "{stdout}");
+    assert!(
+        stderr.contains("instance ended in state Failed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn dev_once_fast_forwards_delayed_sequence_with_virtual_time() {
+    let sb = Sandbox::new();
+    let sequence = sb.write_sequence(
+        "delayed.json",
+        r#"{"name":"terminal-delay","blocks":[{"type":"step","id":"wait","handler":"noop","delay":{"duration":259200000}},{"type":"step","id":"after","handler":"probe"}]}"#,
+    );
+    let started = std::time::Instant::now();
+
+    let stdout = sb.run_ok(&[
+        "dev",
+        sequence.to_str().unwrap(),
+        "--once",
+        "--skip-timers",
+        "--mock",
+        r#"probe={"timer":"advanced"}"#,
+    ]);
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(stdout.contains("wait"), "{stdout}");
+    assert!(stdout.contains("after"), "{stdout}");
+    assert!(stdout.contains("advanced"), "{stdout}");
+    assert!(stdout.contains("instance completed"), "{stdout}");
 }
 
 // ---------------------------------------------------------------------------
