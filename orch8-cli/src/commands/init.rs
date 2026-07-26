@@ -53,7 +53,7 @@ pub fn run(dir: &str, template: &str) -> Result<()> {
 /// template had `# api_key = ""` with `cors_origins = "*"`, producing a
 /// publicly-reachable unauthenticated server on first boot — the
 /// default-insecure-by-omission path the review called out.
-fn generate_api_key() -> String {
+pub(crate) fn generate_secret_hex() -> String {
     use std::fmt::Write as _;
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
@@ -78,7 +78,7 @@ tick_interval_ms = 100
 batch_size = 200
 max_concurrent_steps = 128
 stale_instance_threshold_secs = 600
-# encryption_key = ""                      # 64 hex chars for AES-256-GCM
+encryption_key = "{encryption_key}"       # generated AES-256-GCM master key
 
 [api]
 http_addr = "0.0.0.0:8080"
@@ -136,10 +136,21 @@ volumes:
 "#;
 
 fn write_scaffolds(base: &Path, template: &templates::Template) -> Result<()> {
-    let api_key = generate_api_key();
+    let api_key = generate_secret_hex();
+    let encryption_key = generate_secret_hex();
     #[allow(clippy::literal_string_with_formatting_args)]
-    let orch8_toml = ORCH8_TOML_TEMPLATE.replace("{api_key}", &api_key);
-    write_if_absent(&base.join("orch8.toml"), &orch8_toml)?;
+    let orch8_toml = ORCH8_TOML_TEMPLATE
+        .replace("{api_key}", &api_key)
+        .replace("{encryption_key}", &encryption_key);
+    let config_path = base.join("orch8.toml");
+    let config_existed = config_path.exists();
+    write_if_absent(&config_path, &orch8_toml)?;
+    #[cfg(unix)]
+    if !config_existed {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600))
+            .context("secure orch8.toml permissions")?;
+    }
     write_if_absent(&base.join("sequence.json"), template.json)?;
     write_if_absent(&base.join("docker-compose.yml"), DOCKER_COMPOSE_TEMPLATE)
 }
@@ -210,6 +221,13 @@ mod tests {
 
         assert_eq!(cfg.engine.tick_interval_ms, 100);
         assert_eq!(cfg.engine.max_concurrent_steps, 128);
+        assert_eq!(cfg.engine.encryption_key.expose().len(), 64);
+        assert_eq!(cfg.api.api_key.expose().len(), 64);
+        assert_ne!(
+            cfg.engine.encryption_key.expose(),
+            cfg.api.api_key.expose(),
+            "auth and encryption must use independent random keys"
+        );
         assert_eq!(
             cfg.engine.batch_size, 200,
             "batch_size must take the scaffolded (non-default) value"
@@ -231,6 +249,19 @@ mod tests {
         // Default behavior unchanged: sequence.json is the default template.
         let written = fs::read_to_string(dir.path().join("sequence.json")).unwrap();
         assert_eq!(written, templates::find("default").unwrap().json);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(dir.path().join("orch8.toml"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "generated secrets must not be group/world readable"
+            );
+        }
     }
 
     #[test]

@@ -3118,6 +3118,7 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
+ "hex",
  "orch8-engine",
  "orch8-publisher",
  "orch8-storage",
@@ -3166,11 +3167,15 @@ name = "orch8-push"
 version = "0.7.0-dev"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
+ "ed25519-dalek",
+ "hex",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4175,6 +4180,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -5295,11 +5301,13 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]

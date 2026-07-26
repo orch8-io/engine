@@ -76,6 +76,97 @@ pub(super) async fn create(storage: &SqliteStorage, i: &TaskInstance) -> Result<
     Ok(())
 }
 
+pub(super) async fn create_admitted(
+    storage: &SqliteStorage,
+    instance: &TaskInstance,
+    max_active: u64,
+) -> Result<(), StorageError> {
+    let mut connection = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = async {
+        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=? AND state IN ('scheduled','running','waiting','paused')")
+            .bind(instance.tenant_id.as_str())
+            .fetch_one(&mut *connection)
+            .await?;
+        if u64::try_from(active).unwrap_or(u64::MAX) >= max_active {
+            return Err(StorageError::QuotaExceeded(
+                "active-instance entitlement exhausted".into(),
+            ));
+        }
+        bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), instance)?
+            .execute(&mut *connection)
+            .await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
+pub(super) async fn create_batch_admitted(
+    storage: &SqliteStorage,
+    instances: &[TaskInstance],
+    limits: &HashMap<TenantId, u64>,
+) -> Result<u64, StorageError> {
+    if instances.is_empty() {
+        return Ok(0);
+    }
+    let mut connection = storage.pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
+        .await?;
+    let result = async {
+        let mut requested = HashMap::<TenantId, u64>::new();
+        for instance in instances {
+            *requested.entry(instance.tenant_id.clone()).or_default() += 1;
+        }
+        for (tenant, requested) in requested {
+            let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=? AND state IN ('scheduled','running','waiting','paused')")
+                .bind(tenant.as_str())
+                .fetch_one(&mut *connection)
+                .await?;
+            let limit = limits.get(&tenant).copied().unwrap_or(0);
+            if u64::try_from(active)
+                .unwrap_or(u64::MAX)
+                .saturating_add(requested)
+                > limit
+            {
+                return Err(StorageError::QuotaExceeded(
+                    "active-instance entitlement exhausted".into(),
+                ));
+            }
+        }
+        for instance in instances {
+            bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), instance)?
+                .execute(&mut *connection)
+                .await?;
+        }
+        u64::try_from(instances.len())
+            .map_err(|error| StorageError::Query(format!("batch size conversion: {error}")))
+    }
+    .await;
+    match result {
+        Ok(count) => {
+            sqlx::query("COMMIT").execute(&mut *connection).await?;
+            Ok(count)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
+}
+
 pub(super) async fn create_batch(
     storage: &SqliteStorage,
     instances: &[TaskInstance],

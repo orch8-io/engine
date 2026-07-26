@@ -17,7 +17,7 @@ uniffi = "0.32"
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
@@ -29,6 +29,7 @@ ed25519-dalek = { workspace = true }
 sqlx = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
+hex = "0.4"
 
 [build-dependencies]
 uniffi = { version = "0.32", features = ["build"] }

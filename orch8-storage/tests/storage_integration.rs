@@ -1257,6 +1257,10 @@ async fn cluster_node_lifecycle() {
         registered_at: now,
         last_heartbeat_at: now,
         drain: false,
+        drain_started_at: None,
+        stopped_at: None,
+        capabilities_withdrawn: false,
+        execution_handoff_evidence: None,
     };
     s.register_node(&node).await.unwrap();
 
@@ -1273,11 +1277,21 @@ async fn cluster_node_lifecycle() {
     // Drain.
     s.drain_node(node.id).await.unwrap();
     assert!(s.should_drain(node.id).await.unwrap());
+    let draining = s.list_nodes().await.unwrap();
+    assert_eq!(draining[0].status, NodeStatus::Draining);
+    assert!(draining[0].capabilities_withdrawn);
+    assert!(draining[0].drain_started_at.is_some());
+    assert!(draining[0].execution_handoff_evidence.is_none());
 
     // Deregister.
     s.deregister_node(node.id).await.unwrap();
     let after = s.list_nodes().await.unwrap();
     assert_eq!(after[0].status, NodeStatus::Stopped);
+    assert!(after[0].stopped_at.is_some());
+    assert_eq!(
+        after[0].execution_handoff_evidence.as_deref(),
+        Some("scheduler_drained; in_flight_work_completed_or_durably_recoverable")
+    );
 }
 
 // ===========================================================================

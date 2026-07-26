@@ -13,13 +13,17 @@ pub(super) async fn register(
     storage: &SqliteStorage,
     node: &ClusterNode,
 ) -> Result<(), StorageError> {
-    sqlx::query("INSERT OR REPLACE INTO cluster_nodes (id,name,status,registered_at,last_heartbeat_at,drain) VALUES (?1,?2,?3,?4,?5,?6)")
+    sqlx::query("INSERT OR REPLACE INTO cluster_nodes (id,name,status,registered_at,last_heartbeat_at,drain,drain_started_at,stopped_at,capabilities_withdrawn,execution_handoff_evidence) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)")
         .bind(node.id.to_string())
         .bind(&node.name)
         .bind(node.status.to_string())
         .bind(ts(node.registered_at))
         .bind(ts(node.last_heartbeat_at))
         .bind(node.drain as i32)
+        .bind(node.drain_started_at.map(ts))
+        .bind(node.stopped_at.map(ts))
+        .bind(node.capabilities_withdrawn as i32)
+        .bind(&node.execution_handoff_evidence)
         .execute(&storage.pool).await?;
     Ok(())
 }
@@ -34,16 +38,18 @@ pub(super) async fn heartbeat(storage: &SqliteStorage, node_id: Uuid) -> Result<
 }
 
 pub(super) async fn drain(storage: &SqliteStorage, node_id: Uuid) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cluster_nodes SET drain=1, status='draining' WHERE id=?1")
+    sqlx::query("UPDATE cluster_nodes SET drain=1, status='draining', drain_started_at=COALESCE(drain_started_at, ?2), capabilities_withdrawn=1 WHERE id=?1")
         .bind(node_id.to_string())
+        .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await?;
     Ok(())
 }
 
 pub(super) async fn deregister(storage: &SqliteStorage, node_id: Uuid) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cluster_nodes SET status='stopped' WHERE id=?1")
+    sqlx::query("UPDATE cluster_nodes SET status='stopped', stopped_at=?2, capabilities_withdrawn=1, execution_handoff_evidence='scheduler_drained; in_flight_work_completed_or_durably_recoverable' WHERE id=?1")
         .bind(node_id.to_string())
+        .bind(ts(Utc::now()))
         .execute(&storage.pool)
         .await?;
     Ok(())
@@ -79,10 +85,11 @@ pub(super) async fn reap_stale(
         - chrono::Duration::from_std(stale_threshold)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let result = sqlx::query(
-        "UPDATE cluster_nodes SET status='stopped'
+        "UPDATE cluster_nodes SET status='stopped', stopped_at=?2
          WHERE status='active' AND last_heartbeat_at < ?1",
     )
     .bind(ts(cutoff))
+    .bind(ts(Utc::now()))
     .execute(&storage.pool)
     .await?;
     Ok(result.rows_affected())

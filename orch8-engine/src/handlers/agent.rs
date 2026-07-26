@@ -1349,9 +1349,11 @@ mod net_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    use chrono::Utc;
     use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
-    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+    use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
@@ -1423,9 +1425,34 @@ mod net_tests {
     async fn mk_ctx(params: Value) -> (StepContext, Arc<dyn StorageBackend>, InstanceId) {
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let instance_id = InstanceId::new();
+        let tenant_id = TenantId::unchecked("t");
+        let now = Utc::now();
+        storage
+            .create_instance(&TaskInstance {
+                id: instance_id,
+                sequence_id: SequenceId::new(),
+                tenant_id: tenant_id.clone(),
+                namespace: Namespace::new("default"),
+                state: InstanceState::Running,
+                next_fire_at: None,
+                priority: Priority::Normal,
+                timezone: "UTC".into(),
+                metadata: json!({}),
+                context: ExecutionContext::default(),
+                concurrency_key: None,
+                max_concurrency: None,
+                idempotency_key: None,
+                session_id: None,
+                parent_instance_id: None,
+                budget: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
         let ctx = StepContext {
             instance_id,
-            tenant_id: TenantId::unchecked("t"),
+            tenant_id,
             block_id: BlockId::new("b"),
             params,
             context: Arc::new(ExecutionContext::default()),

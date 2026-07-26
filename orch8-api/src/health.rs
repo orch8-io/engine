@@ -55,6 +55,8 @@ pub(crate) async fn readiness(State(state): State<AppState>) -> impl IntoRespons
 pub(crate) async fn info() -> impl IntoResponse {
     axum::Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "storage_schema_version": orch8_storage::STORAGE_SCHEMA_VERSION,
+        "contract_schema_version": orch8_types::contract::CONTRACT_SCHEMA_VERSION,
         "env_label": std::env::var("ORCH8_ENV_LABEL").ok(),
         "env_color": std::env::var("ORCH8_ENV_COLOR").ok(),
     }))

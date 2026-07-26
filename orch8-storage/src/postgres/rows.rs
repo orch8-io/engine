@@ -489,6 +489,10 @@ pub(super) struct ClusterNodeRow {
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat_at: DateTime<Utc>,
     pub drain: bool,
+    pub drain_started_at: Option<DateTime<Utc>>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    pub capabilities_withdrawn: bool,
+    pub execution_handoff_evidence: Option<String>,
 }
 
 impl ClusterNodeRow {
@@ -502,6 +506,10 @@ impl ClusterNodeRow {
             registered_at: self.registered_at,
             last_heartbeat_at: self.last_heartbeat_at,
             drain: self.drain,
+            drain_started_at: self.drain_started_at,
+            stopped_at: self.stopped_at,
+            capabilities_withdrawn: self.capabilities_withdrawn,
+            execution_handoff_evidence: self.execution_handoff_evidence,
         }
     }
 }

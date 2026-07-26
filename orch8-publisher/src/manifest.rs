@@ -154,7 +154,7 @@ pub enum ManifestError {
 
 /// Serialize a value to canonical JSON: sorted keys at every level, no extra whitespace.
 /// Cross-language verifiers can reproduce the exact same bytes by sorting keys.
-pub fn canonical_json<T: Serialize>(value: &T) -> Result<String, ManifestError> {
+pub fn canonical_json<T: Serialize + ?Sized>(value: &T) -> Result<String, ManifestError> {
     let v = serde_json::to_value(value).map_err(|e| ManifestError::Serialization(e.to_string()))?;
     let sorted = sort_json_keys(v);
     serde_json::to_string(&sorted).map_err(|e| ManifestError::Serialization(e.to_string()))

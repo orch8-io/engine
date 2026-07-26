@@ -2005,6 +2005,21 @@ passthrough_impl! {
             .map(|(key, value)| self.decrypt_json_value(&value).map(|value| (key, value)))
             .collect()
     }
+    async fn get_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        match self
+            .inner
+            .get_shared_knowledge(tenant_id, namespace, key)
+            .await?
+        {
+            Some(value) => Ok(Some(self.decrypt_json_value(&value)?)),
+            None => Ok(None),
+        }
+    }
     async fn delete_shared_knowledge(
         &self,
         tenant_id: &str,

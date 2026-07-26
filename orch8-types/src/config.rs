@@ -118,6 +118,8 @@ impl Drop for SecretString {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
     #[serde(default)]
+    pub node: NodeConfig,
+    #[serde(default)]
     pub database: DatabaseConfig,
     #[serde(default)]
     pub engine: SchedulerConfig,
@@ -129,6 +131,37 @@ pub struct EngineConfig {
     pub artifacts: ArtifactConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+}
+
+/// Process assembly role. Each role starts only its declared listeners and
+/// background services; unknown values fail during deserialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeRole {
+    #[default]
+    AllInOne,
+    Control,
+    Executor,
+    Gateway,
+    Edge,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NodeConfig {
+    #[serde(default)]
+    pub role: NodeRole,
+    /// Optional outbound managed-cloud gRPC endpoint. Control-only: local
+    /// nodes never request workload payloads on this session.
+    #[serde(default)]
+    pub managed_control_endpoint: String,
+    #[serde(default)]
+    pub managed_control_api_key: SecretString,
+    #[serde(default)]
+    pub managed_control_tenant_id: String,
+    #[serde(default)]
+    pub managed_control_worker_id: String,
+    #[serde(default)]
+    pub managed_control_runtime_id: String,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -522,6 +555,20 @@ const fn default_stale_threshold() -> u64 {
 pub struct ApiConfig {
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
+    /// PEM certificate chain presented by the gRPC server. TLS is enabled
+    /// when this, `grpc_tls_key_path`, and `grpc_tls_client_ca_path` are set.
+    #[serde(default)]
+    pub grpc_tls_cert_path: String,
+    /// PEM private key corresponding to `grpc_tls_cert_path`.
+    #[serde(default)]
+    pub grpc_tls_key_path: String,
+    /// PEM CA roots used to verify required gRPC client certificates.
+    #[serde(default)]
+    pub grpc_tls_client_ca_path: String,
+    /// JSON object mapping client-certificate SHA-256 fingerprints to
+    /// `{ "tenant_id": "...", "identity": "..." }` workload identities.
+    #[serde(default)]
+    pub grpc_mtls_identities: String,
     #[serde(default = "default_http_addr")]
     pub http_addr: String,
     /// Comma-separated allowed origins for CORS. Use `*` to allow all.
@@ -553,6 +600,10 @@ impl Default for ApiConfig {
     fn default() -> Self {
         Self {
             grpc_addr: default_grpc_addr(),
+            grpc_tls_cert_path: String::new(),
+            grpc_tls_key_path: String::new(),
+            grpc_tls_client_ca_path: String::new(),
+            grpc_mtls_identities: String::new(),
             http_addr: default_http_addr(),
             cors_origins: default_cors_origins(),
             api_key: SecretString::default(),
@@ -642,8 +693,62 @@ fn default_otlp_protocol() -> String {
 
 impl EngineConfig {
     /// Validate configuration values, returning all errors found.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
+
+        if self.node.role == NodeRole::Gateway {
+            if self.api.api_key.is_empty() {
+                errors.push("node.role=gateway requires api.api_key".into());
+            }
+            if !self.api.require_tenant_header {
+                errors.push("node.role=gateway requires api.require_tenant_header=true".into());
+            }
+            if self.engine.encryption_key.is_empty() {
+                errors.push("node.role=gateway requires engine.encryption_key".into());
+            }
+            if self.api.grpc_tls_cert_path.is_empty()
+                || self.api.grpc_tls_key_path.is_empty()
+                || self.api.grpc_tls_client_ca_path.is_empty()
+            {
+                errors.push("node.role=gateway requires gRPC mTLS certificate paths".into());
+            }
+            if self
+                .api
+                .http_addr
+                .parse::<std::net::SocketAddr>()
+                .map_or(true, |address| !address.ip().is_loopback())
+            {
+                errors.push(
+                    "node.role=gateway requires api.http_addr on loopback behind a TLS proxy"
+                        .into(),
+                );
+            }
+        }
+        if !self.node.managed_control_endpoint.is_empty() {
+            if !matches!(self.node.role, NodeRole::Executor | NodeRole::Edge) {
+                errors.push(
+                    "node.managed_control_endpoint requires node.role=executor or edge".into(),
+                );
+            }
+            if !self.node.managed_control_endpoint.starts_with("https://") {
+                errors.push("node.managed_control_endpoint must use HTTPS".into());
+            }
+            if self.node.managed_control_api_key.is_empty()
+                || self.node.managed_control_tenant_id.trim().is_empty()
+                || self.node.managed_control_worker_id.trim().is_empty()
+                || self
+                    .node
+                    .managed_control_runtime_id
+                    .parse::<uuid::Uuid>()
+                    .is_err()
+            {
+                errors.push(
+                    "managed control requires API key, tenant, worker id, and UUID runtime id"
+                        .into(),
+                );
+            }
+        }
 
         // Database
         match self.database.backend.as_str() {
@@ -655,7 +760,6 @@ impl EngineConfig {
         if self.database.max_connections == 0 {
             errors.push("database.max_connections must be > 0".into());
         }
-
         // Engine / scheduler
         if self.engine.tick_interval_ms == 0 {
             errors.push("engine.tick_interval_ms must be > 0".into());
@@ -680,9 +784,16 @@ impl EngineConfig {
                 _ => {}
             }
         }
-        if !self.engine.encryption_key.is_empty() && self.engine.encryption_key.expose().len() != 64
+        if !self.engine.encryption_key.is_empty()
+            && (self.engine.encryption_key.expose().len() != 64
+                || !self
+                    .engine
+                    .encryption_key
+                    .expose()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()))
         {
-            errors.push("engine.encryption_key must be exactly 64 hex characters".into());
+            errors.push("engine.encryption_key must be exactly 64 hexadecimal characters".into());
         }
 
         // Logging
@@ -1266,5 +1377,55 @@ mod tests {
             "aabbccdd11223344556677889900aabbccdd11223344556677889900aabbccdd"
         );
         assert_eq!(cfg.api.api_key.expose(), "secret-api-key");
+    }
+
+    #[test]
+    fn node_role_defaults_and_deserializes_fail_closed() {
+        assert_eq!(EngineConfig::default().node.role, NodeRole::AllInOne);
+        let gateway: EngineConfig = toml::from_str("[node]\nrole = \"gateway\"\n").unwrap();
+        assert_eq!(gateway.node.role, NodeRole::Gateway);
+        assert!(toml::from_str::<EngineConfig>("[node]\nrole = \"mystery\"\n").is_err());
+    }
+
+    #[test]
+    fn gateway_role_requires_hardened_identity_and_crypto() {
+        let mut cfg = EngineConfig::default();
+        cfg.node.role = NodeRole::Gateway;
+        let errors = cfg.validate().unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("api.api_key")));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("engine.encryption_key"))
+        );
+        assert!(errors.iter().any(|error| error.contains("gRPC mTLS")));
+
+        cfg.api.api_key = "root-key".into();
+        cfg.engine.encryption_key = "11".repeat(32).into();
+        cfg.api.grpc_tls_cert_path = "/run/tls/server.crt".into();
+        cfg.api.grpc_tls_key_path = "/run/tls/server.key".into();
+        cfg.api.grpc_tls_client_ca_path = "/run/tls/client-ca.crt".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn managed_control_is_https_authenticated_and_role_scoped() {
+        let mut cfg = EngineConfig::default();
+        cfg.node.managed_control_endpoint = "http://control.example.com".into();
+        let errors = cfg.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("executor or edge"))
+        );
+        assert!(errors.iter().any(|error| error.contains("HTTPS")));
+
+        cfg.node.role = NodeRole::Edge;
+        cfg.node.managed_control_endpoint = "https://control.example.com".into();
+        cfg.node.managed_control_api_key = "managed-secret".into();
+        cfg.node.managed_control_tenant_id = "acme".into();
+        cfg.node.managed_control_worker_id = "edge-1".into();
+        cfg.node.managed_control_runtime_id = uuid::Uuid::now_v7().to_string();
+        assert!(cfg.validate().is_ok());
     }
 }

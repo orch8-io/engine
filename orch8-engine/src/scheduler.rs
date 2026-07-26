@@ -1676,6 +1676,7 @@ async fn process_instance(
     let sequence = sequence_cache
         .get_by_id(storage.as_ref(), instance.sequence_id)
         .await?;
+    let optimization = sequence_cache.optimization_for(&sequence).await;
 
     // claim_due_instances already set state to Running.
     // Ensure the run identity and start timestamp together. Retry/resume may
@@ -1807,19 +1808,32 @@ async fn process_instance(
     // or any plugin handlers (ap://, grpc://, wasm://), use the tree-based
     // evaluator. Plugin handlers are only dispatched correctly through the tree
     // evaluator's step_block.rs which knows about all plugin prefixes.
-    let has_composite = blocks
-        .iter()
-        .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)));
+    // Dynamically injected blocks are not part of the immutable compiler IR;
+    // retain the exact legacy scan whenever the evaluator changed the roots.
+    let static_roots = blocks.len() == sequence.blocks.len();
+    let has_composite = optimization.as_ref().filter(|_| static_roots).map_or_else(
+        || {
+            blocks
+                .iter()
+                .any(|b| !matches!(b, orch8_types::sequence::BlockDefinition::Step(_)))
+        },
+        |ir| ir.top_level_has_composite,
+    );
 
-    let has_plugin_handler = blocks.iter().any(|b| {
-        if let orch8_types::sequence::BlockDefinition::Step(step) = b {
-            crate::handlers::activepieces::is_ap_handler(&step.handler)
-                || crate::handlers::grpc_plugin::is_grpc_handler(&step.handler)
-                || crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
-        } else {
-            false
-        }
-    });
+    let has_plugin_handler = optimization.as_ref().filter(|_| static_roots).map_or_else(
+        || {
+            blocks.iter().any(|b| {
+                if let orch8_types::sequence::BlockDefinition::Step(step) = b {
+                    crate::handlers::activepieces::is_ap_handler(&step.handler)
+                        || crate::handlers::grpc_plugin::is_grpc_handler(&step.handler)
+                        || crate::handlers::wasm_plugin::is_wasm_handler(&step.handler)
+                } else {
+                    false
+                }
+            })
+        },
+        |ir| ir.top_level_has_plugin_handler,
+    );
 
     if has_composite || has_plugin_handler {
         return process_instance_tree(

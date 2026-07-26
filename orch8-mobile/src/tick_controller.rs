@@ -41,6 +41,13 @@ pub(crate) struct TickController {
 const MAX_IDLE_INTERVAL: Duration = Duration::from_secs(5);
 const SYNC_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 const INSTANCE_GC_INTERVAL: Duration = Duration::from_secs(60);
+const QUIESCENT_PARK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerWake {
+    Work,
+    Timer,
+}
 
 impl TickController {
     pub fn new() -> Self {
@@ -172,7 +179,7 @@ impl TickController {
             loop {
                 let sleep = tokio::time::sleep_until(next_tick);
                 tokio::pin!(sleep);
-                let woke_for_work = tokio::select! {
+                let wake = tokio::select! {
                     biased;
                     () = cancel.cancelled() => { tracing::debug!("[orch8] tick loop: cancel signal"); break; }
                     () = loop_cancel.cancelled() => { tracing::debug!("[orch8] tick loop: loop_cancel signal"); break; }
@@ -180,24 +187,27 @@ impl TickController {
                         let state = PowerState::from_atomic(power_state.load(Ordering::Acquire));
                         let now = Instant::now();
                         next_tick = now + if scheduler_is_quiescent {
-                            quiescent_tick_interval(
-                                now,
-                                next_instance_gc,
-                                sync_reporter.as_deref(),
-                            )
+                            quiescent_tick_interval(sync_reporter.as_deref())
                         } else {
                             scheduled_tick_interval(tick_interval, state, idle_streak)
                         };
                         continue;
                     }
-                    () = work_available.notified() => true,
-                    () = &mut sleep => false,
+                    () = work_available.notified() => SchedulerWake::Work,
+                    () = &mut sleep => SchedulerWake::Timer,
                 };
+                let scheduler_tick_due = should_run_scheduler(scheduler_is_quiescent, wake);
+                let woke_for_work = wake == SchedulerWake::Work;
                 if woke_for_work {
                     idle_streak = 0;
                     scheduler_is_quiescent = false;
                 }
 
+                        // A timer wake while the scheduler is known quiescent
+                        // exists only to service the sync deadline. Local work
+                        // retains a `Notify` permit and server commands are
+                        // handled below, so neither an RSS sample nor a full
+                        // scheduler pass can discover anything on this path.
                         if tick_count.is_multiple_of(50) {
                             tracing::debug!("[orch8] tick #{tick_count}");
                         }
@@ -210,7 +220,10 @@ impl TickController {
                         // Linux/Android it reads procfs. Doing either on every
                         // tick wastes CPU and battery when memory is healthy.
                         let now = Instant::now();
-                        if memory_budget != 0 && now >= next_memory_check {
+                        if scheduler_tick_due
+                            && memory_budget != 0
+                            && now >= next_memory_check
+                        {
                             let rss = tokio::task::spawn_blocking(memory::current_rss_bytes)
                                 .await
                                 .ok()
@@ -228,20 +241,22 @@ impl TickController {
                             }
                         }
 
-                        if memory_budget_exceeded {
+                        if scheduler_tick_due && memory_budget_exceeded {
                             next_tick = Instant::now()
                                 + effective_tick_interval(tick_interval, ps);
                             continue;
                         }
 
-                        let mut scheduler_has_work = true;
-                        let mut lifecycle_may_have_changed = true;
+                        let mut scheduler_has_work = !scheduler_is_quiescent;
+                        let mut lifecycle_may_have_changed = false;
 
                         // Acquire mutex only for tick_once — release before
                         // notifier queries and listener callbacks to prevent
                         // stacking when listeners call back into the engine
                         // (e.g. completeStep from onStepPending).
-                        {
+                        if scheduler_tick_due {
+                            scheduler_has_work = true;
+                            lifecycle_may_have_changed = true;
                             tracing::trace!("[orch8] tick #{tick_count}: acquiring mutex");
                             let _guard = tick_mutex.lock().await;
                             tracing::trace!("[orch8] tick #{tick_count}: calling tick_once");
@@ -275,7 +290,7 @@ impl TickController {
                         // Paused instances still need polling for deadlines and
                         // SLA alerts; terminal-only storage can sleep until the
                         // next maintenance deadline.
-                        if !scheduler_has_work {
+                        if scheduler_tick_due && !scheduler_has_work {
                             match storage_is_scheduler_quiescent(&storage).await {
                                 Ok(true) => scheduler_is_quiescent = true,
                                 Ok(false) => scheduler_has_work = true,
@@ -327,22 +342,24 @@ impl TickController {
                                 sync_scan.record_attempt(now, succeeded);
                             }
                             if should_sync {
-                                if reporter.sync_once(&storage, &lifecycle).await {
+                                let commands_received =
+                                    reporter.sync_once(&storage, &lifecycle).await;
+                                if commands_received {
                                     sync_scan.mark_dirty();
-                                }
-                                // Server commands may have scheduled work after
-                                // `tick_once` computed its result. Re-check the
-                                // cheap state count instead of forcing another
-                                // full scheduler pass after an empty response.
-                                match storage_is_scheduler_quiescent(&storage).await {
-                                    Ok(is_quiescent) => {
-                                        scheduler_is_quiescent = is_quiescent;
-                                        scheduler_has_work = !is_quiescent;
-                                    }
-                                    Err(e) => {
-                                        scheduler_has_work = true;
-                                        scheduler_is_quiescent = false;
-                                        warn!(error = %e, "failed to check post-sync scheduler quiescence");
+                                    // Server commands may have scheduled work
+                                    // after `tick_once` computed its result.
+                                    // Empty responses cannot mutate instances,
+                                    // so avoid a heartbeat-only COUNT query.
+                                    match storage_is_scheduler_quiescent(&storage).await {
+                                        Ok(is_quiescent) => {
+                                            scheduler_is_quiescent = is_quiescent;
+                                            scheduler_has_work = !is_quiescent;
+                                        }
+                                        Err(e) => {
+                                            scheduler_has_work = true;
+                                            scheduler_is_quiescent = false;
+                                            warn!(error = %e, "failed to check post-sync scheduler quiescence");
+                                        }
                                     }
                                 }
                             }
@@ -350,7 +367,7 @@ impl TickController {
 
                         tick_count += 1;
                         let now = Instant::now();
-                        if now >= next_instance_gc {
+                        if instance_gc_due(now, next_instance_gc, scheduler_is_quiescent) {
                             match lifecycle
                                 .gc_expired_instances(max_instance_lifetime_secs)
                                 .await
@@ -370,11 +387,7 @@ impl TickController {
                         }
                         let now = Instant::now();
                         next_tick = now + if scheduler_is_quiescent {
-                            quiescent_tick_interval(
-                                now,
-                                next_instance_gc,
-                                sync_reporter.as_deref(),
-                            )
+                            quiescent_tick_interval(sync_reporter.as_deref())
                         } else {
                             scheduled_tick_interval(tick_interval, ps, idle_streak)
                         };
@@ -430,15 +443,16 @@ fn scheduled_tick_interval(base: Duration, power_state: PowerState, idle_streak:
         .min(MAX_IDLE_INTERVAL.max(active))
 }
 
-fn quiescent_tick_interval(
-    now: Instant,
-    next_instance_gc: Instant,
-    sync_reporter: Option<&SyncReporter>,
-) -> Duration {
-    let until_gc = next_instance_gc.saturating_duration_since(now);
-    sync_reporter.map_or(until_gc, |reporter| {
-        until_gc.min(reporter.next_sync_delay())
-    })
+fn quiescent_tick_interval(sync_reporter: Option<&SyncReporter>) -> Duration {
+    sync_reporter.map_or(QUIESCENT_PARK_INTERVAL, SyncReporter::next_sync_delay)
+}
+
+const fn should_run_scheduler(scheduler_is_quiescent: bool, wake: SchedulerWake) -> bool {
+    !scheduler_is_quiescent || matches!(wake, SchedulerWake::Work)
+}
+
+fn instance_gc_due(now: Instant, next_instance_gc: Instant, scheduler_is_quiescent: bool) -> bool {
+    !scheduler_is_quiescent && now >= next_instance_gc
 }
 
 async fn storage_is_scheduler_quiescent(
@@ -597,12 +611,24 @@ mod tests {
     }
 
     #[test]
-    fn quiescent_scheduler_sleeps_until_gc_without_sync() {
+    fn quiescent_scheduler_parks_without_sync() {
+        assert_eq!(quiescent_tick_interval(None), QUIESCENT_PARK_INTERVAL);
+    }
+
+    #[test]
+    fn quiescent_timer_wake_services_sync_without_scheduler_work() {
+        assert!(!should_run_scheduler(true, SchedulerWake::Timer));
+        assert!(should_run_scheduler(true, SchedulerWake::Work));
+        assert!(should_run_scheduler(false, SchedulerWake::Timer));
+    }
+
+    #[test]
+    fn instance_gc_waits_while_quiescent_then_runs_on_activity() {
         let now = Instant::now();
-        assert_eq!(
-            quiescent_tick_interval(now, now + INSTANCE_GC_INTERVAL, None),
-            INSTANCE_GC_INTERVAL
-        );
+        let overdue = now - Duration::from_secs(1);
+
+        assert!(!instance_gc_due(now, overdue, true));
+        assert!(instance_gc_due(now, overdue, false));
     }
 
     #[test]

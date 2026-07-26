@@ -2,7 +2,21 @@
 
 Configuration is layered: `orch8.toml` is the base, environment variables override individual fields, and CLI flags (where supported) take final precedence.
 
-The `orch8.toml` file has four sections: `[database]`, `[engine]`, `[api]`, and `[logging]`.
+The `orch8.toml` file is organized into typed sections; omitted sections use
+documented defaults.
+
+## [node]
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `role` | string | `"all_in_one"` | Process assembly: `all_in_one`, `control`, `executor`, `gateway`, or `edge`. See [Node Roles](NODE_ROLES.md). |
+
+Before opening storage or listeners, the server runs an aggregated automatic
+preflight over typed config, HTTP/gRPC socket syntax and conflicts, TLS file
+completeness/readability, workload-identity mappings, OTLP URI syntax,
+federation trust configuration, and role-compatible mobile surfaces. Every
+finding is reported in one actionable error list. Storage connection and
+migration execution are the subsequent live preflight gate.
 
 ---
 
@@ -80,6 +94,10 @@ Controls the HTTP and gRPC servers, authentication, CORS, and rate limiting.
 |-------|------|---------|-------------|
 | `http_addr` | string | `"127.0.0.1:8080"` | HTTP API listen address |
 | `grpc_addr` | string | `"127.0.0.1:50051"` | gRPC API listen address |
+| `grpc_tls_cert_path` | string | `""` | PEM server certificate chain. Set with the key and client CA paths to enable required client-certificate authentication. |
+| `grpc_tls_key_path` | string | `""` | PEM private key for the gRPC server certificate. |
+| `grpc_tls_client_ca_path` | string | `""` | PEM CA roots used to verify gRPC client certificates. |
+| `grpc_mtls_identities` | string | `""` | JSON object mapping leaf-certificate SHA-256 fingerprints to `tenant_id` and `identity`. Requires all three TLS paths. |
 | `cors_origins` | string | `""` | CORS `Access-Control-Allow-Origin` value. Empty means no CORS headers. Use a comma-separated list of specific origins. `*` is allowed only when API-key auth is off — the server refuses to start with wildcard CORS while auth is enabled |
 | `api_key` | string | `""` | Root API key. When set, all requests must include an `x-api-key: <key>` header (per-tenant keys created via the API are also accepted). If empty, the server **refuses to start** unless `--insecure-auth` (or `--insecure`) is passed explicitly |
 | `require_tenant_header` | bool | `true` | If `true` (the default — secure by default), all requests must include `X-Tenant-Id`; requests without it receive `400 Bad Request`. With API-key auth on, disabling this additionally requires `ORCH8_ALLOW_NO_TENANT_ISOLATION=1` — otherwise startup fails |
@@ -166,7 +184,12 @@ mount a config file for those settings.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ORCH8_HTTP_ADDR` | `127.0.0.1:8080` | HTTP listen address |
+| `ORCH8_NODE_ROLE` | `all_in_one` | Fail-closed process assembly role; see [Node Roles](NODE_ROLES.md) |
 | `ORCH8_GRPC_ADDR` | `127.0.0.1:50051` | gRPC listen address |
+| `ORCH8_GRPC_TLS_CERT_PATH` | — | PEM gRPC server certificate chain path |
+| `ORCH8_GRPC_TLS_KEY_PATH` | — | PEM gRPC server private-key path |
+| `ORCH8_GRPC_TLS_CLIENT_CA_PATH` | — | PEM client CA path; causes the listener to require a trusted client certificate |
+| `ORCH8_GRPC_MTLS_IDENTITIES` | — | JSON fingerprint-to-workload mapping; see [gRPC worker stream](GRPC_WORKER_STREAM.md#mtls-workload-identity) |
 | `ORCH8_CORS_ORIGINS` | — | CORS allowed origins (empty = no CORS headers). `*` is rejected at startup while API-key auth is enabled |
 | `ORCH8_API_KEY` | — | Root API key, sent by clients as `x-api-key`. Required unless `--insecure-auth` is passed |
 | `ORCH8_REQUIRE_TENANT_HEADER` | `true` | Enforce `X-Tenant-Id` header (secure by default) |

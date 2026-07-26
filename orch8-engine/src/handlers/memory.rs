@@ -24,14 +24,20 @@
 //! Embedding config (`model`, `api_key`/`api_key_env`, `base_url`, `timeout_ms`)
 //! is shared by all three.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use orch8_types::error::StepError;
 
 use super::StepContext;
+use crate::memory_governance::{
+    MemoryOperation, load_namespace_policy, validate_residency, validate_target_namespace,
+};
 
 /// Prefix marking an instance-KV entry as a memory record, so `memory_search`
 /// can pick memories out of the shared KV namespace without colliding with
@@ -46,6 +52,8 @@ const DEFAULT_TOP_K: u64 = 5;
 const DEFAULT_NAMESPACE: &str = "default";
 const MAX_SHARED_RECORDS: u32 = 10_000;
 const MAX_TOP_K: u64 = 100;
+const INSTANCE_DEFAULT_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+const INSTANCE_MAX_RETENTION_SECS: u64 = 365 * 24 * 60 * 60;
 
 // ===========================================================================
 // embed
@@ -96,6 +104,8 @@ pub async fn handle_embed(ctx: StepContext) -> Result<Value, StepError> {
 pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
     let scope = memory_scope(&ctx.params)?;
     let namespace = memory_namespace(&ctx.params)?;
+    let authorization = authorize_memory(&ctx, scope, &namespace, MemoryOperation::Store).await?;
+    let retention_secs = retention_secs(&ctx.params, &authorization)?;
     let text = ctx
         .params
         .get("text")
@@ -112,7 +122,7 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
         return Ok(super::util::dry_run_stub(
             "memory_store",
             Value::Null,
-            json!({ "key": key, "stored": false, "dimensions": 0, "scope": scope, "namespace": namespace }),
+            json!({ "key": key, "stored": false, "dimensions": 0, "scope": scope, "namespace": namespace, "residency": authorization.residency, "retention_secs": retention_secs }),
         ));
     }
 
@@ -138,7 +148,14 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
     );
     validate_memory_key(&key)?;
 
-    let record = memory_record(text.as_deref(), &embedding, &metadata);
+    let record = memory_record(
+        text.as_deref(),
+        &embedding,
+        &metadata,
+        &authorization,
+        retention_secs,
+        &ctx,
+    )?;
     match scope {
         MemoryScope::Instance => {
             let storage_key = format!("{MEMORY_KEY_PREFIX}{key}");
@@ -156,7 +173,7 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
 
     debug!(key = %key, dimensions = embedding.len(), "memory_store: persisted");
     Ok(
-        json!({ "key": key, "stored": true, "dimensions": embedding.len(), "scope": scope, "namespace": namespace }),
+        json!({ "key": key, "stored": true, "dimensions": embedding.len(), "scope": scope, "namespace": namespace, "residency": authorization.residency, "retention_secs": retention_secs, "policy_version": authorization.policy_version }),
     )
 }
 
@@ -167,13 +184,14 @@ pub async fn handle_memory_store(ctx: StepContext) -> Result<Value, StepError> {
 pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> {
     let scope = memory_scope(&ctx.params)?;
     let namespace = memory_namespace(&ctx.params)?;
+    let authorization = authorize_memory(&ctx, scope, &namespace, MemoryOperation::Search).await?;
     // Dry-run: skip the embedding-provider call (the query vector would
     // otherwise be embedded via an external API). Return an empty result set.
     if ctx.is_dry_run() {
         return Ok(super::util::dry_run_stub(
             "memory_search",
             Value::Null,
-            json!({ "results": [], "count": 0, "scope": scope, "namespace": namespace }),
+            json!({ "results": [], "count": 0, "scope": scope, "namespace": namespace, "residency": authorization.residency, "policy_version": authorization.policy_version }),
         ));
     }
 
@@ -220,10 +238,49 @@ pub async fn handle_memory_search(ctx: StepContext) -> Result<Value, StepError> 
             .into_iter()
             .collect(),
     };
+    let (records, expired) = governed_records(records, &authorization, scope, Utc::now());
+    purge_expired(&ctx, scope, &namespace, &expired).await?;
     let results = rank_memories(&query_embedding, records, top_k);
 
     Ok(
-        json!({ "results": results, "count": results_len(&results), "scope": scope, "namespace": namespace }),
+        json!({ "results": results, "count": results_len(&results), "scope": scope, "namespace": namespace, "residency": authorization.residency, "policy_version": authorization.policy_version, "expired_deleted": expired.len() }),
+    )
+}
+
+/// Permanently delete one governed memory. Tenant-scoped deletion is denied
+/// unless the authoritative namespace policy grants `delete` to this sequence.
+pub async fn handle_memory_delete(ctx: StepContext) -> Result<Value, StepError> {
+    let scope = memory_scope(&ctx.params)?;
+    let namespace = memory_namespace(&ctx.params)?;
+    let authorization = authorize_memory(&ctx, scope, &namespace, MemoryOperation::Delete).await?;
+    let key = ctx
+        .params
+        .get("key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| permanent("memory_delete: `key` is required"))?;
+    validate_memory_key(key)?;
+    if ctx.is_dry_run() {
+        return Ok(super::util::dry_run_stub(
+            "memory_delete",
+            Value::Null,
+            json!({ "key": key, "deleted": false, "scope": scope, "namespace": namespace, "residency": authorization.residency }),
+        ));
+    }
+    match scope {
+        MemoryScope::Instance => {
+            ctx.storage
+                .delete_instance_kv(ctx.instance_id, &format!("{MEMORY_KEY_PREFIX}{key}"))
+                .await
+        }
+        MemoryScope::Tenant => {
+            ctx.storage
+                .delete_shared_knowledge(ctx.tenant_id.as_str(), &namespace, key)
+                .await
+        }
+    }
+    .map_err(|error| retryable(format!("memory_delete storage error: {error}")))?;
+    Ok(
+        json!({ "key": key, "deleted": true, "scope": scope, "namespace": namespace, "residency": authorization.residency, "policy_version": authorization.policy_version }),
     )
 }
 
@@ -327,7 +384,7 @@ fn resolve_api_key(params: &Value) -> Result<String, StepError> {
 // Pure helpers (unit-tested without network or storage)
 // ===========================================================================
 
-#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum MemoryScope {
     Instance,
@@ -353,17 +410,105 @@ fn memory_namespace(params: &Value) -> Result<String, StepError> {
         .get("namespace")
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_NAMESPACE);
-    if namespace.is_empty()
-        || namespace.len() > 128
-        || !namespace
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/'))
-    {
+    validate_target_namespace(namespace).map_err(permanent)?;
+    Ok(namespace.to_string())
+}
+
+#[derive(Debug)]
+struct MemoryAuthorization {
+    sequence_id: orch8_types::ids::SequenceId,
+    tenant_id: String,
+    instance_id: String,
+    residency: String,
+    policy_version: u64,
+    default_retention_secs: u64,
+    max_retention_secs: u64,
+}
+
+async fn authorize_memory(
+    ctx: &StepContext,
+    scope: MemoryScope,
+    namespace: &str,
+    operation: MemoryOperation,
+) -> Result<MemoryAuthorization, StepError> {
+    let instance = ctx
+        .storage
+        .get_instance(ctx.instance_id)
+        .await
+        .map_err(|error| retryable(format!("memory authorization storage error: {error}")))?
+        .ok_or_else(|| permanent("memory authorization: instance does not exist"))?;
+    if instance.tenant_id != ctx.tenant_id {
         return Err(permanent(
-            "memory: namespace must be 1-128 characters using letters, digits, '-', '_', '.', or '/'",
+            "memory authorization: instance tenant does not match caller tenant",
         ));
     }
-    Ok(namespace.to_string())
+
+    let requested_residency = ctx.params.get("residency").and_then(Value::as_str);
+    if let Some(residency) = requested_residency {
+        validate_residency(residency).map_err(permanent)?;
+    }
+    let (residency, policy_version, default_retention_secs, max_retention_secs) = match scope {
+        MemoryScope::Instance => {
+            let residency = requested_residency.unwrap_or("local");
+            (
+                residency.to_string(),
+                1,
+                INSTANCE_DEFAULT_RETENTION_SECS,
+                INSTANCE_MAX_RETENTION_SECS,
+            )
+        }
+        MemoryScope::Tenant => {
+            let policy = load_namespace_policy(ctx.storage.as_ref(), &ctx.tenant_id, namespace)
+                .await
+                .map_err(|error| retryable(format!("memory policy storage error: {error}")))?
+                .ok_or_else(|| {
+                    permanent(format!(
+                        "memory: tenant namespace '{namespace}' has no governance policy"
+                    ))
+                })?;
+            if !policy.authorizes(instance.sequence_id, operation) {
+                return Err(permanent(format!(
+                    "memory: sequence {} is not authorized for {operation:?} in namespace '{namespace}'",
+                    instance.sequence_id
+                )));
+            }
+            if requested_residency.is_some_and(|value| value != policy.residency) {
+                return Err(permanent(format!(
+                    "memory: requested residency does not match policy residency '{}'",
+                    policy.residency
+                )));
+            }
+            (
+                policy.residency,
+                policy.policy_version,
+                policy.default_retention_secs,
+                policy.max_retention_secs,
+            )
+        }
+    };
+    Ok(MemoryAuthorization {
+        sequence_id: instance.sequence_id,
+        tenant_id: ctx.tenant_id.to_string(),
+        instance_id: ctx.instance_id.to_string(),
+        residency,
+        policy_version,
+        default_retention_secs,
+        max_retention_secs,
+    })
+}
+
+fn retention_secs(params: &Value, authorization: &MemoryAuthorization) -> Result<u64, StepError> {
+    let retention = params
+        .get("retention_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(authorization.default_retention_secs);
+    if retention == 0 || retention > authorization.max_retention_secs {
+        return Err(permanent(format!(
+            "memory: retention_secs must be 1..={} under the active policy",
+            authorization.max_retention_secs
+        )));
+    }
+    Ok(retention)
 }
 
 fn validate_memory_key(key: &str) -> Result<(), StepError> {
@@ -440,13 +585,48 @@ fn parse_vector(arr: &[Value]) -> Vec<f64> {
     arr.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect()
 }
 
-/// Build a persisted memory record.
-fn memory_record(text: Option<&str>, embedding: &[f64], metadata: &Value) -> Value {
-    json!({
+/// Build a persisted memory record with retention and recorded provenance.
+fn memory_record(
+    text: Option<&str>,
+    embedding: &[f64],
+    metadata: &Value,
+    authorization: &MemoryAuthorization,
+    retention_secs: u64,
+    ctx: &StepContext,
+) -> Result<Value, StepError> {
+    let created_at = Utc::now();
+    let retention = i64::try_from(retention_secs)
+        .map_err(|_| permanent("memory: retention_secs is too large"))?;
+    let expires_at = created_at + chrono::Duration::seconds(retention);
+    let content = json!({
         "text": text,
         "embedding": embedding,
         "metadata": metadata,
-    })
+    });
+    let canonical = orch8_publisher::manifest::canonical_json(&content)
+        .map_err(|error| permanent(format!("memory provenance serialization failed: {error}")))?;
+    let digest = Sha256::digest(canonical.as_bytes());
+    let mut content_sha256 = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut content_sha256, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(json!({
+        "text": text,
+        "embedding": embedding,
+        "metadata": metadata,
+        "governance": {
+            "schema_version": 1,
+            "tenant_id": authorization.tenant_id,
+            "sequence_id": authorization.sequence_id,
+            "instance_id": authorization.instance_id,
+            "block_id": ctx.block_id,
+            "policy_version": authorization.policy_version,
+            "residency": authorization.residency,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "content_sha256": content_sha256,
+        }
+    }))
 }
 
 /// Content-addressed key for a memory (stable hash of the text), used when the
@@ -489,6 +669,84 @@ fn extract_memory_records(kv: &std::collections::HashMap<String, Value>) -> Vec<
         .collect()
 }
 
+fn governed_records(
+    records: Vec<(String, Value)>,
+    authorization: &MemoryAuthorization,
+    scope: MemoryScope,
+    now: DateTime<Utc>,
+) -> (Vec<(String, Value)>, Vec<String>) {
+    let mut active = Vec::new();
+    let mut expired = Vec::new();
+    for (key, record) in records {
+        let Some(governance) = record.get("governance") else {
+            // Records written before governed memory shipped have no policy
+            // envelope. Instance KV already binds them to this exact
+            // instance and tenant, so keep them readable for compatibility.
+            // Shared tenant records do not have that provenance guarantee and
+            // therefore remain fail-closed until explicitly rewritten.
+            if scope == MemoryScope::Instance {
+                active.push((key, record));
+            }
+            continue;
+        };
+        if governance.get("tenant_id").and_then(Value::as_str)
+            != Some(authorization.tenant_id.as_str())
+            || governance.get("residency").and_then(Value::as_str)
+                != Some(authorization.residency.as_str())
+        {
+            continue;
+        }
+        let valid_instance = governance
+            .get("instance_id")
+            .and_then(Value::as_str)
+            .is_some_and(|instance_id| instance_id == authorization.instance_id);
+        let expires_at = governance
+            .get("expires_at")
+            .and_then(Value::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc));
+        let Some(expires_at) = expires_at else {
+            continue;
+        };
+        // Instance-scoped records must originate from this exact instance.
+        // Tenant records may originate from any authorized sequence/instance.
+        if scope == MemoryScope::Instance && !valid_instance {
+            continue;
+        }
+        if expires_at <= now {
+            expired.push(key);
+        } else {
+            active.push((key, record));
+        }
+    }
+    (active, expired)
+}
+
+async fn purge_expired(
+    ctx: &StepContext,
+    scope: MemoryScope,
+    namespace: &str,
+    expired: &[String],
+) -> Result<(), StepError> {
+    let result = match scope {
+        MemoryScope::Instance => {
+            let keys = expired
+                .iter()
+                .map(|key| format!("{MEMORY_KEY_PREFIX}{key}"))
+                .collect::<Vec<_>>();
+            ctx.storage
+                .delete_instance_kv_batch(ctx.instance_id, &keys)
+                .await
+        }
+        MemoryScope::Tenant => {
+            ctx.storage
+                .delete_shared_knowledge_batch(ctx.tenant_id.as_str(), namespace, expired)
+                .await
+        }
+    };
+    result.map_err(|error| retryable(format!("memory retention cleanup failed: {error}")))
+}
+
 /// Rank memories against a query embedding, returning the top `k` as result
 /// objects sorted by descending score.
 fn rank_memories(query: &[f64], records: Vec<(String, Value)>, top_k: usize) -> Vec<Value> {
@@ -518,6 +776,7 @@ fn rank_memories(query: &[f64], records: Vec<(String, Value)>, top_k: usize) -> 
                 "text": record.get("text").cloned().unwrap_or(Value::Null),
                 "score": score,
                 "metadata": record.get("metadata").cloned().unwrap_or(json!({})),
+                "provenance": record.get("governance").cloned().unwrap_or(Value::Null),
             })
         })
         .collect()
@@ -636,14 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_record_shape() {
-        let r = memory_record(Some("the sky"), &[0.1, 0.2], &json!({"src": "test"}));
-        assert_eq!(r["text"], "the sky");
-        assert_eq!(r["embedding"][1], 0.2);
-        assert_eq!(r["metadata"]["src"], "test");
-    }
-
-    #[test]
     fn extract_memory_records_filters_prefix() {
         let mut kv = HashMap::new();
         kv.insert(
@@ -718,6 +969,57 @@ mod tests {
         );
         assert!(memory_namespace(&json!({"namespace": "bad namespace"})).is_err());
     }
+
+    #[test]
+    fn governance_filters_expired_and_legacy_shared_records() {
+        let now = Utc::now();
+        let authorization = MemoryAuthorization {
+            sequence_id: orch8_types::ids::SequenceId::new(),
+            tenant_id: "tenant-a".into(),
+            instance_id: "instance-a".into(),
+            residency: "br-south-1".into(),
+            policy_version: 1,
+            default_retention_secs: 60,
+            max_retention_secs: 120,
+        };
+        let governed = |expires_at: DateTime<Utc>| {
+            json!({
+                "text": "fact",
+                "embedding": [1.0],
+                "metadata": {},
+                "governance": {
+                    "tenant_id": "tenant-a",
+                    "instance_id": "instance-a",
+                    "residency": "br-south-1",
+                    "expires_at": expires_at,
+                }
+            })
+        };
+        let records = vec![
+            (
+                "active".into(),
+                governed(now + chrono::Duration::seconds(1)),
+            ),
+            (
+                "expired".into(),
+                governed(now - chrono::Duration::seconds(1)),
+            ),
+            (
+                "legacy".into(),
+                json!({"text": "old", "embedding": [1.0], "metadata": {}}),
+            ),
+        ];
+
+        let (active, expired) =
+            governed_records(records.clone(), &authorization, MemoryScope::Tenant, now);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, "active");
+        assert_eq!(expired, vec!["expired"]);
+
+        let (instance_active, _) =
+            governed_records(records, &authorization, MemoryScope::Instance, now);
+        assert!(instance_active.iter().any(|(key, _)| key == "legacy"));
+    }
 }
 
 /// Tests that drive the async network (`embed`) and storage-backed
@@ -732,7 +1034,40 @@ mod net_tests {
 
     use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
     use orch8_types::context::ExecutionContext;
-    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+    use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
+    use orch8_types::instance::{InstanceState, Priority, TaskInstance};
+
+    async fn seed_instance(
+        storage: &Arc<dyn StorageBackend>,
+        instance_id: InstanceId,
+        tenant_id: TenantId,
+        sequence_id: SequenceId,
+    ) {
+        let now = Utc::now();
+        storage
+            .create_instance(&TaskInstance {
+                id: instance_id,
+                sequence_id,
+                tenant_id,
+                namespace: Namespace::new("default"),
+                state: InstanceState::Running,
+                next_fire_at: None,
+                priority: Priority::Normal,
+                timezone: "UTC".into(),
+                metadata: json!({}),
+                context: ExecutionContext::default(),
+                concurrency_key: None,
+                max_concurrency: None,
+                idempotency_key: None,
+                session_id: None,
+                parent_instance_id: None,
+                budget: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+    }
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
@@ -803,9 +1138,12 @@ mod net_tests {
             super::super::builtin::mark_url_safe_for_test(&url).await;
         }
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let instance_id = InstanceId::new();
+        let tenant_id = TenantId::unchecked("t");
+        seed_instance(&storage, instance_id, tenant_id.clone(), SequenceId::new()).await;
         StepContext {
-            instance_id: InstanceId::new(),
-            tenant_id: TenantId::unchecked("t"),
+            instance_id,
+            tenant_id,
             block_id: BlockId::new("b"),
             params,
             context: Arc::new(ExecutionContext::default()),
@@ -890,6 +1228,13 @@ mod net_tests {
         // embeddings → no network, so no SSRF cache seeding is needed.
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let instance_id = InstanceId::new();
+        seed_instance(
+            &storage,
+            instance_id,
+            TenantId::unchecked("t"),
+            SequenceId::new(),
+        )
+        .await;
         let base = StepContext {
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -921,9 +1266,64 @@ mod net_tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn tenant_memory_is_shared_across_instances_but_not_tenants() {
         let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
         let context = Arc::new(ExecutionContext::default());
+        let sequence_a = SequenceId::new();
+        let sequence_b = SequenceId::new();
+        let writer_instance = InstanceId::new();
+        let reader_instance = InstanceId::new();
+        let isolated_instance = InstanceId::new();
+        seed_instance(
+            &storage,
+            writer_instance,
+            TenantId::unchecked("tenant-a"),
+            sequence_a,
+        )
+        .await;
+        seed_instance(
+            &storage,
+            reader_instance,
+            TenantId::unchecked("tenant-a"),
+            sequence_a,
+        )
+        .await;
+        seed_instance(
+            &storage,
+            isolated_instance,
+            TenantId::unchecked("tenant-b"),
+            sequence_b,
+        )
+        .await;
+        let policy = |sequence_id| crate::memory_governance::MemoryNamespacePolicy {
+            policy_version: 1,
+            allowed_sequence_ids: vec![sequence_id],
+            operations: vec![
+                MemoryOperation::Store,
+                MemoryOperation::Search,
+                MemoryOperation::Delete,
+            ],
+            residency: "br-south-1".into(),
+            default_retention_secs: 3_600,
+            max_retention_secs: 86_400,
+        };
+        crate::memory_governance::install_namespace_policy(
+            storage.as_ref(),
+            &TenantId::unchecked("tenant-a"),
+            "research",
+            &policy(sequence_a),
+        )
+        .await
+        .unwrap();
+        crate::memory_governance::install_namespace_policy(
+            storage.as_ref(),
+            &TenantId::unchecked("tenant-b"),
+            "research",
+            &policy(sequence_b),
+        )
+        .await
+        .unwrap();
         let base = |tenant: &str, instance_id: InstanceId, params: Value| StepContext {
             instance_id,
             tenant_id: TenantId::unchecked(tenant),
@@ -937,7 +1337,7 @@ mod net_tests {
 
         handle_memory_store(base(
             "tenant-a",
-            InstanceId::new(),
+            writer_instance,
             json!({
                 "scope": "tenant",
                 "namespace": "research",
@@ -951,7 +1351,7 @@ mod net_tests {
 
         let found = handle_memory_search(base(
             "tenant-a",
-            InstanceId::new(),
+            reader_instance,
             json!({
                 "scope": "tenant",
                 "namespace": "research",
@@ -962,10 +1362,15 @@ mod net_tests {
         .unwrap();
         assert_eq!(found["count"], 1);
         assert_eq!(found["results"][0]["key"], "shared-fact");
+        assert_eq!(found["residency"], "br-south-1");
+        assert_eq!(
+            found["results"][0]["provenance"]["sequence_id"],
+            sequence_a.to_string()
+        );
 
         let isolated = handle_memory_search(base(
             "tenant-b",
-            InstanceId::new(),
+            isolated_instance,
             json!({
                 "scope": "tenant",
                 "namespace": "research",
@@ -975,6 +1380,120 @@ mod net_tests {
         .await
         .unwrap();
         assert_eq!(isolated["count"], 0);
+
+        let mut expired_record = storage
+            .get_shared_knowledge("tenant-a", "research", "shared-fact")
+            .await
+            .unwrap()
+            .unwrap();
+        expired_record["governance"]["expires_at"] = json!("2020-01-01T00:00:00Z");
+        storage
+            .set_shared_knowledge("tenant-a", "research", "expired-a", &expired_record)
+            .await
+            .unwrap();
+        storage
+            .set_shared_knowledge("tenant-a", "research", "expired-b", &expired_record)
+            .await
+            .unwrap();
+
+        let cleaned = handle_memory_search(base(
+            "tenant-a",
+            reader_instance,
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "query_embedding": [1.0, 0.0]
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(cleaned["expired_deleted"], 2);
+        assert!(
+            storage
+                .get_shared_knowledge("tenant-a", "research", "expired-a")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let deleted = handle_memory_delete(base(
+            "tenant-a",
+            writer_instance,
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "key": "shared-fact"
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(deleted["deleted"], true);
+
+        let after_delete = handle_memory_search(base(
+            "tenant-a",
+            reader_instance,
+            json!({
+                "scope": "tenant",
+                "namespace": "research",
+                "query_embedding": [1.0, 0.0]
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(after_delete["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn tenant_memory_denies_unlisted_sequence_and_excess_retention() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let tenant = TenantId::unchecked("tenant-a");
+        let allowed_sequence = SequenceId::new();
+        let denied_sequence = SequenceId::new();
+        let allowed_instance = InstanceId::new();
+        let denied_instance = InstanceId::new();
+        seed_instance(&storage, allowed_instance, tenant.clone(), allowed_sequence).await;
+        seed_instance(&storage, denied_instance, tenant.clone(), denied_sequence).await;
+        crate::memory_governance::install_namespace_policy(
+            storage.as_ref(),
+            &tenant,
+            "bounded",
+            &crate::memory_governance::MemoryNamespacePolicy {
+                policy_version: 1,
+                allowed_sequence_ids: vec![allowed_sequence],
+                operations: vec![MemoryOperation::Store],
+                residency: "br-south-1".into(),
+                default_retention_secs: 60,
+                max_retention_secs: 120,
+            },
+        )
+        .await
+        .unwrap();
+        let context = Arc::new(ExecutionContext::default());
+        let make_ctx = |instance_id, retention_secs| StepContext {
+            instance_id,
+            tenant_id: tenant.clone(),
+            block_id: BlockId::new("memory"),
+            params: json!({
+                "scope": "tenant",
+                "namespace": "bounded",
+                "text": "fact",
+                "embedding": [1.0],
+                "retention_secs": retention_secs
+            }),
+            context: Arc::clone(&context),
+            attempt: 0,
+            storage: Arc::clone(&storage),
+            wait_for_input: None,
+        };
+
+        assert!(matches!(
+            handle_memory_store(make_ctx(denied_instance, 60)).await,
+            Err(StepError::Permanent { .. })
+        ));
+        assert!(matches!(
+            handle_memory_store(make_ctx(allowed_instance, 121)).await,
+            Err(StepError::Permanent { .. })
+        ));
     }
 
     #[tokio::test]

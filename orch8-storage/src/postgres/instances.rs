@@ -91,17 +91,81 @@ pub(super) async fn create(
     Ok(())
 }
 
-pub(super) async fn create_batch(
+pub(super) async fn create_admitted(
+    store: &PostgresStorage,
+    inst: &TaskInstance,
+    max_active: u64,
+) -> Result<(), StorageError> {
+    let mut transaction = store.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,1))")
+        .bind(inst.tenant_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=$1 AND state IN ('scheduled','running','waiting','paused')")
+        .bind(inst.tenant_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+    if u64::try_from(active).unwrap_or(u64::MAX) >= max_active {
+        return Err(StorageError::QuotaExceeded(
+            "active-instance entitlement exhausted".into(),
+        ));
+    }
+    let context = serde_json::to_value(&inst.context)?;
+    bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst, &context)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn create_batch_admitted(
     store: &PostgresStorage,
     instances: &[TaskInstance],
+    limits: &HashMap<orch8_types::ids::TenantId, u64>,
 ) -> Result<u64, StorageError> {
     if instances.is_empty() {
         return Ok(0);
     }
+    let mut transaction = store.pool.begin().await?;
+    let mut requested = HashMap::<orch8_types::ids::TenantId, u64>::new();
+    for instance in instances {
+        *requested.entry(instance.tenant_id.clone()).or_default() += 1;
+    }
+    let mut tenants = requested.keys().cloned().collect::<Vec<_>>();
+    tenants.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    for tenant in &tenants {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,1))")
+            .bind(tenant.as_str())
+            .execute(&mut *transaction)
+            .await?;
+    }
+    for tenant in &tenants {
+        let active: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_instances WHERE tenant_id=$1 AND state IN ('scheduled','running','waiting','paused')")
+            .bind(tenant.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let requested = requested.get(tenant).copied().unwrap_or(0);
+        let limit = limits.get(tenant).copied().unwrap_or(0);
+        if u64::try_from(active)
+            .unwrap_or(u64::MAX)
+            .saturating_add(requested)
+            > limit
+        {
+            return Err(StorageError::QuotaExceeded(
+                "active-instance entitlement exhausted".into(),
+            ));
+        }
+    }
+    let count = insert_batch_tx(&mut transaction, instances).await?;
+    transaction.commit().await?;
+    Ok(count)
+}
 
-    let mut tx = store.pool.begin().await?;
+async fn insert_batch_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    instances: &[TaskInstance],
+) -> Result<u64, StorageError> {
     let mut count = 0u64;
-
     for chunk in instances.chunks(500) {
         // Pre-serialize JSON values outside the closure so failures propagate.
         let rows: Vec<_> = chunk
@@ -149,10 +213,23 @@ pub(super) async fn create_batch(
                     .push_bind(inst.updated_at);
             },
         );
-        let result = qb.build().execute(&mut *tx).await?;
+        let result = qb.build().execute(&mut **transaction).await?;
         count += result.rows_affected();
     }
 
+    Ok(count)
+}
+
+pub(super) async fn create_batch(
+    store: &PostgresStorage,
+    instances: &[TaskInstance],
+) -> Result<u64, StorageError> {
+    if instances.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = store.pool.begin().await?;
+    let count = insert_batch_tx(&mut tx, instances).await?;
     tx.commit().await?;
     Ok(count)
 }

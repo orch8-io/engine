@@ -31,6 +31,7 @@ const SIDE_EFFECT_BUILTINS: &[&str] = &[
     "send_signal",
     "self_modify",
     "memory_store",
+    "memory_delete",
     "blob_put",
     "embed",
 ];

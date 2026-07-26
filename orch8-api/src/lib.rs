@@ -3,6 +3,7 @@ pub mod approvals;
 pub mod auth;
 pub mod changes;
 pub mod circuit_breakers;
+pub mod client_contract;
 pub mod cluster;
 pub mod continuity;
 pub mod credentials;
@@ -10,6 +11,7 @@ pub mod cron;
 pub mod dataflow;
 pub mod diagnosis;
 pub mod dlq_groups;
+pub mod entitlements;
 pub mod error;
 pub mod events;
 pub mod health;
@@ -96,6 +98,8 @@ pub struct AppState {
     pub publisher: Option<Arc<orch8_publisher::SequencePublisher>>,
     pub push_provider: Arc<dyn orch8_push::PushProvider>,
     pub mobile_sync_enabled: bool,
+    /// Provider-neutral tenant plan catalog used for API admission.
+    pub entitlements: Arc<dyn entitlements::EntitlementProvider>,
     /// Names of handlers the engine executes in-process. Served by
     /// `GET /handlers` alongside externally-registered handler names.
     pub builtin_handlers: Arc<Vec<String>>,
@@ -254,6 +258,17 @@ pub fn build_router(state: AppState) -> Router {
         // Mounting them here too would double-register the handlers (axum
         // panics on overlapping routes) and would also place them behind
         // auth. The test harness mounts them separately.
+        .with_state(state)
+}
+
+/// Build the hardened continuity-gateway surface.
+///
+/// Only canonical versioned continuity routes are mounted: no general
+/// management API, legacy aliases, Swagger, webhooks, or mobile endpoints.
+/// Operational health is attached by `orch8-server` outside this router.
+pub fn build_continuity_gateway_router(state: AppState) -> Router {
+    Router::new()
+        .nest(API_V1_PREFIX, continuity::routes())
         .with_state(state)
 }
 

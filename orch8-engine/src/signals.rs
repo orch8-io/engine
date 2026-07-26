@@ -297,15 +297,19 @@ async fn cancel_scoped(
     // Children grouped by parent, so `is_inside_finally_branch` doesn't
     // rescan the whole tree once per TryCatch node (O(n²) on TryCatch-heavy
     // trees).
-    let mut children_of: std::collections::HashMap<
+    // ⚡ Bolt: A sorted `Vec` is used instead of a `HashMap` to eliminate massive
+    // hashing and allocation overhead on the cancellation hot path. Lookups are
+    // performed in O(log N) time using `partition_point`.
+    let mut children_of: Vec<(
         orch8_types::ids::ExecutionNodeId,
-        Vec<&orch8_types::execution::ExecutionNode>,
-    > = std::collections::HashMap::new();
+        &orch8_types::execution::ExecutionNode,
+    )> = Vec::with_capacity(tree.len());
     for n in &tree {
         if let Some(parent_id) = n.parent_id {
-            children_of.entry(parent_id).or_default().push(n);
+            children_of.push((parent_id, n));
         }
     }
+    children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
 
@@ -365,10 +369,10 @@ async fn cancel_scoped(
 /// run to completion.
 fn is_inside_finally_branch(
     node_index: &[&orch8_types::execution::ExecutionNode],
-    children_of: &std::collections::HashMap<
+    children_of: &[(
         orch8_types::ids::ExecutionNodeId,
-        Vec<&orch8_types::execution::ExecutionNode>,
-    >,
+        &orch8_types::execution::ExecutionNode,
+    )],
     node: &orch8_types::execution::ExecutionNode,
 ) -> bool {
     use orch8_types::execution::BlockType;
@@ -377,15 +381,22 @@ fn is_inside_finally_branch(
     // Cancelling it would orphan the finally branch. (A `Pending` child is
     // active, so an all-pending finally branch is covered by the same check.)
     if node.block_type == BlockType::TryCatch {
-        let has_active_finally = children_of.get(&node.id).is_some_and(|children| {
-            children.iter().any(|c| {
-                c.branch_index == Some(2)
-                    && matches!(
-                        c.state,
-                        NodeState::Pending | NodeState::Running | NodeState::Waiting
-                    )
-            })
-        });
+        let start = children_of.partition_point(|&(p, _)| p < node.id);
+        let mut has_active_finally = false;
+        for &(p, c) in children_of.iter().skip(start) {
+            if p != node.id {
+                break;
+            }
+            if c.branch_index == Some(2)
+                && matches!(
+                    c.state,
+                    NodeState::Pending | NodeState::Running | NodeState::Waiting
+                )
+            {
+                has_active_finally = true;
+                break;
+            }
+        }
         if has_active_finally {
             return true;
         }

@@ -82,6 +82,7 @@ async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
         publisher: None,
         push_provider: Arc::new(orch8_push::NoopPushProvider),
         mobile_sync_enabled,
+        entitlements: crate::entitlements::unlimited_provider(),
         builtin_handlers: Arc::new(crate::builtin_handler_names()),
         engine_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         continuity_crypto: Some(Arc::new(

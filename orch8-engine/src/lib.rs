@@ -24,7 +24,9 @@ pub mod handlers;
 pub mod interceptors;
 pub mod lifecycle;
 pub mod lint;
+pub mod memory_governance;
 pub mod metrics;
+pub mod optimizer;
 pub mod placement;
 pub mod preflight;
 pub mod preload;
@@ -398,6 +400,10 @@ impl Engine {
             registered_at: now,
             last_heartbeat_at: now,
             drain: false,
+            drain_started_at: None,
+            stopped_at: None,
+            capabilities_withdrawn: false,
+            execution_handoff_evidence: None,
         };
         self.storage.register_node(&node).await?;
         tracing::info!(

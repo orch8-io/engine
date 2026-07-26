@@ -24,6 +24,7 @@ use crate::storage::{MobileStorage, SyncExecutionStepProjection, SyncInstancePro
 /// entirely (a huge value).
 const MIN_SYNC_INTERVAL_SECS: u32 = 5;
 const MAX_SYNC_INTERVAL_SECS: u32 = 3600;
+const COMMAND_PRUNE_INTERVAL: chrono::Duration = chrono::Duration::days(1);
 
 /// Batched status + approval reporter that syncs with the server on a
 /// configurable wall-clock cadence. Receives commands from the server and executes
@@ -36,6 +37,7 @@ pub(crate) struct SyncReporter {
     api_key: String,
     sync_interval_secs: AtomicU64,
     last_sync_attempt: StdMutex<chrono::DateTime<chrono::Utc>>,
+    last_command_prune: StdMutex<Option<chrono::DateTime<chrono::Utc>>>,
     clock: SharedClock,
     push_generation: AtomicU64,
     completed_push_generation: AtomicU64,
@@ -44,10 +46,10 @@ pub(crate) struct SyncReporter {
 #[derive(serde::Serialize)]
 struct SyncRequest<'a> {
     device_id: &'a str,
-    status_updates: Vec<serde_json::Value>,
-    approval_requests: Vec<serde_json::Value>,
-    step_delegations: Vec<serde_json::Value>,
-    command_acks: Vec<String>,
+    status_updates: Vec<&'a serde_json::value::RawValue>,
+    approval_requests: Vec<&'a serde_json::value::RawValue>,
+    step_delegations: Vec<&'a serde_json::value::RawValue>,
+    command_acks: &'a [String],
 }
 
 #[derive(serde::Deserialize)]
@@ -83,6 +85,14 @@ enum CommandOutcome {
 
 type OutboxEntry = (String, String);
 
+fn borrow_valid_payloads(rows: &[(i64, String)]) -> Vec<&serde_json::value::RawValue> {
+    let mut payloads = Vec::with_capacity(rows.len());
+    payloads.extend(rows.iter().filter_map(|(_, payload)| {
+        serde_json::from_str::<&serde_json::value::RawValue>(payload).ok()
+    }));
+    payloads
+}
+
 struct ScanOutboxEntries {
     statuses: Vec<OutboxEntry>,
     approvals: Vec<OutboxEntry>,
@@ -110,6 +120,7 @@ impl SyncReporter {
             api_key,
             sync_interval_secs: AtomicU64::new(u64::from(default_interval())),
             last_sync_attempt: StdMutex::new(now),
+            last_command_prune: StdMutex::new(None),
             clock,
             push_generation: AtomicU64::new(0),
             completed_push_generation: AtomicU64::new(0),
@@ -183,6 +194,20 @@ impl SyncReporter {
     fn mark_pushes_completed(&self, attempted_generation: u64) {
         self.completed_push_generation
             .fetch_max(attempted_generation, Ordering::AcqRel);
+    }
+
+    fn command_prune_due(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.last_command_prune
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none_or(|last| now - last >= COMMAND_PRUNE_INTERVAL)
+    }
+
+    fn mark_command_prune_completed(&self, now: chrono::DateTime<chrono::Utc>) {
+        *self
+            .last_command_prune
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
     }
 
     /// Initialize the outbox tables. Called once on engine startup.
@@ -351,6 +376,8 @@ impl SyncReporter {
     }
 
     /// Execute one sync cycle: drain outbox, POST to server, process commands.
+    /// Returns `true` only when the response contained commands that may have
+    /// changed scheduler-visible instance state.
     #[allow(clippy::too_many_lines)]
     pub async fn sync_once(
         &self,
@@ -373,12 +400,12 @@ impl SyncReporter {
                 "SELECT id, payload FROM sync_outbox WHERE entry_type = 'delegation' ORDER BY id LIMIT 20",
             )
             .fetch_all(&self.pool),
-            sqlx::query_as::<_, (String,)>(
+            sqlx::query_scalar::<_, String>(
                 "SELECT command_id FROM sync_command_acks ORDER BY created_at LIMIT 100",
             )
             .fetch_all(&self.pool),
         );
-        let (status_rows, approval_rows, delegation_rows, ack_rows) = match pending {
+        let (status_rows, approval_rows, delegation_rows, command_acks) = match pending {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(%error, "failed to read pending mobile sync data");
@@ -386,29 +413,19 @@ impl SyncReporter {
             }
         };
 
-        let status_updates: Vec<serde_json::Value> = status_rows
-            .iter()
-            .filter_map(|(_, p)| serde_json::from_str(p).ok())
-            .collect();
-
-        let approval_requests: Vec<serde_json::Value> = approval_rows
-            .iter()
-            .filter_map(|(_, p)| serde_json::from_str(p).ok())
-            .collect();
-
-        let step_delegations: Vec<serde_json::Value> = delegation_rows
-            .iter()
-            .filter_map(|(_, p)| serde_json::from_str(p).ok())
-            .collect();
-
-        let command_acks: Vec<String> = ack_rows.iter().map(|(id,)| id.clone()).collect();
+        // Payloads are already validated JSON written by this SDK. Borrow the
+        // stored text directly instead of rebuilding an owned Value tree only
+        // for reqwest to serialize that tree back into the same JSON.
+        let status_updates = borrow_valid_payloads(&status_rows);
+        let approval_requests = borrow_valid_payloads(&approval_rows);
+        let step_delegations = borrow_valid_payloads(&delegation_rows);
 
         let req = SyncRequest {
             device_id: &self.device_id,
             status_updates,
             approval_requests,
             step_delegations,
-            command_acks: command_acks.clone(),
+            command_acks: &command_acks,
         };
 
         let result = self
@@ -442,16 +459,11 @@ impl SyncReporter {
         let commands_received = !sync_resp.commands.is_empty();
 
         // Clean up sent outbox entries.
-        let sent_status_ids: Vec<i64> = status_rows.iter().map(|(id, _)| *id).collect();
-        let sent_approval_ids: Vec<i64> = approval_rows.iter().map(|(id, _)| *id).collect();
-        let sent_delegation_ids: Vec<i64> = delegation_rows.iter().map(|(id, _)| *id).collect();
-
-        let mut sent_outbox_ids = Vec::with_capacity(
-            sent_status_ids.len() + sent_approval_ids.len() + sent_delegation_ids.len(),
-        );
-        sent_outbox_ids.extend_from_slice(&sent_status_ids);
-        sent_outbox_ids.extend_from_slice(&sent_approval_ids);
-        sent_outbox_ids.extend_from_slice(&sent_delegation_ids);
+        let mut sent_outbox_ids =
+            Vec::with_capacity(status_rows.len() + approval_rows.len() + delegation_rows.len());
+        sent_outbox_ids.extend(status_rows.iter().map(|(id, _)| *id));
+        sent_outbox_ids.extend(approval_rows.iter().map(|(id, _)| *id));
+        sent_outbox_ids.extend(delegation_rows.iter().map(|(id, _)| *id));
         if let Err(e) = delete_outbox_rows(&self.pool, &sent_outbox_ids).await {
             warn!(error = %e, "failed to delete sent sync outbox rows");
         }
@@ -519,14 +531,21 @@ impl SyncReporter {
             }
         }
 
-        // Prune old idempotency records so the table doesn't grow forever.
-        // 30 days comfortably outlives any plausible ack-redelivery window.
-        if let Err(e) = sqlx::query("DELETE FROM sync_executed_commands WHERE executed_at < ?")
-            .bind((chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339())
-            .execute(&self.pool)
-            .await
-        {
-            warn!(error = %e, "failed to prune old sync_executed_commands rows");
+        // Retention housekeeping does not need to wake SQLite on every
+        // heartbeat. Run once immediately and then at most daily; a failure
+        // is deliberately left due so the next successful round-trip retries.
+        let prune_schedule_now = self.clock.now();
+        if self.command_prune_due(prune_schedule_now) {
+            match sqlx::query("DELETE FROM sync_executed_commands WHERE executed_at < ?")
+                .bind((chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339())
+                .execute(&self.pool)
+                .await
+            {
+                Ok(_) => self.mark_command_prune_completed(prune_schedule_now),
+                Err(e) => {
+                    warn!(error = %e, "failed to prune old sync_executed_commands rows");
+                }
+            }
         }
 
         // Update sync interval from server hint, clamped to a sane range: a
@@ -546,9 +565,9 @@ impl SyncReporter {
             .store(u64::from(clamped_secs), Ordering::Relaxed);
 
         debug!(
-            status_sent = sent_status_ids.len(),
-            approvals_sent = sent_approval_ids.len(),
-            delegations_sent = sent_delegation_ids.len(),
+            status_sent = status_rows.len(),
+            approvals_sent = approval_rows.len(),
+            delegations_sent = delegation_rows.len(),
             commands_received = sync_resp.commands.len(),
             next_sync_secs = clamped_secs,
             "sync complete"
@@ -1043,32 +1062,11 @@ fn build_steps_payload(
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     if let Some(seq) = seq {
-        let flat = flatten_blocks(&seq.blocks);
-
         // Index tree nodes by block id so each block lookup is O(1) instead
         // of a linear scan of the tree for every block.
         let nodes_by_block: std::collections::HashMap<&str, _> =
             tree.iter().map(|n| (n.block_id.as_str(), n)).collect();
-
-        for (block_id, block_type, handler) in &flat {
-            let node = nodes_by_block.get(block_id.as_str());
-            let (state, started_at, completed_at) = match node {
-                Some(n) => (
-                    n.state.clone(),
-                    n.started_at.clone(),
-                    n.completed_at.clone(),
-                ),
-                None => ("pending".into(), None, None),
-            };
-            entries.push(serde_json::json!({
-                "block_id": block_id.as_str(),
-                "block_type": block_type,
-                "state": state,
-                "handler": handler,
-                "started_at": started_at,
-                "completed_at": completed_at,
-            }));
-        }
+        append_block_entries(&mut entries, &seq.blocks, &nodes_by_block);
     } else {
         for node in tree {
             entries.push(serde_json::json!({
@@ -1088,75 +1086,110 @@ fn build_steps_payload(
     Some(serde_json::Value::Array(entries))
 }
 
-fn flatten_blocks(blocks: &[BlockDefinition]) -> Vec<(BlockId, String, Option<String>)> {
-    let mut out = Vec::new();
-    for b in blocks {
-        match b {
+fn append_block_entries(
+    entries: &mut Vec<serde_json::Value>,
+    blocks: &[BlockDefinition],
+    nodes_by_block: &std::collections::HashMap<&str, &SyncExecutionStepProjection>,
+) {
+    for block in blocks {
+        match block {
             BlockDefinition::Step(sd) => {
-                out.push((sd.id.clone(), "step".into(), Some(sd.handler.clone())));
+                append_block_entry(entries, &sd.id, "step", Some(&sd.handler), nodes_by_block);
             }
             BlockDefinition::Parallel(p) => {
-                out.push((p.id.clone(), "parallel".into(), None));
+                append_block_entry(entries, &p.id, "parallel", None, nodes_by_block);
                 for branch in &p.branches {
-                    out.extend(flatten_blocks(branch));
+                    append_block_entries(entries, branch, nodes_by_block);
                 }
             }
             BlockDefinition::Race(r) => {
-                out.push((r.id.clone(), "race".into(), None));
+                append_block_entry(entries, &r.id, "race", None, nodes_by_block);
                 for branch in &r.branches {
-                    out.extend(flatten_blocks(branch));
+                    append_block_entries(entries, branch, nodes_by_block);
                 }
             }
             BlockDefinition::Loop(l) => {
-                out.push((l.id.clone(), "loop".into(), None));
-                out.extend(flatten_blocks(&l.body));
+                append_block_entry(entries, &l.id, "loop", None, nodes_by_block);
+                append_block_entries(entries, &l.body, nodes_by_block);
             }
             BlockDefinition::ForEach(fe) => {
-                out.push((fe.id.clone(), "for_each".into(), None));
-                out.extend(flatten_blocks(&fe.body));
+                append_block_entry(entries, &fe.id, "for_each", None, nodes_by_block);
+                append_block_entries(entries, &fe.body, nodes_by_block);
             }
             BlockDefinition::Router(rt) => {
-                out.push((rt.id.clone(), "router".into(), None));
+                append_block_entry(entries, &rt.id, "router", None, nodes_by_block);
                 for route in &rt.routes {
-                    out.extend(flatten_blocks(&route.blocks));
+                    append_block_entries(entries, &route.blocks, nodes_by_block);
                 }
                 if let Some(ref def) = rt.default {
-                    out.extend(flatten_blocks(def));
+                    append_block_entries(entries, def, nodes_by_block);
                 }
             }
             BlockDefinition::TryCatch(tc) => {
-                out.push((tc.id.clone(), "try_catch".into(), None));
-                out.extend(flatten_blocks(&tc.try_block));
-                out.extend(flatten_blocks(&tc.catch_block));
+                append_block_entry(entries, &tc.id, "try_catch", None, nodes_by_block);
+                append_block_entries(entries, &tc.try_block, nodes_by_block);
+                append_block_entries(entries, &tc.catch_block, nodes_by_block);
                 if let Some(ref fin) = tc.finally_block {
-                    out.extend(flatten_blocks(fin));
+                    append_block_entries(entries, fin, nodes_by_block);
                 }
             }
             BlockDefinition::SubSequence(ss) => {
-                out.push((ss.id.clone(), "sub_sequence".into(), None));
+                append_block_entry(entries, &ss.id, "sub_sequence", None, nodes_by_block);
             }
             BlockDefinition::ABSplit(ab) => {
-                out.push((ab.id.clone(), "ab_split".into(), None));
+                append_block_entry(entries, &ab.id, "ab_split", None, nodes_by_block);
                 for variant in &ab.variants {
-                    out.extend(flatten_blocks(&variant.blocks));
+                    append_block_entries(entries, &variant.blocks, nodes_by_block);
                 }
             }
             BlockDefinition::CancellationScope(cs) => {
-                out.push((cs.id.clone(), "cancellation_scope".into(), None));
-                out.extend(flatten_blocks(&cs.blocks));
+                append_block_entry(entries, &cs.id, "cancellation_scope", None, nodes_by_block);
+                append_block_entries(entries, &cs.blocks, nodes_by_block);
             }
             BlockDefinition::Saga(saga) => {
-                out.push((saga.id.clone(), "saga".into(), None));
+                append_block_entry(entries, &saga.id, "saga", None, nodes_by_block);
                 for step in &saga.steps {
-                    out.extend(flatten_blocks(std::slice::from_ref(step.action.as_ref())));
+                    append_block_entries(
+                        entries,
+                        std::slice::from_ref(step.action.as_ref()),
+                        nodes_by_block,
+                    );
                     if let Some(comp) = &step.compensation {
-                        out.extend(flatten_blocks(std::slice::from_ref(comp.as_ref())));
+                        append_block_entries(
+                            entries,
+                            std::slice::from_ref(comp.as_ref()),
+                            nodes_by_block,
+                        );
                     }
                 }
             }
         }
     }
-    out
+}
+
+fn append_block_entry(
+    entries: &mut Vec<serde_json::Value>,
+    block_id: &BlockId,
+    block_type: &'static str,
+    handler: Option<&str>,
+    nodes_by_block: &std::collections::HashMap<&str, &SyncExecutionStepProjection>,
+) {
+    let node = nodes_by_block.get(block_id.as_str());
+    let (state, started_at, completed_at) = node.map_or(("pending", None, None), |node| {
+        (
+            node.state.as_str(),
+            node.started_at.as_deref(),
+            node.completed_at.as_deref(),
+        )
+    });
+    entries.push(serde_json::json!({
+        "block_id": block_id.as_str(),
+        "block_type": block_type,
+        "state": state,
+        "handler": handler,
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }));
 }
 
 fn find_handler(
@@ -1217,6 +1250,17 @@ mod tests {
         Arc<dyn StorageBackend>,
         Arc<InstanceLifecycleManager>,
     ) {
+        setup_with_clock(sync_url, SharedClock::default()).await
+    }
+
+    async fn setup_with_clock(
+        sync_url: String,
+        clock: SharedClock,
+    ) -> (
+        SyncReporter,
+        Arc<dyn StorageBackend>,
+        Arc<InstanceLifecycleManager>,
+    ) {
         let sqlite = Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await
@@ -1231,7 +1275,13 @@ mod tests {
         ));
 
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let reporter = SyncReporter::new(pool, sync_url, "device-1".to_string(), "key".to_string());
+        let reporter = SyncReporter::new_with_clock(
+            pool,
+            sync_url,
+            "device-1".to_string(),
+            "key".to_string(),
+            clock,
+        );
         reporter.init_tables().await;
 
         (reporter, storage, lifecycle)
@@ -1255,6 +1305,17 @@ mod tests {
             reporter.http.get().is_none(),
             "outbox read failure must not initialize networking"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_sync_response_reports_no_scheduler_mutation() {
+        let response = serde_json::json!({ "sync_interval_secs": 30 }).to_string();
+        let (sync_url, server) = spawn_mock_server(vec![response], 1).await;
+        let (reporter, storage, lifecycle) = setup(sync_url).await;
+
+        assert!(!reporter.sync_once(&storage, &lifecycle).await);
+
+        server.await.unwrap();
     }
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
@@ -1379,6 +1440,43 @@ mod tests {
         assert_eq!(status["steps"][0]["block_id"], "review");
     }
 
+    #[test]
+    fn steps_payload_preserves_nested_sequence_order_and_metadata() {
+        let sequence: SequenceDefinition = serde_json::from_str(include_str!(
+            "../tests/fixtures/workflows/onboarding-flow.json"
+        ))
+        .unwrap();
+
+        let payload = build_steps_payload(&[], Some(&sequence)).unwrap();
+        let entries = payload.as_array().unwrap();
+        let block_ids: Vec<_> = entries
+            .iter()
+            .map(|entry| entry["block_id"].as_str().unwrap())
+            .collect();
+
+        assert_eq!(
+            block_ids,
+            [
+                "init_profile",
+                "validate_email",
+                "show_terms",
+                "terms_gate",
+                "show_decline_notice",
+                "collect_preferences",
+                "setup_notifications",
+                "admin_approval",
+                "approval_gate",
+                "show_rejection_banner",
+                "show_welcome_banner",
+                "complete_onboarding",
+            ]
+        );
+        assert_eq!(entries[3]["block_type"], "router");
+        assert!(entries[3]["handler"].is_null());
+        assert_eq!(entries[4]["handler"], "show_banner");
+        assert!(entries.iter().all(|entry| entry["state"] == "pending"));
+    }
+
     async fn count_instances(storage: &Arc<dyn StorageBackend>) -> usize {
         let filter = InstanceFilter::default();
         let pagination = Pagination {
@@ -1480,6 +1578,49 @@ mod tests {
         assert_eq!(remaining_acks, vec!["a2"]);
     }
 
+    #[test]
+    fn sync_request_serializes_borrowed_acknowledgements_unchanged() {
+        let command_acks = vec!["ack-1".to_string(), "ack-2".to_string()];
+        let request = SyncRequest {
+            device_id: "device-1",
+            status_updates: Vec::new(),
+            approval_requests: Vec::new(),
+            step_delegations: Vec::new(),
+            command_acks: &command_acks,
+        };
+
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["command_acks"], serde_json::json!(["ack-1", "ack-2"]));
+    }
+
+    #[test]
+    fn sync_request_borrows_valid_outbox_json_unchanged() {
+        let rows = vec![
+            (
+                1,
+                r#"{"instance_id":"i1","nested":{"value":7}}"#.to_string(),
+            ),
+            (2, "not-json".to_string()),
+        ];
+        let status_updates = borrow_valid_payloads(&rows);
+
+        assert_eq!(status_updates.len(), 1);
+        assert_eq!(status_updates[0].get().as_ptr(), rows[0].1.as_ptr());
+
+        let request = SyncRequest {
+            device_id: "device-1",
+            status_updates,
+            approval_requests: Vec::new(),
+            step_delegations: Vec::new(),
+            command_acks: &[],
+        };
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            json["status_updates"],
+            serde_json::json!([{"instance_id": "i1", "nested": {"value": 7}}])
+        );
+    }
+
     /// Spawn a mock sync server that answers `count` requests, each with the
     /// corresponding body from `bodies` (cycling the last one if short).
     async fn spawn_mock_server(
@@ -1520,6 +1661,48 @@ mod tests {
             .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn command_retention_prune_retries_failures_then_runs_at_most_daily() {
+        let response = serde_json::json!({ "sync_interval_secs": 30 }).to_string();
+        let (sync_url, server) = spawn_mock_server(vec![response], 4).await;
+        let start = chrono::Utc::now();
+        let manual = Arc::new(ManualClock::new(start));
+        let clock = SharedClock::from_arc(Arc::clone(&manual) as Arc<dyn Clock>);
+        let (reporter, storage, lifecycle) = setup_with_clock(sync_url, clock).await;
+
+        sqlx::query("DROP TABLE sync_executed_commands")
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+        reporter.sync_once(&storage, &lifecycle).await;
+
+        reporter.init_tables().await;
+        let stale_timestamp = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+        sqlx::query("INSERT INTO sync_executed_commands (command_id, executed_at) VALUES (?, ?)")
+            .bind("retry-after-failure")
+            .bind(&stale_timestamp)
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert_eq!(marker_count(&reporter.pool, "retry-after-failure").await, 0);
+
+        sqlx::query("INSERT INTO sync_executed_commands (command_id, executed_at) VALUES (?, ?)")
+            .bind("within-daily-window")
+            .bind(&stale_timestamp)
+            .execute(&reporter.pool)
+            .await
+            .unwrap();
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert_eq!(marker_count(&reporter.pool, "within-daily-window").await, 1);
+
+        manual.advance(COMMAND_PRUNE_INTERVAL);
+        reporter.sync_once(&storage, &lifecycle).await;
+        assert_eq!(marker_count(&reporter.pool, "within-daily-window").await, 0);
+
+        server.await.unwrap();
     }
 
     /// A command that fails with a transient error (here: sequence not synced

@@ -187,10 +187,20 @@ message WorkerStreamOpen {
   repeated string supported_features = 3;
   uint32 max_in_flight = 4;
   uint32 protocol_version = 5;
+  string runtime_capabilities_json = 6;
+  string tenant_id = 7;
 }
 
 message WorkerStreamDemand {
   uint32 capacity = 1;
+}
+
+message RuntimeHeartbeat {
+  string runtime_capabilities_json = 1;
+}
+
+message WorkerCommandAck {
+  string command_id = 1;
 }
 
 message WorkerStreamClient {
@@ -200,6 +210,8 @@ message WorkerStreamClient {
     CompleteTaskRequest complete = 3;
     FailTaskRequest fail = 4;
     HeartbeatTaskRequest heartbeat = 5;
+    RuntimeHeartbeat runtime_heartbeat = 6;
+    WorkerCommandAck command_ack = 7;
   }
 }
 
@@ -225,12 +237,17 @@ message WorkerStreamAck {
   string task_id = 2;
 }
 
+message WorkerControlCommand {
+  string command_json = 1;
+}
+
 message WorkerStreamServer {
   oneof payload {
     WorkerStreamHello hello = 1;
     WorkerStreamTask task = 2;
     WorkerStreamCancellation cancellation = 3;
     WorkerStreamAck ack = 4;
+    WorkerControlCommand command = 5;
   }
 }
 
@@ -341,6 +358,35 @@ message HealthResponse {
   string status = 1;
 }
 
+// --- Telemetry ---
+
+message TelemetryEventInput {
+  string event_type = 1;
+  string payload_json = 2;
+  string device_id = 3;
+  string os_name = 4;
+  string os_version = 5;
+  string app_version = 6;
+  string sdk_version = 7;
+  string created_at = 8;
+}
+
+message IngestTelemetryBatchRequest {
+  string tenant_id = 1;
+  repeated TelemetryEventInput events = 2;
+}
+
+message TelemetryEventRejection {
+  uint32 index = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message IngestTelemetryBatchResponse {
+  uint32 accepted = 1;
+  repeated TelemetryEventRejection rejected = 2;
+}
+
 // --- Common responses ---
 
 message Empty {}
@@ -350,6 +396,9 @@ message Empty {}
 service Orch8Service {
   // Health
   rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Telemetry
+  rpc IngestTelemetryBatch(IngestTelemetryBatchRequest) returns (IngestTelemetryBatchResponse);
 
   // Sequences
   rpc CreateSequence(CreateSequenceRequest) returns (SequenceResponse);

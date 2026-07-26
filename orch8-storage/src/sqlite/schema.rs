@@ -221,7 +221,11 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
     status TEXT NOT NULL DEFAULT 'active',
     registered_at TEXT NOT NULL,
     last_heartbeat_at TEXT NOT NULL,
-    drain INTEGER NOT NULL DEFAULT 0 CHECK(drain IN (0, 1))
+    drain INTEGER NOT NULL DEFAULT 0 CHECK(drain IN (0, 1)),
+    drain_started_at TEXT,
+    stopped_at TEXT,
+    capabilities_withdrawn INTEGER NOT NULL DEFAULT 0 CHECK(capabilities_withdrawn IN (0, 1)),
+    execution_handoff_evidence TEXT
 );
 
 CREATE TABLE IF NOT EXISTS injected_blocks (
@@ -485,11 +489,18 @@ CREATE TABLE IF NOT EXISTS push_wake_outbox (
     terminal_reason TEXT,
     delivered_at TEXT,
     command_acked_at TEXT,
+    execution_id TEXT,
+    topic TEXT,
+    collapse_key TEXT,
+    superseded_by TEXT,
     created_at TEXT NOT NULL,
     UNIQUE (tenant_id, device_id, command_id)
 );
 CREATE INDEX IF NOT EXISTS idx_push_wake_due
     ON push_wake_outbox(next_attempt_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_push_wake_collapse_pending
+    ON push_wake_outbox(tenant_id,device_id,collapse_key,created_at)
+    WHERE status='pending' AND collapse_key IS NOT NULL;
 
 -- End mobile sync tables ─────────────────────────────────────────────────────
 
@@ -1062,9 +1073,20 @@ CREATE TABLE IF NOT EXISTS manifest_locks (
     tenant_id TEXT PRIMARY KEY,
     locked_at TEXT NOT NULL
 );
+
+-- Authoritative tenant-to-backend placement. There is no implicit/default
+-- partition; callers fail closed when a row or registered backend is absent.
+CREATE TABLE IF NOT EXISTS tenant_storage_placements (
+    tenant_id TEXT PRIMARY KEY,
+    backend_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch > 0),
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
+    ON tenant_storage_placements(backend_id);
 ";
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 38;
+pub(super) const SCHEMA_VERSION: i64 = 39;

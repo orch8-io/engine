@@ -731,6 +731,7 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "embed",
     "memory_store",
     "memory_search",
+    "memory_delete",
     "human_review",
     "self_modify",
     "emit_event",

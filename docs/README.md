@@ -39,6 +39,7 @@ health probes and inbound webhook routes are intentionally public.
 - [Typed dataflow](TYPED_DATAFLOW.md) — static reference checking and generated bindings.
 - [Storage backend conformance](STORAGE_BACKEND_CONFORMANCE.md) — reusable minimum behavioral suite for third-party backends.
 - [Externalized state](EXTERNALIZATION.md) — payload offloading behavior and metrics.
+- [Governed durable memory](GOVERNED_MEMORY.md) — memory authorization, retention, residency labels, deletion, and provenance.
 - [Database migrations](../migrations/README.md) — immutability and checksum rules.
 
 ## Understand

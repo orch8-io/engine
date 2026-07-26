@@ -75,6 +75,8 @@ jobs:
         run: ./scripts/test-review-fix-guards.sh
       - name: Check
         run: cargo check --workspace
+      - name: Generated client contract
+        run: ./scripts/check-generated-clients.sh
       - name: Clippy (all targets)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Doc warnings

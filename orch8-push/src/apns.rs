@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::{ApnsConfig, PushError, PushProvider};
+use crate::{ApnsConfig, PushError, PushProvider, SignedWakeMetadata};
 
 const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
 /// Maximum push token length. Tokens longer than this are rejected before
@@ -139,9 +139,12 @@ impl ApnsProvider {
     }
 }
 
-#[async_trait]
-impl PushProvider for ApnsProvider {
-    async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
+impl ApnsProvider {
+    async fn send(
+        &self,
+        token: &str,
+        metadata: Option<&SignedWakeMetadata>,
+    ) -> Result<(), PushError> {
         if token.len() > MAX_TOKEN_LEN {
             return Err(PushError::InvalidToken);
         }
@@ -152,11 +155,16 @@ impl PushProvider for ApnsProvider {
             let encoded = urlencoding::encode(token);
             let url = format!("{}/3/device/{}", self.base_url, encoded);
 
-            let payload = serde_json::json!({
+            let mut payload = serde_json::json!({
                 "aps": {
                     "content-available": 1
                 }
             });
+            if let Some(metadata) = metadata {
+                payload["orch8"] = serde_json::to_value(metadata).map_err(|error| {
+                    PushError::Permanent(format!("serialize signed wake: {error}"))
+                })?;
+            }
 
             let resp = match self
                 .client
@@ -241,6 +249,22 @@ impl PushProvider for ApnsProvider {
         Err(PushError::Retryable(format!(
             "APNs delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
         )))
+    }
+}
+
+#[async_trait]
+impl PushProvider for ApnsProvider {
+    async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
+        self.send(token, None).await
+    }
+
+    async fn send_signed_wake(
+        &self,
+        token: &str,
+        _platform: &str,
+        metadata: &SignedWakeMetadata,
+    ) -> Result<(), PushError> {
+        self.send(token, Some(metadata)).await
     }
 }
 

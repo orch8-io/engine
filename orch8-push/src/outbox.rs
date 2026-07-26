@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
+use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 
-use crate::{PushError, PushProvider};
+use crate::{CollapsibleWake, PushError, PushProvider};
 
 /// A leased wake returned by durable storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,20 @@ pub trait PushOutboxStore: Send + Sync + 'static {
         created_at: DateTime<Utc>,
     ) -> Result<Uuid, String>;
 
+    /// Persist an execution-scoped wake while terminally superseding older
+    /// pending rows with the same collapse key. Backends should override this
+    /// default transactionally; the default preserves correctness without
+    /// collapse for third-party stores.
+    async fn enqueue_collapsible_wake(&self, wake: &CollapsibleWake) -> Result<Uuid, String> {
+        self.enqueue_wake(
+            &wake.tenant_id,
+            &wake.device_id,
+            &wake.command_id,
+            wake.created_at,
+        )
+        .await
+    }
+
     /// Atomically lease due rows. Implementations must prevent concurrent
     /// workers from receiving the same wake until `lease_until` expires.
     async fn claim_due_wakes(
@@ -96,6 +111,7 @@ pub struct PushOutboxWorker {
     batch_size: u32,
     lease_duration: Duration,
     max_attempts: u32,
+    wake_signer: Option<(String, SigningKey)>,
 }
 
 impl PushOutboxWorker {
@@ -107,6 +123,7 @@ impl PushOutboxWorker {
             batch_size: 100,
             lease_duration: Duration::seconds(30),
             max_attempts: 8,
+            wake_signer: None,
         }
     }
 
@@ -114,6 +131,12 @@ impl PushOutboxWorker {
     pub fn with_limits(mut self, batch_size: u32, max_attempts: u32) -> Self {
         self.batch_size = batch_size.clamp(1, 1_000);
         self.max_attempts = max_attempts.clamp(1, 32);
+        self
+    }
+
+    #[must_use]
+    pub fn with_wake_signer(mut self, key_id: impl Into<String>, key: SigningKey) -> Self {
+        self.wake_signer = Some((key_id.into(), key));
         self
     }
 
@@ -127,10 +150,28 @@ impl PushOutboxWorker {
             .claim_due_wakes(now, now + self.lease_duration, self.batch_size)
             .await?;
         for wake in &wakes {
-            let provider_result = self
-                .provider
-                .send_silent_push(&wake.push_token, &wake.platform)
-                .await;
+            let provider_result = if let Some((key_id, key)) = &self.wake_signer {
+                match crate::SignedWakeMetadata::sign(
+                    &wake.tenant_id,
+                    &wake.device_id,
+                    &wake.command_id,
+                    key_id,
+                    key,
+                    now,
+                    now + Duration::minutes(5),
+                ) {
+                    Ok(metadata) => {
+                        self.provider
+                            .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
+                            .await
+                    }
+                    Err(error) => Err(PushError::Permanent(error.to_string())),
+                }
+            } else {
+                self.provider
+                    .send_silent_push(&wake.push_token, &wake.platform)
+                    .await
+            };
             let outcome = self.classify(wake, provider_result, now);
             self.store.record_wake_outcome(wake, &outcome, now).await?;
         }
@@ -192,6 +233,26 @@ mod tests {
     impl PushProvider for FixedProvider {
         async fn send_silent_push(&self, _token: &str, _platform: &str) -> Result<(), PushError> {
             self.0.lock().unwrap().remove(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct SignedRecordingProvider(Mutex<Vec<crate::SignedWakeMetadata>>);
+
+    #[async_trait]
+    impl PushProvider for SignedRecordingProvider {
+        async fn send_silent_push(&self, _token: &str, _platform: &str) -> Result<(), PushError> {
+            Err(PushError::Permanent("unsigned wake rejected".into()))
+        }
+
+        async fn send_signed_wake(
+            &self,
+            _token: &str,
+            _platform: &str,
+            metadata: &crate::SignedWakeMetadata,
+        ) -> Result<(), PushError> {
+            self.0.lock().unwrap().push(metadata.clone());
+            Ok(())
         }
     }
 
@@ -318,5 +379,22 @@ mod tests {
         assert_eq!(worker.drain_once(Utc::now()).await.unwrap(), 0);
         assert_eq!(store.wakes.lock().unwrap().len(), 1);
         assert!(store.outcomes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_signer_sends_bound_metadata_instead_of_unsigned_wake() {
+        let store = Arc::new(RecordingStore {
+            wakes: Mutex::new(vec![wake(0)]),
+            ..Default::default()
+        });
+        let provider = Arc::new(SignedRecordingProvider::default());
+        let worker = PushOutboxWorker::new(store, provider.clone())
+            .with_wake_signer("push-v1", SigningKey::from_bytes(&[8; 32]));
+        worker.drain_once(Utc::now()).await.unwrap();
+        let sent = provider.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].tenant_id, "tenant-a");
+        assert_eq!(sent[0].device_id, "device-a");
+        assert_eq!(sent[0].command_id, "command-a");
     }
 }

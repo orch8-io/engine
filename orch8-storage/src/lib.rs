@@ -6,6 +6,7 @@ pub mod encrypting;
 pub mod externalizing;
 pub mod postgres;
 pub mod sqlite;
+pub mod tenant_partition;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -43,6 +44,9 @@ use orch8_types::session::Session;
 use orch8_types::signal::Signal;
 use orch8_types::trigger::{TriggerDef, TriggerPollState};
 use orch8_types::worker::WorkerTask;
+
+/// Latest durable schema migration compiled into this release.
+pub const STORAGE_SCHEMA_VERSION: u32 = 78;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -301,8 +305,68 @@ impl Drop for ManifestLockGuard {
 pub trait InstanceStore: Send + Sync + 'static {
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError>;
 
+    /// Atomically enforce a tenant active-instance ceiling and insert one row.
+    /// Production backends override this with a transaction/tenant lock.
+    async fn create_instance_admitted(
+        &self,
+        instance: &TaskInstance,
+        max_active_instances: u64,
+    ) -> Result<(), StorageError> {
+        let active = self
+            .count_instances(&InstanceFilter {
+                tenant_id: Some(instance.tenant_id.clone()),
+                states: Some(vec![
+                    InstanceState::Scheduled,
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    InstanceState::Paused,
+                ]),
+                ..InstanceFilter::default()
+            })
+            .await?;
+        if active >= max_active_instances {
+            return Err(StorageError::QuotaExceeded(
+                "active-instance entitlement exhausted".into(),
+            ));
+        }
+        self.create_instance(instance).await
+    }
+
     async fn create_instances_batch(&self, instances: &[TaskInstance])
     -> Result<u64, StorageError>;
+
+    /// Atomic multi-tenant counterpart to [`Self::create_instance_admitted`].
+    async fn create_instances_batch_admitted(
+        &self,
+        instances: &[TaskInstance],
+        limits: &std::collections::HashMap<TenantId, u64>,
+    ) -> Result<u64, StorageError> {
+        let mut requested = std::collections::HashMap::<TenantId, u64>::new();
+        for instance in instances {
+            *requested.entry(instance.tenant_id.clone()).or_default() += 1;
+        }
+        for (tenant_id, count) in requested {
+            let active = self
+                .count_instances(&InstanceFilter {
+                    tenant_id: Some(tenant_id.clone()),
+                    states: Some(vec![
+                        InstanceState::Scheduled,
+                        InstanceState::Running,
+                        InstanceState::Waiting,
+                        InstanceState::Paused,
+                    ]),
+                    ..InstanceFilter::default()
+                })
+                .await?;
+            let limit = limits.get(&tenant_id).copied().unwrap_or(0);
+            if active.saturating_add(count) > limit {
+                return Err(StorageError::QuotaExceeded(
+                    "active-instance entitlement exhausted".into(),
+                ));
+            }
+        }
+        self.create_instances_batch(instances).await
+    }
 
     /// Persist a new instance while externalizing large `context.data` fields.
     ///
@@ -2172,6 +2236,20 @@ pub trait ResourceStore: Send + Sync + 'static {
         key: &str,
     ) -> Result<(), StorageError>;
 
+    /// Delete several instance-KV entries. Concrete SQL backends override
+    /// this with one bounded statement; the default preserves compatibility
+    /// for third-party backends.
+    async fn delete_instance_kv_batch(
+        &self,
+        instance_id: InstanceId,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        for key in keys {
+            self.delete_instance_kv(instance_id, key).await?;
+        }
+        Ok(())
+    }
+
     // === Shared agent knowledge ===
     //
     // Tenant-isolated, namespace-scoped records shared by workflows and agent
@@ -2186,6 +2264,18 @@ pub trait ResourceStore: Send + Sync + 'static {
         value: &serde_json::Value,
     ) -> Result<(), StorageError>;
 
+    async fn get_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        let mut records = self
+            .list_shared_knowledge(tenant_id, namespace, 10_000)
+            .await?;
+        Ok(records.remove(key))
+    }
+
     async fn list_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -2199,6 +2289,21 @@ pub trait ResourceStore: Send + Sync + 'static {
         namespace: &str,
         key: &str,
     ) -> Result<(), StorageError>;
+
+    /// Delete several records from one tenant namespace. Concrete SQL
+    /// backends override this to avoid an N+1 cleanup path.
+    async fn delete_shared_knowledge_batch(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        for key in keys {
+            self.delete_shared_knowledge(tenant_id, namespace, key)
+                .await?;
+        }
+        Ok(())
+    }
 
     // === Artifacts (durable binary blobs) ===
     //

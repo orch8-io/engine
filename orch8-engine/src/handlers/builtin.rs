@@ -296,6 +296,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("embed", super::memory::handle_embed);
     registry.register("memory_store", super::memory::handle_memory_store);
     registry.register("memory_search", super::memory::handle_memory_search);
+    registry.register("memory_delete", super::memory::handle_memory_delete);
     registry.register("human_review", super::human_review::handle_human_review);
     registry.register("self_modify", super::self_modify::handle_self_modify);
     registry.register("emit_event", super::emit_event::handle_emit_event);

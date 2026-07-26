@@ -28,8 +28,182 @@ use orch8_storage::artifacts::{ObjectArtifactStore, S3Config};
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::EngineConfig;
+use orch8_types::config::NodeRole;
 
+mod managed_control;
 mod telemetry;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrpcSurface {
+    Full,
+    Executor,
+    ContinuityGateway,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+struct NodeAssembly {
+    full_api: bool,
+    continuity_gateway: bool,
+    public_webhooks: bool,
+    engine: bool,
+    push_outbox: bool,
+    grpc: GrpcSurface,
+}
+
+const EXECUTOR_GRPC_RPCS: &[&str] = &[
+    "/orch8.Orch8Service/Health",
+    "/orch8.Orch8Service/PollTasks",
+    "/orch8.Orch8Service/CompleteTask",
+    "/orch8.Orch8Service/FailTask",
+    "/orch8.Orch8Service/HeartbeatTask",
+    "/orch8.Orch8Service/WorkerStream",
+    "/orch8.Orch8Service/ArtifactTransfer",
+    "/orch8.Orch8Service/IngestTelemetryBatch",
+];
+
+const GATEWAY_GRPC_RPCS: &[&str] = &[
+    "/orch8.Orch8Service/Health",
+    "/orch8.Orch8Service/ArtifactTransfer",
+];
+
+impl NodeAssembly {
+    const fn for_role(role: NodeRole) -> Self {
+        match role {
+            NodeRole::AllInOne => Self {
+                full_api: true,
+                continuity_gateway: false,
+                public_webhooks: true,
+                engine: true,
+                push_outbox: true,
+                grpc: GrpcSurface::Full,
+            },
+            NodeRole::Control => Self {
+                full_api: true,
+                continuity_gateway: false,
+                public_webhooks: true,
+                engine: false,
+                push_outbox: true,
+                grpc: GrpcSurface::Full,
+            },
+            NodeRole::Executor => Self {
+                full_api: false,
+                continuity_gateway: false,
+                public_webhooks: false,
+                engine: true,
+                push_outbox: false,
+                grpc: GrpcSurface::Executor,
+            },
+            NodeRole::Gateway => Self {
+                full_api: false,
+                continuity_gateway: true,
+                public_webhooks: false,
+                engine: false,
+                push_outbox: false,
+                grpc: GrpcSurface::ContinuityGateway,
+            },
+            NodeRole::Edge => Self {
+                full_api: false,
+                continuity_gateway: false,
+                public_webhooks: false,
+                engine: true,
+                push_outbox: false,
+                grpc: GrpcSurface::Disabled,
+            },
+        }
+    }
+}
+
+fn automatic_startup_preflight(
+    config: &EngineConfig,
+    assembly: NodeAssembly,
+) -> anyhow::Result<()> {
+    let mut errors = config.validate().err().unwrap_or_default();
+    if config.database.url.is_empty() {
+        errors.push("database.url must be configured for startup".into());
+    }
+    let http_addr = config.api.http_addr.parse::<std::net::SocketAddr>();
+    let grpc_addr = config.api.grpc_addr.parse::<std::net::SocketAddr>();
+    if let Err(error) = &http_addr {
+        errors.push(format!("api.http_addr is invalid: {error}"));
+    }
+    if assembly.grpc != GrpcSurface::Disabled {
+        if let Err(error) = &grpc_addr {
+            errors.push(format!("api.grpc_addr is invalid: {error}"));
+        }
+        if http_addr.as_ref().ok() == grpc_addr.as_ref().ok() && http_addr.is_ok() {
+            errors.push("api.http_addr and api.grpc_addr must use different sockets".into());
+        }
+    }
+
+    let tls_paths = [
+        (
+            "api.grpc_tls_cert_path",
+            config.api.grpc_tls_cert_path.as_str(),
+        ),
+        (
+            "api.grpc_tls_key_path",
+            config.api.grpc_tls_key_path.as_str(),
+        ),
+        (
+            "api.grpc_tls_client_ca_path",
+            config.api.grpc_tls_client_ca_path.as_str(),
+        ),
+    ];
+    let configured_tls_paths = tls_paths
+        .iter()
+        .filter(|(_, path)| !path.is_empty())
+        .count();
+    if configured_tls_paths != 0 && configured_tls_paths != tls_paths.len() {
+        errors.push("gRPC TLS requires certificate, private key, and client CA paths".into());
+    } else if configured_tls_paths == tls_paths.len() {
+        for (field, path) in tls_paths {
+            match std::fs::metadata(path) {
+                Ok(metadata) if metadata.is_file() && metadata.len() > 0 => {}
+                Ok(_) => errors.push(format!("{field} must reference a non-empty regular file")),
+                Err(error) => errors.push(format!("{field} cannot be read at {path:?}: {error}")),
+            }
+        }
+    }
+    if let Err(error) =
+        orch8_grpc::auth::WorkloadIdentityRegistry::from_json(&config.api.grpc_mtls_identities)
+    {
+        errors.push(format!("api.grpc_mtls_identities is invalid: {error}"));
+    }
+
+    if config.telemetry.otlp_enabled() {
+        let valid = config
+            .telemetry
+            .otlp_endpoint
+            .parse::<http::Uri>()
+            .is_ok_and(|uri| {
+                matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
+            });
+        if !valid {
+            errors.push("telemetry.otlp_endpoint must be an absolute HTTP(S) URI".into());
+        }
+    }
+    if let Ok(encoded) = std::env::var("ORCH8_FEDERATION_PEERS")
+        && let Err(error) = parse_federation_peers(&encoded)
+    {
+        errors.push(format!("ORCH8_FEDERATION_PEERS is invalid: {error}"));
+    }
+    let mobile_sync_enabled = std::env::var("ORCH8_MOBILE_SYNC_ENABLED")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true"));
+    if mobile_sync_enabled && !assembly.full_api {
+        errors.push("ORCH8_MOBILE_SYNC_ENABLED requires an all_in_one or control node".into());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "automatic startup preflight failed:\n  - {}",
+            errors.join("\n  - ")
+        )
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -77,12 +251,28 @@ async fn main() -> anyhow::Result<()> {
     let mut config = tokio::task::spawn_blocking(move || load_config(&config_path))
         .await
         .context("config loader panicked")??;
-    if let Err(errors) = config.validate() {
-        return Err(anyhow::anyhow!(
-            "configuration invalid: {}",
-            errors.join(", ")
-        ));
-    }
+    let assembly = NodeAssembly::for_role(config.node.role);
+    automatic_startup_preflight(&config, assembly)?;
+    let managed_control = if config.node.managed_control_endpoint.is_empty() {
+        None
+    } else {
+        let runtime_id = uuid::Uuid::parse_str(&config.node.managed_control_runtime_id)
+            .map(orch8_types::continuity::RuntimeId::from_uuid)
+            .context("invalid managed control runtime id")?;
+        Some(managed_control::ManagedControlConfig {
+            endpoint: config.node.managed_control_endpoint.clone(),
+            api_key: config.node.managed_control_api_key.clone(),
+            tenant_id: config.node.managed_control_tenant_id.clone(),
+            worker_id: config.node.managed_control_worker_id.clone(),
+            runtime_id,
+            kind: if config.node.role == NodeRole::Edge {
+                orch8_types::continuity::RuntimeKind::Edge
+            } else {
+                orch8_types::continuity::RuntimeKind::Server
+            },
+        })
+    };
+    config.node.managed_control_api_key = orch8_types::SecretString::default();
 
     // Initialize OTLP trace export (no-op unless ORCH8_OTLP_ENDPOINT /
     // [telemetry] otlp_endpoint is set) and logging.
@@ -104,6 +294,8 @@ async fn main() -> anyhow::Result<()> {
     // Graceful shutdown token. Shared with HTTP, gRPC, engine, and any long-lived
     // request handlers (SSE streams) via `AppState`.
     let shutdown_token = CancellationToken::new();
+    let managed_control_handle =
+        managed_control.map(|managed| managed_control::spawn(managed, shutdown_token.clone()));
 
     // Inject storage so `Open` transitions survive process restarts, then
     // rehydrate any previously persisted rows. Load failures are non-fatal —
@@ -127,11 +319,14 @@ async fn main() -> anyhow::Result<()> {
         cb_registry.clone(),
         engine_ready.clone(),
     );
-    let push_outbox_handle = spawn_push_outbox_worker(
-        storage.clone(),
-        app_state.push_provider.clone(),
-        shutdown_token.clone(),
-    );
+    let push_outbox_handle = assembly.push_outbox.then(|| {
+        spawn_push_outbox_worker(
+            storage.clone(),
+            app_state.push_provider.clone(),
+            app_state.continuity_crypto.as_deref(),
+            shutdown_token.clone(),
+        )
+    });
     let cors = build_cors_layer(&config.api.cors_origins);
     let require_tenant = config.api.require_tenant_header;
     let has_api_key = !config.api.api_key.is_empty();
@@ -153,47 +348,55 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn gRPC + signal handler before the HTTP middleware closure takes
     // ownership of the root-key digest.
-    let grpc_handle = spawn_grpc_server(
-        storage.clone(),
-        &config,
-        shutdown_token.clone(),
-        root_key_digest,
-        require_tenant,
-        engine_ready.clone(),
-    )
-    .await?;
+    let grpc_handle = if assembly.grpc == GrpcSurface::Disabled {
+        None
+    } else {
+        Some(
+            spawn_grpc_server(
+                storage.clone(),
+                &config,
+                shutdown_token.clone(),
+                root_key_digest,
+                require_tenant,
+                engine_ready.clone(),
+                assembly.grpc,
+            )
+            .await?,
+        )
+    };
     spawn_signal_handler(shutdown_token.clone())?;
 
-    // Circuit-breaker routes are merged separately (they need AppState with
-    // the registry). Nest under /api/v1 and also keep at root for backward
-    // compatibility, mirroring what `build_router` does for the other routes.
-    let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());
     // Storage handle for the auth middleware: per-tenant API keys are resolved
     // by hash against the database.
     let auth_storage = storage.clone();
-    let mut app = build_router(app_state.clone())
-        .nest(API_V1_PREFIX, cb_routes.clone())
-        .merge(orch8_api::mark_unversioned_deprecated(cb_routes))
-        // Metrics and Swagger UI must carry the same API key as the rest of the
-        // management surface. A tower `.layer()` only wraps routes registered
-        // *before* it, so these are merged here — ABOVE the auth layers — to be
-        // covered by them. (Previously they were merged below the layers and
-        // were therefore publicly reachable despite the comment claiming
-        // otherwise.) A Prometheus scraper / docs viewer must now present
-        // `x-api-key` (and, when ORCH8_REQUIRE_TENANT_HEADER is set, an
-        // `x-tenant-id`).
-        .merge(orch8_api::metrics::routes().with_state(metrics_state))
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+    let mut protected_app = if assembly.full_api {
+        // Circuit-breaker routes are server-owned because they share the live
+        // scheduler registry. Full control surfaces retain versioned and
+        // deprecated legacy mounts plus authenticated metrics/docs.
+        let cb_routes = orch8_api::circuit_breakers::routes().with_state(app_state.clone());
+        build_router(app_state.clone())
+            .nest(API_V1_PREFIX, cb_routes.clone())
+            .merge(orch8_api::mark_unversioned_deprecated(cb_routes))
+            .merge(orch8_api::metrics::routes().with_state(metrics_state))
+            .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+    } else if assembly.continuity_gateway {
+        orch8_api::build_continuity_gateway_router(app_state.clone())
+    } else {
+        axum::Router::new()
+    };
+    protected_app = protected_app
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::tenant_middleware(require_tenant, req, next)
         }))
         .layer(axum::middleware::from_fn(move |req, next| {
             orch8_api::auth::api_key_middleware(auth_storage.clone(), root_key_digest, req, next)
-        }))
-        // Health probes + inbound webhooks stay public: merged *after* the auth
-        // layers so k8s/LB liveness checks and third-party webhook callers keep
-        // working when ORCH8_API_KEY / ORCH8_REQUIRE_TENANT_HEADER are set.
-        .merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()))
+        }));
+    if assembly.public_webhooks {
+        protected_app =
+            protected_app.merge(orch8_api::webhooks::public_routes().with_state(app_state.clone()));
+    }
+    let mut app = protected_app
+        // Health probes stay public for every role and reveal no route surface.
         .merge(orch8_api::health::routes().with_state(app_state))
         .layer(axum::middleware::from_fn(
             orch8_api::request_id::request_id_middleware,
@@ -229,13 +432,15 @@ async fn main() -> anyhow::Result<()> {
         http_addr
     );
 
-    let engine_handle = spawn_engine(
-        storage.clone(),
-        &config,
-        shutdown_token.clone(),
-        cb_registry.clone(),
-        engine_ready.clone(),
-    );
+    let engine_handle = assembly.engine.then(|| {
+        spawn_engine(
+            storage.clone(),
+            &config,
+            shutdown_token.clone(),
+            cb_registry.clone(),
+            engine_ready.clone(),
+        )
+    });
 
     tracing::info!("Engine ready");
 
@@ -250,7 +455,14 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("HTTP server error")?;
 
-    drain_shutdown(engine_handle, grpc_handle, push_outbox_handle, cb_registry).await;
+    drain_shutdown(
+        engine_handle,
+        grpc_handle,
+        push_outbox_handle,
+        managed_control_handle,
+        cb_registry,
+    )
+    .await;
 
     // Flush any spans still buffered in the OTLP batch exporter. After the
     // engine has drained so the last step spans make it out. Best-effort: a
@@ -312,6 +524,7 @@ fn build_app_state(
         publisher: None,
         push_provider,
         mobile_sync_enabled,
+        entitlements: orch8_api::entitlements::unlimited_provider(),
         builtin_handlers: std::sync::Arc::new(orch8_api::builtin_handler_names()),
         engine_ready,
         continuity_crypto,
@@ -645,6 +858,7 @@ async fn spawn_grpc_server(
     root_key_digest: Option<[u8; 32]>,
     require_tenant: bool,
     engine_ready: Arc<std::sync::atomic::AtomicBool>,
+    surface: GrpcSurface,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let grpc_addr: std::net::SocketAddr = config
         .api
@@ -659,12 +873,63 @@ async fn spawn_grpc_server(
         .await
         .context("Failed to bind gRPC listener")?;
 
+    let tls_paths = [
+        config.api.grpc_tls_cert_path.as_str(),
+        config.api.grpc_tls_key_path.as_str(),
+        config.api.grpc_tls_client_ca_path.as_str(),
+    ];
+    let configured_tls_paths = tls_paths.iter().filter(|path| !path.is_empty()).count();
+    if configured_tls_paths != 0 && configured_tls_paths != tls_paths.len() {
+        anyhow::bail!(
+            "gRPC mTLS requires grpc_tls_cert_path, grpc_tls_key_path, and grpc_tls_client_ca_path"
+        );
+    }
+    if configured_tls_paths == 0 && !config.api.grpc_mtls_identities.trim().is_empty() {
+        anyhow::bail!("grpc_mtls_identities requires gRPC mTLS transport configuration");
+    }
+    let workload_identities =
+        orch8_grpc::auth::WorkloadIdentityRegistry::from_json(&config.api.grpc_mtls_identities)
+            .map_err(anyhow::Error::msg)
+            .context("Invalid grpc_mtls_identities")?;
+    let tls_config = if configured_tls_paths == tls_paths.len() {
+        let (certificate, private_key, client_ca) = tokio::try_join!(
+            tokio::fs::read(&config.api.grpc_tls_cert_path),
+            tokio::fs::read(&config.api.grpc_tls_key_path),
+            tokio::fs::read(&config.api.grpc_tls_client_ca_path),
+        )
+        .context("Failed to read gRPC mTLS certificate material")?;
+        Some(
+            tonic::transport::ServerTlsConfig::new()
+                .identity(tonic::transport::Identity::from_pem(
+                    certificate,
+                    private_key,
+                ))
+                .client_ca_root(tonic::transport::Certificate::from_pem(client_ca)),
+        )
+    } else {
+        None
+    };
+
     let grpc_service =
         Orch8GrpcService::with_max_context_bytes(storage.clone(), config.engine.max_context_bytes);
-    let auth_layer = orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant);
+    let mut auth_layer =
+        orch8_grpc::auth::GrpcAuthLayer::new(storage, root_key_digest, require_tenant)
+            .with_workload_identities(workload_identities);
+    auth_layer = match surface {
+        GrpcSurface::Full => auth_layer,
+        GrpcSurface::Executor => auth_layer.with_allowed_rpc_paths(EXECUTOR_GRPC_RPCS),
+        GrpcSurface::ContinuityGateway => auth_layer.with_allowed_rpc_paths(GATEWAY_GRPC_RPCS),
+        GrpcSurface::Disabled => anyhow::bail!("disabled gRPC surface cannot be spawned"),
+    };
+    let mut server = tonic::transport::Server::builder();
+    if let Some(tls_config) = tls_config {
+        server = server
+            .tls_config(tls_config)
+            .context("Invalid gRPC mTLS certificate material")?;
+    }
     let handle = tokio::spawn(async move {
         tracing::info!("gRPC server listening on {}", grpc_addr);
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = server
             .layer(auth_layer)
             .add_service(Orch8ServiceServer::new(grpc_service))
             .serve_with_incoming_shutdown(
@@ -716,10 +981,18 @@ fn spawn_engine(
 fn spawn_push_outbox_worker(
     storage: Arc<dyn StorageBackend>,
     provider: Arc<dyn orch8_push::PushProvider>,
+    crypto: Option<&orch8_api::ContinuityCrypto>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let store: Arc<dyn orch8_push::PushOutboxStore> = storage;
     let worker = orch8_push::PushOutboxWorker::new(store, provider);
+    let worker = match crypto {
+        Some(crypto) => worker.with_wake_signer(
+            format!("push-{}", crypto.signing_key_id),
+            crypto.signing_key.clone(),
+        ),
+        None => worker,
+    };
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -737,9 +1010,10 @@ fn spawn_push_outbox_worker(
 }
 
 async fn drain_shutdown(
-    engine_handle: tokio::task::JoinHandle<()>,
-    grpc_handle: tokio::task::JoinHandle<()>,
-    push_outbox_handle: tokio::task::JoinHandle<()>,
+    engine_handle: Option<tokio::task::JoinHandle<()>>,
+    grpc_handle: Option<tokio::task::JoinHandle<()>>,
+    push_outbox_handle: Option<tokio::task::JoinHandle<()>>,
+    managed_control_handle: Option<tokio::task::JoinHandle<()>>,
     cb_registry: Arc<CircuitBreakerRegistry>,
 ) {
     // Wait for engine and gRPC to finish draining (with timeout).
@@ -751,16 +1025,28 @@ async fn drain_shutdown(
     // rehydrated against at boot.
     let drain_timeout = tokio::time::Duration::from_secs(30);
     if tokio::time::timeout(drain_timeout, async {
-        let (engine_result, grpc_result, push_result) =
-            tokio::join!(engine_handle, grpc_handle, push_outbox_handle);
-        if let Err(error) = engine_result {
-            tracing::error!(%error, "engine task failed while draining shutdown");
-        }
-        if let Err(error) = grpc_result {
-            tracing::error!(%error, "gRPC task failed while draining shutdown");
-        }
-        if let Err(error) = push_result {
-            tracing::error!(%error, "push outbox task failed while draining shutdown");
+        let wait = |handle: Option<tokio::task::JoinHandle<()>>| async move {
+            if let Some(handle) = handle {
+                handle.await
+            } else {
+                Ok(())
+            }
+        };
+        let (engine_result, grpc_result, push_result, managed_result) = tokio::join!(
+            wait(engine_handle),
+            wait(grpc_handle),
+            wait(push_outbox_handle),
+            wait(managed_control_handle)
+        );
+        for (service, result) in [
+            ("engine", engine_result),
+            ("gRPC", grpc_result),
+            ("push outbox", push_result),
+            ("managed control", managed_result),
+        ] {
+            if let Err(error) = result {
+                tracing::error!(%error, %service, "service task failed while draining shutdown");
+            }
         }
     })
     .await
@@ -802,7 +1088,7 @@ fn load_config(path: &str) -> anyhow::Result<EngineConfig> {
             return Err(anyhow::anyhow!("Failed to read config file {path}: {e}"));
         }
     };
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config)?;
     Ok(config)
 }
 
@@ -825,7 +1111,7 @@ fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn apply_env_overrides(config: &mut EngineConfig) {
+fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
         config.artifacts.backend = val;
     }
@@ -882,6 +1168,37 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     }
     if let Ok(val) = std::env::var("ORCH8_GRPC_ADDR") {
         config.api.grpc_addr = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_NODE_ROLE") {
+        config.node.role = serde_json::from_value(serde_json::Value::String(val))
+            .context("ORCH8_NODE_ROLE must be all_in_one, control, executor, gateway, or edge")?;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_ENDPOINT") {
+        config.node.managed_control_endpoint = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_API_KEY") {
+        config.node.managed_control_api_key = val.into();
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_TENANT_ID") {
+        config.node.managed_control_tenant_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_WORKER_ID") {
+        config.node.managed_control_worker_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_MANAGED_CONTROL_RUNTIME_ID") {
+        config.node.managed_control_runtime_id = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CERT_PATH") {
+        config.api.grpc_tls_cert_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_KEY_PATH") {
+        config.api.grpc_tls_key_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_TLS_CLIENT_CA_PATH") {
+        config.api.grpc_tls_client_ca_path = val;
+    }
+    if let Ok(val) = std::env::var("ORCH8_GRPC_MTLS_IDENTITIES") {
+        config.api.grpc_mtls_identities = val;
     }
     if let Ok(val) = std::env::var("ORCH8_CORS_ORIGINS") {
         config.api.cors_origins = val;
@@ -949,6 +1266,7 @@ fn apply_env_overrides(config: &mut EngineConfig) {
     {
         config.database.search_path = Some(val);
     }
+    Ok(())
 }
 
 /// Initialize OTLP trace export, then the tracing subscriber (which needs the
@@ -1039,9 +1357,10 @@ fn print_startup_banner(config: &EngineConfig, insecure_auth: bool, insecure_sto
     let tick = config.engine.tick_interval_ms;
     let batch = config.engine.batch_size;
     let concurrency = config.engine.max_concurrent_steps;
+    let role = config.node.role;
 
     tracing::info!("Starting Orch8.io engine v{version}");
-    tracing::info!("  storage={backend}  http={http}  grpc={grpc}");
+    tracing::info!("  role={role:?}  storage={backend}  http={http}  grpc={grpc}");
     tracing::info!("  auth={auth}  encryption={encryption}  tenant-header={tenant}");
     tracing::info!("  tick={tick}ms  batch={batch}  max-concurrent-steps={concurrency}");
     tracing::info!("© Oleksii Vasylenko Tecnologia LTDA — BUSL-1.1 — https://orch8.io");
@@ -1100,6 +1419,46 @@ fn build_cors_layer(origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_roles_select_disjoint_hardened_surfaces() {
+        let all = NodeAssembly::for_role(NodeRole::AllInOne);
+        assert!(all.full_api && all.engine && all.push_outbox);
+        assert_eq!(all.grpc, GrpcSurface::Full);
+
+        let executor = NodeAssembly::for_role(NodeRole::Executor);
+        assert!(!executor.full_api && !executor.continuity_gateway);
+        assert!(!executor.public_webhooks && !executor.push_outbox && executor.engine);
+        assert_eq!(executor.grpc, GrpcSurface::Executor);
+
+        let control = NodeAssembly::for_role(NodeRole::Control);
+        assert!(control.full_api && control.push_outbox && !control.engine);
+        assert_eq!(control.grpc, GrpcSurface::Full);
+
+        let gateway = NodeAssembly::for_role(NodeRole::Gateway);
+        assert!(gateway.continuity_gateway);
+        assert!(!gateway.full_api && !gateway.engine && !gateway.push_outbox);
+        assert_eq!(gateway.grpc, GrpcSurface::ContinuityGateway);
+
+        let edge = NodeAssembly::for_role(NodeRole::Edge);
+        assert!(edge.engine && !edge.full_api && !edge.public_webhooks);
+        assert_eq!(edge.grpc, GrpcSurface::Disabled);
+    }
+
+    #[test]
+    fn automatic_preflight_aggregates_ports_tls_and_otlp_errors() {
+        let mut config = EngineConfig::default();
+        config.api.grpc_addr = config.api.http_addr.clone();
+        config.api.grpc_tls_cert_path = "/definitely/missing/server.crt".into();
+        config.telemetry.otlp_endpoint = "not-an-absolute-uri".into();
+        let error =
+            automatic_startup_preflight(&config, NodeAssembly::for_role(NodeRole::AllInOne))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("different sockets"));
+        assert!(error.contains("certificate, private key, and client CA"));
+        assert!(error.contains("absolute HTTP(S) URI"));
+    }
     use serial_test::serial;
 
     #[test]
@@ -1144,7 +1503,7 @@ mod tests {
             std::env::remove_var("ORCH8_OTLP_PROTOCOL");
         }
         let mut config = EngineConfig::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config).unwrap();
         assert!(config.telemetry.otlp_endpoint.is_empty());
         assert_eq!(config.telemetry.otlp_protocol, "grpc");
         assert!(!config.telemetry.otlp_enabled());
@@ -1157,7 +1516,7 @@ mod tests {
             std::env::set_var("ORCH8_OTLP_PROTOCOL", "grpc");
         }
         let mut config = EngineConfig::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config).unwrap();
         assert_eq!(config.telemetry.otlp_endpoint, "http://collector:4317");
         assert_eq!(config.telemetry.otlp_protocol, "grpc");
         assert!(config.telemetry.otlp_enabled());
@@ -1264,7 +1623,7 @@ mod tests {
             std::env::remove_var("ORCH8_RATE_LIMIT_RPS");
         }
         let mut config = EngineConfig::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config).unwrap();
         assert_eq!(
             config.engine.batch_size, default_batch,
             "unparseable ORCH8_BATCH_SIZE must be ignored, keeping the default"
@@ -1280,7 +1639,7 @@ mod tests {
             std::env::set_var("ORCH8_RATE_LIMIT_RPS", "42");
         }
         let mut config = EngineConfig::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config).unwrap();
         assert_eq!(
             config.api.max_concurrent_requests, 42,
             "alias must be consulted when the preferred var fails to parse"
@@ -1293,7 +1652,7 @@ mod tests {
             std::env::set_var("ORCH8_MAX_CONCURRENT_REQUESTS", "7");
         }
         let mut config = EngineConfig::default();
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config).unwrap();
         assert_eq!(config.api.max_concurrent_requests, 7);
 
         #[allow(unsafe_code)]
@@ -1328,6 +1687,7 @@ mod tests {
             None,
             false,
             engine_ready,
+            GrpcSurface::Full,
         )
         .await;
         assert!(

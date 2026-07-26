@@ -424,7 +424,7 @@ fn lint_handler_params(
             check_required_str(block_id, handler, params, "key", warnings);
             check_required(block_id, handler, params, "value", warnings);
         }
-        "get_state" | "delete_state" => {
+        "get_state" | "delete_state" | "memory_delete" => {
             check_required_str(block_id, handler, params, "key", warnings);
         }
         "embed" => {

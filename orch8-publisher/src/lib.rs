@@ -8,6 +8,7 @@
 
 pub mod capsule;
 pub mod cdn;
+pub mod distribution;
 pub mod grant;
 pub mod manifest;
 pub mod package;
@@ -15,6 +16,12 @@ pub mod publish;
 pub mod registry;
 
 pub use cdn::{CdnBackend, CdnError, MemoryCdnBackend, S3CdnBackend};
+pub use distribution::{
+    AttestationPredicate, AttestationSubject, ChannelRelease, DeltaApplication, DeltaPackage,
+    DependencyKind, DependencyLockfile, DistributionError, LockedDependency,
+    PrivatePackageRegistryPublisher, PrivateRegistryPolicy, RegistryAction, ReleaseChannel,
+    ReleaseChannelName, SignedReleaseChannel, SupplyChainAttestation, hash_files,
+};
 pub use manifest::{
     ManifestBody, ManifestGenerator, ManifestRemoved, ManifestSequence, ManifestSigningKey,
     SignedManifest,

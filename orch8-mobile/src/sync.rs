@@ -445,11 +445,9 @@ impl SyncOrchestrator {
     async fn reconcile_removed(
         &self,
         manifest: &Manifest,
-        local_sequences: &HashMap<String, SequenceDefinition>,
+        local_sequences: &HashMap<String, i32>,
     ) -> Result<u32, MobileError> {
         let mut removed_count = 0u32;
-        let manifest_names: HashSet<String> =
-            manifest.sequences.iter().map(|s| s.name.clone()).collect();
 
         // Reconcile removed entries.
         let cutoff = Utc::now() - chrono::Duration::days(30);
@@ -471,8 +469,13 @@ impl SyncOrchestrator {
         let last_sync = self.get_last_sync_ts().await?;
         let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
         if last_sync.is_none_or(|t| t < thirty_days_ago) {
+            let manifest_names: HashSet<&str> = manifest
+                .sequences
+                .iter()
+                .map(|sequence| sequence.name.as_str())
+                .collect();
             for name in local_sequences.keys() {
-                if !manifest_names.contains(name) {
+                if !manifest_names.contains(name.as_str()) {
                     if let Err(e) = self.remove_local_sequence(name).await {
                         warn!(name = %name, error = %e, "failed to remove stale local sequence");
                     } else {
@@ -494,7 +497,7 @@ impl SyncOrchestrator {
         manifest: &Manifest,
         auth: &SyncAuth,
         registered_handlers: &HashSet<String>,
-        local_sequences: &HashMap<String, SequenceDefinition>,
+        local_sequences: &HashMap<String, i32>,
         trusted_keys: &mut HashMap<String, VerifyingKey>,
     ) -> Result<(u32, u32, u32, u32), MobileError> {
         let mut added = 0u32;
@@ -535,9 +538,9 @@ impl SyncOrchestrator {
             // discover we're up to date wastes a device's bandwidth/battery
             // on every sync for every sequence that hasn't changed — which,
             // in steady state, is nearly all of them.
-            let existing = local_sequences.get(&entry.name);
-            if let Some(existing_seq) = existing
-                && existing_seq.version >= entry.version
+            let existing_version = local_sequences.get(&entry.name);
+            if let Some(existing_version) = existing_version
+                && *existing_version >= entry.version
             {
                 skipped += 1;
                 continue;
@@ -641,8 +644,12 @@ impl SyncOrchestrator {
                 }
             };
 
+            // Persistence serializes the owned definition into SQLite fields.
+            // Release the capped raw response first so its allocation (up to
+            // 5 MiB) does not overlap those temporary serialization buffers.
+            drop(seq_json);
             self.upsert_sequence(&seq).await?;
-            if existing.is_some() {
+            if existing_version.is_some() {
                 updated += 1;
             } else {
                 added += 1;
@@ -791,23 +798,16 @@ impl SyncOrchestrator {
         Ok(text)
     }
 
-    async fn list_local_sequences(
-        &self,
-    ) -> Result<HashMap<String, SequenceDefinition>, MobileError> {
+    async fn list_local_sequences(&self) -> Result<HashMap<String, i32>, MobileError> {
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
-        let seqs = self
-            .backend
-            .list_sequences(Some(&tenant), Some(&ns), 1000, 0)
+        self.mobile_storage
+            .list_local_sequence_versions(&tenant, &ns, 1000)
             .await
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
-            })?;
-        let mut map = HashMap::new();
-        for seq in seqs {
-            map.insert(seq.name.clone(), seq);
-        }
-        Ok(map)
+            })
+            .map(|versions| versions.into_iter().collect())
     }
 
     async fn remove_local_sequence(&self, name: &str) -> Result<(), MobileError> {
@@ -874,26 +874,18 @@ impl SyncOrchestrator {
         }
         let tenant = crate::mobile_tenant_id();
         let ns = Namespace::new("default");
-        let seqs = self
-            .backend
-            .list_sequences(Some(&tenant), Some(&ns), u32::MAX, 0)
+        let candidates = self
+            .mobile_storage
+            .list_excess_oldest_local_sequences(&tenant, &ns, self.max_stored_sequences)
             .await
             .map_err(|e| MobileError::Storage {
                 message: e.to_string(),
             })?;
-        #[allow(clippy::cast_possible_truncation)]
-        let count = seqs.len() as u32;
-        if count <= self.max_stored_sequences {
-            return Ok(());
-        }
-        let mut sorted = seqs;
-        sorted.sort_by_key(|s| s.created_at);
-        let to_evict = (count - self.max_stored_sequences) as usize;
-        for seq in sorted.iter().take(to_evict) {
-            if let Err(e) = self.backend.delete_sequence(seq.id).await {
-                warn!(name = %seq.name, error = %e, "failed to evict excess sequence");
+        for (sequence_id, name) in candidates {
+            if let Err(e) = self.backend.delete_sequence(sequence_id).await {
+                warn!(%name, error = %e, "failed to evict excess sequence");
             } else {
-                info!(name = %seq.name, "evicted oldest sequence (over limit)");
+                info!(%name, "evicted oldest sequence (over limit)");
             }
         }
         Ok(())
@@ -918,24 +910,28 @@ impl SyncOrchestrator {
     #[allow(clippy::unused_self)]
     fn version_meets_min(&self, sdk: &str, min: &str) -> bool {
         // Fail closed: a version string with an unparseable component must not
-        // silently compare as if the component were absent (`filter_map` would
-        // parse "0.4.x" as [0, 4]).
-        let parse =
-            |v: &str| -> Option<Vec<u32>> { v.split('.').map(|s| s.parse::<u32>().ok()).collect() };
-        let (Some(sdk_parts), Some(min_parts)) = (parse(sdk), parse(min)) else {
-            return false;
-        };
-        for i in 0..min_parts.len().max(sdk_parts.len()) {
-            let s = sdk_parts.get(i).copied().unwrap_or(0);
-            let m = min_parts.get(i).copied().unwrap_or(0);
-            if s > m {
-                return true;
+        // silently compare as if the component were absent. Keep consuming
+        // both iterators after the first difference so a late invalid component
+        // still rejects the entire version without allocating component vectors.
+        let mut sdk_parts = sdk.split('.');
+        let mut min_parts = min.split('.');
+        let mut ordering = std::cmp::Ordering::Equal;
+        loop {
+            let (sdk_part, min_part) = (sdk_parts.next(), min_parts.next());
+            if sdk_part.is_none() && min_part.is_none() {
+                break;
             }
-            if s < m {
+            let Some(sdk_part) = sdk_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
                 return false;
+            };
+            let Some(min_part) = min_part.map_or(Some(0), |part| part.parse::<u32>().ok()) else {
+                return false;
+            };
+            if ordering == std::cmp::Ordering::Equal {
+                ordering = sdk_part.cmp(&min_part);
             }
         }
-        true
+        ordering != std::cmp::Ordering::Less
     }
 }
 
@@ -1033,6 +1029,8 @@ mod tests {
 
         assert!(!orch.version_meets_min("0.4.x", "0.3.0"));
         assert!(!orch.version_meets_min("0.4.0", "0.4.x"));
+        assert!(!orch.version_meets_min("1.x", "0.9"));
+        assert!(!orch.version_meets_min("0.9", "1.x"));
         assert!(!orch.version_meets_min("", "0.1.0"));
     }
 
@@ -1219,6 +1217,32 @@ mod tests {
             on_cancel: None,
             created_at,
         }
+    }
+
+    #[tokio::test]
+    async fn local_sequence_projection_keeps_latest_version() {
+        let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mobile_storage = Arc::new(MobileStorage::new(sqlite.clone()));
+        let backend: Arc<dyn StorageBackend> = sqlite.clone();
+        let orch = SyncOrchestrator::new(
+            mobile_storage,
+            backend.clone(),
+            RootKey {
+                pubkey: VerifyingKey::from_bytes(&[0u8; 32]).unwrap(),
+            },
+            "0.4.0".to_string(),
+            10,
+        );
+
+        let mut version_one = make_test_sequence("shared", Utc::now());
+        version_one.version = 1;
+        backend.create_sequence(&version_one).await.unwrap();
+        let mut version_three = make_test_sequence("shared", Utc::now());
+        version_three.version = 3;
+        backend.create_sequence(&version_three).await.unwrap();
+
+        let versions = orch.list_local_sequences().await.unwrap();
+        assert_eq!(versions, HashMap::from([("shared".to_string(), 3)]));
     }
 
     #[tokio::test]

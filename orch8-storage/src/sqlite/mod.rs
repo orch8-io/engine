@@ -627,11 +627,27 @@ impl crate::InstanceStore for SqliteStorage {
         instances::create(self, instance).await
     }
 
+    async fn create_instance_admitted(
+        &self,
+        instance: &TaskInstance,
+        max_active_instances: u64,
+    ) -> Result<(), StorageError> {
+        instances::create_admitted(self, instance, max_active_instances).await
+    }
+
     async fn create_instances_batch(
         &self,
         instances: &[TaskInstance],
     ) -> Result<u64, StorageError> {
         instances::create_batch(self, instances).await
+    }
+
+    async fn create_instances_batch_admitted(
+        &self,
+        instances: &[TaskInstance],
+        limits: &std::collections::HashMap<TenantId, u64>,
+    ) -> Result<u64, StorageError> {
+        instances::create_batch_admitted(self, instances, limits).await
     }
 
     async fn create_instance_externalized(
@@ -2437,6 +2453,14 @@ impl crate::ResourceStore for SqliteStorage {
         self.delete_instance_kv_impl(instance_id, key).await
     }
 
+    async fn delete_instance_kv_batch(
+        &self,
+        instance_id: InstanceId,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        self.delete_instance_kv_batch_impl(instance_id, keys).await
+    }
+
     async fn set_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -2458,6 +2482,16 @@ impl crate::ResourceStore for SqliteStorage {
             .await
     }
 
+    async fn get_shared_knowledge(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        self.get_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
+    }
+
     async fn delete_shared_knowledge(
         &self,
         tenant_id: &str,
@@ -2465,6 +2499,16 @@ impl crate::ResourceStore for SqliteStorage {
         key: &str,
     ) -> Result<(), StorageError> {
         self.delete_shared_knowledge_impl(tenant_id, namespace, key)
+            .await
+    }
+
+    async fn delete_shared_knowledge_batch(
+        &self,
+        tenant_id: &str,
+        namespace: &str,
+        keys: &[String],
+    ) -> Result<(), StorageError> {
+        self.delete_shared_knowledge_batch_impl(tenant_id, namespace, keys)
             .await
     }
 

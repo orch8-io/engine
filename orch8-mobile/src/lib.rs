@@ -9,6 +9,7 @@
     clippy::used_underscore_binding,
 )]
 
+mod capabilities;
 mod config;
 mod continuity;
 mod error;
@@ -16,6 +17,7 @@ mod handlers;
 mod lifecycle;
 mod memory;
 mod notifier;
+mod privacy;
 mod runtime;
 mod storage;
 mod sync;
@@ -41,10 +43,15 @@ use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::sequence::SequenceDefinition;
 
+pub use crate::capabilities::{
+    CapabilityDescriptor, CapabilityHost, CapabilityRequest, CapabilityResponse, DeviceCapability,
+    DeviceToolBridge, standard_capability_descriptors,
+};
 pub use crate::config::MobileEngineConfig;
 pub use crate::continuity::{CapsuleSigner, ContinuityExportResult, ContinuityImportResult};
 pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
+pub use crate::privacy::{DisclosureSurface, PrivacyError, ProtectedFieldBoundary};
 pub use crate::sync::{RootKey, SyncResult};
 pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
 
@@ -214,6 +221,22 @@ pub struct MobileEngine {
 
 /// Maximum response body size for `load_sequences_from_url`.
 const MAX_SEQUENCES_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+
+fn parse_sequence_batch(body: &[u8]) -> Result<Vec<(usize, SequenceDefinition)>, MobileError> {
+    let raw_sequences: Vec<&serde_json::value::RawValue> =
+        serde_json::from_slice(body).map_err(|error| MobileError::InvalidInput {
+            message: format!("parse sequences JSON: {error}"),
+        })?;
+    let mut sequences = Vec::with_capacity(raw_sequences.len());
+    for raw in raw_sequences {
+        let sequence =
+            serde_json::from_str(raw.get()).map_err(|error| MobileError::InvalidInput {
+                message: format!("parse sequences JSON: {error}"),
+            })?;
+        sequences.push((raw.get().len(), sequence));
+    }
+    Ok(sequences)
+}
 
 fn build_mobile_http_client(timeout: Duration) -> reqwest::Client {
     // The builder only uses constants and a validated duration, so failure is
@@ -660,7 +683,7 @@ impl MobileEngine {
         destination_runtime_id: String,
         destination_instance_id: String,
     ) -> Result<(), MobileError> {
-        self.run_with_timeout(async {
+        let result = self.run_with_timeout(async {
             continuity::activate_capsule(
                 self.storage.as_ref(),
                 &capsule_id,
@@ -668,7 +691,11 @@ impl MobileEngine {
                 &destination_instance_id,
             )
             .await
-        })
+        });
+        if result.is_ok() {
+            self.tick_controller.wake();
+        }
+        result
     }
 
     /// Export a paused or waiting device-owned execution for a destination
@@ -710,6 +737,10 @@ impl MobileEngine {
             }
 
             let seq: SequenceDefinition = serde_json::from_str(&json)?;
+            // `SequenceDefinition` owns everything needed below. Release the
+            // capped UniFFI input before metadata queries and SQLite serialize
+            // the definition again.
+            drop(json);
 
             {
                 let tenant = mobile_tenant_id();
@@ -813,20 +844,20 @@ impl MobileEngine {
                 }
             })?;
 
-            let sequences: Vec<SequenceDefinition> =
-                serde_json::from_slice(&body_bytes).map_err(|e| MobileError::InvalidInput {
-                    message: format!("parse sequences JSON: {e}"),
-                })?;
+            // Validate the complete batch before the first write, retaining
+            // each element's original byte length instead of serializing every
+            // owned workflow tree again merely to enforce its size limit.
+            let sequences = parse_sequence_batch(&body_bytes)?;
+            // Parsed definitions own their data, so the capped 5 MiB response
+            // no longer needs to overlap SQLite persistence.
+            drop(body_bytes);
 
             let mut loaded = 0u32;
-            for seq in sequences {
-                let json = serde_json::to_string(&seq).map_err(|e| MobileError::Engine {
-                    message: format!("re-serialize sequence: {e}"),
-                })?;
-                if json.len() as u64 > self.config.max_sequence_size_bytes {
+            for (json_size, seq) in sequences {
+                if json_size as u64 > self.config.max_sequence_size_bytes {
                     warn!(
                         name = %seq.name,
-                        size = json.len(),
+                        size = json_size,
                         limit = self.config.max_sequence_size_bytes,
                         "skipping oversized sequence"
                     );
@@ -1000,6 +1031,28 @@ mod tests {
     use super::*;
     use orch8_types::instance::TaskInstance;
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn sequence_batch_keeps_raw_sizes_without_reserializing() {
+        let first = r#"{"id":"00000000-0000-0000-0000-000000000001","tenant_id":"mobile","namespace":"default","name":"one","version":1,"deprecated":false,"blocks":[],"created_at":"2026-01-01T00:00:00Z"}"#;
+        let second = r#"{"id":"00000000-0000-0000-0000-000000000002","tenant_id":"mobile","namespace":"default","name":"two","version":2,"deprecated":false,"blocks":[],"created_at":"2026-01-02T00:00:00Z"}"#;
+        let body = format!("[{first},{second}]");
+
+        let parsed = parse_sequence_batch(body.as_bytes()).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, first.len());
+        assert_eq!(parsed[0].1.name, "one");
+        assert_eq!(parsed[1].0, second.len());
+        assert_eq!(parsed[1].1.name, "two");
+    }
+
+    #[test]
+    fn sequence_batch_rejects_invalid_definition_before_returning_any() {
+        let result = parse_sequence_batch(br#"[{"name":"incomplete"}]"#);
+
+        assert!(matches!(result, Err(MobileError::InvalidInput { .. })));
+    }
 
     #[test]
     fn default_config_has_sane_values() {

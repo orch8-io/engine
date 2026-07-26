@@ -17,9 +17,10 @@ The first client frame must be `WorkerStreamOpen` and declares:
 The server replies with `WorkerStreamHello`, containing the exact feature
 intersection and authoritative bounds. Version mismatches fail with
 `FAILED_PRECONDITION`; oversized or malformed opens fail before task claims.
-Version 1 supports `task_delivery`, `completion`, `failure`, `heartbeat`, and
-`cancellation`. `task_delivery` is mandatory. Operations not negotiated by the
-client are rejected.
+Version 1 supports `task_delivery`, `completion`, `failure`, `heartbeat`,
+`cancellation`, `runtime_capabilities`, `draining`, and
+`placement_commands`. `task_delivery` is mandatory. Operations not negotiated
+by the client are rejected.
 
 Current limits are 256 in-flight tasks, 1 MiB per protocol frame, 64 handlers,
 and a recommended 15-second heartbeat interval. A client controls backpressure
@@ -47,6 +48,31 @@ recovered by the existing stale-worker reaper and can be claimed by a later
 session. Clients must treat task identifiers as idempotency keys and reconnect
 with a new open handshake.
 
+## Durable runtime sessions and control
+
+A worker can attach a canonical `RuntimeCapabilities` advertisement to its
+open frame and refresh it with `RuntimeHeartbeat`. The authenticated tenant is
+authoritative; permissive development listeners may instead use the open
+frame's explicit tenant. Each accepted advertisement is persisted in the
+tenant-scoped runtime registry with a server-authored observation time and a
+45-second lease. Handler/plugin/credential/region/hardware lists are bounded,
+and the advertisement must include every handler claimed by the session.
+
+Runtime self-reporting cannot elevate trust: the stream stores advertisements
+as `registered` even if a client claims `signed` or `attested`. Higher trust
+remains a separate control-plane decision. Heartbeats cannot swap the
+session's runtime ID. Expired leases remain historical evidence but are
+ineligible for placement through the existing placement engine.
+
+The stream also consumes the durable worker-command queue. Pending `drain`,
+`reload`, `ping`, and `place` commands are sent after the hello frame and again
+on heartbeats until `WorkerCommandAck` removes the exact command. A `place`
+payload carries the operator-authored placement instruction without inventing
+a second persistence path. Once either the runtime advertises `draining` or a
+pending drain command is observed, the session finishes existing in-flight
+tasks but rejects all later demand; draining cannot be reversed by a heartbeat
+on the same connection.
+
 ## Resumable artifact and continuity transfer
 
 `Orch8Service.ArtifactTransfer` uses the same bounded open/hello discipline
@@ -69,3 +95,46 @@ capsules, checkpoints, provenance, or large step artifacts into control-plane
 messages. Those formats remain independently versioned and signed; the stream
 provides bounded transport, checksum verification, tenant authorization, and
 resume semantics without becoming another persistence layer.
+
+## Bounded telemetry ingestion
+
+`Orch8Service.IngestTelemetryBatch` accepts at most 1,000 events and 4 MiB of
+accepted JSON payload per request. A single payload is capped at 256 KiB;
+event names, device metadata, version strings, and RFC 3339 timestamps are
+validated before storage. Invalid events do not poison valid neighbors: the
+response returns the accepted count plus stable rejection codes and original
+indexes for every rejected event. Accepted events are handed to the storage
+backend in one batch operation.
+
+The authenticated caller tenant is authoritative. A supplied `tenant_id` must
+match it, and storage enrichment uses that authoritative tenant rather than
+trusting event JSON. In explicitly permissive deployments, `tenant_id` remains
+required in the request.
+
+## mTLS workload identity
+
+Production gRPC listeners can require client certificates signed by a
+configured CA. Set all three `[api]` paths—`grpc_tls_cert_path`,
+`grpc_tls_key_path`, and `grpc_tls_client_ca_path`—then map leaf-certificate
+SHA-256 fingerprints with `grpc_mtls_identities`:
+
+```toml
+[api]
+grpc_tls_cert_path = "/run/orch8/tls/server.crt"
+grpc_tls_key_path = "/run/orch8/tls/server.key"
+grpc_tls_client_ca_path = "/run/orch8/tls/workload-ca.crt"
+grpc_mtls_identities = '''
+{
+  "13:8A:...:F0": { "tenant_id": "acme", "identity": "worker-prod" }
+}
+'''
+```
+
+The TLS stack verifies the certificate chain; the auth layer hashes the leaf
+certificate DER, resolves the configured identity, and stamps its tenant into
+the same isolation path used by tenant API keys. An `x-tenant-id` that
+disagrees with the mapping is rejected. Existing API-key authentication is
+unchanged when mTLS is not configured and remains available to authenticated
+TLS clients during migration. Configuration is fail-fast: partial TLS paths,
+malformed fingerprints, duplicate normalized fingerprints, empty identities,
+and identity mappings without TLS all prevent listener startup.
