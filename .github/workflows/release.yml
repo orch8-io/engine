@@ -103,10 +103,13 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            # Keep the release binary compatible with Debian Bookworm's
+            # glibc 2.36 runtime. ubuntu-latest is currently Ubuntu 24.04 and
+            # links against glibc 2.38.
+            os: ubuntu-22.04
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -126,11 +129,10 @@ jobs:
 
       - name: Install protoc
         run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            sudo apt-get update && sudo apt-get install -y protobuf-compiler
-          else
-            brew install protobuf
-          fi
+          case "${{ matrix.os }}" in
+            ubuntu-*) sudo apt-get update && sudo apt-get install -y protobuf-compiler ;;
+            *) brew install protobuf ;;
+          esac
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
