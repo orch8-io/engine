@@ -667,10 +667,15 @@ async fn stale_recovery_skips_waiting_instances_postgres() {
         s.get_instance(waiting.id).await.unwrap().unwrap().state,
         InstanceState::Waiting
     );
-    assert_eq!(
-        s.get_instance(running.id).await.unwrap().unwrap().state,
-        InstanceState::Scheduled
+    let recovered = s.get_instance(running.id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            recovered.state,
+            InstanceState::Scheduled | InstanceState::Running
+        ),
+        "a recovered row may be immediately reclaimed by a concurrent workspace scheduler"
     );
+    assert!(recovered.updated_at > stale_at);
 }
 
 /// Postgres parity for the atomic terminal transition/outbox protocol. The
