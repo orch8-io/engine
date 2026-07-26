@@ -870,3 +870,7 @@ mod tests {
 #[cfg(test)]
 #[path = "distribution_boundary_tests.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+#[path = "distribution_gates_coverage_tests.rs"]
+mod gates_coverage_tests;

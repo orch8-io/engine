@@ -89,3 +89,7 @@ mod tests {
         assert!(!json.contains("block_id"));
     }
 }
+
+#[cfg(test)]
+#[path = "audit_coverage_tests.rs"]
+mod audit_coverage_tests;

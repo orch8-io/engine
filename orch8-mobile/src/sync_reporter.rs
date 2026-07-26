@@ -1906,3 +1906,7 @@ mod tests {
         assert!(reporter.should_sync());
     }
 }
+
+#[cfg(test)]
+#[path = "sync_reporter_coverage_tests.rs"]
+mod sync_reporter_coverage_tests;

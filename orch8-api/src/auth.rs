@@ -396,3 +396,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "principals_coverage_tests.rs"]
+mod principals_coverage_tests;

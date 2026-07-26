@@ -1527,3 +1527,7 @@ mod tests {
         assert_eq!(error, DataflowGenerationError::DepthLimit);
     }
 }
+
+#[cfg(test)]
+#[path = "dataflow_coverage_tests.rs"]
+mod dataflow_coverage_tests;

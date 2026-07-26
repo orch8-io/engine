@@ -2379,3 +2379,14 @@ mod tests {
         assert_eq!(status.message(), "internal error");
     }
 }
+
+#[cfg(test)]
+mod artifact_transfer_coverage_tests;
+#[cfg(test)]
+mod runtime_session_coverage_tests;
+#[cfg(test)]
+mod service_helpers_coverage_tests;
+#[cfg(test)]
+mod telemetry_coverage_tests;
+#[cfg(test)]
+mod worker_session_coverage_tests;

@@ -192,3 +192,7 @@ mod tests {
 #[cfg(test)]
 #[path = "memory_governance_boundary_tests.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+#[path = "memory_governance_coverage_tests.rs"]
+mod memory_governance_coverage_tests;

@@ -4673,3 +4673,9 @@ mod tests {
         drop(guard_b);
     }
 }
+
+#[cfg(test)]
+mod stale_reclaim_coverage_tests;
+
+#[cfg(test)]
+mod schema_coverage_tests;

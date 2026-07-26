@@ -1387,3 +1387,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "doctor_coverage_tests.rs"]
+mod doctor_coverage_tests;

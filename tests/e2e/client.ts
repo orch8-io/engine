@@ -30,6 +30,59 @@ const DEFAULT_BASE: string =
 /** A loose JSON response shape — individual endpoints narrow as needed. */
 type ApiResponse = any;
 
+/** Least-privilege principal capabilities (orch8-types `ApiCapability`). */
+export type ApiCapability =
+  | "operator"
+  | "worker"
+  | "device"
+  | "publisher"
+  | "approver"
+  | "auditor";
+
+export interface CreateApiKeyRequest {
+  tenant_id: string;
+  name?: string;
+  capabilities?: ApiCapability[];
+  expires_at?: string;
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  tenant_id: string;
+  name: string;
+  capabilities: ApiCapability[];
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked: boolean;
+}
+
+/** Create response — the only place the plaintext `secret` is returned.
+ *  The Rust create handler omits `last_used_at` and `revoked`, so they
+ *  are optional here (unlike the `ApiKeyInfo` list view). */
+export interface CreatedApiKey extends Omit<ApiKeyInfo, "last_used_at" | "revoked"> {
+  secret: string;
+  last_used_at?: string | null;
+  revoked?: boolean;
+}
+
+/** One page of the tenant change feed (`GET /changes`). */
+export interface ChangePage {
+  changes: Array<{
+    id: string;
+    instance_id: string;
+    tenant_id: string;
+    event_type: string;
+    from_state?: string;
+    to_state?: string;
+    block_id?: string;
+    details?: unknown;
+    created_at: string;
+  }>;
+  next_cursor?: string;
+  has_more: boolean;
+}
+
 /** Translate a plain object into a URLSearchParams, skipping null/undefined. */
 function toQuery(query: Record<string, unknown>): string {
   const params = new URLSearchParams();
@@ -42,9 +95,14 @@ function toQuery(query: Record<string, unknown>): string {
 
 export class Orch8Client {
   readonly baseUrl: string;
+  readonly #defaultHeaders: Record<string, string>;
 
-  constructor(baseUrl: string = DEFAULT_BASE) {
+  constructor(
+    baseUrl: string = DEFAULT_BASE,
+    defaultHeaders: Record<string, string> = {},
+  ) {
     this.baseUrl = baseUrl;
+    this.#defaultHeaders = defaultHeaders;
   }
 
   // --- Sequences ---
@@ -137,6 +195,22 @@ export class Orch8Client {
   ): Promise<ApiResponse> {
     return this.#post(`/instances/${id}/signals`, {
       signal_type: signalType,
+      payload,
+    });
+  }
+
+  /**
+   * Send a custom signal. The `SignalType` enum is externally tagged, so
+   * `Custom(name)` crosses the wire as an object (`{ custom: name }`) — not
+   * the plain string `custom:name` the Display impl and CLI use.
+   */
+  async sendCustomSignal(
+    id: string,
+    name: string,
+    payload: Record<string, unknown> = {},
+  ): Promise<ApiResponse> {
+    return this.#post(`/instances/${id}/signals`, {
+      signal_type: { custom: name },
       payload,
     });
   }
@@ -668,6 +742,42 @@ export class Orch8Client {
     return this.#get<ApiResponse[]>(`/instances/${id}/audit`);
   }
 
+  // --- Instances (batch actions) ---
+
+  async batchAction(body: {
+    filter: Record<string, unknown>;
+    action: "retry" | "pause" | "resume" | "cancel" | "signal";
+    signal_type?: string;
+    payload?: Record<string, unknown>;
+    dry_run?: boolean;
+    limit?: number;
+  }): Promise<ApiResponse> {
+    return this.#post("/instances/batch-action", body);
+  }
+
+  // --- Tenant change feed ---
+
+  async listChanges(query: Record<string, unknown> = {}): Promise<ChangePage> {
+    return this.#get<ChangePage>(`/changes${toQuery(query)}`);
+  }
+
+  // --- Execution doctor (diagnosis + remediations) ---
+
+  async getDiagnosis(id: string): Promise<ApiResponse> {
+    return this.#get(`/instances/${id}/diagnosis`);
+  }
+
+  async listRemediationPreviews(id: string): Promise<ApiResponse[]> {
+    return this.#get<ApiResponse[]>(`/instances/${id}/remediations`);
+  }
+
+  async applyRemediation(
+    id: string,
+    body: { preview_id: string; acknowledge_side_effect_risk?: boolean },
+  ): Promise<ApiResponse> {
+    return this.#post(`/instances/${id}/remediations/apply`, body);
+  }
+
   async pruneCheckpoints(id: string, keep: number): Promise<ApiResponse> {
     return this.#post(`/instances/${id}/checkpoints/prune`, { keep });
   }
@@ -1141,10 +1251,29 @@ export class Orch8Client {
     throw new Error("Server not ready within timeout");
   }
 
+  // --- API Keys (admin-only; requires the root key) ---
+
+  async createApiKey(body: CreateApiKeyRequest): Promise<CreatedApiKey> {
+    return this.#post<CreatedApiKey>("/api-keys", body);
+  }
+
+  async listApiKeys(tenantId: string): Promise<ApiKeyInfo[]> {
+    return this.#get<ApiKeyInfo[]>(
+      `/api-keys${toQuery({ tenant_id: tenantId })}`,
+    );
+  }
+
+  /** Revokes a key. Resolves on 204, throws ApiError otherwise. */
+  async revokeApiKey(id: string): Promise<void> {
+    await this.#delete(`/api-keys/${encodeURIComponent(id)}`);
+  }
+
   // --- Internal ---
 
   async #get<T = ApiResponse>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`);
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers: { ...this.#defaultHeaders },
+    });
     if (!res.ok) throw new ApiError(res.status, await res.text(), path);
     return (await res.json()) as T;
   }
@@ -1162,7 +1291,10 @@ export class Orch8Client {
   }
 
   async #delete<T = Record<string, never>>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, { method: "DELETE" });
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      method: "DELETE",
+      headers: { ...this.#defaultHeaders },
+    });
     if (!res.ok) throw new ApiError(res.status, await res.text(), path);
     return {} as T;
   }
@@ -1170,7 +1302,7 @@ export class Orch8Client {
   async #jsonMethod<T>(method: string, path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...this.#defaultHeaders },
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new ApiError(res.status, await res.text(), path);
@@ -1187,7 +1319,11 @@ export class Orch8Client {
   ): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
-      headers: { "Content-Type": "application/json", ...headers },
+      headers: {
+        "Content-Type": "application/json",
+        ...this.#defaultHeaders,
+        ...headers,
+      },
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new ApiError(res.status, await res.text(), path);

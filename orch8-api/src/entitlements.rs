@@ -169,3 +169,7 @@ mod tests {
 #[cfg(test)]
 #[path = "entitlements_boundary_tests.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+#[path = "entitlements_admission_tests.rs"]
+mod admission_tests;

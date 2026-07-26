@@ -1997,3 +1997,7 @@ mod tests {
         assert_eq!(inst.state, InstanceState::Failed);
     }
 }
+
+#[cfg(test)]
+#[path = "engine_coverage_tests.rs"]
+mod engine_coverage_tests;

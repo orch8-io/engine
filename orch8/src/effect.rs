@@ -108,3 +108,7 @@ fn invariant_error(message: &str) -> StepError {
         details: None,
     }
 }
+
+#[cfg(test)]
+#[path = "effect_coverage_tests.rs"]
+mod effect_coverage_tests;

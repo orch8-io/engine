@@ -77,7 +77,7 @@ route_hit_case!(
     "cred-7"
 );
 route_hit_case!(
-    coverage_push_008_long_route_fields_resolve,
+    coverage_push_008_single_character_route_fields_resolve,
     "t",
     "a",
     "x",

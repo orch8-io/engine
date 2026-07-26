@@ -38,7 +38,7 @@ validation_case!(
     true
 );
 validation_case!(
-    coverage_entitlement_003_whitespace_plan_id_is_preserved,
+    coverage_entitlement_003_whitespace_plan_id_is_valid,
     |p: &mut PlanEntitlements| p.plan_id = " ".into(),
     true
 );

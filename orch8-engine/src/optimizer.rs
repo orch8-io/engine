@@ -468,3 +468,7 @@ mod tests {
 #[cfg(test)]
 #[path = "optimizer_boundary_tests.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+#[path = "plan_compile_coverage_tests.rs"]
+mod plan_compile_coverage_tests;

@@ -877,3 +877,7 @@ mod tests {
         assert_eq!(storage.delete_oldest_telemetry_events(0).await.unwrap(), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "storage_coverage_tests.rs"]
+mod storage_coverage_tests;

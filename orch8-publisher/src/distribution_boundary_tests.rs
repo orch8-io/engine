@@ -1,6 +1,6 @@
 //! Distribution input-validation boundaries.
 //!
-//! Count contract: 70 independently named unit tests.
+//! Count contract: 73 independently named unit tests.
 
 use super::*;
 
@@ -406,3 +406,32 @@ requirement_case!(
     vec!["cpu"],
     false
 );
+
+#[test]
+fn coverage_distribution_071_invalid_path_reports_the_offending_path() {
+    let error = validate_relative_path("../a.txt").unwrap_err();
+    assert_eq!(
+        error,
+        DistributionError::Invalid("invalid delta path ../a.txt".into())
+    );
+}
+
+#[test]
+fn coverage_distribution_072_invalid_hash_reports_the_sha256_contract() {
+    let error = validate_hash("abc").unwrap_err();
+    assert_eq!(
+        error,
+        DistributionError::Invalid("SHA-256 digest must be 64 hexadecimal characters".into())
+    );
+}
+
+#[test]
+fn coverage_distribution_073_missing_requirement_names_kind_and_item() {
+    let required = vec!["noop".to_string()];
+    let available: Vec<String> = Vec::new();
+    let error = require_all("handler", &required, &available).unwrap_err();
+    assert_eq!(
+        error,
+        DistributionError::Incompatible("missing handler noop".into())
+    );
+}

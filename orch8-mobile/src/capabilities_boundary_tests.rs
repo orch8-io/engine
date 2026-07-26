@@ -133,7 +133,7 @@ execute_case!(
     coverage_capability_014_camera_preserves_empty_arguments,
     DeviceCapability::Camera,
     r#"{"operation":"capture","arguments":{},"foreground":true}"#,
-    "arguments"
+    r#""arguments":{}"#
 );
 execute_case!(
     coverage_capability_015_camera_preserves_quality_argument,
@@ -223,7 +223,7 @@ execute_case!(
     coverage_capability_029_empty_string_argument_round_trips,
     DeviceCapability::SecureStorage,
     r#"{"operation":"put","arguments":{"value":""},"foreground":false}"#,
-    "value"
+    r#""value":"""#
 );
 execute_case!(
     coverage_capability_030_multiple_arguments_round_trip,

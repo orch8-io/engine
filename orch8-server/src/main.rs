@@ -1696,3 +1696,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod node_role_coverage_tests;
+#[cfg(test)]
+mod preflight_coverage_tests;

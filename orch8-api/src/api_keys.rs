@@ -181,3 +181,7 @@ async fn revoke_api_key(
         Err(ApiError::NotFound("api_key".into()))
     }
 }
+
+#[cfg(test)]
+#[path = "api_keys_contract_tests.rs"]
+mod contract_tests;

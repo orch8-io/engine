@@ -1517,3 +1517,6 @@ pub async fn activate_first_pending_child(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod coverage_tests;

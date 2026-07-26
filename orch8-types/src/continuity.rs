@@ -911,3 +911,7 @@ mod tests {
         assert_eq!(serde_json::to_value(decoded).unwrap(), value);
     }
 }
+
+#[cfg(test)]
+#[path = "continuity_coverage_tests.rs"]
+mod continuity_coverage_tests;

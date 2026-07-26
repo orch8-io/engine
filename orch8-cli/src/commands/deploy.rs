@@ -111,3 +111,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value> {
     }
     serde_json::from_str(&text).context("decode deploy gate response")
 }
+
+#[cfg(test)]
+#[path = "deploy_coverage_tests.rs"]
+mod deploy_coverage_tests;

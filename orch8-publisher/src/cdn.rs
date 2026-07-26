@@ -702,3 +702,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "cdn_coverage_tests.rs"]
+mod coverage_tests;

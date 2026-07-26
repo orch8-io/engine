@@ -1569,3 +1569,7 @@ mod net_tests {
         assert_eq!(resolve_model(&json!({ "model": "custom" })), "custom");
     }
 }
+
+#[cfg(test)]
+#[path = "memory_coverage_tests.rs"]
+mod memory_coverage_tests;

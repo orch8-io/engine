@@ -485,3 +485,7 @@ async fn install(
     println!("provenance recorded in {LOCKFILE}");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "package_cmd_coverage_tests.rs"]
+mod package_cmd_coverage_tests;
