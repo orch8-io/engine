@@ -866,3 +866,7 @@ mod tests {
         assert_eq!(lock.verify(), Err(DistributionError::HashMismatch));
     }
 }
+
+#[cfg(test)]
+#[path = "distribution_boundary_tests.rs"]
+mod boundary_tests;

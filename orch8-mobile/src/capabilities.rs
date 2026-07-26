@@ -235,3 +235,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "capabilities_boundary_tests.rs"]
+mod boundary_tests;

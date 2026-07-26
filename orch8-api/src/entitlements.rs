@@ -165,3 +165,7 @@ mod tests {
         assert!(plan.validate().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "entitlements_boundary_tests.rs"]
+mod boundary_tests;

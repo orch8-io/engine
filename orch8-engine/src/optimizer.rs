@@ -464,3 +464,7 @@ mod tests {
         assert_eq!(first.constant_pool, second.constant_pool);
     }
 }
+
+#[cfg(test)]
+#[path = "optimizer_boundary_tests.rs"]
+mod boundary_tests;
