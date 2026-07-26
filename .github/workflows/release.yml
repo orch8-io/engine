@@ -581,6 +581,8 @@ jobs:
         uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.3.2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             artifacts/orch8-*.tar.gz
             artifacts/orch8-*.tar.gz.sha256
@@ -594,6 +596,7 @@ jobs:
   # -- install.sh smoke test -------------------------------------------------
   install-sh-smoke:
     name: install.sh Smoke Test (${{ matrix.os }})
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     needs: [release]

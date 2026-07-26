@@ -86,6 +86,10 @@ assert_contains .github/workflows/release.yml 'needs: [verify]'
 assert_contains .github/workflows/release.yml 'provenance: true'
 assert_contains .github/workflows/release.yml 'Smoke test pushed image'
 assert_contains .github/workflows/release.yml "if [[ \"\$TAG\" == *-* ]]"
+assert_contains .github/workflows/release.yml "prerelease: \${{ contains(github.ref_name, '-') }}"
+assert_contains .github/workflows/release.yml "if: \${{ !contains(github.ref_name, '-') }}"
+assert_contains .github/workflows/release.yml 'Verify Cloud management surface'
+assert_contains .github/workflows/ci.yml 'Verify Cloud management surface'
 assert_contains .github/workflows/ci.yml 'sqlite-smoke:'
 assert_contains .github/workflows/ci.yml 'fuzz-smoke:'
 assert_contains .github/workflows/ci.yml 'mobile-sync-smoke:'
