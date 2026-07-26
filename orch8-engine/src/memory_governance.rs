@@ -188,3 +188,7 @@ mod tests {
         assert!(policy.validate().is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "memory_governance_boundary_tests.rs"]
+mod boundary_tests;

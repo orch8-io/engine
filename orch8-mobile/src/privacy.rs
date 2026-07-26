@@ -240,3 +240,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "privacy_boundary_tests.rs"]
+mod boundary_tests;

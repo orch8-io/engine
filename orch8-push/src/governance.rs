@@ -479,3 +479,7 @@ mod tests {
         assert!(state.active && state.quarantine_reason.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "governance_boundary_tests.rs"]
+mod boundary_tests;

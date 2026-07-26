@@ -76,3 +76,7 @@ mod tests {
         assert!(generate_javascript_client().contains("/releases/{id}/validate"));
     }
 }
+
+#[cfg(test)]
+#[path = "client_contract_boundary_tests.rs"]
+mod boundary_tests;
