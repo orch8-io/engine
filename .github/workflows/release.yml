@@ -103,10 +103,12 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            # Bookworm ships glibc 2.36. Build GNU artifacts on glibc 2.35 so
+            # both the standalone archive and Dockerfile.release remain compatible.
+            os: ubuntu-22.04
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -126,7 +128,7 @@ jobs:
 
       - name: Install protoc
         run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          if [[ "${{ matrix.os }}" == "ubuntu-22.04" ]]; then
             sudo apt-get update && sudo apt-get install -y protobuf-compiler
           else
             brew install protobuf
