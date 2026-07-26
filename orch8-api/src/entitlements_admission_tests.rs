@@ -462,7 +462,7 @@ async fn coverage_admission_034_unlimited_provider_admits_api_maximum_batch() {
         &tenant("tenant-a"),
         &ns(&["any"]),
         10_000,
-        usize::MAX.min(u32::MAX as usize),
+        u32::MAX as usize,
     );
     assert!(
         result.is_ok(),

@@ -444,7 +444,7 @@ async fn coverage_artifact_028_digest_matches_sha256_of_stored_bytes() {
 
 #[tokio::test]
 async fn coverage_artifact_029_chunk_bounds_are_internally_ordered() {
-    assert!(MIN_TRANSFER_CHUNK_BYTES <= MAX_TRANSFER_CHUNK_BYTES);
+    const { assert!(MIN_TRANSFER_CHUNK_BYTES <= MAX_TRANSFER_CHUNK_BYTES) };
     assert_eq!(MIN_TRANSFER_CHUNK_BYTES, 4 * 1024);
     assert_eq!(MAX_TRANSFER_CHUNK_BYTES, 1024 * 1024);
 }

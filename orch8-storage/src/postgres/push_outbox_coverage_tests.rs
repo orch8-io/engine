@@ -1,6 +1,6 @@
 //! Coverage tests for the Postgres push wake outbox's pure outcome mapping.
 //!
-//! These pin the same status/reason vocabulary as the SQLite backend so the
+//! These pin the same status/reason vocabulary as the `SQLite` backend so the
 //! two drain loops stay interchangeable. The SQL paths themselves need a live
 //! Postgres and are covered by `tests/postgres_integration.rs`.
 //!

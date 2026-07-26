@@ -76,14 +76,14 @@ fn coverage_reporter_006_borrowed_payloads_drop_invalid_keep_order() {
         (1, r#"{"a":1}"#.to_string()),
         (2, "not-json".to_string()),
         (3, "   ".to_string()),
-        (4, r#"[1,2]"#.to_string()),
+        (4, r"[1,2]".to_string()),
     ];
 
     let payloads = borrow_valid_payloads(&rows);
 
     assert_eq!(payloads.len(), 2);
     assert_eq!(payloads[0].get(), r#"{"a":1}"#);
-    assert_eq!(payloads[1].get(), r#"[1,2]"#);
+    assert_eq!(payloads[1].get(), r"[1,2]");
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn coverage_reporter_016_find_wait_info_extracts_human_input_metadata() {
             "params": {},
             "wait_for_input": {
                 "prompt": "Approve?",
-                "timeout": 300000,
+                "timeout": 300_000,
                 "store_as": "decision",
                 "choices": [{"label": "Yes", "value": "yes"}]
             }

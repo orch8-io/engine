@@ -38,6 +38,9 @@ impl EnvGuard {
         }
     }
 
+    // Keeping this as a method ties each mutation visibly to the live guard
+    // that restores the process environment when the test scope exits.
+    #[allow(clippy::unused_self)]
     fn set(&self, name: &str, value: &str) {
         #[allow(unsafe_code)]
         // SAFETY: serialized via #[serial(otlp_env)] at every call site.

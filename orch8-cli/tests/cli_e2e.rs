@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A minimal but complete sequence definition the package builder accepts
-/// (mirrors `VALID_SEQUENCE_JSON` in package_cmd_coverage_tests.rs).
+/// (mirrors `VALID_SEQUENCE_JSON` in `package_cmd_coverage_tests.rs`).
 const VALID_SEQUENCE_JSON: &str = r#"{
   "id": "0191e4f2-a1b2-7c3d-8e4f-a5b6c7d8e9f0",
   "tenant_id": "demo",

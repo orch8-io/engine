@@ -466,7 +466,7 @@ async fn coverage_reclaim_022_won_cas_persists_payload_verbatim() {
             InstanceState::Running,
             InstanceState::Failed,
             None,
-            &[entry.clone()],
+            std::slice::from_ref(&entry),
         )
         .await
         .unwrap();

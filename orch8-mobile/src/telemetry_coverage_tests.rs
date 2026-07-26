@@ -39,7 +39,7 @@ fn stored_event(id: i64, event_type: &str, payload: &str) -> crate::storage::Tel
 fn coverage_telemetry_001_upload_batch_stays_below_offline_buffer_cap() {
     assert_eq!(MAX_BUFFER_SIZE, 1000);
     assert_eq!(MAX_UPLOAD_BATCH_SIZE, 500);
-    assert!(MAX_UPLOAD_BATCH_SIZE < MAX_BUFFER_SIZE);
+    const { assert!(MAX_UPLOAD_BATCH_SIZE < MAX_BUFFER_SIZE) };
 }
 
 #[test]
