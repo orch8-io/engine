@@ -102,6 +102,14 @@ describe("Execution Doctor — open circuit breaker evidence", () => {
       namespace: "default",
     });
     await client.waitForState(probe.id, "waiting", { timeoutMs: 10_000 });
+    // Reserve the probe task with its own worker. Otherwise the first poll in
+    // openBreakerViaFailures can claim this older pending task instead of the
+    // newly-created failure instance, leaving that instance stuck waiting and
+    // preventing the breaker cleanup below from running.
+    const probeWorkerId = `probe-${uuid().slice(0, 6)}`;
+    const probeTasks = await client.pollWorkerTasks(handler, probeWorkerId);
+    assert.equal(probeTasks.length, 1, "expected the probe worker task");
+    assert.equal(probeTasks[0]!.instance_id, probe.id);
 
     await openBreakerViaFailures(handler, tenantId, seq.id, workerId);
 
@@ -152,6 +160,10 @@ describe("Execution Doctor — open circuit breaker evidence", () => {
       !cleared.diagnoses.some((x: any) => x.code === "OPEN_CIRCUIT_BREAKER"),
       `warning must be gone after reset: ${JSON.stringify(cleared.diagnoses)}`,
     );
+    await client.completeWorkerTask(probeTasks[0]!.id, probeWorkerId, {
+      probe: "complete",
+    });
+    await client.waitForState(probe.id, "completed", { timeoutMs: 10_000 });
   });
 
   it("instance created after the trip: low-confidence health warning", async () => {
