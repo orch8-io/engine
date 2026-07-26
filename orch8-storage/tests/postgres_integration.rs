@@ -683,15 +683,13 @@ async fn terminal_transition_and_webhook_enqueue_share_one_transaction_postgres(
     s.create_sequence(&mk_sequence(&tenant, seq_id))
         .await
         .unwrap();
-    // `next_fire_at: None` keeps this instance out of any concurrently
+    // A far-future fire time keeps this instance out of any concurrently
     // running scheduler's due-instance claim query (`cargo test --workspace`
     // shares one Postgres database across every crate's integration tests,
-    // and some of them tick a real scheduler loop) — otherwise a stray
-    // claim can flip `state` out from under the CAS below and fail this
-    // test's assertion for reasons that have nothing to do with what it's
-    // actually verifying.
+    // and some of them tick a real scheduler loop). `NULL` cannot be used
+    // here because scheduled rows without an explicit fire time are due now.
     let mut instance = mk_instance(&tenant, seq_id, None);
-    instance.next_fire_at = None;
+    instance.next_fire_at = Some(Utc::now() + chrono::Duration::days(1));
     s.create_instance(&instance).await.unwrap();
 
     let entry = WebhookOutboxEntry {
