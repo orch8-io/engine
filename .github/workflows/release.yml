@@ -255,6 +255,15 @@ jobs:
           docker logs orch8-release-smoke
           exit 1
 
+      - name: Verify Cloud management surface
+        run: |
+          curl -fsS "http://localhost:8080/sequences?limit=1&tenant_id=default" > /dev/null
+          curl -fsS "http://localhost:8080/events?limit=1&tenant_id=default" > /dev/null
+          curl -fsS -X POST http://localhost:8080/sequences/preflight \
+            -H 'content-type: application/json' \
+            --data '{"id":"00000000-0000-4000-8000-000000000001","tenant_id":"default","namespace":"default","name":"release-smoke","version":1,"created_at":"2026-01-01T00:00:00Z","blocks":[]}' \
+            > /dev/null
+
       # The docker-manifest job (and its `latest` update) only runs once both
       # platform legs pass this smoke test.
       - name: Tear down smoke container
