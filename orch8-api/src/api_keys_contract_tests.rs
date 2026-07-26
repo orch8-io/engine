@@ -16,6 +16,9 @@ use std::sync::Arc;
 use crate::auth::AdminContext;
 use tokio_util::sync::CancellationToken;
 
+// The direct-handler tests intentionally exercise the optional extractor type
+// used by the public handler boundary.
+#[allow(clippy::unnecessary_wraps)]
 fn admin() -> OptionalAdmin {
     Some(axum::Extension(AdminContext))
 }

@@ -295,11 +295,11 @@ async fn coverage_partition_038_route_returns_placement_verbatim() {
     let placement_store: Arc<dyn TenantPlacementStore> = store;
     let mut router = TenantPartitionRouter::new(placement_store);
     router.register_backend("shard-a", backend().await).unwrap();
-    let routed = router
+    let route_result = router
         .route(&TenantId::new("tenant-a").unwrap())
         .await
         .unwrap();
-    assert_eq!(routed.placement, seeded);
+    assert_eq!(route_result.placement, seeded);
 }
 
 #[tokio::test]
@@ -312,11 +312,11 @@ async fn coverage_partition_039_route_returns_registered_backend_arc() {
     router
         .register_backend("shard-a", Arc::clone(&shard))
         .unwrap();
-    let routed = router
+    let route_result = router
         .route(&TenantId::new("tenant-a").unwrap())
         .await
         .unwrap();
-    assert!(Arc::ptr_eq(&routed.backend, &shard));
+    assert!(Arc::ptr_eq(&route_result.backend, &shard));
 }
 
 #[tokio::test]
@@ -418,11 +418,11 @@ async fn coverage_partition_044_many_backends_registered_independently() {
             .unwrap();
     }
     for index in 0..5 {
-        let routed = router
+        let route_result = router
             .route(&TenantId::new(format!("tenant-{index}")).unwrap())
             .await
             .unwrap();
-        assert_eq!(routed.placement.backend_id, format!("shard-{index}"));
+        assert_eq!(route_result.placement.backend_id, format!("shard-{index}"));
     }
 }
 
@@ -625,12 +625,12 @@ async fn coverage_partition_055_sqlite_store_routes_end_to_end() {
     router
         .register_backend("shard-a", Arc::clone(&shard))
         .unwrap();
-    let routed = router
+    let route_result = router
         .route(&TenantId::new("tenant-a").unwrap())
         .await
         .unwrap();
-    assert!(Arc::ptr_eq(&routed.backend, &shard));
-    assert_eq!(routed.placement.epoch, 1);
+    assert!(Arc::ptr_eq(&route_result.backend, &shard));
+    assert_eq!(route_result.placement.epoch, 1);
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 //! Structural coverage for the generated-client contract: the shape of the
-//! validated OpenAPI document and the exact scaffolding both client
+//! validated `OpenAPI` document and the exact scaffolding both client
 //! generators emit around the required operations.
 //!
 //! Count contract: 28 independently named unit tests.

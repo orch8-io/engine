@@ -1,7 +1,7 @@
 //! Coverage tests for the evaluator's parallel-dispatch hot path.
 //!
 //! Pins [`find_parallel_step_pair`] branch-pairing semantics (the function
-//! whose HashMap was replaced with a flat Vec on the allocation hot path),
+//! whose `HashMap` was replaced with a flat `Vec` on the allocation hot path),
 //! plus [`nearest_parallel_branch`] and the node index helpers.
 //!
 //! Count contract: 14 independently named unit tests.

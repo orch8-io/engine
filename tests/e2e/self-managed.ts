@@ -17,7 +17,7 @@
  * paths — `run-standalone.ts` needs the location to spawn the file, and
  * `run-e2e.ts` only needs the basename, which it derives.
  *
- * Three reasons a suite belongs here:
+ * Four reasons a suite belongs here:
  *
  *   1. Server-lifecycle: the suite stops/starts or swaps env mid-test
  *      (incompatible with attach-mode).
@@ -27,6 +27,9 @@
  *      count-based assertions. Only a fresh server isolates them.
  *   3. Self-terminating: e.g. the cluster drain test kills its own
  *      server's node_id mid-run, so it needs a sacrificial own-server.
+ *   4. Resource isolation: a suite deliberately creates enough durable work
+ *      to starve the shared scheduler or exhaust PostgreSQL resources before
+ *      later suites run, even though its own assertions pass.
  */
 
 export interface SelfManagedSuite {
@@ -84,6 +87,8 @@ export const SELF_MANAGED_SUITES: readonly SelfManagedSuite[] = [
   { file: "features/pushwake_encryption_at_rest.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY + ORCH8_MOBILE_SYNC_ENABLED at boot" },
   { file: "handlers/activepieces_scenarios.test.ts", reason: "needs ORCH8_ACTIVEPIECES_URL → local mock" },
   { file: "handlers/artifacts.test.ts", reason: "needs ORCH8_ARTIFACT_BACKEND=local" },
+  // Resource isolation (rule #4): intentionally leaves a 50k+ execution backlog.
+  { file: "features/entitlements_batch_limits.test.ts", reason: "creates 50k+ scheduled instances" },
   // Self-terminates (rule #3).
   { file: "features/cluster.test.ts", reason: "drains its own node_id, killing the server" },
 ];

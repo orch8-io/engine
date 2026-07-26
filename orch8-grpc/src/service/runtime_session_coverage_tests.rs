@@ -70,17 +70,17 @@ runtime_list_case!(
 );
 runtime_list_case!(
     coverage_runtime_004_empty_entry_is_rejected,
-    vec![String::new()],
+    [String::new()],
     false
 );
 runtime_list_case!(
     coverage_runtime_005_256_byte_entry_is_valid,
-    vec!["e".repeat(256)],
+    ["e".repeat(256)],
     true
 );
 runtime_list_case!(
     coverage_runtime_006_257_byte_entry_is_rejected,
-    vec!["e".repeat(257)],
+    ["e".repeat(257)],
     false
 );
 
@@ -394,10 +394,9 @@ fn command(worker_id: &str, kind: WorkerCommandKind) -> WorkerCommand {
     }
 }
 
-fn command_channel() -> (
-    mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
-    mpsc::Receiver<Result<proto::WorkerStreamServer, Status>>,
-) {
+type CommandFrame = Result<proto::WorkerStreamServer, Status>;
+
+fn command_channel() -> (mpsc::Sender<CommandFrame>, mpsc::Receiver<CommandFrame>) {
     mpsc::channel(16)
 }
 

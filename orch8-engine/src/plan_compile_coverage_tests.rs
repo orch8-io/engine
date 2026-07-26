@@ -9,8 +9,8 @@ use chrono::Utc;
 use orch8_types::ids::{BlockId, Namespace, SequenceId, TenantId};
 use orch8_types::sequence::{
     ABSplitDef, ABVariant, BlockDefinition, CancellationScopeDef, ForEachDef, LoopDef, ParallelDef,
-    RaceDef, Route, RouterDef, SagaDef, SagaStep, SequenceDefinition, SequenceStatus, StepDef,
-    SubSequenceDef, TryCatchDef,
+    RaceDef, RaceSemantics, Route, RouterDef, SagaDef, SagaStep, SequenceDefinition,
+    SequenceStatus, StepDef, SubSequenceDef, TryCatchDef,
 };
 use serde_json::{Value, json};
 
@@ -88,7 +88,7 @@ kind_case!(
     BlockDefinition::Race(Box::new(RaceDef {
         id: BlockId::new("r"),
         branches: vec![vec![step("a")]],
-        semantics: Default::default(),
+        semantics: RaceSemantics::default(),
     })),
     OptimizedBlockKind::Race
 );

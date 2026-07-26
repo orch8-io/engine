@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A minimal but complete sequence definition the package builder accepts
-/// (mirrors `VALID_SEQUENCE_JSON` in package_cmd_coverage_tests.rs).
+/// (mirrors `VALID_SEQUENCE_JSON` in `package_cmd_coverage_tests.rs`).
 const VALID_SEQUENCE_JSON: &str = r#"{
   "id": "0191e4f2-a1b2-7c3d-8e4f-a5b6c7d8e9f0",
   "tenant_id": "demo",
@@ -69,11 +69,7 @@ impl Sandbox {
 
     /// Run the binary with `args`, assert it exits 0, return stdout.
     fn run_ok(&self, args: &[&str]) -> String {
-        let output = self
-            .cmd()
-            .args(args)
-            .output()
-            .expect("spawn orch8 binary");
+        let output = self.cmd().args(args).output().expect("spawn orch8 binary");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(
@@ -85,11 +81,7 @@ impl Sandbox {
 
     /// Run the binary with `args`, assert it fails, return stderr.
     fn run_err(&self, args: &[&str]) -> String {
-        let output = self
-            .cmd()
-            .args(args)
-            .output()
-            .expect("spawn orch8 binary");
+        let output = self.cmd().args(args).output().expect("spawn orch8 binary");
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         assert!(
             !output.status.success(),
@@ -270,11 +262,7 @@ fn context_use_and_remove_unknown_context_fail() {
 #[test]
 fn context_file_with_insecure_permissions_is_refused() {
     let sb = Sandbox::new();
-    std::fs::write(
-        &sb.contexts_file,
-        r#"{"selected":null,"contexts":{}}"#,
-    )
-    .unwrap();
+    std::fs::write(&sb.contexts_file, r#"{"selected":null,"contexts":{}}"#).unwrap();
     std::fs::set_permissions(
         &sb.contexts_file,
         std::os::unix::fs::PermissionsExt::from_mode(0o644),
@@ -299,10 +287,7 @@ fn init_scaffolds_project_and_never_clobbers() {
     let project_arg = project.to_str().unwrap();
 
     let stdout = sb.run_ok(&["init", project_arg]);
-    assert!(
-        stdout.contains("Initialized Orch8 project in"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Initialized Orch8 project in"), "{stdout}");
     for file in ["orch8.toml", "sequence.json", "docker-compose.yml"] {
         assert!(
             project.join(file).exists(),
@@ -386,8 +371,5 @@ fn package_build_verify_round_trip_and_tamper_detection() {
     std::fs::write(&tampered, serde_json::to_string_pretty(&pkg).unwrap()).unwrap();
 
     let stderr = sb.run_err(&["package", "verify", tampered.to_str().unwrap()]);
-    assert!(
-        stderr.contains("content hash mismatch"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("content hash mismatch"), "{stderr}");
 }

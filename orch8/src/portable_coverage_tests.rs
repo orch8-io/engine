@@ -156,6 +156,6 @@ fn coverage_portable_018_updated_at_does_not_break_identity() {
     // same continuity execution must compare identical regardless of it.
     let base = execution();
     let mut other = base.clone();
-    other.updated_at = other.updated_at + Duration::hours(1);
+    other.updated_at += Duration::hours(1);
     assert!(same_continuity_identity(&base, &other));
 }

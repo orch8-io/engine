@@ -1,7 +1,7 @@
 //! Coverage tests for the cancellation hot path helpers.
 //!
 //! Pins [`is_inside_finally_branch`] (finally-branch protection over the
-//! sorted-vec children index that replaced a HashMap) and
+//! sorted-vec children index that replaced a `HashMap`) and
 //! [`is_descendant_of_any`] ancestry checks used by `cancel_scoped`.
 //!
 //! Count contract: 14 independently named unit tests.
@@ -32,7 +32,7 @@ fn mk_node(
 }
 
 /// Build the sorted node index and sorted children-of vec exactly the way
-/// `cancel_scoped` does, so the partition_point lookup contract is exercised.
+/// `cancel_scoped` does, so the `partition_point` lookup contract is exercised.
 fn indexes(
     tree: &[ExecutionNode],
 ) -> (Vec<&ExecutionNode>, Vec<(ExecutionNodeId, &ExecutionNode)>) {

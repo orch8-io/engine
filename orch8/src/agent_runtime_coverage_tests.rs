@@ -68,7 +68,7 @@ async fn coverage_agent_006_runtime_derefs_to_the_engine() {
         .expect("runtime builds");
     // Deref coercion: the runtime is usable anywhere an `&Engine` is expected.
     let engine = engine_surface(&runtime);
-    assert!(std::ptr::eq(engine, &*runtime));
+    assert!(std::ptr::eq(engine, &raw const *runtime));
     runtime.shutdown().await;
 }
 
