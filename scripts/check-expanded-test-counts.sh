@@ -20,9 +20,9 @@ e2e_files=(
   tests/e2e/features/compiled_plan_unknown_roots.test.ts
 )
 
-unit_pattern='^\s*(validation_case|catalog_case|fallback_case|escape_case|generated_contains_case|namespace_case|residency_case|policy_case|guard_case|identity_case|handler_case|descriptor_case|execute_case|rejected_case|sanitize_case|route_hit_case|route_miss_case|invalid_route_case|wake_verify_case|collapse_key_difference_case|path_case|hash_case|requirement_case)!|^\s*(async )?fn coverage_'
-unit_count="$(rg --no-filename --count-matches "$unit_pattern" "${unit_files[@]}" | awk '{ total += $1 } END { print total + 0 }')"
-e2e_count="$(rg --no-filename --count-matches '^\s*it\(' "${e2e_files[@]}" | awk '{ total += $1 } END { print total + 0 }')"
+unit_pattern='^[[:space:]]*(validation_case|catalog_case|fallback_case|escape_case|generated_contains_case|namespace_case|residency_case|policy_case|guard_case|identity_case|handler_case|descriptor_case|execute_case|rejected_case|sanitize_case|route_hit_case|route_miss_case|invalid_route_case|wake_verify_case|collapse_key_difference_case|path_case|hash_case|requirement_case)!|^[[:space:]]*(async )?fn coverage_'
+unit_count="$(grep -hEc "$unit_pattern" "${unit_files[@]}" | awk '{ total += $1 } END { print total + 0 }')"
+e2e_count="$(grep -hEc '^[[:space:]]*it\(' "${e2e_files[@]}" | awk '{ total += $1 } END { print total + 0 }')"
 
 if [[ "$unit_count" -ne 400 ]]; then
   echo "expected exactly 400 added Rust unit tests, found $unit_count" >&2
@@ -35,4 +35,3 @@ if [[ "$e2e_count" -ne 150 ]]; then
 fi
 
 echo "expanded test counts verified: $unit_count Rust unit tests, $e2e_count Node E2E tests"
-
