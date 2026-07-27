@@ -27,7 +27,7 @@ version lifecycle contract.
 
 ## Authentication
 
-When `ORCH8_API_KEY` is set, every endpoint requires an `x-api-key` header — including `/metrics`, `/swagger-ui`, and `/api-docs/openapi.json`. When `ORCH8_REQUIRE_TENANT_HEADER` is set, requests must also carry an `x-tenant-id` header, and tenant-owned resources are scoped to that tenant.
+When `ORCH8_API_KEY` is set, every endpoint requires an `x-api-key` header — including `/metrics`, `/swagger-ui`, and `/api-docs/openapi.json`. `ORCH8_REQUIRE_TENANT_HEADER` defaults to `true`; authenticated requests must also carry an `x-tenant-id` header unless a capability-scoped tenant key supplies the authoritative tenant. Disabling tenant-header enforcement requires the explicit `ORCH8_ALLOW_NO_TENANT_ISOLATION=1` risk acknowledgement. Tenant-owned resources remain scoped to the authenticated tenant.
 
 Only the health probes (`/health/live`, `/health/ready`, `/info`) and inbound public webhooks (`POST /webhooks/{slug}`, which use their own per-trigger secrets) stay public, so load-balancer checks and third-party webhook callers keep working.
 
@@ -1534,12 +1534,16 @@ which are summarized rather than repeated field-by-field here:
 - **Plugins** — WASM and gRPC plugin registration
 - **Approvals** — Human-in-the-loop approval inbox
 - **Cluster** — Node listing, heartbeat, drain
+- **Diagnosis and remediation** — Ranked instance findings, state-bound previews, and audited apply
+- **Tenant change feed** — Cursor-resumable polling and bounded SSE over immutable audit changes
 - **Webhooks** — Webhook subscription management
 - **Telemetry** — Execution telemetry and rollback history
-- **API Keys** — Per-tenant API key create/list/revoke (`/api-keys`)
+- **API Keys and principals** — Per-tenant capability-scoped key create/list/revoke (`/api-keys`)
+- **Admission entitlements** — Namespace, context-size, batch-size, and active-instance limits on instance creation
 - **Sequence lifecycle** — List, delete, versions, promote/deprecate/unpublish, status, and `POST /sequences/migrate-instance`
-- **Execution introspection** — `GET /instances/{id}/tree` (execution tree), `/timeline`, `/audit`, `/artifacts`, and SSE streaming at `GET /instances/{id}/stream`
+- **Execution introspection** — `GET /instances/{id}/tree` (execution tree), `/timeline`, `/audit`, `/artifacts`, `/effects`, and SSE streaming at `GET /instances/{id}/stream`
 - **Checkpoints & recovery** — `GET|POST /instances/{id}/checkpoints`, `/checkpoints/latest`, `/checkpoints/prune`, `POST /instances/{id}/fork`, `POST /instances/{id}/resume-from/{block_id}`, `POST /instances/{id}/inject-blocks`
+- **Continuity control** — Ownership handoff, provenance, budgets, evidence gates, migrations, compensations, attention, residency, federation, fault lab, and stream windows
 - **Bulk reschedule** — `PATCH /instances/bulk/reschedule` (shift `next_fire_at` by `offset_secs`)
 - **Rollback policies** — `/rollback-policies` CRUD
 - **Usage & info** — `GET /usage`, `GET /info` (version + environment label)
