@@ -633,7 +633,9 @@ async fn handle_fail(ctx: StepContext) -> Result<Value, StepError> {
 ///
 /// Params:
 /// - `url` (string, required): The URL to request.
-/// - `method` (string): HTTP method. Defaults to "GET".
+/// - `method` (string): HTTP method — one of GET, POST, PUT, PATCH, DELETE,
+///   HEAD (case-insensitive). Defaults to "GET"; anything else is a Permanent
+///   config error.
 /// - `body` (string): Request body for POST/PUT.
 /// - `headers` (object): Extra HTTP headers.
 /// - `timeout_ms` (u64): Timeout in milliseconds. Defaults to 10000.
@@ -649,18 +651,33 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
             details: None,
         })?;
 
+    // Validate the method against a closed set up front (config error, not a
+    // runtime failure). Unknown methods must NOT silently fall through to
+    // GET — a workflow typo should fail loudly. Validated before the URL
+    // safety check so a bad method is rejected without any network/DNS work.
+    let method = ctx
+        .params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET");
+    if !["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]
+        .iter()
+        .any(|m| method.eq_ignore_ascii_case(m))
+    {
+        return Err(StepError::Permanent {
+            message: format!(
+                "http_request: unsupported method `{method}`; expected GET, POST, PUT, PATCH, DELETE, or HEAD"
+            ),
+            details: None,
+        });
+    }
+
     if !is_url_safe(url).await {
         return Err(StepError::Permanent {
             message: "blocked: URL targets a private/internal network address".into(),
             details: None,
         });
     }
-
-    let method = ctx
-        .params
-        .get("method")
-        .and_then(Value::as_str)
-        .unwrap_or("GET");
 
     let body_str = ctx.params.get("body").and_then(Value::as_str).unwrap_or("");
 
@@ -689,7 +706,11 @@ async fn handle_http_request(ctx: StepContext) -> Result<Value, StepError> {
         client.patch(url)
     } else if method.eq_ignore_ascii_case("DELETE") {
         client.delete(url)
+    } else if method.eq_ignore_ascii_case("HEAD") {
+        client.head(url)
     } else {
+        // Validated against the closed set above, so the only remaining
+        // method is GET.
         client.get(url)
     };
 
@@ -1044,6 +1065,20 @@ mod tests {
             panic!("expected Permanent, got {err:?}");
         };
         assert!(message.contains("url"));
+    }
+
+    #[tokio::test]
+    async fn http_request_unknown_method_fails() {
+        let result = handle_http_request(
+            test_ctx(json!({"url": "http://example.com/", "method": "frobnicate"})).await,
+        )
+        .await;
+        let err = result.unwrap_err();
+        let StepError::Permanent { message, .. } = &err else {
+            panic!("expected Permanent, got {err:?}");
+        };
+        assert!(message.contains("unsupported method"));
+        assert!(message.contains("frobnicate"));
     }
 
     #[tokio::test]

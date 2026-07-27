@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use orch8_types::finding::{
     Confidence, Evidence, Finding, FindingSeverity, Remediation, ResourceRef,
@@ -89,60 +89,75 @@ struct SequenceRefs {
     rate_limit_keys: BTreeSet<String>,
 }
 
+/// Depth-first walk over the serialized definition: every object is
+/// reported to `on_object`, every string to `on_string`. Shared so each
+/// check only writes its per-node logic, not the recursion.
+fn walk_definition(
+    value: &Value,
+    on_object: &mut impl FnMut(&Map<String, Value>),
+    on_string: &mut impl FnMut(&str),
+) {
+    match value {
+        Value::Object(map) => {
+            on_object(map);
+            for child in map.values() {
+                walk_definition(child, on_object, on_string);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                walk_definition(item, on_object, on_string);
+            }
+        }
+        Value::String(s) => on_string(s),
+        _ => {}
+    }
+}
+
 /// Walk the serialized definition and collect everything preflight needs.
 /// JSON-walking (rather than matching every DSL variant) keeps this in
-/// sync with new composite block types automatically.
-fn collect_refs(seq: &SequenceDefinition) -> SequenceRefs {
-    fn walk(value: &Value, refs: &mut SequenceRefs) {
-        match value {
-            Value::Object(map) => {
-                let ty = map.get("type").and_then(Value::as_str);
-                if let (Some(Value::String(id)), Some(Value::String(handler))) =
-                    (map.get("id"), map.get("handler"))
-                {
-                    refs.steps.push((id.clone(), handler.clone()));
-                    if let Some(Value::String(q)) = map.get("queue_name") {
-                        refs.explicit_queues.insert(q.clone());
-                    }
-                    if let Some(Value::String(k)) = map.get("rate_limit_key") {
-                        refs.rate_limit_keys.insert(k.clone());
-                    }
-                }
-                if ty == Some("sub_sequence")
-                    && let (Some(Value::String(id)), Some(Value::String(name))) =
-                        (map.get("id"), map.get("sequence_name"))
-                {
-                    let version = map
-                        .get("version")
-                        .and_then(Value::as_i64)
-                        .and_then(|v| i32::try_from(v).ok());
-                    refs.sub_sequences.push((id.clone(), name.clone(), version));
-                }
-                for child in map.values() {
-                    walk(child, refs);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    walk(item, refs);
-                }
-            }
-            Value::String(s) => {
-                if let Some(rest) = s.strip_prefix(CREDENTIAL_PREFIX) {
-                    // `credentials://ID` or `credentials://ID/field`
-                    let id = rest.split('/').next().unwrap_or(rest);
-                    if !id.is_empty() {
-                        refs.credential_ids.insert(id.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+/// sync with new composite block types automatically. Step refs are gated
+/// on `type == "step"` so an arbitrary `{id, handler}` object in a params
+/// payload cannot register phantom external handlers.
+fn collect_refs(val: &Value) -> SequenceRefs {
     let mut refs = SequenceRefs::default();
-    if let Ok(v) = serde_json::to_value(seq) {
-        walk(&v, &mut refs);
-    }
+    walk_definition(
+        val,
+        &mut |map| {
+            let ty = map.get("type").and_then(Value::as_str);
+            if ty == Some("step")
+                && let (Some(Value::String(id)), Some(Value::String(handler))) =
+                    (map.get("id"), map.get("handler"))
+            {
+                refs.steps.push((id.clone(), handler.clone()));
+                if let Some(Value::String(q)) = map.get("queue_name") {
+                    refs.explicit_queues.insert(q.clone());
+                }
+                if let Some(Value::String(k)) = map.get("rate_limit_key") {
+                    refs.rate_limit_keys.insert(k.clone());
+                }
+            }
+            if ty == Some("sub_sequence")
+                && let (Some(Value::String(id)), Some(Value::String(name))) =
+                    (map.get("id"), map.get("sequence_name"))
+            {
+                let version = map
+                    .get("version")
+                    .and_then(Value::as_i64)
+                    .and_then(|v| i32::try_from(v).ok());
+                refs.sub_sequences.push((id.clone(), name.clone(), version));
+            }
+        },
+        &mut |s| {
+            if let Some(rest) = s.strip_prefix(CREDENTIAL_PREFIX) {
+                // `credentials://ID` or `credentials://ID/field`
+                let id = rest.split('/').next().unwrap_or(rest);
+                if !id.is_empty() {
+                    refs.credential_ids.insert(id.to_string());
+                }
+            }
+        },
+    );
     refs
 }
 
@@ -154,14 +169,18 @@ pub fn run_preflight(
     inventory: &RuntimeInventory,
     now: DateTime<Utc>,
 ) -> PreflightReport {
-    let refs = collect_refs(seq);
+    // Serialize once; every JSON-walking check shares this value.
+    let serialized = serde_json::to_value(seq).ok();
+    let refs = serialized
+        .as_ref()
+        .map_or_else(SequenceRefs::default, collect_refs);
     let checks = vec![
         check_definition(seq, now),
         check_lint(seq, now),
         check_input_schema(seq, now),
-        check_output_schemas(seq, now),
+        check_output_schemas(serialized.as_ref(), now),
         check_typed_dataflow(seq, now),
-        check_when_guards(seq, now),
+        check_when_guards(serialized.as_ref(), now),
         check_handlers(seq, &refs, inventory, now),
         check_plugins(&refs, inventory, now),
         check_credentials(&refs, inventory, now),
@@ -293,62 +312,51 @@ fn check_input_schema(seq: &SequenceDefinition, now: DateTime<Utc>) -> Preflight
     }
 }
 
-fn check_output_schemas(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
-    fn walk(value: &Value, findings: &mut Vec<Finding>, now: DateTime<Utc>) {
-        match value {
-            Value::Object(map) => {
-                if let Some(Value::String(id)) = map.get("id")
-                    && let Some(schema) = map.get("output_schema")
-                    && !schema.is_null()
-                {
-                    if !schema.is_object() {
-                        findings.push(
-                            Finding::new(
-                                "INVALID_OUTPUT_SCHEMA",
-                                FindingSeverity::Error,
-                                format!(
-                                    "step '{id}' output_schema must be a JSON Schema object, found {}",
-                                    json_type_name(schema)
-                                ),
-                                Confidence::Certain,
-                                now,
-                            )
-                            .with_resource(ResourceRef::new("block", id.clone())),
-                        );
-                    } else if jsonschema::validator_for(schema).is_err() {
-                        findings.push(
-                            Finding::new(
-                                "INVALID_OUTPUT_SCHEMA",
-                                FindingSeverity::Error,
-                                format!("step '{id}' output_schema is not a valid JSON Schema"),
-                                Confidence::Certain,
-                                now,
-                            )
-                            .with_resource(ResourceRef::new("block", id.clone())),
-                        );
-                    }
-                }
-                for child in map.values() {
-                    walk(child, findings, now);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    walk(item, findings, now);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let Ok(val) = serde_json::to_value(seq) else {
+fn check_output_schemas(val: Option<&Value>, now: DateTime<Utc>) -> PreflightCheck {
+    let Some(val) = val else {
         return PreflightCheck::pass(
             "output_schemas_valid",
             "no output schemas (serialization failed)",
         );
     };
     let mut findings = Vec::new();
-    walk(&val, &mut findings, now);
+    walk_definition(
+        val,
+        &mut |map| {
+            if let Some(Value::String(id)) = map.get("id")
+                && let Some(schema) = map.get("output_schema")
+                && !schema.is_null()
+            {
+                if !schema.is_object() {
+                    findings.push(
+                        Finding::new(
+                            "INVALID_OUTPUT_SCHEMA",
+                            FindingSeverity::Error,
+                            format!(
+                                "step '{id}' output_schema must be a JSON Schema object, found {}",
+                                json_type_name(schema)
+                            ),
+                            Confidence::Certain,
+                            now,
+                        )
+                        .with_resource(ResourceRef::new("block", id.clone())),
+                    );
+                } else if jsonschema::validator_for(schema).is_err() {
+                    findings.push(
+                        Finding::new(
+                            "INVALID_OUTPUT_SCHEMA",
+                            FindingSeverity::Error,
+                            format!("step '{id}' output_schema is not a valid JSON Schema"),
+                            Confidence::Certain,
+                            now,
+                        )
+                        .with_resource(ResourceRef::new("block", id.clone())),
+                    );
+                }
+            }
+        },
+        &mut |_| {},
+    );
     if findings.is_empty() {
         PreflightCheck::pass("output_schemas_valid", "all output schemas are well-formed")
     } else {
@@ -361,53 +369,44 @@ fn check_output_schemas(seq: &SequenceDefinition, now: DateTime<Utc>) -> Preflig
     }
 }
 
-fn check_when_guards(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
-    fn walk(value: &Value, findings: &mut Vec<Finding>, now: DateTime<Utc>) {
-        match value {
-            Value::Object(map) => {
-                if let Some(Value::String(id)) = map.get("id")
-                    && let Some(Value::String(when_expr)) = map.get("when")
-                    && when_expr.trim().is_empty()
-                {
-                    findings.push(
-                        Finding::new(
-                            "EMPTY_WHEN_GUARD",
-                            FindingSeverity::Warning,
-                            format!("step '{id}' has an empty `when` guard expression"),
-                            Confidence::Certain,
-                            now,
-                        )
-                        .with_resource(ResourceRef::new("block", id.clone())),
-                    );
-                }
-                for child in map.values() {
-                    walk(child, findings, now);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    walk(item, findings, now);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let Ok(val) = serde_json::to_value(seq) else {
+fn check_when_guards(val: Option<&Value>, now: DateTime<Utc>) -> PreflightCheck {
+    let Some(val) = val else {
         return PreflightCheck::pass("when_guards_valid", "no when guards (serialization failed)");
     };
     let mut findings = Vec::new();
-    walk(&val, &mut findings, now);
+    walk_definition(
+        val,
+        &mut |map| {
+            if let Some(Value::String(id)) = map.get("id")
+                && let Some(Value::String(when_expr)) = map.get("when")
+                && when_expr.trim().is_empty()
+            {
+                findings.push(
+                    Finding::new(
+                        "EMPTY_WHEN_GUARD",
+                        FindingSeverity::Warning,
+                        format!("step '{id}' has an empty `when` guard expression"),
+                        Confidence::Certain,
+                        now,
+                    )
+                    .with_resource(ResourceRef::new("block", id.clone())),
+                );
+            }
+        },
+        &mut |_| {},
+    );
     if findings.is_empty() {
         PreflightCheck::pass(
             "when_guards_valid",
             "all `when` guard expressions are well-formed",
         )
     } else {
+        // Findings here are warnings only — mirror the other
+        // warning-only checks instead of failing the sequence.
         PreflightCheck::with_status(
             "when_guards_valid",
-            PreflightStatus::Fail,
-            format!("{} invalid `when` guard(s)", findings.len()),
+            PreflightStatus::Warning,
+            format!("{} empty `when` guard(s)", findings.len()),
             findings,
         )
     }
@@ -458,6 +457,13 @@ fn check_handlers(
             continue; // served in-process by an enabled plugin
         }
         external.insert(handler.as_str());
+    }
+
+    // A pin narrows which of the live workers count; without the pin
+    // inventory, pin enforcement for external handlers is unproven —
+    // report Unknown rather than silently passing.
+    if !external.is_empty() && inventory.version_pins.is_none() {
+        return unknown("handlers_have_workers", "version pin");
     }
 
     for handler in external {
@@ -693,17 +699,16 @@ fn check_queues(
         return unknown("queues_consumable", "queue consumer");
     };
 
-    let redirected: BTreeSet<&str> = inventory
-        .routing_rules
-        .as_ref()
-        .map(|rules| {
-            rules
-                .iter()
-                .filter(|r| r.enabled)
-                .filter_map(|r| r.match_queue.as_deref())
-                .collect()
-        })
-        .unwrap_or_default();
+    let Some(rules) = &inventory.routing_rules else {
+        // Redirects can substitute for a consumer; without the rules
+        // inventory, redirect evaluation is unproven — not "no redirects".
+        return unknown("queues_consumable", "routing rule");
+    };
+    let redirected: BTreeSet<&str> = rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| r.match_queue.as_deref())
+        .collect();
 
     let mut findings = Vec::new();
     for queue in &refs.explicit_queues {
@@ -926,7 +931,7 @@ mod tests {
             ]},
             {"type": "sub_sequence", "id": "child", "sequence_name": "refund-flow", "version": 3, "input": {}}
         ]));
-        let refs = collect_refs(&s);
+        let refs = collect_refs(&serde_json::to_value(&s).unwrap());
         assert_eq!(refs.steps.len(), 2);
         assert!(refs.explicit_queues.contains("billing"));
         assert_eq!(
@@ -948,9 +953,31 @@ mod tests {
         let s = seq(json!([
             {"type": "step", "id": "a", "handler": "noop", "params": {"k": "credentials://vault-key/token"}}
         ]));
-        let refs = collect_refs(&s);
+        let refs = collect_refs(&serde_json::to_value(&s).unwrap());
         assert!(refs.credential_ids.contains("vault-key"));
         assert!(!refs.credential_ids.contains("vault-key/token"));
+    }
+
+    #[test]
+    fn params_object_with_id_and_handler_is_not_a_step() {
+        // An {id, handler} object inside a params payload is data, not a
+        // block position — it must not register a phantom external handler.
+        let s = seq(json!([
+            {"type": "step", "id": "a", "handler": "noop", "params": {
+                "nested": {"id": "spoof", "handler": "phantom_handler", "queue_name": "ghost-q"}
+            }}
+        ]));
+        let refs = collect_refs(&serde_json::to_value(&s).unwrap());
+        assert_eq!(refs.steps, vec![("a".to_string(), "noop".to_string())]);
+        assert!(refs.explicit_queues.is_empty());
+        assert!(refs.rate_limit_keys.is_empty());
+
+        // And preflight stays Pass: no phantom handler needs a worker.
+        let report = run_preflight(&s, &full_inventory(), t0());
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
     }
 
     // --- unknown propagation ---
@@ -979,6 +1006,72 @@ mod tests {
         );
         assert_eq!(report.overall, PreflightStatus::Unknown);
         assert!(!report.is_ready());
+    }
+
+    #[test]
+    fn missing_pin_inventory_with_external_handler_yields_unknown() {
+        // version_pins = None means pin enforcement is unproven: a pinned
+        // handler must not silently pass against an older worker.
+        let s = seq(json!([
+            {"type": "step", "id": "charge", "handler": "charge_card", "params": {}}
+        ]));
+        let mut inv = full_inventory();
+        inv.worker_registrations = Some(vec![registration("charge_card", None, Some("1.1.0"))]);
+        inv.version_pins = None;
+        let report = run_preflight(&s, &inv, t0());
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Unknown
+        );
+        assert!(!report.is_ready());
+    }
+
+    #[test]
+    fn missing_pin_inventory_with_only_builtin_handlers_still_passes() {
+        // No external handlers: pins cannot matter, so None pins do not
+        // make the check Unknown.
+        let s = seq(json!([
+            {"type": "step", "id": "a", "handler": "noop", "params": {}}
+        ]));
+        let mut inv = full_inventory();
+        inv.version_pins = None;
+        let report = run_preflight(&s, &inv, t0());
+        assert_eq!(
+            check(&report, "handlers_have_workers").status,
+            PreflightStatus::Pass
+        );
+    }
+
+    #[test]
+    fn missing_routing_rules_yields_unknown_for_queue_check() {
+        // routing_rules = None is not "no redirects exist" — redirect
+        // evaluation is unproven, so the check is Unknown rather than
+        // warning about possibly-redirected queues.
+        let s = seq(json!([
+            {"type": "step", "id": "a", "handler": "noop", "params": {}, "queue_name": "orphan"}
+        ]));
+        let mut inv = full_inventory();
+        inv.routing_rules = None;
+        let report = run_preflight(&s, &inv, t0());
+        assert_eq!(
+            check(&report, "queues_consumable").status,
+            PreflightStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn empty_when_guard_warns_not_fails() {
+        // EMPTY_WHEN_GUARD findings are warnings only; like every other
+        // warning-only check the status is Warning, not Fail.
+        let s = seq(json!([
+            {"type": "step", "id": "a", "handler": "noop", "params": {}, "when": "  "}
+        ]));
+        let report = run_preflight(&s, &full_inventory(), t0());
+        let c = check(&report, "when_guards_valid");
+        assert_eq!(c.status, PreflightStatus::Warning);
+        assert_eq!(c.findings[0].code, "EMPTY_WHEN_GUARD");
+        assert_eq!(report.overall, PreflightStatus::Warning);
+        assert!(report.is_ready());
     }
 
     #[test]

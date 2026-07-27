@@ -371,10 +371,20 @@ async fn record_attempt(
     }
 }
 
+/// Whether an HTTP error status is terminal — retrying a permanently
+/// misconfigured endpoint (400/401/403/404, …) can never succeed, so the
+/// delivery should fail immediately instead of burning the full retry
+/// schedule while holding a dispatch slot and outbox lease. 408 and 429 are
+/// transient client errors and stay retryable, as do all 5xx statuses.
+const fn is_terminal_status(status: u16) -> bool {
+    status >= 400 && status < 500 && status != 408 && status != 429
+}
+
 /// One full retry pass. Returns `Ok(())` on a 2xx/3xx, or `Err(last_error)`
-/// after exhausting `max_retries` (or on shutdown). Does NOT park — callers
-/// decide what to do with a failure. Every attempt is recorded (bounded,
-/// redacted metadata) under `delivery_id` for the delivery inspector.
+/// after exhausting `max_retries`, on a terminal 4xx status, or on shutdown.
+/// Does NOT park — callers decide what to do with a failure. Every attempt is
+/// recorded (bounded, redacted metadata) under `delivery_id` for the delivery
+/// inspector.
 async fn try_send(
     delivery_id: uuid::Uuid,
     url: &str,
@@ -419,6 +429,10 @@ async fn try_send(
                 )
                 .await;
                 last_error = format!("http {status}");
+                if is_terminal_status(status) {
+                    warn!(url = %url, status, attempt, "webhook returned terminal client error status — not retrying");
+                    return Err(last_error);
+                }
                 warn!(url = %url, status, attempt, "webhook returned error status");
             }
             Err(e) => {
@@ -1070,6 +1084,68 @@ mod tests {
         assert!(
             elapsed >= Duration::from_millis(400),
             "backoff should apply: {elapsed:?}",
+        );
+    }
+
+    #[test]
+    fn terminal_status_classification() {
+        // Permanently-misconfigured endpoints must not be retried.
+        for status in [400, 401, 403, 404, 405, 422, 499] {
+            assert!(is_terminal_status(status), "{status} should be terminal");
+        }
+        // Transient statuses keep the backoff retry path.
+        for status in [408, 429, 500, 502, 503, 599] {
+            assert!(
+                !is_terminal_status(status),
+                "{status} should stay retryable"
+            );
+        }
+        // Non-error statuses are never terminal.
+        for status in [200, 301, 399] {
+            assert!(!is_terminal_status(status));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_does_not_retry_terminal_4xx() {
+        // A 400 means the endpoint is misconfigured — retrying can never
+        // succeed, so exactly one attempt must be made even with retries
+        // budgeted.
+        let (url, counter, _bodies) = start_mock_server(|_| 400).await;
+        let cancel = CancellationToken::new();
+        let event = WebhookEvent {
+            event_type: "t".into(),
+            instance_id: None,
+            timestamp: "t".into(),
+            data: serde_json::json!({}),
+        };
+        send_with_retry(&url, &event, Duration::from_secs(2), 5, None, &cancel).await;
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "terminal 4xx must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_retries_transient_408_429_and_5xx() {
+        // 429, 408 and 500 are transient: each must be retried until the
+        // endpoint finally returns 200.
+        let (url, counter, _bodies) = start_mock_server(|n| [429, 408, 500, 200][n.min(3)]).await;
+        let cancel = CancellationToken::new();
+        let event = WebhookEvent {
+            event_type: "t".into(),
+            instance_id: None,
+            timestamp: "t".into(),
+            data: serde_json::json!({}),
+        };
+        send_with_retry(&url, &event, Duration::from_secs(2), 5, None, &cancel).await;
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            4,
+            "429, 408 and 500 should each be retried"
         );
     }
 

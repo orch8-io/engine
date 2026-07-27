@@ -123,7 +123,7 @@ pub async fn execute_for_each(
     } else {
         // First visit — resolve live, externalize the snapshot once, and
         // persist a lightweight marker that only holds the ref key.
-        let Some(items) = resolve_collection(
+        let Some(mut items) = resolve_collection(
             &fe_def.collection,
             &instance.context,
             storage,
@@ -145,6 +145,13 @@ pub async fn execute_for_each(
             evaluator::complete_node(storage, node.id).await?;
             return Ok(true);
         }
+        // Truncate the snapshot to the effective cap before externalizing:
+        // iterations past `max_iterations` never run, so persisting the
+        // full author-controlled collection would only bloat
+        // externalized_state and force every later tick to re-read and
+        // re-clone items the loop can never reach.
+        let user_max = fe_def.max_iterations.min(FOR_EACH_ABSOLUTE_MAX);
+        items.truncate(usize::try_from(user_max).unwrap_or(usize::MAX));
         // Externalize the collection snapshot so later ticks stay consistent
         // without duplicating the full array into every iteration marker.
         storage
@@ -217,6 +224,11 @@ pub async fn execute_for_each(
     // the body subtree so the next tick starts the next iteration.
     if !children.is_empty() && evaluator::all_terminal(&children) {
         if evaluator::any_failed(&children) {
+            // Drop the last iteration's item binding before failing so it
+            // does not leak into on_failure handlers and later context
+            // readers — the same cleanup the completion path performs.
+            // Best-effort and idempotent.
+            cleanup_item_var(storage, instance.id, &fe_def.item_var).await;
             evaluator::fail_node(storage, node.id).await?;
             return Ok(true);
         }
@@ -237,6 +249,17 @@ pub async fn execute_for_each(
             attempt: u16::try_from(next_index).unwrap_or(u16::MAX),
             created_at: chrono::Utc::now(),
         };
+        // Reset the body subtree BEFORE persisting the advanced marker: if
+        // the reset fails, the stored counter still matches the still-terminal
+        // body and the next tick retries the idempotent reset instead of
+        // counting a phantom iteration whose body never ran (same ordering
+        // rationale as loop_block). Skipped at the cap so the body stays
+        // terminal for clean close-out.
+        if next_index < effective_max {
+            reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id)
+                .await?;
+        }
+
         storage.save_block_output(&marker).await?;
 
         // Compact old body-step outputs once the retained window is exceeded.
@@ -267,16 +290,6 @@ pub async fn execute_for_each(
             total = snapshot_items.len(),
             "for_each iteration completed"
         );
-
-        // Cap reached after this iteration: leave body terminal. The
-        // top-of-function guard will complete the node on the next tick.
-        if next_index >= effective_max {
-            return Ok(true);
-        }
-
-        // Reset the body subtree so the next tick re-runs it against
-        // `items[next_index]`. The bind+activate happens on that tick.
-        reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id).await?;
     }
 
     Ok(true)
@@ -312,13 +325,62 @@ async fn bind_item_var(
 /// subsequent steps. The cleanup is best-effort: if the instance was
 /// concurrently deleted or the context is not an object, we silently skip.
 async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId, item_var: &str) {
-    if let Ok(Some(mut inst)) = storage.get_instance(instance_id).await
-        && let Some(data) = inst.context.data.as_object_mut()
-        && data.remove(item_var).is_some()
+    let Ok(Some(mut inst)) = storage.get_instance(instance_id).await else {
+        return;
+    };
+    if inst
+        .context
+        .data
+        .as_object()
+        .is_none_or(|d| !d.contains_key(item_var))
     {
-        let _ = storage
-            .update_instance_context(instance_id, &inst.context)
-            .await;
+        // Key already absent (or data is not an object) — nothing to write.
+        return;
+    }
+    // CAS against the `updated_at` we just read: a concurrent context merge
+    // (human_input, update_context signal) landing between read and write
+    // would otherwise be silently dropped by a blind full-document replace.
+    // On contention, retry the read-mutate-write exactly once; if the fresh
+    // read shows the key already removed, treat it as success. If the retry
+    // also loses, proceed — the cleanup is best-effort and never worth
+    // failing the step.
+    let expected_updated_at = inst.updated_at;
+    if let Some(data) = inst.context.data.as_object_mut() {
+        data.remove(item_var);
+    }
+    let landed = storage
+        .update_instance_context_cas(instance_id, &inst.context, expected_updated_at)
+        .await
+        .unwrap_or(false);
+    if !landed {
+        let retry_landed = match storage.get_instance(instance_id).await {
+            Ok(Some(mut fresh))
+                if fresh
+                    .context
+                    .data
+                    .as_object()
+                    .is_some_and(|d| d.contains_key(item_var)) =>
+            {
+                let expected_updated_at = fresh.updated_at;
+                if let Some(data) = fresh.context.data.as_object_mut() {
+                    data.remove(item_var);
+                }
+                storage
+                    .update_instance_context_cas(instance_id, &fresh.context, expected_updated_at)
+                    .await
+                    .unwrap_or(false)
+            }
+            // Instance gone, or a concurrent writer already removed the key
+            // — either way nothing to do.
+            _ => true,
+        };
+        if !retry_landed {
+            warn!(
+                instance_id = %instance_id,
+                item_var = %item_var,
+                "lost CAS race cleaning up for_each item var; leaving it in context"
+            );
+        }
     }
 }
 

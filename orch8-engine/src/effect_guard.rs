@@ -15,9 +15,9 @@ use orch8_types::continuity_advanced::{InvariantRule, WorkflowInvariant};
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use uuid::Uuid;
 
+use crate::dataflow::hex_sha256;
 use crate::error::EngineError;
 
 pub(crate) struct EffectGuard<'a> {
@@ -414,15 +414,6 @@ fn destination_fingerprint(handler: &str, params: &Value) -> Result<String, Engi
     }))
     .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
     Ok(hex_sha256(canonical.as_bytes()))
-}
-
-fn hex_sha256(value: &[u8]) -> String {
-    let digest = Sha256::digest(value);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    output
 }
 
 fn effect_kind(handler: &str) -> EffectKind {

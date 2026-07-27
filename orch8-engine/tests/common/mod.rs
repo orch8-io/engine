@@ -7,7 +7,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use orch8_engine::evaluator::{self, EvalOutcome};
+use orch8_engine::evaluator::{self, EvalOutcome, TerminalReason};
 use orch8_engine::handlers::{HandlerRegistry, builtin::register_builtins};
 use orch8_engine::sequence_cache::SequenceCache;
 use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
@@ -681,17 +681,11 @@ pub async fn drive(
         let outcome = evaluator::evaluate(storage, handlers, &inst, sequence)
             .await
             .unwrap();
-        if let EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } = outcome
-        {
-            let new_state = if any_cancelled && !any_failed {
-                InstanceState::Cancelled
-            } else if any_failed {
-                InstanceState::Failed
-            } else {
-                InstanceState::Completed
+        if let EvalOutcome::Done { reason } = outcome {
+            let new_state = match reason {
+                TerminalReason::Cancelled => InstanceState::Cancelled,
+                TerminalReason::Failed => InstanceState::Failed,
+                TerminalReason::Succeeded => InstanceState::Completed,
             };
             storage
                 .update_instance_state(instance_id, new_state, None)

@@ -465,7 +465,7 @@ fn preflight_valid_when_guard_passes() {
 // ================================================================
 
 #[test]
-fn preflight_empty_when_guard_fails() {
+fn preflight_empty_when_guard_warns() {
     use chrono::{TimeZone, Utc};
     use orch8_engine::preflight::{RuntimeInventory, run_preflight};
 
@@ -504,8 +504,8 @@ fn preflight_empty_when_guard_fails() {
         .expect("missing when_guards_valid check");
     assert_eq!(
         check.status,
-        orch8_types::preflight::PreflightStatus::Fail,
-        "empty when guard should fail preflight: {check:?}"
+        orch8_types::preflight::PreflightStatus::Warning,
+        "empty when guard should warn, not fail, in preflight: {check:?}"
     );
 }
 

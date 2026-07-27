@@ -9,7 +9,7 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::json;
 
-use orch8_engine::evaluator::{self, EvalOutcome};
+use orch8_engine::evaluator::{self, EvalOutcome, TerminalReason};
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::error::StepError;
@@ -73,8 +73,7 @@ async fn evaluate_empty_sequence_returns_done_immediately() {
     assert!(matches!(
         outcome,
         EvalOutcome::Done {
-            any_failed: false,
-            any_cancelled: false,
+            reason: TerminalReason::Succeeded,
         }
     ));
 }
@@ -121,12 +120,8 @@ async fn evaluate_returns_done_with_any_failed_true_on_failure() {
         .await
         .unwrap();
     match outcome {
-        EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } => {
-            assert!(any_failed);
-            assert!(!any_cancelled);
+        EvalOutcome::Done { reason } => {
+            assert_eq!(reason, TerminalReason::Failed);
         }
         EvalOutcome::MoreWork { .. } => {
             drive(&storage, &reg, inst.id, &seq).await;
@@ -2136,8 +2131,7 @@ async fn eval_outcome_done_all_completed() {
     assert!(matches!(
         outcome,
         EvalOutcome::Done {
-            any_failed: false,
-            any_cancelled: false
+            reason: TerminalReason::Succeeded
         }
     ));
 }

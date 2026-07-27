@@ -1579,12 +1579,8 @@ fn check_termination_all_completed_returns_done() {
     let result = check_termination(&tree);
     assert!(result.is_some());
     match result.unwrap() {
-        EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } => {
-            assert!(!any_failed);
-            assert!(!any_cancelled);
+        EvalOutcome::Done { reason } => {
+            assert_eq!(reason, TerminalReason::Succeeded);
         }
         EvalOutcome::MoreWork { .. } => panic!("expected Done"),
     }
@@ -1615,12 +1611,8 @@ fn check_termination_root_failed_returns_done_with_failed() {
     let result = check_termination(&tree);
     assert!(result.is_some());
     match result.unwrap() {
-        EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } => {
-            assert!(any_failed);
-            assert!(!any_cancelled);
+        EvalOutcome::Done { reason } => {
+            assert_eq!(reason, TerminalReason::Failed);
         }
         EvalOutcome::MoreWork { .. } => panic!("expected Done"),
     }
@@ -1639,12 +1631,8 @@ fn check_termination_root_cancelled_returns_done_with_cancelled() {
     let result = check_termination(&tree);
     assert!(result.is_some());
     match result.unwrap() {
-        EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } => {
-            assert!(!any_failed);
-            assert!(any_cancelled);
+        EvalOutcome::Done { reason } => {
+            assert_eq!(reason, TerminalReason::Cancelled);
         }
         EvalOutcome::MoreWork { .. } => panic!("expected Done"),
     }
@@ -1696,12 +1684,8 @@ fn check_termination_mixed_completed_and_skipped_returns_done() {
     let result = check_termination(&tree);
     assert!(result.is_some());
     match result.unwrap() {
-        EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        } => {
-            assert!(!any_failed);
-            assert!(!any_cancelled);
+        EvalOutcome::Done { reason } => {
+            assert_eq!(reason, TerminalReason::Succeeded);
         }
         EvalOutcome::MoreWork { .. } => panic!("expected Done"),
     }

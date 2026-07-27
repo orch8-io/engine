@@ -145,54 +145,59 @@ fn resolve_string(
     Ok(serde_json::Value::String(result))
 }
 
+/// Quote-aware scan shared by the template scanners below. Iterates `s` with
+/// byte indices while tracking single/double-quote state, calling `f` for each
+/// character with its byte index and whether it sits inside a quoted span.
+/// Returning `false` from `f` stops the scan early. Note: like the original
+/// hand-rolled loops this has no escape handling — a `\'` inside a
+/// single-quoted span still toggles quote state. That historical behavior is
+/// preserved deliberately.
+fn scan_quote_aware(s: &str, mut f: impl FnMut(usize, char, bool) -> bool) {
+    let mut in_quote = false;
+    let mut quote_char = ' ';
+    for (i, c) in s.char_indices() {
+        if !f(i, c, in_quote) {
+            return;
+        }
+        if in_quote {
+            if c == quote_char {
+                in_quote = false;
+            }
+        } else if c == '\'' || c == '"' {
+            in_quote = true;
+            quote_char = c;
+        }
+    }
+}
+
 /// Check if the inner content of `{{ ... }}` is a single template expression
 /// (possibly with pipe filters) rather than containing multiple separate
 /// template expressions. We check that the content between the outer `{{ }}`
 /// doesn't contain unquoted `{{` which would indicate multiple expressions.
 pub(crate) fn is_single_template_expr(inner: &str) -> bool {
-    let mut in_quote = false;
-    let mut quote_char = ' ';
-    let bytes = inner.as_bytes();
-    let mut i = 0;
-    while i < bytes.len().saturating_sub(1) {
-        let c = bytes[i] as char;
-        if in_quote {
-            if c == quote_char {
-                in_quote = false;
-            }
-        } else if c == '\'' || c == '"' {
-            in_quote = true;
-            quote_char = c;
-        } else if c == '{' && bytes[i + 1] == b'{' {
+    let mut single = true;
+    scan_quote_aware(inner, |i, c, in_quote| {
+        if !in_quote && c == '{' && inner[i..].starts_with("{{") {
+            single = false;
             return false;
         }
-        i += 1;
-    }
-    true
+        true
+    });
+    single
 }
 
 /// Find the position of `}}` that closes a template expression, skipping
 /// any `}}` that appear inside quoted strings (e.g. `replace('{{x}}', ...)`).
 pub(crate) fn find_closing_braces(s: &str) -> Option<usize> {
-    let mut in_quote = false;
-    let mut quote_char = ' ';
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len().saturating_sub(1) {
-        let c = bytes[i] as char;
-        if in_quote {
-            if c == quote_char {
-                in_quote = false;
-            }
-        } else if c == '\'' || c == '"' {
-            in_quote = true;
-            quote_char = c;
-        } else if c == '}' && bytes[i + 1] == b'}' {
-            return Some(i);
+    let mut pos = None;
+    scan_quote_aware(s, |i, c, in_quote| {
+        if !in_quote && c == '}' && s[i..].starts_with("}}") {
+            pos = Some(i);
+            return false;
         }
-        i += 1;
-    }
-    None
+        true
+    });
+    pos
 }
 
 fn resolve_path(
@@ -231,7 +236,12 @@ fn resolve_path(
                 break;
             }
         } else {
-            base_value = serde_json::Value::String(seg.to_string());
+            // Parse quoted-string/number literals the same way the `default()`
+            // filter and the static validator (`is_literal`) treat them, so
+            // `{{ data.missing | 'USD' }}` yields `USD` (no quotes) and
+            // `{{ data.missing | 42 }}` yields a number. Bare words stay
+            // plain strings (`| fallback_value` → "fallback_value").
+            base_value = parse_literal_value(seg);
             filter_start = i + 1;
             break;
         }
@@ -510,22 +520,14 @@ fn parse_truncate_args(args: &str) -> Result<(usize, String), EngineError> {
 
 fn split_filter_args(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
-    let mut in_quote = false;
-    let mut quote_char = ' ';
     let mut start = 0;
-    for (i, c) in s.char_indices() {
-        if in_quote {
-            if c == quote_char {
-                in_quote = false;
-            }
-        } else if c == '\'' || c == '"' {
-            in_quote = true;
-            quote_char = c;
-        } else if c == ',' {
+    scan_quote_aware(s, |i, c, in_quote| {
+        if !in_quote && c == ',' {
             parts.push(&s[start..i]);
             start = i + 1;
         }
-    }
+        true
+    });
     parts.push(&s[start..]);
     parts
 }
@@ -577,22 +579,14 @@ fn parse_replace_args(
 ) -> Result<(String, String), EngineError> {
     // args looks like: 'search_string', replacement_path_or_literal
     // Find the comma that separates the two args (outside of quotes).
-    let mut in_quote = false;
-    let mut quote_char = ' ';
     let mut comma_pos = None;
-    for (i, c) in args.char_indices() {
-        if in_quote {
-            if c == quote_char {
-                in_quote = false;
-            }
-        } else if c == '\'' || c == '"' {
-            in_quote = true;
-            quote_char = c;
-        } else if c == ',' {
+    scan_quote_aware(args, |i, c, in_quote| {
+        if !in_quote && c == ',' {
             comma_pos = Some(i);
-            break;
+            return false;
         }
-    }
+        true
+    });
     let comma = comma_pos.ok_or_else(|| {
         EngineError::TemplateError(format!("replace() requires two arguments: {args}"))
     })?;
@@ -797,20 +791,7 @@ where
 }
 
 fn navigate_json_owned(value: &serde_json::Value, path: &[&str]) -> Option<serde_json::Value> {
-    let mut current = value;
-    for &segment in path {
-        match current {
-            serde_json::Value::Object(map) => {
-                current = map.get(segment)?;
-            }
-            serde_json::Value::Array(arr) => {
-                let idx: usize = segment.parse().ok()?;
-                current = arr.get(idx)?;
-            }
-            _ => return None,
-        }
-    }
-    Some(current.clone())
+    navigate_json(value, path.iter().copied()).cloned()
 }
 
 // ---------------------------------------------------------------------------
