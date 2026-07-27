@@ -62,6 +62,8 @@ bash -n "$repo_root/scripts/embed-aar-license.sh"
 
 workspace_version="$(awk -F'"' '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version/{print $2; exit}' "$repo_root/Cargo.toml")"
 [[ -n "$workspace_version" ]] || fail "could not read the workspace version"
+fuzz_timeout="$(awk '/^  fuzz-smoke:/{f=1; next} f && /timeout-minutes:/{print $2; exit}' "$repo_root/.github/workflows/ci.yml")"
+[[ "$fuzz_timeout" == "20" ]] || fail "fuzz smoke timeout is $fuzz_timeout minutes, expected 20"
 for package in orch8-engine orch8-publisher orch8-storage orch8-types; do
     fuzz_version="$(lock_package_version "$repo_root/fuzz/Cargo.lock" "$package")"
     [[ "$fuzz_version" == "$workspace_version" ]] \
