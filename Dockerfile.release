@@ -1,5 +1,7 @@
 FROM debian:bookworm-slim
 
+LABEL org.opencontainers.image.licenses="BUSL-1.1"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -8,6 +10,7 @@ RUN groupadd --system orch8 && useradd --system --gid orch8 orch8
 
 COPY orch8-server /usr/local/bin/orch8-server
 COPY orch8 /usr/local/bin/orch8
+COPY LICENSE /usr/share/licenses/orch8/LICENSE
 
 ENV ORCH8_STORAGE_BACKEND=sqlite \
     ORCH8_DATABASE_URL=sqlite:///data/orch8.db \

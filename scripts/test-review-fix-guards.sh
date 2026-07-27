@@ -16,6 +16,14 @@ assert_contains() {
         || fail "$file is missing required guard: $pattern"
 }
 
+assert_not_contains() {
+    local file="$1"
+    local pattern="$2"
+    if grep -qF -- "$pattern" "$repo_root/$file"; then
+        fail "$file contains forbidden release behavior: $pattern"
+    fi
+}
+
 expect_failure() {
     local label="$1"
     shift
@@ -24,8 +32,32 @@ expect_failure() {
     fi
 }
 
+lock_package_version() {
+    local lockfile="$1"
+    local package="$2"
+    awk -v package="$package" '
+        /^\[\[package\]\]$/ { in_package = 0 }
+        $0 == "name = \"" package "\"" { in_package = 1; next }
+        in_package && /^version = "/ {
+            gsub(/^version = "|"$/, "")
+            print
+            exit
+        }
+    ' "$lockfile"
+}
+
 bash -n "$repo_root/scripts/check-migration-immutability.sh"
 bash -n "$repo_root/scripts/check-destructive-migrations.sh"
+bash -n "$repo_root/scripts/embed-aar-license.sh"
+
+workspace_version="$(awk -F'"' '/^\[workspace\.package\]/{f=1; next} /^\[/{f=0} f && /^version/{print $2; exit}' "$repo_root/Cargo.toml")"
+[[ -n "$workspace_version" ]] || fail "could not read the workspace version"
+for package in orch8-engine orch8-publisher orch8-storage orch8-types; do
+    fuzz_version="$(lock_package_version "$repo_root/fuzz/Cargo.lock" "$package")"
+    [[ "$fuzz_version" == "$workspace_version" ]] \
+        || fail "fuzz/Cargo.lock has ${package} ${fuzz_version}, expected ${workspace_version}"
+done
+assert_contains docs/MOBILE_SDK.md "(\`${workspace_version}\`)"
 
 # Exercise migration guards in an isolated tagged repository.
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orch8-migration-guards.XXXXXX")"
@@ -33,6 +65,17 @@ trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/migrations" "$fixture/scripts"
 cp "$repo_root/scripts/check-migration-immutability.sh" "$fixture/scripts/"
 cp "$repo_root/scripts/check-destructive-migrations.sh" "$fixture/scripts/"
+
+# Prove the shipped AAR helper embeds the exact repository license bytes.
+cp "$repo_root/LICENSE" "$fixture/aar-payload"
+(
+    cd "$fixture"
+    zip -q sample.aar aar-payload
+)
+"$repo_root/scripts/embed-aar-license.sh" "$fixture/sample.aar" "$repo_root/LICENSE" > /dev/null
+unzip -p "$fixture/sample.aar" META-INF/LICENSE | cmp -s - "$repo_root/LICENSE" \
+    || fail "AAR license contents do not match LICENSE"
+
 (
     cd "$fixture"
     git init -q
@@ -90,10 +133,26 @@ assert_contains .github/workflows/release.yml "prerelease: \${{ contains(github.
 assert_contains .github/workflows/release.yml "if: \${{ !contains(github.ref_name, '-') }}"
 assert_contains .github/workflows/release.yml 'Verify Cloud management surface'
 assert_contains .github/workflows/release.yml 'os: ubuntu-22.04'
+assert_contains .github/workflows/release.yml 'sh ./install.sh --dir "$INSTALL_DIR" --version "$GITHUB_REF_NAME"'
+assert_contains .github/workflows/release.yml 'cp LICENSE "$DIR/"'
+assert_contains .github/workflows/release.yml 'cp LICENSE docker-ctx/'
+assert_contains .github/workflows/release.yml 'test "$IMAGE" -f /usr/share/licenses/orch8/LICENSE'
+assert_contains .github/workflows/release.yml 'cp LICENSE build/Orch8Mobile.xcframework/LICENSE'
+assert_contains .github/workflows/release.yml 'bash ../../scripts/embed-aar-license.sh'
+assert_contains .github/workflows/release.yml 'cp LICENSE bindings/LICENSE'
+assert_contains .github/workflows/mobile.yml 'cp LICENSE build/Orch8Mobile.xcframework/LICENSE'
+assert_contains .github/workflows/mobile.yml 'bash ../../scripts/embed-aar-license.sh'
+assert_not_contains .github/workflows/mobile.yml 'gh release create'
+assert_not_contains .github/workflows/mobile.yml 'gh release upload'
+assert_contains packages/android/orch8-mobile/build.gradle.kts 'name.set("Business Source License 1.1")'
+assert_not_contains packages/android/orch8-mobile/build.gradle.kts 'Apache License 2.0'
 assert_contains .github/workflows/ci.yml 'Verify Cloud management surface'
 assert_contains .github/workflows/ci.yml 'sqlite-smoke:'
 assert_contains .github/workflows/ci.yml 'fuzz-smoke:'
 assert_contains .github/workflows/ci.yml 'mobile-sync-smoke:'
 assert_contains Dockerfile.release "addr=\\\"\${ORCH8_HTTP_ADDR:-127.0.0.1:8080}\\\""
+assert_contains Dockerfile.release 'COPY LICENSE /usr/share/licenses/orch8/LICENSE'
+assert_contains Dockerfile.release 'LABEL org.opencontainers.image.licenses="BUSL-1.1"'
+assert_contains scripts/embed-aar-license.sh "unzip -Z1 \"\$aar_path\" | grep -Fx 'META-INF/LICENSE'"
 
 echo "OK: release and migration review-fix guards passed."
