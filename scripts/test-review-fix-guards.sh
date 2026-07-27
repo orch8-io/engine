@@ -24,6 +24,16 @@ assert_not_contains() {
     fi
 }
 
+assert_count() {
+    local file="$1"
+    local pattern="$2"
+    local expected="$3"
+    local actual
+    actual="$(awk -v pattern="$pattern" 'index($0, pattern) { count++ } END { print count + 0 }' "$repo_root/$file")"
+    [[ "$actual" == "$expected" ]] \
+        || fail "$file contains $actual occurrences of $pattern, expected $expected"
+}
+
 expect_failure() {
     local label="$1"
     shift
@@ -141,6 +151,9 @@ assert_contains .github/workflows/release.yml 'test "$IMAGE" -f /usr/share/licen
 assert_contains .github/workflows/release.yml 'docker pull --platform "$PLATFORM" "$IMAGE"'
 assert_contains .github/workflows/release.yml 'docker run --platform "$PLATFORM" --rm --entrypoint test'
 assert_contains .github/workflows/release.yml 'docker run --platform "$PLATFORM" -d --name orch8-release-smoke'
+assert_contains .github/workflows/release.yml 'docker buildx imagetools create --tag "ghcr.io/orch8-io/engine:${TAG}"'
+assert_not_contains .github/workflows/release.yml 'docker manifest create'
+assert_count .github/workflows/release.yml 'docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2' 2
 assert_contains .github/workflows/release.yml 'cp LICENSE build/Orch8Mobile.xcframework/LICENSE'
 assert_contains .github/workflows/release.yml 'bash ../../scripts/embed-aar-license.sh'
 assert_contains .github/workflows/release.yml 'cp LICENSE bindings/LICENSE'
