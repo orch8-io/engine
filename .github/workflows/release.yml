@@ -239,12 +239,13 @@ jobs:
       - name: Smoke test pushed image
         env:
           IMAGE: ghcr.io/orch8-io/engine:${{ steps.version.outputs.tag }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          docker pull "$IMAGE"
-          docker run --rm --entrypoint test "$IMAGE" -f /usr/share/licenses/orch8/LICENSE
+          docker pull --platform "$PLATFORM" "$IMAGE"
+          docker run --platform "$PLATFORM" --rm --entrypoint test "$IMAGE" -f /usr/share/licenses/orch8/LICENSE
           # Mirrors the ci.yml docker-smoke job: default SQLite backend and
           # --insecure, since the smoke container has no API/encryption keys.
-          docker run -d --name orch8-release-smoke \
+          docker run --platform "$PLATFORM" -d --name orch8-release-smoke \
             -p 8080:8080 \
             -e ORCH8_LOG_JSON=true \
             --entrypoint /usr/local/bin/orch8-server \
