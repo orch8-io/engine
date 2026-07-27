@@ -353,7 +353,9 @@ jobs:
   fuzz-smoke:
     name: Fuzz Smoke (${{ matrix.target }})
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # A cold cargo-fuzz compile can exceed 10 minutes before the bounded
+    # 60-second fuzz pass begins.
+    timeout-minutes: 20
     needs: [check]
     strategy:
       fail-fast: false
