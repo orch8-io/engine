@@ -20,7 +20,11 @@ Sequence Definition          Task Instance
                               +-----------------------------+
 ```
 
-**Single binary** — API server, scheduler, cron loop, and worker reaper all run in one process. PostgreSQL is the only dependency.
+**One deployable binary, five roles** — `all_in_one` runs the API, scheduler,
+cron loop, worker reaper, and push outbox in one process. `control`, `executor`,
+`gateway`, and `edge` assemble narrower surfaces from the same binary. See
+[Node Roles](NODE_ROLES.md). PostgreSQL is the production dependency; SQLite
+supports development, embedding, and mobile runtimes.
 
 ---
 
@@ -31,7 +35,7 @@ orch8-server          Binary entry point, wires config/storage/api/engine
     |
 orch8-api             REST routes (axum), request/response types
     |
-orch8-grpc            gRPC service (tonic) for high-throughput clients
+orch8-grpc            gRPC workers, runtime control, artifact transfer, telemetry
     |
 orch8-engine          Scheduler tick loop, evaluator, handlers, signals, recovery
     |
@@ -41,11 +45,11 @@ orch8-types           Domain types, IDs, config, errors (shared by every crate)
     |
 orch8-mobile          UniFFI bindings for iOS/Android, offline-first engine
     |
-orch8-push            APNs/FCM push notification providers
+orch8-push            Durable, governed APNs/FCM wake delivery
     |
-orch8-publisher       Event publishing (webhooks, NATS)
+orch8-publisher       Signed package registry and governed distribution
     |
-orch8-cli             CLI tool (init, sequence, instance, signal, health)
+orch8-cli             Bootstrap, authoring, operations, debugging, releases
 ```
 
 ---

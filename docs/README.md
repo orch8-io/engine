@@ -24,28 +24,41 @@ health probes and inbound webhook routes are intentionally public.
 - [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
 - [Deployment](DEPLOYMENT.md) — Docker, Kubernetes, cloud targets, and the production checklist.
+- [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.
+- [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
+- [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
 - [External workers](WORKERS.md) — poll, heartbeat, complete, and fail work from any language.
+- [Negotiated gRPC worker stream](GRPC_WORKER_STREAM.md) — worker sessions, control, resumable artifacts, telemetry, and mTLS identity.
 - [Webhooks](WEBHOOKS.md) — delivery, signatures, replay protection, and receiver example.
+- [Durable push delivery](PUSH_DELIVERY.md) — APNs/FCM wake outbox lifecycle and recovery.
+- [Governed execution wakes](PUSH_GOVERNANCE.md) — tenant credential routing, signed wake metadata, collapse, and token quarantine.
 - [Continuity operations](CONTINUITY_OPERATIONS.md) — portable handoff, migration, effects, and provenance.
 - [Continuity debugging](CONTINUITY_DEBUGGING.md) — fault lab, DLQ reproduction, checkpoints, and fixture extraction.
 
 ## Reference
 
-- [Engine capability priorities](ENGINE_FEATURE_PRIORITIES.md) — engine-only roadmap, estimates, and proposals deliberately not pursued.
 - [REST API](API.md) — curated guide to the most-used routes and payloads.
 - [Live OpenAPI](http://localhost:8080/swagger-ui) — complete generated request/response reference for a running engine.
+- [API entitlements and generated-client gate](API_ENTITLEMENTS_AND_CLIENT_GATE.md) — plan admission limits and OpenAPI compatibility enforcement.
 - [Configuration](CONFIGURATION.md) — TOML and environment variables.
+- [CLI productization commands](CLI_PRODUCTIZATION.md) — contexts, deploy gates, and bounded debugging.
 - [Mobile SDK](MOBILE_SDK.md) — iOS/Android API and build reference.
+- [Mobile protected fields and device tools](MOBILE_PRIVACY_AND_TOOLS.md) — capability descriptors, opaque handles, redaction, and field-key rotation.
 - [Typed dataflow](TYPED_DATAFLOW.md) — static reference checking and generated bindings.
 - [Storage backend conformance](STORAGE_BACKEND_CONFORMANCE.md) — reusable minimum behavioral suite for third-party backends.
+- [Tenant partition routing](TENANT_PARTITION_ROUTING.md) — authoritative backend placement, fencing epochs, and tenant moves.
 - [Externalized state](EXTERNALIZATION.md) — payload offloading behavior and metrics.
 - [Governed durable memory](GOVERNED_MEMORY.md) — memory authorization, retention, residency labels, deletion, and provenance.
+- [Package registry](PACKAGE_REGISTRY.md) — signed object layout, publication, and consumer verification.
+- [Governed distribution](DISTRIBUTION_GOVERNANCE.md) — channels, deltas, private policy, attestations, and dependency locks.
+- [Workflow compiler optimization](WORKFLOW_OPTIMIZER.md) — immutable optimization sidecars and equivalence guarantees.
 - [Database migrations](../migrations/README.md) — immutability and checksum rules.
 
 ## Understand
 
 - [Architecture](ARCHITECTURE.md) — crates, execution model, storage, concurrency, and observability.
 - [Embedding applications](APPLICATIONS.md) — mobile, desktop, browser, edge, and game-engine use cases.
+- [Engine capability priorities](ENGINE_FEATURE_PRIORITIES.md) — implemented engine primitives, deliberate bounds, and rejected duplicate abstractions.
 
 ## Component and example documentation
 

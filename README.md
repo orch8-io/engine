@@ -20,35 +20,78 @@ Portable Continuity takes that further: a running execution can hand off between
 
 ## Features
 
-**Workflow Primitives** — Step, Parallel, Race, TryCatch, Loop, ForEach, Router, SubSequence, CancellationScope, AB Split, Saga (sequential steps with LIFO compensating rollback on failure)
+**Durable execution** — Snapshot-based crash recovery, retry with exponential
+backoff and conditional failure policies, idempotency keys, persistent circuit
+breakers, dead-letter fingerprinting, automatic incident reproduction, and
+checkpoint-based fork/resume. Side-effecting steps use a universal effect
+ledger so recovery can distinguish uncommitted, committed, unknown, and
+compensated effects.
 
-**Conditional Execution** — per-step `when` guards (skip a step based on context/prior outputs, no handler invocation), conditional retry policies (`retry_if` expression evaluated against the failure, `non_retryable_codes` denylist — both layer on top of `max_attempts`/backoff)
+**Workflow language** — Step, Parallel, Race, TryCatch, Loop, ForEach, Router,
+SubSequence, CancellationScope, AB Split, and Saga; per-step `when` guards;
+JSON Schema input/output contracts; dynamic block injection; and bounded
+concurrent execution of independent `Parallel` branches.
 
-**Scheduling** — Relative delays, business-days-only with holiday awareness, timezone-per-instance, jitter, send windows, cron triggers with configurable tick interval
+**Scheduling and dispatch** — Relative and cron schedules, business calendars,
+timezones, jitter, send windows, per-entity concurrency keys, weighted resource
+pools, sliding-window limits, daily caps, warmup ramps, four priority levels,
+and cooperative preemption at durable step boundaries.
 
-**Rate Limiting** — Per-resource sliding window with deferred scheduling (not rejection), resource pools with weighted rotation, daily caps, and warmup ramps
+**Workers and extensions** — Lease-based REST workers with resumable heartbeat
+checkpoints, queue/version/capability routing, a [negotiated bidirectional gRPC
+session](docs/GRPC_WORKER_STREAM.md), gRPC sidecars, WASM plugins, MCP client and
+server modes, Activepieces, signed webhooks, and deduplicated events. Worker,
+runtime, artifact-transfer, telemetry, and control sessions are bounded and
+resumable.
 
-**Reliability** — Crash recovery via state snapshots, configurable retry with exponential backoff, dead letter queue with root-cause fingerprinting and automatic incident reproduction, idempotency keys, circuit breakers with fallback handler routing and persistent state, block output schemas (JSON Schema-gated handler output)
+**Data, artifacts, and streams** — Durable local or S3-compatible encrypted
+artifacts, automatic externalization of oversized state, instance and
+tenant-namespaced semantic memory, a resumable tenant change feed, and bounded
+tumbling/sliding/session windows over durable continuity frames.
 
-**Concurrency** — Per-entity key control, priority queues (Low/Normal/High/Critical), bulk create/pause/resume/cancel, batch instance creation (up to 10k)
+**Multi-tenancy and governance** — Capability-scoped tenant principals,
+provider-neutral plan entitlements, tenant rate/concurrency limits,
+tenant-isolated breakers and memory, authoritative [tenant partition
+routing](docs/TENANT_PARTITION_ROUTING.md), and fail-closed residency,
+disclosure, delegation, and federation policy.
 
-**Multi-tenancy** — Tenant-scoped queries, per-tenant rate limits, per-tenant circuit breakers, tenant isolation middleware, per-tenant noisy-neighbor protection
+**Security** — Secure-by-default API-key and tenant enforcement, AES-256-GCM
+encryption for context, credentials, artifacts, worker checkpoints, and
+protected mobile fields; OAuth2 credential refresh; mTLS workload identity;
+HMAC-signed webhooks; signed packages/capsules/provenance; nonce and federation
+replay boundaries; CORS controls; and outbound URL/SSRF validation.
 
-**Extensibility** — External workers through REST polling or a [negotiated bidirectional gRPC session](docs/GRPC_WORKER_STREAM.md), gRPC sidecar plugins, WASM plugins, webhook events (HMAC-signed with replay protection), workflow interceptors, emit-event with deduplication, and tenant-scoped signed workflow/connector packages with verifiable publication history. See [Package Registry](docs/PACKAGE_REGISTRY.md).
+**AI and human workflows** — Multi-provider `llm_call` with structured-output
+repair, multimodal artifacts, cost/token telemetry, effect-safe provider
+failover, durable ReAct agents, governed shared knowledge, bounded cumulative
+budgets, evidence-scoped evaluation gates, and lease-safe human attention.
 
-**Observability** — Prometheus metrics, structured JSON logging, audit log, execution tree visualization, Grafana dashboard template, visual execution workbench (unified timeline, run comparison, fork preview), template debugger and resolution inspector, stuck-instance doctor with ranked diagnostics
+**Release and distribution safety** — Sequence preflight, typed-dataflow
+compilation, semantic diff, historical effect-free replay, guarded canaries,
+automatic rollback gates, workflow contracts, signed packages, append-only
+registry history, runtime-targeted channels, attestations, dependency locks,
+and verified delta fallback. See [Safe Releases](docs/RELEASES.md), [Package
+Registry](docs/PACKAGE_REGISTRY.md), and [Governed Distribution](docs/DISTRIBUTION_GOVERNANCE.md).
 
-**Release Safety** — semantic diff between sequence versions, historical validation against recorded runs, canary routing with automatic rollback gates, workflow contracts (declarative scenario tests with virtual time), sequence preflight readiness checks
+**Mobile, edge, and portable continuity** — Native iOS/Android execution via
+Rust + UniFFI, offline-first sync, protected device tools, durable APNs/FCM
+wake delivery, capability-aware placement, signed capsule handoff, ownership
+epochs, provenance, live migration/rollback, receipt-backed compensation,
+what-if simulation, sovereign-edge enforcement, and signed federation
+send/receive primitives. See [Mobile SDK](docs/MOBILE_SDK.md), [Continuity
+Operations](docs/CONTINUITY_OPERATIONS.md), and [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md).
 
-**AI Agent Support** — Unified `llm_call` handler covering all major providers (OpenAI, Anthropic, Gemini + 7 more), dynamic step injection (self_modify), human-in-the-loop with timeout/escalation, SSE streaming, query-instance handler for cross-workflow coordination
+**Operations and observability** — Role-specific all-in-one/control/executor/
+gateway/edge nodes, secure verified bootstrap, aggregate startup preflight,
+auditable draining, outbound managed-control tunnels, redacted support bundles,
+Prometheus metrics, OTLP/JSON telemetry, audit and provenance logs, execution
+workbench, ranked diagnosis, previewable remediation, and the operator
+dashboard. See [Node Roles](docs/NODE_ROLES.md), [Secure Bootstrap](docs/SECURE_BOOTSTRAP.md),
+and [Support Bundle](docs/SUPPORT_BUNDLE.md).
 
-**Mobile** — Native iOS and Android SDK via Rust + UniFFI, offline-first execution, battery-aware sync intervals, server-side visibility into mobile workflows, human-in-the-loop approvals via a [durable APNs/FCM wake outbox](docs/PUSH_DELIVERY.md), single bidirectional sync endpoint
-
-**Portable Continuity** — cryptographically-signed capsule handoff lets a running execution move between server, device, and back mid-flight with exactly-once ownership transfer, tamper-evident provenance chains, effect-receipt tracking (at-most-once side effects across retries and handoffs), capability-aware placement routing, live migration between sequence versions with rollback, comparative what-if simulation from a checkpoint, and fail-closed residency/federation controls for regulated data. See [Continuity Operations](docs/CONTINUITY_OPERATIONS.md) and [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md).
-
-**Typed Dataflow** — a bounded compiler analyzes `data.*`/`outputs.*`/`state.*`/`config.*` references across a sequence and generates matching, byte-stable TypeScript and Python bindings plus a canonical schema; missing producers and closed-schema violations fail preflight with the exact reference chain. See [Typed Dataflow](docs/TYPED_DATAFLOW.md).
-
-**Security** — AES-256-GCM encryption at rest for context and credentials, OAuth2 credential refresh, API key authentication, CORS configuration, HMAC-signed webhooks with nonce replay protection
+The [documentation index](docs/README.md) maps each capability to its guide.
+For the exact release-by-release inventory, including migrations and explicit
+non-guarantees, see the [changelog](CHANGELOG.md#unreleased).
 
 ## Install
 
@@ -301,8 +344,15 @@ engine/
 docker run -d \
   -p 8080:8080 \
   -e ORCH8_DATABASE_URL=postgres://user:pass@host:5432/orch8 \
+  -e ORCH8_API_KEY=replace-with-a-long-random-secret \
+  -e ORCH8_ENCRYPTION_KEY=replace-with-64-hex-characters \
+  -e ORCH8_REQUIRE_TENANT_HEADER=true \
   ghcr.io/orch8-io/engine:latest
 ```
+
+Mount configuration and secrets instead of putting them directly in shell
+history in production. See the [Docker deployment guide](docs/DEPLOYMENT.md#docker)
+and [secure bootstrap](docs/SECURE_BOOTSTRAP.md).
 
 ### Helm
 
