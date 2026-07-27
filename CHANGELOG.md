@@ -111,6 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cross-architecture container smoke tests run the image they built**: release validation now passes the matrix platform explicitly when pulling and running per-architecture images, allowing ARM64 images to execute through QEMU on AMD64 GitHub runners before the multi-architecture manifest is published.
+
 - **Ubuntu 22.04 release builds support proto3 optional fields**: protobuf generation now passes the compatibility flag required by the runner's protoc 3.12 while remaining valid with newer compilers, so glibc-compatible GNU release artifacts can be built successfully.
 
 - **Release artifacts are installable and correctly licensed**: GNU binaries are built on Ubuntu 22.04 for compatibility with the Debian Bookworm release image, every distributed archive and container includes the BUSL-1.1 license, and the Android Maven metadata now declares the same license as the Rust workspace.
