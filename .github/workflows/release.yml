@@ -162,7 +162,9 @@ jobs:
           mkdir "$DIR"
           cp "target/${TARGET}/release/orch8-server" "$DIR/"
           cp "target/${TARGET}/release/orch8" "$DIR/"
+          cp LICENSE "$DIR/"
           tar -czf "${DIR}.tar.gz" "$DIR"
+          tar -tzf "${DIR}.tar.gz" | grep -Fx "${DIR}/LICENSE"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 
       - name: Upload artifacts
@@ -202,6 +204,7 @@ jobs:
           tar -xzf "artifacts/orch8-${TAG}-${{ matrix.target }}.tar.gz"
           cp "orch8-${TAG}-${{ matrix.target }}/orch8-server" docker-ctx/
           cp "orch8-${TAG}-${{ matrix.target }}/orch8" docker-ctx/
+          cp LICENSE docker-ctx/
           cp Dockerfile.release docker-ctx/Dockerfile
 
       - name: Log in to GHCR
@@ -238,6 +241,7 @@ jobs:
           IMAGE: ghcr.io/orch8-io/engine:${{ steps.version.outputs.tag }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
         run: |
           docker pull "$IMAGE"
+          docker run --rm --entrypoint test "$IMAGE" -f /usr/share/licenses/orch8/LICENSE
           # Mirrors the ci.yml docker-smoke job: default SQLite backend and
           # --insecure, since the smoke container has no API/encryption keys.
           docker run -d --name orch8-release-smoke \
@@ -478,11 +482,15 @@ jobs:
             -library build/liborch8_mobile-sim.a -headers build/headers \
             -output build/Orch8Mobile.xcframework
 
+          cp LICENSE build/Orch8Mobile.xcframework/LICENSE
+
       - name: Package XCFramework
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           cd build && zip -r "../Orch8Mobile-${TAG}.xcframework.zip" Orch8Mobile.xcframework
-          cd .. && shasum -a 256 "Orch8Mobile-${TAG}.xcframework.zip" > "Orch8Mobile-${TAG}.xcframework.zip.sha256"
+          cd ..
+          unzip -l "Orch8Mobile-${TAG}.xcframework.zip" | grep -F 'Orch8Mobile.xcframework/LICENSE'
+          shasum -a 256 "Orch8Mobile-${TAG}.xcframework.zip" > "Orch8Mobile-${TAG}.xcframework.zip.sha256"
 
       - name: Upload XCFramework archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -527,6 +535,9 @@ jobs:
           cp ../../artifacts/bindings/kotlin/io/orch8/mobile/orch8_mobile.kt orch8-mobile/src/main/java/io/orch8/mobile/
 
           gradle :orch8-mobile:assembleRelease
+          bash ../../scripts/embed-aar-license.sh \
+            orch8-mobile/build/outputs/aar/orch8-mobile-release.aar \
+            ../../LICENSE
 
       - name: Package AAR
         run: |
@@ -549,6 +560,8 @@ jobs:
     timeout-minutes: 10
     needs: [bindings]
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Download bindings
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -558,7 +571,9 @@ jobs:
       - name: Package
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          cp LICENSE bindings/LICENSE
           zip -r "orch8-bindings-${TAG}.zip" bindings/
+          unzip -l "orch8-bindings-${TAG}.zip" | grep -F 'bindings/LICENSE'
           shasum -a 256 "orch8-bindings-${TAG}.zip" > "orch8-bindings-${TAG}.zip.sha256"
 
       - name: Upload
@@ -616,20 +631,25 @@ jobs:
         env:
           INSTALL_DIR: ${{ runner.temp }}/orch8-bin
         run: |
+          installed=false
           mkdir -p "$INSTALL_DIR"
           for i in $(seq 1 12); do
-            if curl -sSL https://api.github.com/repos/orch8-io/engine/releases/latest 2>/dev/null \
-              | grep -q '"tag_name"'; then
+            if sh ./install.sh --dir "$INSTALL_DIR" --version "$GITHUB_REF_NAME"; then
+              installed=true
               break
             fi
-            echo "Waiting for release to propagate... (attempt $i/12)"
+            echo "Waiting for ${GITHUB_REF_NAME} assets to propagate... (attempt $i/12)"
             sleep 10
           done
-          sh ./install.sh --dir "$INSTALL_DIR"
+          if [[ "$installed" != "true" ]]; then
+            echo "::error::install.sh could not install ${GITHUB_REF_NAME} after 12 attempts."
+            exit 1
+          fi
 
       - name: Verify installed binaries
         env:
           INSTALL_DIR: ${{ runner.temp }}/orch8-bin
         run: |
-          "$INSTALL_DIR/orch8" --version
+          VERSION="${GITHUB_REF_NAME#v}"
+          "$INSTALL_DIR/orch8" --version | grep -F "$VERSION"
           "$INSTALL_DIR/orch8-server" --help | head -5

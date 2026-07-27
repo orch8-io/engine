@@ -111,6 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Release artifacts are installable and correctly licensed**: GNU binaries are built on Ubuntu 22.04 for compatibility with the Debian Bookworm release image, every distributed archive and container includes the BUSL-1.1 license, and the Android Maven metadata now declares the same license as the Rust workspace.
+
+- **Single-owner release publishing and exact-version smoke tests**: `release.yml` is the only workflow that creates GitHub Releases and uploads native assets, eliminating the competing mobile publisher. Final-release installer smoke tests now request the tag being released and verify the installed CLI reports that exact version instead of accidentally installing the previous latest release.
+
 - **Nondeterministic `{{ outputs.* }}` resolution for same-millisecond outputs**: `get_all_outputs` ordered by `created_at` only, so when two attempts of a block shared a timestamp (same-ms retry batches) the last-wins pick in `build_outputs_shape` was planner-dependent and could flip between runs. Both backends now tiebreak by `id` (UUIDv7 — time-ordered), matching the existing `get_outputs_page` convention, so the latest save deterministically wins.
 
 - **Crash-safe capsule redelivery**: capsule import now claims its `(tenant, capsule, destination runtime)` identity, creates the paused destination instance, and persists its checkpoint in one database transaction. Re-saving the same immutable manifest is idempotent while a capsule ID bound to different bytes fails closed; redelivery returns the original imported instance instead of creating duplicates, while encrypted-storage decorators preserve field encryption across the atomic path. PostgreSQL migration `060_capsule_import_idempotency.sql` and SQLite schema v26 add the durable import ledger; the encrypted capsule integration test now covers idempotent redelivery.
