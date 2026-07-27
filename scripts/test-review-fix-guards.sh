@@ -133,6 +133,7 @@ assert_contains .github/workflows/release.yml "prerelease: \${{ contains(github.
 assert_contains .github/workflows/release.yml "if: \${{ !contains(github.ref_name, '-') }}"
 assert_contains .github/workflows/release.yml 'Verify Cloud management surface'
 assert_contains .github/workflows/release.yml 'os: ubuntu-22.04'
+assert_contains orch8-grpc/build.rs '.protoc_arg("--experimental_allow_proto3_optional")'
 assert_contains .github/workflows/release.yml 'sh ./install.sh --dir "$INSTALL_DIR" --version "$GITHUB_REF_NAME"'
 assert_contains .github/workflows/release.yml 'cp LICENSE "$DIR/"'
 assert_contains .github/workflows/release.yml 'cp LICENSE docker-ctx/'
