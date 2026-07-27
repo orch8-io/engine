@@ -597,19 +597,18 @@ fn literal_in_middle_short_circuits_later_paths() {
 }
 
 #[test]
-fn numeric_bare_literal_fallback_is_a_string() {
-    // Phase-1 literal fallbacks are taken verbatim as strings.
+fn numeric_bare_literal_fallback_preserves_its_type() {
     let e = one("{{ context.data.a | 42 }}", json!({}), json!({}));
-    assert_eq!(e.value, Some(json!("42")));
-    assert_eq!(e.result_type.as_deref(), Some("string"));
+    assert_eq!(e.value, Some(json!(42.0)));
+    assert_eq!(e.result_type.as_deref(), Some("number"));
     assert_eq!(e.source.as_deref(), Some("literal"));
 }
 
 #[test]
-fn boolean_bare_literal_fallback_is_a_string() {
+fn boolean_bare_literal_fallback_preserves_its_type() {
     let e = one("{{ context.data.a | true }}", json!({}), json!({}));
-    assert_eq!(e.value, Some(json!("true")));
-    assert_eq!(e.result_type.as_deref(), Some("string"));
+    assert_eq!(e.value, Some(json!(true)));
+    assert_eq!(e.result_type.as_deref(), Some("boolean"));
 }
 
 #[test]

@@ -5,10 +5,11 @@
  * `orch8-api/src/continuity.rs`'s `generate_scenarios` / `reproduce_incident`
  * handlers wrap two pure functions in `orch8-engine/src/continuity_advanced.rs`:
  *
- *   - `generate_scenarios_from_spec(spec)`: deterministic bounded cross-product
- *     generator over up to 7 dimensions (input_schema_cases, router_branches,
+ *   - `generate_scenarios_from_spec(spec)`: deterministic bounded sampler of
+ *     up to 7 dimensions (input_schema_cases, router_branches,
  *     event_joins, policy_facts, invariant_codes, retry_attempts,
- *     handoff_delays_ms), each capped at `MAX_SCENARIO_DIMENSION` (64) entries.
+ *     handoff_delays_ms). Dimension choices are seed-stable and decorrelated;
+ *     each dimension is capped at `MAX_SCENARIO_DIMENSION` (64) entries.
  *     `events` <= 64, `faults` <= 32, `max_steps` in [1, 10_000],
  *     `max_virtual_time_ms` <= 86_400_000, every `handoff_delays_ms` entry
  *     <= `max_virtual_time_ms`. `max_scenarios` is silently capped at 256.
@@ -170,24 +171,16 @@ describe("Scenario Lab (enabled)", () => {
   // ==================================================================
 
   describe("generate_scenarios: router_branches dimension", () => {
-    it("selects a router branch every other scenario (index / 2 stride)", async () => {
+    it("samples every declared router branch", async () => {
       const scenarios = await client.generateContinuityScenarios({
         router_branches: ["approve", "deny"],
-        max_scenarios: 6,
+        max_scenarios: 64,
         seed: 0,
       });
-      const facts = scenarios.map((s: any) =>
+      const facts = scenarios.flatMap((s: any) =>
         (s.policy_facts as string[]).filter((f) => f.startsWith("router:")),
       );
-      // index/2: 0,0,1,1,2,2 -> branch cycles approve,approve,deny,deny,approve,approve
-      assert.deepEqual(facts, [
-        ["router:approve"],
-        ["router:approve"],
-        ["router:deny"],
-        ["router:deny"],
-        ["router:approve"],
-        ["router:approve"],
-      ]);
+      assert.deepEqual([...new Set(facts)].sort(), ["router:approve", "router:deny"]);
     });
 
     it("rejects > 64 router_branches", async () => {
@@ -214,24 +207,16 @@ describe("Scenario Lab (enabled)", () => {
   });
 
   describe("generate_scenarios: event_joins dimension", () => {
-    it("selects an event join every third scenario (index / 3 stride)", async () => {
+    it("samples every declared event join", async () => {
       const scenarios = await client.generateContinuityScenarios({
         event_joins: ["join_a", "join_b"],
-        max_scenarios: 6,
+        max_scenarios: 64,
         seed: 0,
       });
-      const facts = scenarios.map((s: any) =>
+      const facts = scenarios.flatMap((s: any) =>
         (s.policy_facts as string[]).filter((f) => f.startsWith("join:")),
       );
-      // index/3: 0,0,0,1,1,1 -> join_a,join_a,join_a,join_b,join_b,join_b
-      assert.deepEqual(facts, [
-        ["join:join_a"],
-        ["join:join_a"],
-        ["join:join_a"],
-        ["join:join_b"],
-        ["join:join_b"],
-        ["join:join_b"],
-      ]);
+      assert.deepEqual([...new Set(facts)].sort(), ["join:join_a", "join:join_b"]);
     });
 
     it("rejects > 64 event_joins", async () => {
@@ -249,28 +234,16 @@ describe("Scenario Lab (enabled)", () => {
   });
 
   describe("generate_scenarios: policy_facts dimension", () => {
-    it("selects a policy fact every fifth scenario (index / 5 stride)", async () => {
+    it("samples every declared policy fact", async () => {
       const scenarios = await client.generateContinuityScenarios({
         policy_facts: ["locality:eu", "locality:us"],
-        max_scenarios: 10,
+        max_scenarios: 64,
         seed: 0,
       });
-      const facts = scenarios.map((s: any) =>
+      const facts = scenarios.flatMap((s: any) =>
         (s.policy_facts as string[]).filter((f) => f.startsWith("policy:")),
       );
-      // index/5: 0,0,0,0,0,1,1,1,1,1
-      assert.deepEqual(facts, [
-        ["policy:locality:eu"],
-        ["policy:locality:eu"],
-        ["policy:locality:eu"],
-        ["policy:locality:eu"],
-        ["policy:locality:eu"],
-        ["policy:locality:us"],
-        ["policy:locality:us"],
-        ["policy:locality:us"],
-        ["policy:locality:us"],
-        ["policy:locality:us"],
-      ]);
+      assert.deepEqual([...new Set(facts)].sort(), ["policy:locality:eu", "policy:locality:us"]);
     });
 
     it("rejects > 64 policy_facts", async () => {
@@ -288,17 +261,16 @@ describe("Scenario Lab (enabled)", () => {
   });
 
   describe("generate_scenarios: invariant_codes dimension", () => {
-    it("selects an invariant code every seventh scenario (index / 7 stride)", async () => {
+    it("samples every declared invariant code", async () => {
       const scenarios = await client.generateContinuityScenarios({
         invariant_codes: ["INV_A", "INV_B"],
-        max_scenarios: 14,
+        max_scenarios: 64,
         seed: 0,
       });
-      const facts = scenarios.map((s: any) =>
+      const facts = scenarios.flatMap((s: any) =>
         (s.policy_facts as string[]).filter((f) => f.startsWith("invariant:")),
       );
-      assert.deepEqual(facts[0], ["invariant:INV_A"]);
-      assert.deepEqual(facts[7], ["invariant:INV_B"]);
+      assert.deepEqual([...new Set(facts)].sort(), ["invariant:INV_A", "invariant:INV_B"]);
     });
 
     it("rejects > 64 invariant_codes", async () => {
@@ -316,14 +288,14 @@ describe("Scenario Lab (enabled)", () => {
   });
 
   describe("generate_scenarios: retry_attempts dimension as an array", () => {
-    it("cycles retry_attempt through the declared list", async () => {
+    it("samples every declared retry_attempt", async () => {
       const scenarios = await client.generateContinuityScenarios({
         retry_attempts: [0, 3, 7],
-        max_scenarios: 6,
+        max_scenarios: 64,
         seed: 0,
       });
       const attempts = scenarios.map((s: any) => s.retry_attempt);
-      assert.deepEqual(attempts, [0, 3, 7, 0, 3, 7]);
+      assert.deepEqual([...new Set(attempts)].sort((a, b) => a - b), [0, 3, 7]);
     });
 
     it("rejects > 64 retry_attempts entries", async () => {
@@ -361,17 +333,25 @@ describe("Scenario Lab (enabled)", () => {
     });
   });
 
-  describe("generate_scenarios: handoff_delays_ms dimension stride (index / 2)", () => {
-    it("cycles handoff_delay_ms with an index/2 stride", async () => {
+  describe("generate_scenarios: decorrelated dimension sampling", () => {
+    it("samples every router and handoff-delay combination", async () => {
       const scenarios = await client.generateContinuityScenarios({
+        router_branches: ["approve", "deny"],
         handoff_delays_ms: [100, 200],
         max_virtual_time_ms: 1000,
-        max_scenarios: 6,
-        seed: 0,
+        max_scenarios: 64,
+        seed: 7,
       });
-      const delays = scenarios.map((s: any) => s.handoff_delay_ms);
-      // index/2: 0,0,1,1,2,2 -> 100,100,200,200,100,100
-      assert.deepEqual(delays, [100, 100, 200, 200, 100, 100]);
+      const combinations = scenarios.map((s: any) => {
+        const router = (s.policy_facts as string[]).find((f) => f.startsWith("router:"));
+        return `${router}/${s.handoff_delay_ms}`;
+      });
+      assert.deepEqual([...new Set(combinations)].sort(), [
+        "router:approve/100",
+        "router:approve/200",
+        "router:deny/100",
+        "router:deny/200",
+      ]);
     });
   });
 
