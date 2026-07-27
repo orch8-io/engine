@@ -6,6 +6,8 @@ const client = new Orch8Client();
 
 interface DataflowFinding {
   code: string;
+  severity: "warning" | "error";
+  consumer: string;
   reference: string;
 }
 
@@ -23,7 +25,10 @@ function findingByReference(
   const finding = result.report.findings.find(
     (candidate) => candidate.reference === reference,
   );
-  assert.ok(finding, `missing finding for ${reference}`);
+  assert.ok(
+    finding,
+    `missing finding for ${reference}; got ${JSON.stringify(result.report.findings)}`,
+  );
   return finding;
 }
 
@@ -47,8 +52,16 @@ export async function expectDeclaredInput(
     sequence,
   )) as DataflowResult;
 
-  assert.equal(result.report.references_checked, 1);
-  assert.deepEqual(result.report.findings, []);
+  assert.equal(
+    result.report.references_checked,
+    1,
+    `${reference}: references_checked`,
+  );
+  assert.deepEqual(
+    result.report.findings,
+    [],
+    `${reference}: declared ${schemaType} input must compile clean`,
+  );
 }
 
 export async function expectMissingInput(
@@ -70,8 +83,20 @@ export async function expectMissingInput(
     sequence,
   )) as DataflowResult;
 
-  assert.equal(result.report.references_checked, 1);
-  assert.equal(findingByReference(result, reference).code, "SCHEMA_PATH_MISSING");
+  assert.equal(
+    result.report.references_checked,
+    1,
+    `${reference}: references_checked`,
+  );
+  assert.equal(
+    result.report.findings.length,
+    1,
+    `${reference}: exactly one finding expected, got ${JSON.stringify(result.report.findings)}`,
+  );
+  const finding = findingByReference(result, reference);
+  assert.equal(finding.code, "SCHEMA_PATH_MISSING", reference);
+  assert.equal(finding.severity, "error", reference);
+  assert.equal(finding.consumer, "consumer", reference);
 }
 
 export async function expectMissingProducer(
@@ -87,8 +112,20 @@ export async function expectMissingProducer(
     sequence,
   )) as DataflowResult;
 
-  assert.equal(result.report.references_checked, 1);
-  assert.equal(findingByReference(result, reference).code, "MISSING_PRODUCER");
+  assert.equal(
+    result.report.references_checked,
+    1,
+    `${reference}: references_checked`,
+  );
+  assert.equal(
+    result.report.findings.length,
+    1,
+    `${reference}: exactly one finding expected, got ${JSON.stringify(result.report.findings)}`,
+  );
+  const finding = findingByReference(result, reference);
+  assert.equal(finding.code, "MISSING_PRODUCER", reference);
+  assert.equal(finding.severity, "error", reference);
+  assert.equal(finding.consumer, "consumer", reference);
 }
 
 export async function expectDeclaredOutput(
@@ -118,8 +155,16 @@ export async function expectDeclaredOutput(
     sequence,
   )) as DataflowResult;
 
-  assert.equal(result.report.references_checked, 1);
-  assert.deepEqual(result.report.findings, []);
+  assert.equal(
+    result.report.references_checked,
+    1,
+    `${reference}: references_checked`,
+  );
+  assert.deepEqual(
+    result.report.findings,
+    [],
+    `${reference}: declared ${schemaType} output must compile clean`,
+  );
 }
 
 export async function expectUnknownRoot(
@@ -136,6 +181,19 @@ export async function expectUnknownRoot(
     sequence,
   )) as DataflowResult;
 
-  assert.equal(result.report.references_checked, 1);
-  assert.equal(findingByReference(result, reference).code, "TYPE_UNKNOWN");
+  assert.equal(
+    result.report.references_checked,
+    1,
+    `${reference}: references_checked`,
+  );
+  assert.equal(
+    result.report.findings.length,
+    1,
+    `${reference}: exactly one finding expected, got ${JSON.stringify(result.report.findings)}`,
+  );
+  const finding = findingByReference(result, reference);
+  assert.equal(finding.code, "TYPE_UNKNOWN", reference);
+  // Unprovable roots are warnings, not errors — the plan still compiles.
+  assert.equal(finding.severity, "warning", reference);
+  assert.equal(finding.consumer, "consumer", reference);
 }

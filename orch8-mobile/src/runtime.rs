@@ -85,3 +85,7 @@ mod tests {
         assert_eq!(blocking_thread_limit(128), 32);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_coverage_tests.rs"]
+mod runtime_coverage_tests;

@@ -1479,3 +1479,7 @@ mod tests {
         assert_eq!(non_cancellable.state, NodeState::Running);
     }
 }
+
+#[cfg(test)]
+#[path = "signals_coverage_tests.rs"]
+mod signals_coverage_tests;

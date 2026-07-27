@@ -12,6 +12,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::diagnosis::RemediationAction;
+
 /// How severe a finding is for the operator.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
@@ -139,6 +141,11 @@ pub struct Remediation {
     /// explicit confirmation for these.
     #[serde(default)]
     pub side_effect_risk: bool,
+    /// Machine-applicable classification of the action, when the producer
+    /// knows it. Consumers must use this typed field instead of parsing
+    /// `command` strings; `None` means the action is manual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<RemediationAction>,
 }
 
 impl Remediation {
@@ -149,6 +156,7 @@ impl Remediation {
             command: None,
             link: None,
             side_effect_risk: false,
+            action: None,
         }
     }
 
@@ -167,6 +175,12 @@ impl Remediation {
     #[must_use]
     pub fn with_side_effect_risk(mut self) -> Self {
         self.side_effect_risk = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_action(mut self, action: RemediationAction) -> Self {
+        self.action = Some(action);
         self
     }
 }
@@ -371,6 +385,23 @@ mod tests {
         let risky = Remediation::new("re-run the HTTP block").with_side_effect_risk();
         let v = serde_json::to_value(&risky).unwrap();
         assert_eq!(v["side_effect_risk"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn remediation_action_defaults_none_and_round_trips() {
+        let r: Remediation =
+            serde_json::from_value(serde_json::json!({"summary": "resume the instance"})).unwrap();
+        assert_eq!(r.action, None);
+        // `None` is omitted, keeping payloads without a typed action unchanged.
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("action"));
+
+        let typed =
+            Remediation::new("resume the instance").with_action(RemediationAction::ResumeInstance);
+        let v = serde_json::to_value(&typed).unwrap();
+        assert_eq!(v["action"], serde_json::json!("resume_instance"));
+        let back: Remediation = serde_json::from_value(v).unwrap();
+        assert_eq!(back, typed);
     }
 
     #[test]

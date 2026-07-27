@@ -21,9 +21,7 @@ pub fn lint_sequence(seq: &SequenceDefinition) -> Vec<LintWarning> {
     let mut all_ids = HashSet::new();
     collect_all_block_ids(&seq.blocks, &mut all_ids);
 
-    for block in &seq.blocks {
-        lint_block(block, &all_ids, &mut warnings);
-    }
+    lint_blocks(&seq.blocks, &mut warnings);
 
     // Cross-cutting lints that need the full block set
     lint_output_references(seq, &all_ids, &mut warnings);
@@ -34,169 +32,183 @@ pub fn lint_sequence(seq: &SequenceDefinition) -> Vec<LintWarning> {
     warnings
 }
 
+/// The single source of truth for how composite blocks nest: invokes `f` for
+/// each child block slice of `block`, in declaration order (parallel/race
+/// branches, router routes then default, try/catch/finally, saga action then
+/// compensation per step). `Step` and `SubSequence` are leaves — a
+/// `SubSequence`'s blocks live in the invoked sequence, not inline.
+///
+/// The evaluator has a similar helper (`for_each_child_slice` in
+/// `evaluator.rs`), but it is private to that module and carries branch
+/// indices lint does not need, so lint keeps its own.
+fn for_each_child_slice<'a>(block: &'a BlockDefinition, f: &mut impl FnMut(&'a [BlockDefinition])) {
+    match block {
+        BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
+        BlockDefinition::Parallel(p) => {
+            for branch in &p.branches {
+                f(branch);
+            }
+        }
+        BlockDefinition::Race(r) => {
+            for branch in &r.branches {
+                f(branch);
+            }
+        }
+        BlockDefinition::Loop(l) => f(&l.body),
+        BlockDefinition::ForEach(fe) => f(&fe.body),
+        BlockDefinition::Router(r) => {
+            for route in &r.routes {
+                f(&route.blocks);
+            }
+            if let Some(default) = &r.default {
+                f(default);
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            f(&tc.try_block);
+            f(&tc.catch_block);
+            if let Some(finally) = &tc.finally_block {
+                f(finally);
+            }
+        }
+        BlockDefinition::ABSplit(ab) => {
+            for v in &ab.variants {
+                f(&v.blocks);
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => f(&cs.blocks),
+        BlockDefinition::Saga(sg) => {
+            for step in &sg.steps {
+                f(std::slice::from_ref(step.action.as_ref()));
+                if let Some(comp) = &step.compensation {
+                    f(std::slice::from_ref(comp.as_ref()));
+                }
+            }
+        }
+    }
+}
+
+/// Pre-order walk of the block tree: `f` runs on every block, then the walk
+/// descends into the block's child slices (see `for_each_child_slice`).
+fn walk_blocks(blocks: &[BlockDefinition], f: &mut impl FnMut(&BlockDefinition)) {
+    for block in blocks {
+        f(block);
+        for_each_child_slice(block, &mut |slice| walk_blocks(slice, f));
+    }
+}
+
 /// `wait_for_event` relies on the step's `wait_for_input` gate to park
 /// the instance until the join is satisfied. Without it, the step
 /// registers the wait and immediately continues — almost never what the
 /// author intended.
 fn lint_event_waits(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>) {
-    fn walk(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>) {
-        for block in blocks {
-            match block {
-                BlockDefinition::Step(s) => {
-                    if s.handler == "wait_for_event"
-                        && let Some(def) = &s.wait_for_input
-                        && def.choices.is_some()
-                    {
-                        warnings.push(LintWarning {
-                            block_id: s.id.as_str().to_owned(),
-                            message: "wait_for_event steps must not define custom \
-                                      `wait_for_input.choices` — the event resume signal \
-                                      carries the default choice and would be rejected"
-                                .to_owned(),
-                        });
-                    }
-                    if s.handler == "wait_for_event" && s.wait_for_input.is_none() {
-                        warnings.push(LintWarning {
-                            block_id: s.id.as_str().to_owned(),
-                            message: "wait_for_event step has no `wait_for_input` — the \
-                                      instance will not pause for the events; add \
-                                      `\"wait_for_input\": {\"prompt\": \"...\"}` (and an \
-                                      optional timeout) to the step"
-                                .to_owned(),
-                        });
-                    }
-                }
-                BlockDefinition::Parallel(p) => p.branches.iter().for_each(|b| walk(b, warnings)),
-                BlockDefinition::Race(r) => r.branches.iter().for_each(|b| walk(b, warnings)),
-                BlockDefinition::Loop(l) => walk(&l.body, warnings),
-                BlockDefinition::ForEach(f) => walk(&f.body, warnings),
-                BlockDefinition::Router(r) => {
-                    for route in &r.routes {
-                        walk(&route.blocks, warnings);
-                    }
-                    if let Some(default) = &r.default {
-                        walk(default, warnings);
-                    }
-                }
-                BlockDefinition::TryCatch(t) => {
-                    walk(&t.try_block, warnings);
-                    walk(&t.catch_block, warnings);
-                    if let Some(f) = &t.finally_block {
-                        walk(f, warnings);
-                    }
-                }
-                BlockDefinition::ABSplit(a) => {
-                    for v in &a.variants {
-                        walk(&v.blocks, warnings);
-                    }
-                }
-                BlockDefinition::CancellationScope(c) => walk(&c.blocks, warnings),
-                BlockDefinition::Saga(sg) => {
-                    for step in &sg.steps {
-                        walk(std::slice::from_ref(step.action.as_ref()), warnings);
-                        if let Some(comp) = &step.compensation {
-                            walk(std::slice::from_ref(comp.as_ref()), warnings);
-                        }
-                    }
-                }
-                BlockDefinition::SubSequence(_) => {}
+    walk_blocks(blocks, &mut |block| {
+        if let BlockDefinition::Step(s) = block {
+            if s.handler == "wait_for_event"
+                && let Some(def) = &s.wait_for_input
+                && def.choices.is_some()
+            {
+                warnings.push(LintWarning {
+                    block_id: s.id.as_str().to_owned(),
+                    message: "wait_for_event steps must not define custom \
+                              `wait_for_input.choices` — the event resume signal \
+                              carries the default choice and would be rejected"
+                        .to_owned(),
+                });
+            }
+            if s.handler == "wait_for_event" && s.wait_for_input.is_none() {
+                warnings.push(LintWarning {
+                    block_id: s.id.as_str().to_owned(),
+                    message: "wait_for_event step has no `wait_for_input` — the \
+                              instance will not pause for the events; add \
+                              `\"wait_for_input\": {\"prompt\": \"...\"}` (and an \
+                              optional timeout) to the step"
+                        .to_owned(),
+                });
             }
         }
-    }
-    walk(blocks, warnings);
+    });
 }
 
 fn collect_all_block_ids(blocks: &[BlockDefinition], ids: &mut HashSet<String>) {
-    for block in blocks {
-        match block {
-            BlockDefinition::Step(s) => {
-                ids.insert(s.id.as_str().to_owned());
-            }
-            BlockDefinition::Parallel(p) => {
-                ids.insert(p.id.as_str().to_owned());
-                for branch in &p.branches {
-                    collect_all_block_ids(branch, ids);
+    walk_blocks(blocks, &mut |block| {
+        ids.insert(block_id_of(block));
+    });
+}
+
+fn lint_blocks(blocks: &[BlockDefinition], warnings: &mut Vec<LintWarning>) {
+    walk_blocks(blocks, &mut |b| lint_node(b, warnings));
+}
+
+/// Node-level checks for a single block. Descent into child slices is handled
+/// by `walk_blocks`, so every check here runs at the block's own visit, before
+/// its subtree is walked.
+fn lint_node(block: &BlockDefinition, warnings: &mut Vec<LintWarning>) {
+    match block {
+        BlockDefinition::Step(s) => lint_step(s, warnings),
+        BlockDefinition::Parallel(p) => {
+            for branch in &p.branches {
+                if branch.is_empty() {
+                    warnings.push(LintWarning {
+                        block_id: p.id.as_str().to_owned(),
+                        message: "parallel branch is empty (will be a no-op)".into(),
+                    });
                 }
             }
-            BlockDefinition::Race(r) => {
-                ids.insert(r.id.as_str().to_owned());
-                for branch in &r.branches {
-                    collect_all_block_ids(branch, ids);
+        }
+        BlockDefinition::Race(r) => {
+            if r.branches.len() < 2 {
+                warnings.push(LintWarning {
+                    block_id: r.id.as_str().to_owned(),
+                    message: "race with fewer than 2 branches has no racing effect".into(),
+                });
+            }
+        }
+        BlockDefinition::Loop(l) => {
+            lint_expression(l.id.as_str(), "condition", &l.condition, warnings);
+            if let Some(ref break_on) = l.break_on {
+                lint_expression(l.id.as_str(), "break_on", break_on, warnings);
+            }
+        }
+        BlockDefinition::ForEach(_)
+        | BlockDefinition::SubSequence(_)
+        | BlockDefinition::CancellationScope(_) => {}
+        BlockDefinition::Router(r) => {
+            for route in &r.routes {
+                lint_expression(r.id.as_str(), "route.condition", &route.condition, warnings);
+                if route.blocks.is_empty() {
+                    warnings.push(LintWarning {
+                        block_id: r.id.as_str().to_owned(),
+                        message: "router route has empty blocks (will be a no-op)".into(),
+                    });
                 }
             }
-            BlockDefinition::Loop(l) => {
-                ids.insert(l.id.as_str().to_owned());
-                collect_all_block_ids(&l.body, ids);
+        }
+        BlockDefinition::TryCatch(tc) => {
+            if tc.catch_block.is_empty() {
+                warnings.push(LintWarning {
+                    block_id: tc.id.as_str().to_owned(),
+                    message: "try_catch has empty catch_block (errors will be silently swallowed)"
+                        .into(),
+                });
             }
-            BlockDefinition::ForEach(fe) => {
-                ids.insert(fe.id.as_str().to_owned());
-                collect_all_block_ids(&fe.body, ids);
-            }
-            BlockDefinition::Router(r) => {
-                ids.insert(r.id.as_str().to_owned());
-                for route in &r.routes {
-                    collect_all_block_ids(&route.blocks, ids);
-                }
-                if let Some(d) = &r.default {
-                    collect_all_block_ids(d, ids);
-                }
-            }
-            BlockDefinition::TryCatch(tc) => {
-                ids.insert(tc.id.as_str().to_owned());
-                collect_all_block_ids(&tc.try_block, ids);
-                collect_all_block_ids(&tc.catch_block, ids);
-                if let Some(f) = &tc.finally_block {
-                    collect_all_block_ids(f, ids);
-                }
-            }
-            BlockDefinition::SubSequence(s) => {
-                ids.insert(s.id.as_str().to_owned());
-            }
-            BlockDefinition::ABSplit(ab) => {
-                ids.insert(ab.id.as_str().to_owned());
+        }
+        BlockDefinition::ABSplit(ab) => {
+            let all_zero = ab.variants.iter().all(|v| v.weight == 0);
+            if !all_zero {
                 for v in &ab.variants {
-                    collect_all_block_ids(&v.blocks, ids);
-                }
-            }
-            BlockDefinition::CancellationScope(cs) => {
-                ids.insert(cs.id.as_str().to_owned());
-                collect_all_block_ids(&cs.blocks, ids);
-            }
-            BlockDefinition::Saga(sg) => {
-                ids.insert(sg.id.as_str().to_owned());
-                for step in &sg.steps {
-                    collect_all_block_ids(std::slice::from_ref(&*step.action), ids);
-                    if let Some(comp) = &step.compensation {
-                        collect_all_block_ids(std::slice::from_ref(&**comp), ids);
+                    if v.weight == 0 {
+                        warnings.push(LintWarning {
+                            block_id: ab.id.as_str().to_owned(),
+                            message: format!(
+                                "ab_split variant `{}` has weight 0 (will never be selected)",
+                                v.name
+                            ),
+                        });
                     }
                 }
             }
         }
-    }
-}
-
-fn lint_blocks(
-    blocks: &[BlockDefinition],
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    for b in blocks {
-        lint_block(b, all_ids, warnings);
-    }
-}
-
-fn lint_block(block: &BlockDefinition, all_ids: &HashSet<String>, warnings: &mut Vec<LintWarning>) {
-    match block {
-        BlockDefinition::Step(s) => lint_step(s, warnings),
-        BlockDefinition::Parallel(p) => lint_parallel(p, all_ids, warnings),
-        BlockDefinition::Race(r) => lint_race(r, all_ids, warnings),
-        BlockDefinition::Loop(l) => lint_loop(l, all_ids, warnings),
-        BlockDefinition::ForEach(fe) => lint_blocks(&fe.body, all_ids, warnings),
-        BlockDefinition::Router(r) => lint_router(r, all_ids, warnings),
-        BlockDefinition::TryCatch(tc) => lint_try_catch(tc, all_ids, warnings),
-        BlockDefinition::SubSequence(_) => {}
-        BlockDefinition::ABSplit(ab) => lint_ab_split(ab, all_ids, warnings),
-        BlockDefinition::CancellationScope(cs) => lint_blocks(&cs.blocks, all_ids, warnings),
         BlockDefinition::Saga(sg) => {
             if sg.steps.is_empty() {
                 warnings.push(LintWarning {
@@ -204,119 +216,7 @@ fn lint_block(block: &BlockDefinition, all_ids: &HashSet<String>, warnings: &mut
                     message: "saga has no steps (will be a no-op)".into(),
                 });
             }
-            for step in &sg.steps {
-                lint_blocks(std::slice::from_ref(&*step.action), all_ids, warnings);
-                if let Some(comp) = &step.compensation {
-                    lint_blocks(std::slice::from_ref(&**comp), all_ids, warnings);
-                }
-            }
         }
-    }
-}
-
-fn lint_parallel(
-    p: &orch8_types::sequence::ParallelDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    for branch in &p.branches {
-        if branch.is_empty() {
-            warnings.push(LintWarning {
-                block_id: p.id.as_str().to_owned(),
-                message: "parallel branch is empty (will be a no-op)".into(),
-            });
-        }
-        lint_blocks(branch, all_ids, warnings);
-    }
-}
-
-fn lint_race(
-    r: &orch8_types::sequence::RaceDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    if r.branches.len() < 2 {
-        warnings.push(LintWarning {
-            block_id: r.id.as_str().to_owned(),
-            message: "race with fewer than 2 branches has no racing effect".into(),
-        });
-    }
-    for branch in &r.branches {
-        lint_blocks(branch, all_ids, warnings);
-    }
-}
-
-fn lint_loop(
-    l: &orch8_types::sequence::LoopDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    lint_expression(l.id.as_str(), "condition", &l.condition, warnings);
-    if let Some(ref break_on) = l.break_on {
-        lint_expression(l.id.as_str(), "break_on", break_on, warnings);
-    }
-    lint_blocks(&l.body, all_ids, warnings);
-}
-
-fn lint_router(
-    r: &orch8_types::sequence::RouterDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    for route in &r.routes {
-        lint_expression(r.id.as_str(), "route.condition", &route.condition, warnings);
-        if route.blocks.is_empty() {
-            warnings.push(LintWarning {
-                block_id: r.id.as_str().to_owned(),
-                message: "router route has empty blocks (will be a no-op)".into(),
-            });
-        }
-        lint_blocks(&route.blocks, all_ids, warnings);
-    }
-    if let Some(default) = &r.default {
-        lint_blocks(default, all_ids, warnings);
-    }
-}
-
-fn lint_try_catch(
-    tc: &orch8_types::sequence::TryCatchDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    if tc.catch_block.is_empty() {
-        warnings.push(LintWarning {
-            block_id: tc.id.as_str().to_owned(),
-            message: "try_catch has empty catch_block (errors will be silently swallowed)".into(),
-        });
-    }
-    lint_blocks(&tc.try_block, all_ids, warnings);
-    lint_blocks(&tc.catch_block, all_ids, warnings);
-    if let Some(finally) = &tc.finally_block {
-        lint_blocks(finally, all_ids, warnings);
-    }
-}
-
-fn lint_ab_split(
-    ab: &orch8_types::sequence::ABSplitDef,
-    all_ids: &HashSet<String>,
-    warnings: &mut Vec<LintWarning>,
-) {
-    let all_zero = ab.variants.iter().all(|v| v.weight == 0);
-    if !all_zero {
-        for v in &ab.variants {
-            if v.weight == 0 {
-                warnings.push(LintWarning {
-                    block_id: ab.id.as_str().to_owned(),
-                    message: format!(
-                        "ab_split variant `{}` has weight 0 (will never be selected)",
-                        v.name
-                    ),
-                });
-            }
-        }
-    }
-    for v in &ab.variants {
-        lint_blocks(&v.blocks, all_ids, warnings);
     }
 }
 
@@ -553,11 +453,13 @@ fn lint_output_references(
     all_ids: &HashSet<String>,
     warnings: &mut Vec<LintWarning>,
 ) {
-    for block in &seq.blocks {
+    walk_blocks(&seq.blocks, &mut |block| {
         lint_output_refs_in_block(block, all_ids, warnings);
-    }
+    });
 }
 
+/// Node-level output-reference checks for a single block. Descent into child
+/// slices is handled by `walk_blocks`.
 fn lint_output_refs_in_block(
     block: &BlockDefinition,
     all_ids: &HashSet<String>,
@@ -567,27 +469,10 @@ fn lint_output_refs_in_block(
         BlockDefinition::Step(s) => {
             check_refs_in_json(s.id.as_str(), "params", &s.params, all_ids, warnings);
         }
-        BlockDefinition::Parallel(p) => {
-            for branch in &p.branches {
-                for b in branch {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
-            }
-        }
-        BlockDefinition::Race(r) => {
-            for branch in &r.branches {
-                for b in branch {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
-            }
-        }
         BlockDefinition::Loop(l) => {
             check_refs_in_str(l.id.as_str(), "condition", &l.condition, all_ids, warnings);
             if let Some(ref bo) = l.break_on {
                 check_refs_in_str(l.id.as_str(), "break_on", bo, all_ids, warnings);
-            }
-            for b in &l.body {
-                lint_output_refs_in_block(b, all_ids, warnings);
             }
         }
         BlockDefinition::ForEach(fe) => {
@@ -598,9 +483,6 @@ fn lint_output_refs_in_block(
                 all_ids,
                 warnings,
             );
-            for b in &fe.body {
-                lint_output_refs_in_block(b, all_ids, warnings);
-            }
         }
         BlockDefinition::Router(r) => {
             for route in &r.routes {
@@ -611,52 +493,12 @@ fn lint_output_refs_in_block(
                     all_ids,
                     warnings,
                 );
-                for b in &route.blocks {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
-            }
-            if let Some(d) = &r.default {
-                for b in d {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
-            }
-        }
-        BlockDefinition::TryCatch(tc) => {
-            for b in &tc.try_block {
-                lint_output_refs_in_block(b, all_ids, warnings);
-            }
-            for b in &tc.catch_block {
-                lint_output_refs_in_block(b, all_ids, warnings);
-            }
-            if let Some(f) = &tc.finally_block {
-                for b in f {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
             }
         }
         BlockDefinition::SubSequence(s) => {
             check_refs_in_json(s.id.as_str(), "input", &s.input, all_ids, warnings);
         }
-        BlockDefinition::ABSplit(ab) => {
-            for v in &ab.variants {
-                for b in &v.blocks {
-                    lint_output_refs_in_block(b, all_ids, warnings);
-                }
-            }
-        }
-        BlockDefinition::CancellationScope(cs) => {
-            for b in &cs.blocks {
-                lint_output_refs_in_block(b, all_ids, warnings);
-            }
-        }
-        BlockDefinition::Saga(saga) => {
-            for step in &saga.steps {
-                lint_output_refs_in_block(&step.action, all_ids, warnings);
-                if let Some(comp) = &step.compensation {
-                    lint_output_refs_in_block(comp, all_ids, warnings);
-                }
-            }
-        }
+        _ => {}
     }
 }
 
@@ -728,82 +570,21 @@ fn extract_identifier(s: &str) -> &str {
 /// Lint 2: `for_each` safety — warn when `max_iterations` uses the default 1000
 /// without explicit override (easy to miss for large collections).
 fn lint_for_each_safety(seq: &SequenceDefinition, warnings: &mut Vec<LintWarning>) {
-    for block in &seq.blocks {
-        lint_for_each_in_block(block, warnings);
-    }
-}
-
-fn lint_for_each_in_block(block: &BlockDefinition, warnings: &mut Vec<LintWarning>) {
-    match block {
-        BlockDefinition::ForEach(fe) => {
-            if fe.max_iterations == 1000 {
-                warnings.push(LintWarning {
-                    block_id: fe.id.as_str().to_owned(),
-                    message: "for_each uses default max_iterations (1000) — set explicitly to confirm intent".into(),
-                });
-            }
-            for b in &fe.body {
-                lint_for_each_in_block(b, warnings);
-            }
+    // `walk_blocks` descends into saga actions/compensations too, so a
+    // `for_each` nested inside a saga is now linted — the old hand-rolled
+    // walker had no Saga arm and silently skipped saga subtrees.
+    walk_blocks(&seq.blocks, &mut |block| {
+        if let BlockDefinition::ForEach(fe) = block
+            && fe.max_iterations == 1000
+        {
+            warnings.push(LintWarning {
+                block_id: fe.id.as_str().to_owned(),
+                message:
+                    "for_each uses default max_iterations (1000) — set explicitly to confirm intent"
+                        .into(),
+            });
         }
-        BlockDefinition::Parallel(p) => {
-            for branch in &p.branches {
-                for b in branch {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::Race(r) => {
-            for branch in &r.branches {
-                for b in branch {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::Loop(l) => {
-            for b in &l.body {
-                lint_for_each_in_block(b, warnings);
-            }
-        }
-        BlockDefinition::Router(r) => {
-            for route in &r.routes {
-                for b in &route.blocks {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-            if let Some(d) = &r.default {
-                for b in d {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::TryCatch(tc) => {
-            for b in &tc.try_block {
-                lint_for_each_in_block(b, warnings);
-            }
-            for b in &tc.catch_block {
-                lint_for_each_in_block(b, warnings);
-            }
-            if let Some(f) = &tc.finally_block {
-                for b in f {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::ABSplit(ab) => {
-            for v in &ab.variants {
-                for b in &v.blocks {
-                    lint_for_each_in_block(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::CancellationScope(cs) => {
-            for b in &cs.blocks {
-                lint_for_each_in_block(b, warnings);
-            }
-        }
-        _ => {}
-    }
+    });
 }
 
 /// Lint 3: Detect unreachable blocks — steps after a `fail` handler in the
@@ -836,81 +617,15 @@ fn lint_unreachable_in_list(blocks: &[BlockDefinition], warnings: &mut Vec<LintW
 }
 
 fn lint_unreachable_recursive(block: &BlockDefinition, warnings: &mut Vec<LintWarning>) {
-    match block {
-        BlockDefinition::Parallel(p) => {
-            for branch in &p.branches {
-                lint_unreachable_in_list(branch, warnings);
-                for b in branch {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
+    // `for_each_child_slice` also yields saga action/compensation slices, so
+    // unreachable-after-fail is now detected inside sagas — the old
+    // hand-rolled walker had no Saga arm and silently skipped saga subtrees.
+    for_each_child_slice(block, &mut |slice| {
+        lint_unreachable_in_list(slice, warnings);
+        for b in slice {
+            lint_unreachable_recursive(b, warnings);
         }
-        BlockDefinition::Race(r) => {
-            for branch in &r.branches {
-                lint_unreachable_in_list(branch, warnings);
-                for b in branch {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::Loop(l) => {
-            lint_unreachable_in_list(&l.body, warnings);
-            for b in &l.body {
-                lint_unreachable_recursive(b, warnings);
-            }
-        }
-        BlockDefinition::ForEach(fe) => {
-            lint_unreachable_in_list(&fe.body, warnings);
-            for b in &fe.body {
-                lint_unreachable_recursive(b, warnings);
-            }
-        }
-        BlockDefinition::Router(r) => {
-            for route in &r.routes {
-                lint_unreachable_in_list(&route.blocks, warnings);
-                for b in &route.blocks {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
-            if let Some(d) = &r.default {
-                lint_unreachable_in_list(d, warnings);
-                for b in d {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::TryCatch(tc) => {
-            lint_unreachable_in_list(&tc.try_block, warnings);
-            for b in &tc.try_block {
-                lint_unreachable_recursive(b, warnings);
-            }
-            lint_unreachable_in_list(&tc.catch_block, warnings);
-            for b in &tc.catch_block {
-                lint_unreachable_recursive(b, warnings);
-            }
-            if let Some(f) = &tc.finally_block {
-                lint_unreachable_in_list(f, warnings);
-                for b in f {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::ABSplit(ab) => {
-            for v in &ab.variants {
-                lint_unreachable_in_list(&v.blocks, warnings);
-                for b in &v.blocks {
-                    lint_unreachable_recursive(b, warnings);
-                }
-            }
-        }
-        BlockDefinition::CancellationScope(cs) => {
-            lint_unreachable_in_list(&cs.blocks, warnings);
-            for b in &cs.blocks {
-                lint_unreachable_recursive(b, warnings);
-            }
-        }
-        _ => {}
-    }
+    });
 }
 
 fn block_id_of(block: &BlockDefinition) -> String {
@@ -1616,6 +1331,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn for_each_default_max_iterations_in_saga_action_warned() {
+        // Regression: the for_each safety walker used to have no Saga arm, so
+        // a for_each nested in a saga action/compensation never got the
+        // default-max_iterations warning.
+        let seq = sample_seq(vec![BlockDefinition::Saga(Box::new(SagaDef {
+            id: BlockId::new("saga1"),
+            steps: vec![SagaStep {
+                id: BlockId::new("step1"),
+                action: Box::new(BlockDefinition::ForEach(Box::new(ForEachDef {
+                    id: BlockId::new("fe1"),
+                    collection: "{{ context.data.items }}".into(),
+                    item_var: "item".into(),
+                    body: vec![make_step("s1", "noop", json!({}))],
+                    max_iterations: 1000, // default
+                    retain_iterations: None,
+                }))),
+                compensation: None,
+            }],
+        }))]);
+        let w = lint_sequence(&seq);
+        assert!(
+            w.iter()
+                .any(|w| w.block_id == "fe1" && w.message.contains("default max_iterations")),
+            "should warn about default max_iterations inside saga action: {w:?}"
+        );
+    }
+
     // ─── unreachable block lint ───
 
     #[test]
@@ -1646,6 +1389,35 @@ mod tests {
             w.iter()
                 .any(|w| w.block_id == "dead" && w.message.contains("unreachable")),
             "should detect unreachable in nested parallel branch: {w:?}"
+        );
+    }
+
+    #[test]
+    fn step_after_fail_in_saga_compensation_warned() {
+        // Regression: unreachable-after-fail detection used to have no Saga
+        // arm, so blocks after `fail` inside saga actions/compensations were
+        // never flagged.
+        let seq = sample_seq(vec![BlockDefinition::Saga(Box::new(SagaDef {
+            id: BlockId::new("saga1"),
+            steps: vec![SagaStep {
+                id: BlockId::new("step1"),
+                action: Box::new(make_step("act", "noop", json!({}))),
+                compensation: Some(Box::new(BlockDefinition::CancellationScope(Box::new(
+                    CancellationScopeDef {
+                        id: BlockId::new("comp1"),
+                        blocks: vec![
+                            make_step("die", "fail", json!({})),
+                            make_step("dead", "noop", json!({})),
+                        ],
+                    },
+                )))),
+            }],
+        }))]);
+        let w = lint_sequence(&seq);
+        assert!(
+            w.iter()
+                .any(|w| w.block_id == "dead" && w.message.contains("unreachable")),
+            "should detect unreachable block after fail inside saga compensation: {w:?}"
         );
     }
 

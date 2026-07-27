@@ -40,15 +40,29 @@ use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
 use crate::handlers::param_resolve::OutputsSnapshot;
 
+/// Why the instance reached a terminal state, as determined by the root
+/// nodes of the execution tree.
+///
+/// Precedence rule: when the tree contains both Failed and Cancelled root
+/// nodes, the reason is [`TerminalReason::Failed`] — a genuine failure is
+/// reported even if other roots were cancelled. `Cancelled` is only reported
+/// when cancellation occurred without any failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalReason {
+    /// All root nodes completed or were skipped.
+    Succeeded,
+    /// At least one root node failed (wins over cancellation).
+    Failed,
+    /// At least one root node was cancelled and none failed.
+    Cancelled,
+}
+
 /// Result of a single `evaluate()` call, carrying enough state for the caller
 /// to transition the instance without re-reading the tree or instance from DB.
 #[derive(Debug)]
 pub enum EvalOutcome {
     /// All root nodes are terminal — instance is done.
-    Done {
-        any_failed: bool,
-        any_cancelled: bool,
-    },
+    Done { reason: TerminalReason },
     /// More work remains — re-schedule or wait.
     MoreWork { has_waiting_nodes: bool },
 }
@@ -205,6 +219,62 @@ pub async fn ensure_execution_tree(
     Ok(nodes)
 }
 
+/// Invoke `f` for each child block slice of a composite, in the order
+/// `build_nodes` assigns branch indices. The first argument is the branch
+/// index recorded on child nodes: `Some(i)` for branching composites,
+/// `None` for single-body composites (Loop/ForEach/CancellationScope) whose
+/// children carry no branch index. `Step` and `SubSequence` are leaves — a
+/// `SubSequence`'s blocks live in the invoked sequence, not inline.
+fn for_each_child_slice<'a>(
+    block: &'a BlockDefinition,
+    f: &mut impl FnMut(Option<usize>, &'a [BlockDefinition]),
+) {
+    match block {
+        BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
+        BlockDefinition::Parallel(p) => {
+            for (i, branch) in p.branches.iter().enumerate() {
+                f(Some(i), branch);
+            }
+        }
+        BlockDefinition::Race(r) => {
+            for (i, branch) in r.branches.iter().enumerate() {
+                f(Some(i), branch);
+            }
+        }
+        BlockDefinition::Loop(l) => f(None, &l.body),
+        BlockDefinition::ForEach(fe) => f(None, &fe.body),
+        BlockDefinition::Router(r) => {
+            for (i, route) in r.routes.iter().enumerate() {
+                f(Some(i), &route.blocks);
+            }
+            if let Some(default) = &r.default {
+                f(Some(r.routes.len()), default);
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            f(Some(0), &tc.try_block);
+            f(Some(1), &tc.catch_block);
+            if let Some(finally) = &tc.finally_block {
+                f(Some(2), finally);
+            }
+        }
+        BlockDefinition::ABSplit(ab) => {
+            for (i, variant) in ab.variants.iter().enumerate() {
+                f(Some(i), &variant.blocks);
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => f(None, &cs.blocks),
+        BlockDefinition::Saga(sg) => {
+            for (i, step) in sg.steps.iter().enumerate() {
+                f(Some(i * 2), std::slice::from_ref(&*step.action));
+                if let Some(comp) = &step.compensation {
+                    f(Some(i * 2 + 1), std::slice::from_ref(&**comp));
+                }
+            }
+        }
+    }
+}
+
 /// Recursively build execution nodes from block definitions.
 fn build_nodes(
     instance_id: InstanceId,
@@ -231,74 +301,9 @@ fn build_nodes(
         });
 
         // Recurse into children.
-        match block {
-            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
-            BlockDefinition::Parallel(p) => {
-                for (i, branch) in p.branches.iter().enumerate() {
-                    build_nodes(instance_id, Some(node_id), Some(i), branch, out);
-                }
-            }
-            BlockDefinition::Race(r) => {
-                for (i, branch) in r.branches.iter().enumerate() {
-                    build_nodes(instance_id, Some(node_id), Some(i), branch, out);
-                }
-            }
-            BlockDefinition::Loop(l) => {
-                build_nodes(instance_id, Some(node_id), None, &l.body, out);
-            }
-            BlockDefinition::ForEach(f) => {
-                build_nodes(instance_id, Some(node_id), None, &f.body, out);
-            }
-            BlockDefinition::Router(r) => {
-                for (i, route) in r.routes.iter().enumerate() {
-                    build_nodes(instance_id, Some(node_id), Some(i), &route.blocks, out);
-                }
-                if let Some(default) = &r.default {
-                    build_nodes(
-                        instance_id,
-                        Some(node_id),
-                        Some(r.routes.len()),
-                        default,
-                        out,
-                    );
-                }
-            }
-            BlockDefinition::TryCatch(tc) => {
-                build_nodes(instance_id, Some(node_id), Some(0), &tc.try_block, out);
-                build_nodes(instance_id, Some(node_id), Some(1), &tc.catch_block, out);
-                if let Some(finally) = &tc.finally_block {
-                    build_nodes(instance_id, Some(node_id), Some(2), finally, out);
-                }
-            }
-            BlockDefinition::ABSplit(ab) => {
-                for (i, variant) in ab.variants.iter().enumerate() {
-                    build_nodes(instance_id, Some(node_id), Some(i), &variant.blocks, out);
-                }
-            }
-            BlockDefinition::CancellationScope(cs) => {
-                build_nodes(instance_id, Some(node_id), None, &cs.blocks, out);
-            }
-            BlockDefinition::Saga(sg) => {
-                for (i, step) in sg.steps.iter().enumerate() {
-                    build_nodes(
-                        instance_id,
-                        Some(node_id),
-                        Some(i * 2),
-                        std::slice::from_ref(&*step.action),
-                        out,
-                    );
-                    if let Some(comp) = &step.compensation {
-                        build_nodes(
-                            instance_id,
-                            Some(node_id),
-                            Some(i * 2 + 1),
-                            std::slice::from_ref(&**comp),
-                            out,
-                        );
-                    }
-                }
-            }
-        }
+        for_each_child_slice(block, &mut |branch_index, children| {
+            build_nodes(instance_id, Some(node_id), branch_index, children, out);
+        });
     }
 }
 
@@ -308,50 +313,9 @@ fn build_nodes(
 fn collect_body_block_ids<'a>(blocks: &'a [BlockDefinition], out: &mut Vec<&'a BlockId>) {
     for block in blocks {
         out.push(block_meta(block).0);
-        match block {
-            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
-            BlockDefinition::Parallel(p) => {
-                for branch in &p.branches {
-                    collect_body_block_ids(branch, out);
-                }
-            }
-            BlockDefinition::Race(r) => {
-                for branch in &r.branches {
-                    collect_body_block_ids(branch, out);
-                }
-            }
-            BlockDefinition::Loop(l) => collect_body_block_ids(&l.body, out),
-            BlockDefinition::ForEach(f) => collect_body_block_ids(&f.body, out),
-            BlockDefinition::Router(r) => {
-                for route in &r.routes {
-                    collect_body_block_ids(&route.blocks, out);
-                }
-                if let Some(default) = &r.default {
-                    collect_body_block_ids(default, out);
-                }
-            }
-            BlockDefinition::TryCatch(tc) => {
-                collect_body_block_ids(&tc.try_block, out);
-                collect_body_block_ids(&tc.catch_block, out);
-                if let Some(finally) = &tc.finally_block {
-                    collect_body_block_ids(finally, out);
-                }
-            }
-            BlockDefinition::ABSplit(ab) => {
-                for variant in &ab.variants {
-                    collect_body_block_ids(&variant.blocks, out);
-                }
-            }
-            BlockDefinition::CancellationScope(cs) => collect_body_block_ids(&cs.blocks, out),
-            BlockDefinition::Saga(sg) => {
-                for step in &sg.steps {
-                    collect_body_block_ids(std::slice::from_ref(&*step.action), out);
-                    if let Some(comp) = &step.compensation {
-                        collect_body_block_ids(std::slice::from_ref(&**comp), out);
-                    }
-                }
-            }
-        }
+        for_each_child_slice(block, &mut |_, children| {
+            collect_body_block_ids(children, out);
+        });
     }
 }
 
@@ -495,11 +459,7 @@ pub async fn evaluate(
             if matches!(
                 outcome,
                 EvalOutcome::Done {
-                    any_failed: true,
-                    ..
-                } | EvalOutcome::Done {
-                    any_cancelled: true,
-                    ..
+                    reason: TerminalReason::Failed | TerminalReason::Cancelled,
                 }
             ) {
                 let non_terminal_ids: Vec<ExecutionNodeId> = ctx
@@ -634,15 +594,17 @@ fn check_termination(tree: &[ExecutionNode]) -> Option<EvalOutcome> {
 
     if all_completed_or_skipped {
         return Some(EvalOutcome::Done {
-            any_failed: false,
-            any_cancelled: false,
+            reason: TerminalReason::Succeeded,
         });
     }
     if any_failed || any_cancelled {
-        return Some(EvalOutcome::Done {
-            any_failed,
-            any_cancelled,
-        });
+        // Precedence: failure wins over cancellation (see `TerminalReason`).
+        let reason = if any_failed {
+            TerminalReason::Failed
+        } else {
+            TerminalReason::Cancelled
+        };
+        return Some(EvalOutcome::Done { reason });
     }
 
     None
@@ -706,8 +668,11 @@ async fn phase_root_activation(
                 .await?
                 .is_some_and(|i| i.state == InstanceState::Paused);
             return Ok(IterAction::Return(EvalOutcome::Done {
-                any_failed: false,
-                any_cancelled: !now_paused,
+                reason: if now_paused {
+                    TerminalReason::Succeeded
+                } else {
+                    TerminalReason::Cancelled
+                },
             }));
         }
         ctx.instance_stale = true;
@@ -1082,14 +1047,15 @@ fn find_running_step<'a>(
     None
 }
 
-/// Check if a node is inside a Race composite that already has a winner
-/// (another branch's direct child is Completed). If so, this node's
-/// branch lost and should not be dispatched.
-fn is_inside_decided_race(
+/// Walk up the ancestor chain from `node`. For each Race-composite ancestor,
+/// check its other branches (siblings of the branch we came through) with
+/// `sibling_matches`; return true on the first match.
+fn has_race_ancestor_with_matching_sibling(
     tree: &[ExecutionNode],
     block_map: &HashMap<&BlockId, &BlockDefinition>,
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
+    sibling_matches: impl Fn(&ExecutionNode) -> bool,
 ) -> bool {
     // Walk up tracking which direct-child-of-race we came through.
     let mut current_node = Some(node);
@@ -1101,12 +1067,12 @@ fn is_inside_decided_race(
             {
                 let my_branch = curr.branch_index;
                 // Avoid allocating a Vec just to check for any matching children.
-                let sibling_completed = tree.iter().any(|c| {
+                let sibling_match = tree.iter().any(|c| {
                     c.parent_id == Some(parent_id)
                         && c.branch_index != my_branch
-                        && matches!(c.state, NodeState::Completed)
+                        && sibling_matches(c)
                 });
-                if sibling_completed {
+                if sibling_match {
                     return true;
                 }
             }
@@ -1116,6 +1082,20 @@ fn is_inside_decided_race(
         }
     }
     false
+}
+
+/// Check if a node is inside a Race composite that already has a winner
+/// (another branch's direct child is Completed). If so, this node's
+/// branch lost and should not be dispatched.
+fn is_inside_decided_race(
+    tree: &[ExecutionNode],
+    block_map: &HashMap<&BlockId, &BlockDefinition>,
+    node: &ExecutionNode,
+    node_index: &NodeIndex<'_>,
+) -> bool {
+    has_race_ancestor_with_matching_sibling(tree, block_map, node, node_index, |c| {
+        matches!(c.state, NodeState::Completed)
+    })
 }
 
 /// Check if a step node is inside a Race and a sibling branch contains a
@@ -1129,34 +1109,13 @@ fn has_racing_composite_sibling(
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
 ) -> bool {
-    let mut current_node = Some(node);
-    while let Some(curr) = current_node {
-        if let Some(parent_id) = curr.parent_id {
-            if let Some(parent_node) = get_node(node_index, parent_id)
-                && let Some(parent_block) = block_map.get(&parent_node.block_id).copied()
-                && matches!(parent_block, BlockDefinition::Race(_))
-            {
-                let my_branch = curr.branch_index;
-                // Avoid allocating a Vec just to check for any matching children.
-                let sibling_composite_running = tree.iter().any(|c| {
-                    c.parent_id == Some(parent_id)
-                        && c.branch_index != my_branch
-                        && c.state == NodeState::Running
-                        && block_map
-                            .get(&c.block_id)
-                            .copied()
-                            .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
-                });
-                if sibling_composite_running {
-                    return true;
-                }
-            }
-            current_node = get_node(node_index, parent_id);
-        } else {
-            current_node = None;
-        }
-    }
-    false
+    has_race_ancestor_with_matching_sibling(tree, block_map, node, node_index, |c| {
+        c.state == NodeState::Running
+            && block_map
+                .get(&c.block_id)
+                .copied()
+                .is_some_and(|b| !matches!(b, BlockDefinition::Step(_)))
+    })
 }
 
 /// Count ancestors to determine tree depth.
@@ -1180,64 +1139,8 @@ pub fn flatten_blocks(blocks: &[BlockDefinition]) -> HashMap<&BlockId, &BlockDef
         map: &mut HashMap<&'b BlockId, &'b BlockDefinition>,
     ) {
         for block in blocks {
-            let id = match block {
-                BlockDefinition::Step(s) => &s.id,
-                BlockDefinition::Parallel(p) => &p.id,
-                BlockDefinition::Race(r) => &r.id,
-                BlockDefinition::Loop(l) => &l.id,
-                BlockDefinition::ForEach(f) => &f.id,
-                BlockDefinition::Router(r) => &r.id,
-                BlockDefinition::TryCatch(tc) => &tc.id,
-                BlockDefinition::SubSequence(ss) => &ss.id,
-                BlockDefinition::ABSplit(ab) => &ab.id,
-                BlockDefinition::CancellationScope(cs) => &cs.id,
-                BlockDefinition::Saga(sg) => &sg.id,
-            };
-            map.insert(id, block);
-            match block {
-                BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => {}
-                BlockDefinition::Parallel(p) => {
-                    for branch in &p.branches {
-                        walk(branch, map);
-                    }
-                }
-                BlockDefinition::Race(r) => {
-                    for branch in &r.branches {
-                        walk(branch, map);
-                    }
-                }
-                BlockDefinition::Loop(l) => walk(&l.body, map),
-                BlockDefinition::ForEach(f) => walk(&f.body, map),
-                BlockDefinition::Router(r) => {
-                    for route in &r.routes {
-                        walk(&route.blocks, map);
-                    }
-                    if let Some(default) = &r.default {
-                        walk(default, map);
-                    }
-                }
-                BlockDefinition::TryCatch(tc) => {
-                    walk(&tc.try_block, map);
-                    walk(&tc.catch_block, map);
-                    if let Some(finally) = &tc.finally_block {
-                        walk(finally, map);
-                    }
-                }
-                BlockDefinition::ABSplit(ab) => {
-                    for variant in &ab.variants {
-                        walk(&variant.blocks, map);
-                    }
-                }
-                BlockDefinition::CancellationScope(cs) => walk(&cs.blocks, map),
-                BlockDefinition::Saga(sg) => {
-                    for step in &sg.steps {
-                        walk(std::slice::from_ref(&*step.action), map);
-                        if let Some(comp) = &step.compensation {
-                            walk(std::slice::from_ref(&**comp), map);
-                        }
-                    }
-                }
-            }
+            map.insert(block_meta(block).0, block);
+            for_each_child_slice(block, &mut |_, children| walk(children, map));
         }
     }
     let mut map = HashMap::with_capacity(blocks.len() * 2);
@@ -1252,87 +1155,18 @@ pub fn find_block<'a>(
     target_id: &BlockId,
 ) -> Option<&'a BlockDefinition> {
     for block in blocks {
-        let id = match block {
-            BlockDefinition::Step(s) => &s.id,
-            BlockDefinition::Parallel(p) => &p.id,
-            BlockDefinition::Race(r) => &r.id,
-            BlockDefinition::Loop(l) => &l.id,
-            BlockDefinition::ForEach(f) => &f.id,
-            BlockDefinition::Router(r) => &r.id,
-            BlockDefinition::TryCatch(tc) => &tc.id,
-            BlockDefinition::SubSequence(ss) => &ss.id,
-            BlockDefinition::ABSplit(ab) => &ab.id,
-            BlockDefinition::CancellationScope(cs) => &cs.id,
-            BlockDefinition::Saga(sg) => &sg.id,
-        };
-        if id == target_id {
+        if block_meta(block).0 == target_id {
             return Some(block);
         }
-        // Recurse into children.
-        let children = match block {
-            BlockDefinition::Step(_) | BlockDefinition::SubSequence(_) => None,
-            BlockDefinition::Parallel(p) => {
-                for branch in &p.branches {
-                    if let Some(found) = find_block(branch, target_id) {
-                        return Some(found);
-                    }
-                }
-                None
+        // Recurse into children, in the same order `build_nodes` visits
+        // them, keeping the first match (depth-first, pre-order).
+        let mut found = None;
+        for_each_child_slice(block, &mut |_, children| {
+            if found.is_none() {
+                found = find_block(children, target_id);
             }
-            BlockDefinition::Race(r) => {
-                for branch in &r.branches {
-                    if let Some(found) = find_block(branch, target_id) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            BlockDefinition::Loop(l) => Some(&l.body),
-            BlockDefinition::ForEach(f) => Some(&f.body),
-            BlockDefinition::Router(r) => {
-                for route in &r.routes {
-                    if let Some(found) = find_block(&route.blocks, target_id) {
-                        return Some(found);
-                    }
-                }
-                r.default.as_ref()
-            }
-            BlockDefinition::TryCatch(tc) => {
-                if let Some(found) = find_block(&tc.try_block, target_id) {
-                    return Some(found);
-                }
-                if let Some(found) = find_block(&tc.catch_block, target_id) {
-                    return Some(found);
-                }
-                tc.finally_block.as_ref()
-            }
-            BlockDefinition::ABSplit(ab) => {
-                for variant in &ab.variants {
-                    if let Some(found) = find_block(&variant.blocks, target_id) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            BlockDefinition::CancellationScope(cs) => Some(&cs.blocks),
-            BlockDefinition::Saga(sg) => {
-                for step in &sg.steps {
-                    if let Some(found) = find_block(std::slice::from_ref(&*step.action), target_id)
-                    {
-                        return Some(found);
-                    }
-                    if let Some(comp) = &step.compensation
-                        && let Some(found) = find_block(std::slice::from_ref(&**comp), target_id)
-                    {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-        };
-        if let Some(children) = children
-            && let Some(found) = find_block(children, target_id)
-        {
+        });
+        if let Some(found) = found {
             return Some(found);
         }
     }
@@ -1517,3 +1351,6 @@ pub async fn activate_first_pending_child(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod coverage_tests;

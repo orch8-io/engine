@@ -822,3 +822,7 @@ mod tests {
         assert!(preferred.score > other.score);
     }
 }
+
+#[cfg(test)]
+#[path = "placement_coverage_tests.rs"]
+mod placement_coverage_tests;

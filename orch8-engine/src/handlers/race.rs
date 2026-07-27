@@ -2,6 +2,7 @@ use tracing::debug;
 
 use orch8_storage::StorageBackend;
 use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::ids::{BlockId, ExecutionNodeId};
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::{RaceDef, RaceSemantics};
 
@@ -9,33 +10,78 @@ use crate::error::EngineError;
 use crate::evaluator;
 use crate::handlers::HandlerRegistry;
 
-/// Cancel every non-terminal branch (and its entire subtree) once the race
-/// has been decided. A losing branch root may itself be a composite (e.g.
-/// parallel) that is Running while a descendant is Waiting on an external
-/// worker, so every descendant's worker tasks must be purged too.
-async fn cancel_non_terminal_siblings(
+/// Cancel every non-terminal node among `candidates` (and each one's entire
+/// subtree). Used both when the race is decided (losing sibling branches) and
+/// when a branch dies mid-race (its not-yet-started remainder). A losing node
+/// may itself be a composite (e.g. parallel) that is Running while a
+/// descendant is Waiting on an external worker, so every descendant's worker
+/// tasks must be purged too.
+///
+/// The storage writes are batched across all victims — one
+/// `cancel_worker_tasks_for_blocks` plus one `update_nodes_state` — instead
+/// of 3+ round-trips per node, mirroring
+/// `for_each::reset_subtree_to_pending`. The writes remain non-transactional,
+/// exactly as the previous per-node loop: a failure partway through leaves
+/// the earlier steps applied and the later ones skipped.
+async fn cancel_non_terminal_nodes(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
+    race_block_id: &BlockId,
     tree: &[ExecutionNode],
-    children: &[&ExecutionNode],
+    candidates: &[&ExecutionNode],
 ) -> Result<(), EngineError> {
-    for child in children {
-        if !matches!(
-            child.state,
-            NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
-        ) {
-            // Cancel the direct child's worker task first, then recurse
-            // into its subtree to cancel any descendant workers.
-            if child.state == NodeState::Waiting {
-                storage
-                    .cancel_worker_tasks_for_block(instance.id.into_uuid(), child.block_id.as_str())
-                    .await?;
-            }
-            evaluator::cancel_subtree(storage, instance.id, tree, child.id).await?;
-            storage
-                .update_node_state(child.id, NodeState::Cancelled)
-                .await?;
-        }
+    let victims: Vec<&ExecutionNode> = candidates
+        .iter()
+        .filter(|n| {
+            !matches!(
+                n.state,
+                NodeState::Completed
+                    | NodeState::Failed
+                    | NodeState::Cancelled
+                    | NodeState::Skipped
+            )
+        })
+        .copied()
+        .collect();
+    if victims.is_empty() {
+        return Ok(());
+    }
+
+    // 1. Purge pending worker tasks for every Waiting victim FIRST — a worker
+    //    must never claim a task for a node that is about to be Cancelled.
+    let waiting_block_ids: Vec<String> = victims
+        .iter()
+        .filter(|n| n.state == NodeState::Waiting)
+        .map(|n| n.block_id.as_str().to_owned())
+        .collect();
+    if !waiting_block_ids.is_empty() {
+        storage
+            .cancel_worker_tasks_for_blocks(instance.id.into_uuid(), &waiting_block_ids)
+            .await?;
+    }
+
+    // 2. Recurse into each victim's subtree to cancel descendant workers.
+    //    `cancel_subtree` already batches its descendant state update
+    //    internally; its per-Waiting-descendant worker-task cancellation
+    //    lives in evaluator.rs and is deliberately called as-is.
+    for victim in &victims {
+        evaluator::cancel_subtree(storage, instance.id, tree, victim.id).await?;
+    }
+
+    // 3. Flip every victim to Cancelled in one batched write.
+    let victim_ids: Vec<ExecutionNodeId> = victims.iter().map(|n| n.id).collect();
+    storage
+        .update_nodes_state(&victim_ids, NodeState::Cancelled)
+        .await?;
+
+    for victim in &victims {
+        debug!(
+            instance_id = %instance.id,
+            block_id = %race_block_id,
+            branch = victim.branch_index,
+            cancelled_block = %victim.block_id,
+            "race: cancelled non-terminal node and its subtree"
+        );
     }
     Ok(())
 }
@@ -105,24 +151,7 @@ pub async fn execute_race(
             // The branch can never win. Cancel its not-yet-started remainder
             // so the whole tree can reach all-terminal (under FirstToSucceed
             // the race still waits for the surviving branches).
-            for n in branch_nodes.iter().filter(|n| !is_terminal(n)) {
-                if n.state == NodeState::Waiting {
-                    storage
-                        .cancel_worker_tasks_for_block(instance.id.into_uuid(), n.block_id.as_str())
-                        .await?;
-                }
-                evaluator::cancel_subtree(storage, instance.id, tree, n.id).await?;
-                storage
-                    .update_node_state(n.id, NodeState::Cancelled)
-                    .await?;
-                debug!(
-                    instance_id = %instance.id,
-                    block_id = %race_def.id,
-                    branch = branch_idx,
-                    cursor_block = %n.block_id,
-                    "race: cancelling remainder of failed branch"
-                );
-            }
+            cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, branch_nodes).await?;
             continue;
         }
 
@@ -152,7 +181,7 @@ pub async fn execute_race(
 
     // A drained branch wins the race — cancel everything still in flight.
     if any_branch_won {
-        cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
+        cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
         evaluator::complete_node(storage, node.id).await?;
         debug!(
             instance_id = %instance.id,
@@ -167,7 +196,7 @@ pub async fn execute_race(
     // branch has already failed and no branch has won, fail fast instead of
     // waiting for every remaining branch to also fail.
     if matches!(race_def.semantics, RaceSemantics::FirstToResolve) && any_branch_failed {
-        cancel_non_terminal_siblings(storage, instance, tree, &children).await?;
+        cancel_non_terminal_nodes(storage, instance, &race_def.id, tree, &children).await?;
         evaluator::fail_node(storage, node.id).await?;
         debug!(
             instance_id = %instance.id,

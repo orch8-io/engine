@@ -241,3 +241,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "context_coverage_tests.rs"]
+mod context_coverage_tests;

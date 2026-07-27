@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 use tracing::{Instrument, info, warn};
 use uuid::Uuid;
 
@@ -36,8 +38,6 @@ pub struct StepExecParams {
     pub output_schema: Option<serde_json::Value>,
 }
 
-/// Execute a step without persisting the output — returns the `BlockOutput` for
-/// the caller to save (typically combined with a state transition in one transaction).
 /// Count JSON-serialized bytes without allocating a throw-away buffer.
 fn json_byte_size(value: &serde_json::Value) -> Result<usize, serde_json::Error> {
     use std::io::{self, Write};
@@ -56,6 +56,53 @@ fn json_byte_size(value: &serde_json::Value) -> Result<usize, serde_json::Error>
     Ok(counter.0)
 }
 
+/// Maximum entries in the compiled-schema cache. Schemas per deployment are
+/// few (one per step declaring `output_schema`), so a small cap suffices. On
+/// overflow the cache is cleared entirely: eviction only costs a one-off
+/// recompilation on next use, never a correctness change.
+const SCHEMA_CACHE_CAP: usize = 256;
+
+/// Process-local cache of compiled JSON Schema validators, keyed by the
+/// SHA-256 digest of the canonical schema serialization (same idiom as
+/// `optimizer::source_hash`). `jsonschema::Validator` is `Send + Sync`, so a
+/// single `Arc<Validator>` is safely shared across threads.
+static SCHEMA_CACHE: OnceLock<Mutex<HashMap<[u8; 32], Arc<jsonschema::Validator>>>> =
+    OnceLock::new();
+
+fn schema_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<jsonschema::Validator>>> {
+    SCHEMA_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn schema_cache_key(schema: &serde_json::Value) -> Option<[u8; 32]> {
+    let canonical = orch8_publisher::manifest::canonical_json(schema).ok()?;
+    Some(Sha256::digest(canonical.as_bytes()).into())
+}
+
+/// Compile `schema` with `jsonschema::validator_for` defaults, reusing a
+/// cached validator when the same schema was compiled before. Uses a
+/// get-then-compute-then-insert pattern so the lock is never held across
+/// compilation; two threads may compile the same schema concurrently in a
+/// rare race, which is harmless (both results are equivalent, last insert
+/// wins). Falls back to an uncached compile if canonicalization fails.
+fn compiled_schema_validator(
+    schema: &serde_json::Value,
+) -> Result<Arc<jsonschema::Validator>, jsonschema::ValidationError<'static>> {
+    let Some(key) = schema_cache_key(schema) else {
+        return jsonschema::validator_for(schema).map(Arc::new);
+    };
+    let cache = schema_cache();
+    if let Some(v) = cache.lock().expect("schema cache poisoned").get(&key) {
+        return Ok(Arc::clone(v));
+    }
+    let validator = Arc::new(jsonschema::validator_for(schema)?);
+    let mut cache = cache.lock().expect("schema cache poisoned");
+    if cache.len() >= SCHEMA_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, Arc::clone(&validator));
+    Ok(validator)
+}
+
 fn validate_output_schema(
     output_schema: Option<&serde_json::Value>,
     output: &serde_json::Value,
@@ -65,7 +112,7 @@ fn validate_output_schema(
     let Some(schema) = output_schema else {
         return Ok(());
     };
-    let validator = match jsonschema::validator_for(schema) {
+    let validator = match compiled_schema_validator(schema) {
         Ok(v) => v,
         Err(e) => {
             return Err(EngineError::StepFailed {
@@ -104,13 +151,52 @@ fn validate_output_schema(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Selects which persistence steps [`run_step_core`] performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepMode {
+    /// Never persist block outputs — the caller saves the returned
+    /// `BlockOutput` itself (typically combined with a state transition).
+    Dry,
+    /// Persist the synthesized `BlockOutput` on cache hits and the real
+    /// output on success.
+    Live,
+}
+
+/// Execute a step without persisting the output — returns the `BlockOutput` for
+/// the caller to save (typically combined with a state transition in one transaction).
 pub async fn execute_step_dry(
     storage: &Arc<dyn StorageBackend>,
     handlers: &HandlerRegistry,
     exec: StepExecParams,
 ) -> Result<BlockOutput, EngineError> {
+    run_step_core(storage, handlers, exec, StepMode::Dry).await
+}
+
+/// Execute a step with memoization: check if output already exists (idempotency),
+/// invoke the handler if not, persist the result.
+pub async fn execute_step(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    exec: StepExecParams,
+) -> Result<serde_json::Value, EngineError> {
+    run_step_core(storage, handlers, exec, StepMode::Live)
+        .await
+        .map(|block_output| block_output.output)
+}
+
+/// Shared body of [`execute_step_dry`] and [`execute_step`]. `mode` selects the
+/// two persistence points where the two paths differ; everything else —
+/// memoization, caching, effect guard, timeout, externalization, error mapping,
+/// and the `orch8.step` span — is identical.
+#[allow(clippy::too_many_lines)]
+async fn run_step_core(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &HandlerRegistry,
+    exec: StepExecParams,
+    mode: StepMode,
+) -> Result<BlockOutput, EngineError> {
     // Memoization: if output already exists for this block+attempt, return it.
+    // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
     if exec.attempt > 0
         && let Some(existing) = storage
             .get_block_output(exec.instance_id, &exec.block_id)
@@ -153,7 +239,7 @@ pub async fn execute_step_dry(
             );
             let output_size =
                 u32::try_from(json_byte_size(&cached).unwrap_or(0)).unwrap_or(u32::MAX);
-            return Ok(BlockOutput {
+            let block_output = BlockOutput {
                 id: Uuid::now_v7(),
                 instance_id: exec.instance_id,
                 block_id: exec.block_id,
@@ -162,7 +248,13 @@ pub async fn execute_step_dry(
                 output_size,
                 attempt: u16::try_from(exec.attempt).unwrap_or(u16::MAX),
                 created_at: Utc::now(),
-            });
+            };
+            // Mode branch: live persists the synthesized output row so a cache
+            // hit still records the attempt; dry leaves saving to the caller.
+            if mode == StepMode::Live {
+                storage.save_block_output(&block_output).await?;
+            }
+            return Ok(block_output);
         }
     }
 
@@ -276,6 +368,12 @@ pub async fn execute_step_dry(
             )
             .await?;
 
+            // Mode branch: live persists the output row here; dry returns it
+            // for the caller to save atomically with its state transition.
+            if mode == StepMode::Live {
+                storage.save_block_output(&block_output).await?;
+            }
+
             info!(
                 instance_id = %instance_id,
                 output_size = output_size,
@@ -284,207 +382,6 @@ pub async fn execute_step_dry(
             );
 
             Ok(block_output)
-        }
-        Err(step_err) => {
-            if let Some(guard) = effect_guard.take() {
-                guard.mark_unknown().await?;
-            }
-            warn!(
-                instance_id = %instance_id,
-                attempt = attempt,
-                error = %step_err,
-                "step execution failed"
-            );
-            Err(map_step_error(step_err, instance_id, &block_id))
-        }
-    }
-}
-
-/// Execute a step with memoization: check if output already exists (idempotency),
-/// invoke the handler if not, persist the result.
-#[allow(clippy::too_many_lines)]
-pub async fn execute_step(
-    storage: &Arc<dyn StorageBackend>,
-    handlers: &HandlerRegistry,
-    exec: StepExecParams,
-) -> Result<serde_json::Value, EngineError> {
-    // Memoization: if output already exists for this block+attempt, return it.
-    // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
-    if exec.attempt > 0
-        && let Some(existing) = storage
-            .get_block_output(exec.instance_id, &exec.block_id)
-            .await?
-        // The in-progress sentinel now carries the real attempt number, so it
-        // could falsely match the memoization check below — but it is NOT a
-        // real output. Skip it so a crashed-mid-step block re-executes rather
-        // than returning the sentinel as a cached result.
-        && existing.output_ref.as_deref()
-            != Some(crate::handlers::param_resolve::IN_PROGRESS_SENTINEL)
-    {
-        // Ref#4: attempts past i16::MAX can no longer be represented in
-        // the block_outputs.attempt column. Refuse to memoize rather than
-        // clamping — a clamp would make every retry past 32 767 collide
-        // against the same row and silently replay a stale output.
-        let matches_memoized = u16::try_from(exec.attempt).is_ok_and(|a| existing.attempt == a);
-        if matches_memoized {
-            info!(
-                instance_id = %exec.instance_id,
-                block_id = %exec.block_id,
-                "step already executed (memoized), returning cached output"
-            );
-            return Ok(existing.output);
-        }
-    }
-
-    // Step output caching for the tree-evaluator path.
-    if let Some(ref cache_key) = exec.cache_key {
-        let prefixed_key = format!("_cache:{cache_key}");
-        if let Ok(Some(cached)) = storage
-            .get_instance_kv(exec.instance_id, &prefixed_key)
-            .await
-        {
-            info!(
-                instance_id = %exec.instance_id,
-                block_id = %exec.block_id,
-                cache_key = %cache_key,
-                "step output served from cache"
-            );
-            let output_size =
-                u32::try_from(json_byte_size(&cached).unwrap_or(0)).unwrap_or(u32::MAX);
-            let block_output = BlockOutput {
-                id: Uuid::now_v7(),
-                instance_id: exec.instance_id,
-                block_id: exec.block_id,
-                output: cached.clone(),
-                output_ref: None,
-                output_size,
-                attempt: u16::try_from(exec.attempt).unwrap_or(u16::MAX),
-                created_at: Utc::now(),
-            };
-            storage.save_block_output(&block_output).await?;
-            return Ok(cached);
-        }
-    }
-
-    let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
-        let names = handlers.handler_names();
-        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &names);
-        match suggestion {
-            Some(s) => {
-                EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
-            }
-            None => EngineError::HandlerNotFound(exec.handler_name.clone()),
-        }
-    })?;
-
-    let mut effect_guard = if exec.context.runtime.dry_run {
-        None
-    } else {
-        crate::effect_guard::EffectGuard::begin(
-            storage.as_ref(),
-            &exec.tenant_id,
-            exec.instance_id,
-            &exec.block_id,
-            &exec.handler_name,
-            &exec.params,
-            exec.attempt,
-        )
-        .await?
-    };
-
-    // Save fields needed after move into step_ctx.
-    let instance_id = exec.instance_id;
-    let block_id = exec.block_id.clone();
-    let attempt = exec.attempt;
-    let timeout = exec.timeout;
-    let cache_key = exec.cache_key;
-    let output_schema = exec.output_schema;
-
-    // Same `orch8.step` span as `execute_step_dry` — the tree-evaluator path
-    // must export identically-shaped spans as the flat scheduler path.
-    let step_span = tracing::info_span!(
-        "orch8.step",
-        instance_id = %instance_id,
-        block_id = %block_id,
-        handler = %exec.handler_name,
-        tenant_id = %exec.tenant_id,
-        attempt = attempt,
-    );
-
-    let step_ctx = StepContext {
-        instance_id,
-        tenant_id: exec.tenant_id,
-        block_id: exec.block_id,
-        params: exec.params,
-        context: Arc::new(exec.context),
-        attempt,
-        storage: Arc::clone(storage),
-        wait_for_input: exec.wait_for_input,
-    };
-
-    // Execute with optional timeout.
-    let handler_fut = handler(step_ctx).instrument(step_span);
-    let result = if let Some(dur) = timeout {
-        let Ok(result) = tokio::time::timeout(dur, handler_fut).await else {
-            if let Some(guard) = effect_guard.take() {
-                guard.mark_unknown().await?;
-            }
-            return Err(EngineError::StepTimeout {
-                block_id,
-                timeout: dur,
-            });
-        };
-        result
-    } else {
-        handler_fut.await
-    };
-
-    match result {
-        Ok(output) => {
-            if let Some(guard) = effect_guard.take() {
-                guard.commit(&output).await?;
-            }
-            validate_output_schema(output_schema.as_ref(), &output, instance_id, &block_id)?;
-
-            if let Some(ref ck) = cache_key {
-                let prefixed_key = format!("_cache:{ck}");
-                if let Err(e) = storage
-                    .set_instance_kv(instance_id, &prefixed_key, &output)
-                    .await
-                {
-                    warn!(
-                        instance_id = %instance_id,
-                        cache_key = %ck,
-                        error = %e,
-                        "failed to save step output to cache"
-                    );
-                }
-            }
-
-            let output_size =
-                u32::try_from(json_byte_size(&output).unwrap_or(0)).unwrap_or(u32::MAX);
-
-            let block_output = maybe_externalize(
-                storage.as_ref(),
-                instance_id,
-                block_id,
-                output,
-                output_size,
-                u16::try_from(attempt).unwrap_or(u16::MAX),
-                exec.externalize_threshold,
-            )
-            .await?;
-
-            storage.save_block_output(&block_output).await?;
-
-            info!(
-                instance_id = %instance_id,
-                output_size = output_size,
-                externalized = block_output.output_ref.is_some(),
-                "step completed successfully"
-            );
-
-            Ok(block_output.output)
         }
         Err(step_err) => {
             if let Some(guard) = effect_guard.take() {
@@ -684,6 +581,46 @@ mod tests {
         let output = serde_json::json!({"any": "thing"});
         let result = validate_output_schema(None, &output, InstanceId::new(), &BlockId::new("s1"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn compiled_schema_validator_caches_by_schema_content() {
+        // Unique schema so this test is independent of cache entries from
+        // other tests running in the same process.
+        let schema = serde_json::json!({
+            "$id": format!("https://test.invalid/{}", Uuid::new_v4()),
+            "type": "object",
+            "properties": {"score": {"type": "number"}},
+            "required": ["score"]
+        });
+        let first = compiled_schema_validator(&schema).expect("schema compiles");
+        let second = compiled_schema_validator(&schema).expect("schema compiles");
+        // Second call must return the cached compilation, not a new one.
+        assert!(Arc::ptr_eq(&first, &second));
+
+        // Results through the cache are unchanged: conforming passes,
+        // non-conforming fails with the same permanent error as before.
+        let ok = validate_output_schema(
+            Some(&schema),
+            &serde_json::json!({"score": 42}),
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        assert!(ok.is_ok());
+        let bad = validate_output_schema(
+            Some(&schema),
+            &serde_json::json!({"score": "nope"}),
+            InstanceId::new(),
+            &BlockId::new("s1"),
+        );
+        let err = bad.unwrap_err();
+        assert!(matches!(
+            err,
+            EngineError::StepFailed {
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]

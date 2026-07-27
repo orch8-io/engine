@@ -1,6 +1,6 @@
 //! Unit coverage for guard folding and canonical workflow identity.
 //!
-//! Count contract: 60 independently named unit tests.
+//! Count contract: 61 independently named unit tests.
 
 use chrono::Utc;
 use orch8_types::ids::{BlockId, Namespace, SequenceId, TenantId};
@@ -235,7 +235,7 @@ guard_case!(
 );
 guard_case!(
     coverage_optimizer_036_unicode_expression_is_dynamic,
-    Some("pronto"),
+    Some("prontô"),
     GuardPlan::Dynamic
 );
 guard_case!(
@@ -263,8 +263,14 @@ macro_rules! identity_case {
     ($name:ident, $changed_name:expr) => {
         #[test]
         fn $name() {
+            // Clone the baseline and change ONLY the name: `source_hash`
+            // digests the whole definition, so two independently built
+            // sequences would already differ in id and created_at and this
+            // assertion would pass even if the name were dropped from the
+            // canonical form.
             let baseline = sequence_named("baseline");
-            let changed = sequence_named($changed_name);
+            let mut changed = baseline.clone();
+            changed.name = ($changed_name).into();
             let baseline_hash = source_hash(&baseline).unwrap();
             let changed_hash = source_hash(&changed).unwrap();
             assert_ne!(baseline_hash, changed_hash);
@@ -350,3 +356,14 @@ identity_case!(
     coverage_optimizer_060_zero_width_name_updates_identity,
     "base\u{200b}line"
 );
+
+#[test]
+fn coverage_optimizer_061_identical_content_hashes_identically() {
+    // An identical definition (same id, timestamps, and name) must produce
+    // the same hash — the identity is content-derived, not instance-derived.
+    let baseline = sequence_named("baseline");
+    let identical = baseline.clone();
+    let baseline_hash = source_hash(&baseline).unwrap();
+    let identical_hash = source_hash(&identical).unwrap();
+    assert_eq!(baseline_hash, identical_hash);
+}

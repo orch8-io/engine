@@ -152,3 +152,7 @@ mod tests {
         assert!(sampler.state.lock().unwrap().checked_at.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "memory_coverage_tests.rs"]
+mod memory_coverage_tests;

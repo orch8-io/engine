@@ -195,3 +195,7 @@ mod tests {
         assert!(k.is_active(now));
     }
 }
+
+#[cfg(test)]
+#[path = "api_key_coverage_tests.rs"]
+mod api_key_coverage_tests;

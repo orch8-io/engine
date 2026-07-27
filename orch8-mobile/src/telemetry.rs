@@ -843,3 +843,7 @@ mod tests {
         server.abort();
     }
 }
+
+#[cfg(test)]
+#[path = "telemetry_coverage_tests.rs"]
+mod telemetry_coverage_tests;

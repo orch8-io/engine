@@ -43,8 +43,8 @@ pub const LOOP_ABSOLUTE_MAX: u32 = 1_000_000;
 ///   3. Evaluates `condition`; if falsy, completes normally.
 ///   4. Activates any `Pending` body children to `Running`.
 ///   5. If all body children are terminal, either fails the loop (on child
-///      failure) or increments the counter, persists it, and resets the
-///      body subtree to `Pending` so the next tick re-executes it.
+///      failure) or resets the body subtree to `Pending` and then persists
+///      the incremented counter, so the next tick re-executes the body.
 ///
 /// Returns `Ok(true)` to indicate more work; the scheduler will re-dispatch.
 #[allow(clippy::too_many_lines)]
@@ -180,6 +180,24 @@ pub async fn execute_loop(
             attempt: u16::try_from(next_iteration).unwrap_or(u16::MAX),
             created_at: chrono::Utc::now(),
         };
+        // Reset the entire body subtree (direct children plus every
+        // descendant) back to Pending BEFORE persisting the advanced
+        // marker. If the reset failed after the marker was saved, the next
+        // tick would observe the terminal children from the previous
+        // iteration against the already-incremented counter and count a
+        // phantom iteration whose body never ran. With reset-first, a
+        // failure leaves counter and subtree consistent: the next tick
+        // re-enters this branch and retries the reset, which is safe
+        // because the reset is idempotent (see
+        // `l6_reset_subtree_is_idempotent`). Skipped on the final
+        // iteration — the body is left terminal so the evaluator can close
+        // out cleanly on the next tick (the top-of-function guard fires on
+        // `iteration >= effective_max`).
+        if next_iteration < effective_max {
+            reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id)
+                .await?;
+        }
+
         storage.save_block_output(&marker).await?;
 
         // Compact old body-step outputs once the retained window is exceeded.
@@ -210,16 +228,11 @@ pub async fn execute_loop(
             "loop iteration completed"
         );
 
-        // Cap reached after this iteration: leave body children terminal so
-        // the evaluator can close out cleanly on the next tick (the
-        // top-of-function guard will fire on `iteration >= effective_max`).
+        // Cap reached after this iteration: nothing left to schedule; the
+        // top-of-function guard will complete the node on the next tick.
         if next_iteration >= effective_max {
             return Ok(true);
         }
-
-        // Reset the entire body subtree (direct children plus every
-        // descendant) back to Pending so the next tick re-activates it.
-        reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id).await?;
 
         // poll_interval: defer re-execution by setting next_fire_at.
         // Use CAS (conditional_update_instance_state) so that a Cancel
@@ -267,8 +280,8 @@ pub async fn execute_loop(
 /// the descendant immediately without ever running its body.
 ///
 /// The root node's own marker is intentionally NOT purged: the caller is
-/// the composite that owns it, and that caller has already advanced its
-/// counter for the next outer iteration via `save_block_output`.
+/// the composite that owns it and persists the advanced counter itself,
+/// outside this walk (which only touches strict descendants).
 async fn reset_subtree_to_pending(
     storage: &dyn StorageBackend,
     tree: &[ExecutionNode],

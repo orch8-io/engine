@@ -28,6 +28,13 @@ use orch8_types::{error::StepError, ids::InstanceId};
 use super::StepContext;
 use super::util::{check_same_tenant, map_storage_err, permanent, require_str};
 
+/// Byte bound on the serialized `data` payload, which becomes the child
+/// instance's `context.data` verbatim. Mirrors the 4MB cap the engine
+/// applies to other author-controlled JSON (`MAX_JSON_FN_RESULT_BYTES` in
+/// expression.rs) so an oversized payload cannot bloat the child instance
+/// row or pin the worker serializing it.
+const MAX_EMIT_EVENT_DATA_BYTES: usize = 4 * 1024 * 1024;
+
 /// Lightweight wire-side enum for the `dedupe_scope` param. Kept private so
 /// we parse exactly twice (match on string, then build `DedupeScope` once we
 /// also have the `tenant_id` / `instance_id`).
@@ -42,6 +49,16 @@ pub(crate) async fn handle_emit_event(ctx: StepContext) -> Result<Value, StepErr
     let trigger_slug = require_str(&ctx.params, "trigger_slug")?.to_string();
 
     let data = ctx.params.get("data").cloned().unwrap_or_else(|| json!({}));
+
+    // `data` becomes the child instance's context.data with no further
+    // validation downstream, so enforce the engine's 4MB JSON bound here.
+    // Rejected as Permanent: an oversized workflow payload will never
+    // succeed on retry.
+    if data.to_string().len() > MAX_EMIT_EVENT_DATA_BYTES {
+        return Err(permanent(format!(
+            "'data' payload exceeds the {MAX_EMIT_EVENT_DATA_BYTES}-byte limit"
+        )));
+    }
 
     let user_meta = ctx.params.get("meta").cloned().unwrap_or_else(|| json!({}));
 
@@ -689,6 +706,40 @@ mod tests {
         let ctx = mk_ctx(&caller, storage_dyn, json!({}));
         let err = handle_emit_event(ctx).await.unwrap_err();
         assert!(matches!(err, StepError::Permanent { .. }));
+    }
+
+    /// The `data` payload becomes the child instance's context.data
+    /// verbatim, so it must be rejected as Permanent once it exceeds the
+    /// engine's 4MB JSON bound — before any trigger lookup or child write.
+    #[tokio::test]
+    async fn emit_event_rejects_oversized_data_payload() {
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let storage_dyn: Arc<dyn StorageBackend> = storage.clone();
+        let caller = mk_instance("T1", InstanceState::Running);
+        storage.create_instance(&caller).await.unwrap();
+        // A trigger isn't required — the size guard runs first.
+
+        let big = "x".repeat(MAX_EMIT_EVENT_DATA_BYTES + 1);
+        let ctx = mk_ctx(
+            &caller,
+            storage_dyn,
+            json!({
+                "trigger_slug": "on-order",
+                "data": {"blob": big},
+            }),
+        );
+        let err = handle_emit_event(ctx).await.unwrap_err();
+        match err {
+            StepError::Permanent { message, .. } => {
+                assert!(
+                    message.contains("byte limit"),
+                    "expected size-limit message, got: {message}"
+                );
+            }
+            other @ StepError::Retryable { .. } => {
+                panic!("expected Permanent error, got: {other:?}")
+            }
+        }
     }
 
     // === R7: dedupe_scope param ============================================

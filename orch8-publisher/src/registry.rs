@@ -626,3 +626,7 @@ mod tests {
         assert!(stale_ledger.entries.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "registry_coverage_tests.rs"]
+mod coverage_tests;

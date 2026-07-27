@@ -1922,3 +1922,7 @@ mod tests {
         server.await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "sync_coverage_tests.rs"]
+mod sync_coverage_tests;

@@ -533,3 +533,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "fcm_coverage_tests.rs"]
+mod fcm_coverage_tests;

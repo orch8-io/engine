@@ -185,3 +185,7 @@ fn reason_name(reason: PushTerminalReason) -> &'static str {
         PushTerminalReason::RetryLimit => "retry_limit",
     }
 }
+
+#[cfg(test)]
+#[path = "push_outbox_coverage_tests.rs"]
+mod push_outbox_coverage_tests;

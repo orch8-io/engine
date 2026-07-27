@@ -192,3 +192,7 @@ mod tests {
         assert!(!rendered.contains("metadata"));
     }
 }
+
+#[cfg(test)]
+#[path = "support_bundle_coverage_tests.rs"]
+mod support_bundle_coverage_tests;

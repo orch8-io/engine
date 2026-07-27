@@ -61,6 +61,13 @@ pub fn try_evaluate(
     }
     let mut parser = Parser::new(&tokens, context, outputs);
     let result = parser.parse_ternary();
+    if let Some(message) = parser.error {
+        return Err(ExprError {
+            message,
+            position: parser.pos,
+            expr: expr.to_string(),
+        });
+    }
     if parser.pos < tokens.len() {
         return Err(ExprError {
             message: format!("unexpected token {:?}", tokens[parser.pos]),
@@ -344,14 +351,25 @@ fn tokenize_word(chars: &[char], start: usize, tokens: &mut Vec<Token>) -> usize
 
 // === Recursive Descent Parser ===
 
+/// Depth budget for the recursive-descent parser. Each parenthesized
+/// subexpression re-enters the full 8-function parse chain (`parse_ternary`
+/// down to `parse_primary`), so the effective limit is ~8 levels of
+/// parenthesized nesting.
 const MAX_PARSE_DEPTH: u32 = 64;
 
 /// Upper bound on the element count an array-scanning built-in (`unique`,
-/// `sort`, `count`) will process. Expressions run synchronously on the async
+/// `sort`, `count`, `sum`, `avg`, `min`, `max`, `slice`, `values`) will
+/// process. Expressions run synchronously on the async
 /// runtime thread and operate on prior-step outputs, which an attacker-authored
 /// workflow controls; an unbounded array — especially inside a loop condition —
 /// otherwise pins a worker. Above this the function returns `null`.
 const MAX_ARRAY_FN_ELEMENTS: usize = 100_000;
+
+/// Byte bound on the string produced by the `json(...)` built-in, mirroring
+/// `MAX_TEMPLATE_FILTER_RESULT_BYTES` in template.rs. Serializing an
+/// attacker-sized value into an unbounded string would otherwise pin the
+/// worker; above this the function returns `null`.
+const MAX_JSON_FN_RESULT_BYTES: usize = 4 * 1024 * 1024;
 
 struct Parser<'a> {
     tokens: &'a [Token],
@@ -359,6 +377,10 @@ struct Parser<'a> {
     context: &'a ExecutionContext,
     outputs: &'a serde_json::Value,
     depth: u32,
+    /// First parse error encountered (missing ternary `:`, depth overflow).
+    /// The lenient [`evaluate`] path ignores it and keeps the `null` result;
+    /// [`try_evaluate`] surfaces it as an `Err`.
+    error: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -373,6 +395,7 @@ impl<'a> Parser<'a> {
             context,
             outputs,
             depth: 0,
+            error: None,
         }
     }
 
@@ -386,16 +409,29 @@ impl<'a> Parser<'a> {
         tok
     }
 
-    const fn enter(&mut self) -> bool {
+    fn enter(&mut self) -> bool {
+        if self.depth >= MAX_PARSE_DEPTH {
+            // Record the overflow as a parse error instead of silently
+            // yielding `null`. The depth is deliberately NOT incremented:
+            // the caller returns early without a matching `leave()`, so
+            // counting the failed frame would leak depth.
+            if self.error.is_none() {
+                self.error = Some(format!(
+                    "expression exceeds maximum parse depth of {MAX_PARSE_DEPTH}"
+                ));
+            }
+            return false;
+        }
         self.depth += 1;
-        self.depth <= MAX_PARSE_DEPTH
+        true
     }
 
     const fn leave(&mut self) {
         self.depth -= 1;
     }
 
-    // ternary: or (? or : or)?
+    // ternary: or (? or : or)? — when `?` is present the `: else` branch is
+    // required; a missing colon is a parse error.
     //
     // The whole `parse_*` chain returns `Cow<Value>`: path resolution yields a
     // `Borrowed` view into context/outputs, so a value that is only inspected
@@ -409,9 +445,17 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(&Token::Question) {
             self.advance();
             let then_val = self.parse_or();
-            if self.peek() == Some(&Token::Colon) {
-                self.advance();
+            if self.peek() != Some(&Token::Colon) {
+                // `cond ? then` without `: else` is malformed; silently
+                // defaulting the else branch hides authoring mistakes.
+                if self.error.is_none() {
+                    self.error =
+                        Some("ternary expression is missing the ':' else branch".to_string());
+                }
+                self.leave();
+                return Cow::Owned(serde_json::Value::Null);
             }
+            self.advance();
             let else_val = self.parse_or();
             self.leave();
             return if is_truthy(&cond) { then_val } else { else_val };
@@ -684,7 +728,14 @@ impl<'a> Parser<'a> {
                 };
                 serde_json::json!(n)
             }
-            "json" => serde_json::Value::String(arg.to_string()),
+            "json" => {
+                let serialized = arg.to_string();
+                if serialized.len() > MAX_JSON_FN_RESULT_BYTES {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(serialized)
+                }
+            }
             // --- template-enhancements-v0.3.1 ---
             "now" => serde_json::json!(chrono::Utc::now().to_rfc3339()),
             "uuid" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
@@ -734,9 +785,10 @@ impl<'a> Parser<'a> {
                 _ => serde_json::json!([]),
             },
             "values" => match arg {
-                serde_json::Value::Object(m) => {
+                serde_json::Value::Object(m) if m.len() <= MAX_ARRAY_FN_ELEMENTS => {
                     serde_json::Value::Array(m.values().cloned().collect())
                 }
+                serde_json::Value::Object(_) => serde_json::Value::Null,
                 _ => serde_json::json!([]),
             },
             "contains" => {
@@ -760,14 +812,14 @@ impl<'a> Parser<'a> {
             }
             // --- engine-enhancements: array/math ---
             "sum" => match arg {
-                serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => {
                     let s: f64 = a.iter().filter_map(to_f64).sum();
                     serde_json::json!(s)
                 }
                 _ => serde_json::Value::Null,
             },
             "avg" => match arg {
-                serde_json::Value::Array(a) => {
+                serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => {
                     let nums: Vec<f64> = a.iter().filter_map(to_f64).collect();
                     if nums.is_empty() {
                         serde_json::Value::Null
@@ -779,7 +831,7 @@ impl<'a> Parser<'a> {
                 _ => serde_json::Value::Null,
             },
             "min" => match arg {
-                serde_json::Value::Array(a) => a
+                serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => a
                     .iter()
                     .filter_map(to_f64)
                     .reduce(f64::min)
@@ -787,7 +839,7 @@ impl<'a> Parser<'a> {
                 _ => serde_json::Value::Null,
             },
             "max" => match arg {
-                serde_json::Value::Array(a) => a
+                serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => a
                     .iter()
                     .filter_map(to_f64)
                     .reduce(f64::max)
@@ -808,7 +860,7 @@ impl<'a> Parser<'a> {
                 let start = args.get(1).copied().and_then(to_f64).unwrap_or(0.0) as usize;
                 let end = args.get(2).copied().and_then(to_f64);
                 match arg {
-                    serde_json::Value::Array(a) => {
+                    serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => {
                         let end_idx = end.map_or(a.len(), |e| (e as usize).min(a.len()));
                         // Clamp start to end_idx (not just a.len()): otherwise
                         // `slice(arr, 5, 2)` yields start_idx > end_idx and the
@@ -865,10 +917,11 @@ impl<'a> Parser<'a> {
             "count" => {
                 let needle = args.get(1).copied().unwrap_or(&serde_json::Value::Null);
                 match arg {
-                    serde_json::Value::Array(a) => {
+                    serde_json::Value::Array(a) if a.len() <= MAX_ARRAY_FN_ELEMENTS => {
                         let n = a.iter().filter(|v| json_eq(v, needle)).count();
                         serde_json::json!(n)
                     }
+                    serde_json::Value::Array(_) => serde_json::Value::Null,
                     _ => serde_json::json!(0),
                 }
             }
@@ -1100,94 +1153,80 @@ fn record_unary_arithmetic_warning(message: &'static str, value: &serde_json::Va
     test_warning_capture::record(message, &[("value", value.to_string())]);
 }
 
+/// Shared core of the numeric binary operators: coerce both operands with
+/// `to_f64`, apply `op`, and on a non-numeric operand record/warn with
+/// `message` and yield `null`.
+fn json_arith(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    op: fn(f64, f64) -> f64,
+    message: &'static str,
+) -> serde_json::Value {
+    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
+        serde_json::json!(op(a, b))
+    } else {
+        #[cfg(test)]
+        record_arithmetic_warning(message, a, b);
+        warn!(
+            left = %a,
+            right = %b,
+            "{}", message
+        );
+        serde_json::Value::Null
+    }
+}
+
 fn json_add(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-    // String concatenation if either side is a string.
+    // String concatenation when both sides are strings.
     if let (serde_json::Value::String(a), serde_json::Value::String(b)) = (a, b) {
         return serde_json::Value::String(format!("{a}{b}"));
     }
-    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
-        serde_json::json!(a + b)
-    } else {
-        #[cfg(test)]
-        record_arithmetic_warning(
-            "expression arithmetic: non-numeric operand in addition",
-            a,
-            b,
-        );
-        warn!(
-            left = %a,
-            right = %b,
-            "expression arithmetic: non-numeric operand in addition"
-        );
-        serde_json::Value::Null
-    }
+    json_arith(
+        a,
+        b,
+        |a, b| a + b,
+        "expression arithmetic: non-numeric operand in addition",
+    )
 }
 
 fn json_sub(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
-        serde_json::json!(a - b)
-    } else {
-        #[cfg(test)]
-        record_arithmetic_warning(
-            "expression arithmetic: non-numeric operand in subtraction",
-            a,
-            b,
-        );
-        warn!(
-            left = %a,
-            right = %b,
-            "expression arithmetic: non-numeric operand in subtraction"
-        );
-        serde_json::Value::Null
-    }
+    json_arith(
+        a,
+        b,
+        |a, b| a - b,
+        "expression arithmetic: non-numeric operand in subtraction",
+    )
 }
 
 fn json_mul(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
-    if let (Some(a), Some(b)) = (to_f64(a), to_f64(b)) {
-        serde_json::json!(a * b)
-    } else {
-        #[cfg(test)]
-        record_arithmetic_warning(
-            "expression arithmetic: non-numeric operand in multiplication",
-            a,
-            b,
-        );
-        warn!(
-            left = %a,
-            right = %b,
-            "expression arithmetic: non-numeric operand in multiplication"
-        );
-        serde_json::Value::Null
-    }
+    json_arith(
+        a,
+        b,
+        |a, b| a * b,
+        "expression arithmetic: non-numeric operand in multiplication",
+    )
 }
 
 fn json_div(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
     match (to_f64(a), to_f64(b)) {
         (Some(a), Some(b)) if b != 0.0 => serde_json::json!(a / b),
-        _ => {
-            if to_f64(a).is_some() && (to_f64(b) == Some(0.0)) {
-                #[cfg(test)]
-                record_arithmetic_warning("expression arithmetic: division by zero", a, b);
-                warn!(
-                    left = %a,
-                    right = %b,
-                    "expression arithmetic: division by zero"
-                );
-            } else {
-                #[cfg(test)]
-                record_arithmetic_warning(
-                    "expression arithmetic: non-numeric operand in division",
-                    a,
-                    b,
-                );
-                warn!(
-                    left = %a,
-                    right = %b,
-                    "expression arithmetic: non-numeric operand in division"
-                );
-            }
+        (Some(_), Some(_)) => {
+            // Both operands numeric but the divisor is zero.
+            #[cfg(test)]
+            record_arithmetic_warning("expression arithmetic: division by zero", a, b);
+            warn!(
+                left = %a,
+                right = %b,
+                "expression arithmetic: division by zero"
+            );
             serde_json::Value::Null
         }
+        _ => json_arith(
+            a,
+            b,
+            |a, b| a / b,
+            "expression arithmetic: non-numeric operand in division",
+        ),
     }
 }
 
@@ -1855,6 +1894,41 @@ mod tests {
         assert_eq!(evaluate("true ? 1 : 0", &ctx(), &outputs()), json!(1.0));
     }
 
+    #[test]
+    fn ternary_missing_colon_is_parse_error() {
+        // `cond ? then` without `: else` must not be silently accepted.
+        let err = try_evaluate("true ? 1", &ctx(), &outputs()).unwrap_err();
+        assert!(
+            err.message.contains("missing the ':'"),
+            "got: {}",
+            err.message
+        );
+        assert!(evaluate_condition_strict("true ? 1", &ctx(), &outputs()).is_err());
+        // The lenient path keeps its swallow-to-null behavior.
+        assert_eq!(evaluate("true ? 1", &ctx(), &outputs()), json!(null));
+    }
+
+    #[test]
+    fn over_deep_nesting_is_parse_error_not_null() {
+        // Each paren level costs 8 depth increments, so 9 levels overflow the
+        // 64-deep budget. try_evaluate must surface this instead of Ok(null).
+        let expr = "(((((((((1)))))))))";
+        let err = try_evaluate(expr, &ctx(), &outputs()).unwrap_err();
+        assert!(
+            err.message.contains("maximum parse depth"),
+            "got: {}",
+            err.message
+        );
+        assert!(evaluate_condition_strict(expr, &ctx(), &outputs()).is_err());
+        // The lenient path keeps its swallow-to-null behavior.
+        assert_eq!(evaluate(expr, &ctx(), &outputs()), json!(null));
+        // Nesting within the budget still parses fine.
+        assert_eq!(
+            try_evaluate("((((((1))))))", &ctx(), &outputs()).unwrap(),
+            json!(1.0)
+        );
+    }
+
     // --- abs() function ---
 
     #[test]
@@ -2395,6 +2469,52 @@ mod tests {
         };
         assert_eq!(evaluate("unique(items)", &ctx, &json!({})), json!(null));
         assert_eq!(evaluate("sort(items)", &ctx, &json!({})), json!(null));
+        assert_eq!(evaluate("count(items, 1)", &ctx, &json!({})), json!(null));
+        assert_eq!(evaluate("sum(items)", &ctx, &json!({})), json!(null));
+        assert_eq!(evaluate("avg(items)", &ctx, &json!({})), json!(null));
+        assert_eq!(evaluate("min(items)", &ctx, &json!({})), json!(null));
+        assert_eq!(evaluate("max(items)", &ctx, &json!({})), json!(null));
+        assert_eq!(
+            evaluate("slice(items, 0, 2)", &ctx, &json!({})),
+            json!(null)
+        );
+    }
+
+    #[test]
+    fn values_fn_refuses_oversized_input() {
+        // Same DoS guard for `values`, which clones every value of an
+        // attacker-controlled object.
+        let big: serde_json::Map<String, serde_json::Value> = (0..=MAX_ARRAY_FN_ELEMENTS)
+            .map(|i| (i.to_string(), json!(i)))
+            .collect();
+        let ctx = ExecutionContext {
+            data: json!({ "obj": big }),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("values(obj)", &ctx, &json!({})), json!(null));
+    }
+
+    #[test]
+    fn json_fn_refuses_oversized_output() {
+        // Byte bound: serializing a value larger than MAX_JSON_FN_RESULT_BYTES
+        // yields null instead of an unbounded string.
+        let big = "x".repeat(MAX_JSON_FN_RESULT_BYTES + 1);
+        let ctx = ExecutionContext {
+            data: json!({ "s": big }),
+            config: json!({}),
+            ..Default::default()
+        };
+        assert_eq!(evaluate("json(s)", &ctx, &json!({})), json!(null));
+        // At the boundary the serialization still succeeds.
+        let ok = "x".repeat(1024);
+        let ctx = ExecutionContext {
+            data: json!({ "s": ok }),
+            config: json!({}),
+            ..Default::default()
+        };
+        let result = evaluate("json(s)", &ctx, &json!({}));
+        assert!(result.as_str().is_some_and(|s| s.len() == 1026));
     }
 
     // --- count() ---

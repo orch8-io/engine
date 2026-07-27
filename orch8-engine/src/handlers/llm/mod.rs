@@ -170,10 +170,9 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
                 }
             }))
             .build()
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to build optimized HTTP client, using default");
-                reqwest::Client::new()
-            })
+            // Fail fast: silently falling back to a bare `reqwest::Client`
+            // would drop the SsrfGuardResolver and the redirect policy above.
+            .expect("failed to build the shared LLM HTTP client with the SSRF guard")
     })
 }
 
@@ -255,13 +254,17 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
         // Resolve artifact-backed image blocks ONCE, before the failover loop
         // and schema paths, so every provider attempt reuses the fetched bytes.
         multimodal::resolve_message_images(&ctx.storage, ctx.instance_id, &mut ctx.params).await?;
-        return handle_llm_call_failover(
+        let out = handle_llm_call_failover(
             &ctx.params,
             &providers,
             response_schema.as_ref(),
             delta_sink.as_ref(),
         )
-        .await;
+        .await?;
+        // Capture token usage for cost aggregation (best-effort — never fails
+        // the call), exactly as the single-provider path does below.
+        record_llm_usage(&ctx, &out).await;
+        return Ok(out);
     }
 
     let provider = ctx
@@ -270,6 +273,7 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
         .and_then(Value::as_str)
         .unwrap_or("openai")
         .to_string();
+    let format = provider_format(&provider);
 
     // Resolve + validate (api key present, base URL allowed) BEFORE the
     // dry-run skip, so a dry-run still catches missing keys / blocked URLs.
@@ -291,15 +295,23 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
 
     let out = match response_schema.as_ref() {
         Some(compiled) => {
-            call_provider_with_schema(&ctx.params, &api_key, &base, &provider, compiled)
+            call_provider_with_schema(&ctx.params, &api_key, &base, &provider, format, compiled)
                 .await
                 .map_err(SchemaCallFailure::into_permanent)?
         }
         None => {
-            dispatch_provider(&ctx.params, &api_key, &base, &provider, delta_sink.as_ref()).await?
+            dispatch_provider(
+                &ctx.params,
+                &api_key,
+                &base,
+                &provider,
+                format,
+                delta_sink.as_ref(),
+            )
+            .await?
         }
     };
-    emit_gen_ai_telemetry(&ctx.params, &provider, &out);
+    emit_gen_ai_telemetry(&ctx.params, &provider, format, &out);
     // Capture token usage for cost aggregation (best-effort — never fails the call).
     record_llm_usage(&ctx, &out).await;
     Ok(out)
@@ -317,17 +329,15 @@ pub async fn handle_llm_call(mut ctx: StepContext) -> Result<Value, StepError> {
 /// - `gen_ai.response.model` — model reported by the provider response, when present.
 /// - `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` — token usage
 ///   as reported by the provider (0 when absent).
-fn emit_gen_ai_telemetry(params: &Value, provider: &str, out: &Value) {
-    let request_model = params
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| {
-            if provider == "anthropic" {
-                anthropic_default_model()
-            } else {
-                openai_default_model()
-            }
-        });
+fn emit_gen_ai_telemetry(params: &Value, provider: &str, format: ProviderFormat, out: &Value) {
+    let request_model =
+        params
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| match format {
+                ProviderFormat::Anthropic => anthropic_default_model(),
+                ProviderFormat::OpenAiCompat => openai_default_model(),
+            });
     let response_model = out
         .get("model")
         .and_then(Value::as_str)
@@ -344,6 +354,24 @@ fn emit_gen_ai_telemetry(params: &Value, provider: &str, out: &Value) {
     );
 }
 
+/// Wire format a provider speaks. Everything except Anthropic uses the
+/// OpenAI-compatible Chat Completions API; Anthropic uses the Messages API.
+#[derive(Clone, Copy)]
+enum ProviderFormat {
+    OpenAiCompat,
+    Anthropic,
+}
+
+/// Resolve the wire format for a provider name. Only `anthropic` maps to the
+/// Messages API; every other name (including unknown providers) falls back to
+/// the OpenAI-compatible format.
+fn provider_format(provider: &str) -> ProviderFormat {
+    match provider {
+        "anthropic" => ProviderFormat::Anthropic,
+        _ => ProviderFormat::OpenAiCompat,
+    }
+}
+
 /// Route a single call to the correct provider API. `deltas: Some(_)` selects
 /// the streaming wire protocol (SSE consumption + delta publication); the
 /// returned output has the same shape either way.
@@ -352,12 +380,14 @@ async fn dispatch_provider(
     api_key: &str,
     base: &str,
     provider: &str,
+    format: ProviderFormat,
     deltas: Option<&DeltaSink>,
 ) -> Result<Value, StepError> {
-    if provider == "anthropic" {
-        anthropic::call_anthropic(params, api_key, base, deltas).await
-    } else {
-        openai::call_openai_compat(params, api_key, base, provider, deltas).await
+    match format {
+        ProviderFormat::Anthropic => anthropic::call_anthropic(params, api_key, base, deltas).await,
+        ProviderFormat::OpenAiCompat => {
+            openai::call_openai_compat(params, api_key, base, provider, deltas).await
+        }
     }
 }
 
@@ -411,13 +441,14 @@ async fn call_provider_with_schema(
     api_key: &str,
     base: &str,
     provider: &str,
+    format: ProviderFormat,
     compiled: &schema::CompiledSchema,
 ) -> Result<Value, SchemaCallFailure> {
     let mut work = params.clone();
     // Nudge OpenAI-compatible providers toward raw JSON output, unless the
     // step already chose a response_format. Anthropic has no equivalent —
     // prompt + repair handle it.
-    if provider != "anthropic"
+    if matches!(format, ProviderFormat::OpenAiCompat)
         && let Some(obj) = work.as_object_mut()
     {
         obj.entry("response_format")
@@ -432,7 +463,7 @@ async fn call_provider_with_schema(
     for attempt in 0..=max {
         // Always non-streaming: schema validation + repair needs the complete
         // response (the `stream` fallback is decided in `handle_llm_call`).
-        let mut out = dispatch_provider(&work, api_key, base, provider, None)
+        let mut out = dispatch_provider(&work, api_key, base, provider, format, None)
             .await
             .map_err(SchemaCallFailure::Provider)?;
         let (input, output) = usage_tokens(&out);
@@ -596,6 +627,7 @@ async fn failover_inner(
 
         tried.push(provider_name.to_string());
 
+        let format = provider_format(provider_name);
         let merged = merge_provider_params(params, provider_config);
 
         let api_key = match resolve_api_key(&merged, provider_name) {
@@ -618,13 +650,19 @@ async fn failover_inner(
 
         let attempt = async {
             match response_schema {
-                Some(compiled) => {
-                    call_provider_with_schema(&merged, &api_key, &base, provider_name, compiled)
-                        .await
-                        .map_err(SchemaCallFailure::into_retryable_for_failover)
-                }
+                Some(compiled) => call_provider_with_schema(
+                    &merged,
+                    &api_key,
+                    &base,
+                    provider_name,
+                    format,
+                    compiled,
+                )
+                .await
+                .map_err(SchemaCallFailure::into_retryable_for_failover),
                 None => {
-                    dispatch_provider(&merged, &api_key, &base, provider_name, delta_sink).await
+                    dispatch_provider(&merged, &api_key, &base, provider_name, format, delta_sink)
+                        .await
                 }
             }
         };
@@ -642,7 +680,7 @@ async fn failover_inner(
 
         match result {
             Ok(mut output) => {
-                emit_gen_ai_telemetry(&merged, provider_name, &output);
+                emit_gen_ai_telemetry(&merged, provider_name, format, &output);
                 if let Some(obj) = output.as_object_mut() {
                     obj.insert("tried".into(), json!(tried));
                 }
@@ -698,6 +736,20 @@ fn merge_provider_params(base_params: &Value, provider_config: &Value) -> Value 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_format_maps_only_anthropic_to_messages_api() {
+        assert!(matches!(
+            provider_format("anthropic"),
+            ProviderFormat::Anthropic
+        ));
+        for name in ["openai", "groq", "mistral", "unknown-provider", ""] {
+            assert!(
+                matches!(provider_format(name), ProviderFormat::OpenAiCompat),
+                "{name} should fall back to the OpenAI-compatible format"
+            );
+        }
+    }
 
     #[test]
     fn empty_providers_returns_error() {
@@ -1459,6 +1511,42 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["gen_ai.request.model"], "m-failover");
         assert_eq!(events[0]["gen_ai.system"], "openai");
+    }
+
+    #[tokio::test]
+    async fn failover_records_usage_event() {
+        // First provider's key env var is unset → skipped; the second answers.
+        let (base, _requests) = start_openai_mock(vec![openai_resp("hi", 2, 1)]).await;
+        let storage: Arc<dyn orch8_storage::StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let ctx = ctx_with(
+            &storage,
+            orch8_types::ids::InstanceId::new(),
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "providers": [
+                    {"provider": "openai", "api_key_env": "LLM_TEST_UNSET_USAGE_KEY", "model": "m", "base_url": base},
+                    {"provider": "openai", "api_key": "k", "model": "m", "base_url": base},
+                ],
+            }),
+        );
+        let out = handle_llm_call(ctx).await.unwrap();
+        assert_eq!(out["tried"], json!(["openai", "openai"]));
+
+        let now = chrono::Utc::now();
+        let agg = storage
+            .query_usage(
+                "t",
+                now - chrono::Duration::hours(1),
+                now + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agg.len(), 1, "failover path must record a usage_event");
+        assert_eq!((agg[0].input_tokens, agg[0].output_tokens), (2, 1));
     }
 
     #[tokio::test]

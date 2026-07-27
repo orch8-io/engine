@@ -398,3 +398,7 @@ mod tests {
         assert_eq!(sent[0].command_id, "command-a");
     }
 }
+
+#[cfg(test)]
+#[path = "outbox_coverage_tests.rs"]
+mod outbox_coverage_tests;

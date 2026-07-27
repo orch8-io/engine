@@ -111,3 +111,7 @@ impl AgentRuntimeBuilder {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "agent_runtime_coverage_tests.rs"]
+mod agent_runtime_coverage_tests;

@@ -522,3 +522,7 @@ mod tests {
         assert!(!report.checks[0].passed);
     }
 }
+
+#[cfg(test)]
+#[path = "release_gate_coverage_tests.rs"]
+mod release_gate_coverage_tests;

@@ -311,3 +311,7 @@ mod tests {
         assert!(target.join("sequence.json").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "init_coverage_tests.rs"]
+mod init_coverage_tests;

@@ -50,7 +50,7 @@
 //! "completed" | "max_iterations", "tool_calls_made": M, "messages": [...] }`
 
 use serde_json::{Value, json};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use orch8_types::error::StepError;
 
@@ -148,20 +148,35 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
     let (load_storage, load_iid, load_key) = (ctx.storage.clone(), ctx.instance_id, cp_key.clone());
     let load_checkpoint = move || {
         let (s, k) = (load_storage.clone(), load_key.clone());
-        async move { s.get_instance_kv(load_iid, &k).await.ok().flatten() }
+        async move {
+            // Best-effort: a read failure means starting fresh, not failing.
+            match s.get_instance_kv(load_iid, &k).await {
+                Ok(cp) => cp,
+                Err(e) => {
+                    warn!(error = %e, key = %k, "agent: failed to load checkpoint, starting fresh");
+                    None
+                }
+            }
+        }
     };
     let (save_storage, save_iid, save_key) = (ctx.storage.clone(), ctx.instance_id, cp_key.clone());
     let save_checkpoint = move |cp: Value| {
         let (s, k) = (save_storage.clone(), save_key.clone());
         async move {
-            let _ = s.set_instance_kv(save_iid, &k, &cp).await;
+            // Best-effort: a write failure must not fail the agent.
+            if let Err(e) = s.set_instance_kv(save_iid, &k, &cp).await {
+                warn!(error = %e, key = %k, "agent: failed to save checkpoint");
+            }
         }
     };
     let (clear_storage, clear_iid) = (ctx.storage.clone(), ctx.instance_id);
     let clear_checkpoint = move || {
         let (s, k) = (clear_storage.clone(), cp_key.clone());
         async move {
-            let _ = s.delete_instance_kv(clear_iid, &k).await;
+            // Best-effort: a delete failure must not fail the agent.
+            if let Err(e) = s.delete_instance_kv(clear_iid, &k).await {
+                warn!(error = %e, key = %k, "agent: failed to clear checkpoint");
+            }
         }
     };
 
@@ -376,7 +391,15 @@ async fn maybe_recall_memory(ctx: &StepContext, params: Value) -> Result<Value, 
     }
     let mut sub = ctx.clone();
     sub.params = Value::Object(search_params);
-    let found = super::memory::handle_memory_search(sub).await?;
+    // Best-effort, mirroring the store side: a memory recall failure must not
+    // fail the agent — proceed without recalled memories.
+    let found = match super::memory::handle_memory_search(sub).await {
+        Ok(found) => found,
+        Err(e) => {
+            warn!(error = %e, "agent: memory recall failed, continuing without recalled memories");
+            return Ok(params);
+        }
+    };
 
     let Some(system_msg) = memory_recall_system_message(found.get("results")) else {
         return Ok(params);

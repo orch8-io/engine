@@ -427,3 +427,7 @@ mod tests {
         assert_eq!(got.id, seq.id);
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_cache_coverage_tests.rs"]
+mod sequence_cache_coverage_tests;

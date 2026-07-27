@@ -89,6 +89,7 @@ assert_contains .github/workflows/release.yml "if [[ \"\$TAG\" == *-* ]]"
 assert_contains .github/workflows/release.yml "prerelease: \${{ contains(github.ref_name, '-') }}"
 assert_contains .github/workflows/release.yml "if: \${{ !contains(github.ref_name, '-') }}"
 assert_contains .github/workflows/release.yml 'Verify Cloud management surface'
+assert_contains .github/workflows/release.yml 'os: ubuntu-22.04'
 assert_contains .github/workflows/ci.yml 'Verify Cloud management surface'
 assert_contains .github/workflows/ci.yml 'sqlite-smoke:'
 assert_contains .github/workflows/ci.yml 'fuzz-smoke:'

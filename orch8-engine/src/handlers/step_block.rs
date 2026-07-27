@@ -333,12 +333,49 @@ pub async fn execute_step_node(
             if let Some(mut inst) = storage.get_instance(instance.id).await?
                 && inst.context.runtime.current_step.as_ref() != Some(&step_def.id)
             {
+                // CAS against the `updated_at` we just read: a concurrent
+                // evaluator pass (e.g. a parallel branch) may stamp the same
+                // instance, and a blind full-document replace would silently
+                // drop one of the two updates. On contention, retry the
+                // read-mutate-write exactly once. If the retry also loses,
+                // proceed — the stamp is best-effort telemetry for the
+                // notifier and approvals API, never worth failing the step.
+                let stamped_at = node.started_at.unwrap_or_else(chrono::Utc::now);
+                let expected_updated_at = inst.updated_at;
                 inst.context.runtime.current_step = Some(step_def.id.clone());
-                inst.context.runtime.current_step_started_at =
-                    Some(node.started_at.unwrap_or_else(chrono::Utc::now));
-                storage
-                    .update_instance_context(instance.id, &inst.context)
-                    .await?;
+                inst.context.runtime.current_step_started_at = Some(stamped_at);
+                if !storage
+                    .update_instance_context_cas(instance.id, &inst.context, expected_updated_at)
+                    .await?
+                {
+                    let retry_landed = match storage.get_instance(instance.id).await? {
+                        Some(mut fresh)
+                            if fresh.context.runtime.current_step.as_ref()
+                                != Some(&step_def.id) =>
+                        {
+                            let expected_updated_at = fresh.updated_at;
+                            fresh.context.runtime.current_step = Some(step_def.id.clone());
+                            fresh.context.runtime.current_step_started_at = Some(stamped_at);
+                            storage
+                                .update_instance_context_cas(
+                                    instance.id,
+                                    &fresh.context,
+                                    expected_updated_at,
+                                )
+                                .await?
+                        }
+                        // Instance gone, or a concurrent writer already
+                        // stamped this step — either way nothing to do.
+                        _ => true,
+                    };
+                    if !retry_landed {
+                        tracing::warn!(
+                            instance_id = %instance.id,
+                            block_id = %step_def.id,
+                            "lost CAS race stamping current_step; proceeding without the stamp"
+                        );
+                    }
+                }
             }
             // No signal yet — set node to Waiting so the instance transitions
             // to Waiting state and process_signalled_instances can wake it.
@@ -407,33 +444,16 @@ pub async fn execute_step_node(
     // Node worker. No plugin-registry lookup needed — the endpoint is a single
     // env-configured sidecar, and piece/action names live in the handler string.
     if super::activepieces::is_ap_handler(&step_def.handler) {
-        let effect_guard = begin_effect_guard(
-            storage.as_ref(),
-            instance,
-            step_def,
-            &resolved_params,
-            attempt,
-            &step_context,
-        )
-        .await?;
         let handler_name = step_def.handler.clone();
-        let ctx = super::StepContext {
-            instance_id: instance.id,
-            tenant_id: instance.tenant_id.clone(),
-            block_id: step_def.id.clone(),
-            params: resolved_params,
-            context: Arc::new(step_context),
-            attempt,
-            storage: Arc::clone(storage),
-            wait_for_input: step_def.wait_for_input.clone(),
-        };
-        return dispatch_plugin_with_effect(
-            storage.as_ref(),
+        return dispatch_plugin(
+            storage,
+            instance,
             node,
+            step_def,
+            resolved_params,
+            step_context,
             attempt,
-            move || async move { super::activepieces::handle_ap(ctx, &handler_name).await },
-            step_def.output_schema.as_ref(),
-            effect_guard,
+            move |ctx| async move { super::activepieces::handle_ap(ctx, &handler_name).await },
         )
         .await;
     }
@@ -451,34 +471,21 @@ pub async fn execute_step_node(
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             return Ok(false);
         };
+        // Inject the resolved endpoint into params BEFORE dispatch so both
+        // the effect guard (which hashes params for idempotency) and the
+        // handler see the mutated value — preserved from the pre-refactor
+        // branch, which mutated params before `begin_effect_guard`.
         let mut params = resolved_params;
         params["_grpc_endpoint"] = serde_json::Value::String(endpoint);
-        let effect_guard = begin_effect_guard(
-            storage.as_ref(),
+        return dispatch_plugin(
+            storage,
             instance,
-            step_def,
-            &params,
-            attempt,
-            &step_context,
-        )
-        .await?;
-        let ctx = super::StepContext {
-            instance_id: instance.id,
-            tenant_id: instance.tenant_id.clone(),
-            block_id: step_def.id.clone(),
-            params,
-            context: Arc::new(step_context),
-            attempt,
-            storage: Arc::clone(storage),
-            wait_for_input: step_def.wait_for_input.clone(),
-        };
-        return dispatch_plugin_with_effect(
-            storage.as_ref(),
             node,
+            step_def,
+            params,
+            step_context,
             attempt,
-            || super::grpc_plugin::handle_grpc_plugin(ctx),
-            step_def.output_schema.as_ref(),
-            effect_guard,
+            super::grpc_plugin::handle_grpc_plugin,
         )
         .await;
     }
@@ -507,32 +514,15 @@ pub async fn execute_step_node(
             evaluator::fail_node(storage.as_ref(), node.id).await?;
             return Ok(false);
         };
-        let ctx = super::StepContext {
-            instance_id: instance.id,
-            tenant_id: instance.tenant_id.clone(),
-            block_id: step_def.id.clone(),
-            params: resolved_params,
-            context: Arc::new(step_context),
-            attempt,
-            storage: Arc::clone(storage),
-            wait_for_input: step_def.wait_for_input.clone(),
-        };
-        let effect_guard = begin_effect_guard(
-            storage.as_ref(),
+        return dispatch_plugin(
+            storage,
             instance,
-            step_def,
-            &ctx.params,
-            attempt,
-            ctx.context.as_ref(),
-        )
-        .await?;
-        return dispatch_plugin_with_effect(
-            storage.as_ref(),
             node,
+            step_def,
+            resolved_params,
+            step_context,
             attempt,
-            || super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path),
-            step_def.output_schema.as_ref(),
-            effect_guard,
+            move |ctx| async move { super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await },
         )
         .await;
     }
@@ -738,6 +728,64 @@ pub async fn execute_step_node(
             Err(e)
         }
     }
+}
+
+/// Shared plugin-dispatch wiring for the `ActivePieces` / gRPC / WASM branches
+/// of `execute_step_node`: build the `StepContext`, begin the effect guard,
+/// and dispatch through `dispatch_plugin_with_effect`. `handler_fn` receives
+/// the constructed context and performs the branch-specific handler call.
+///
+/// Ordering note: the `StepContext` is built *before* the effect guard (the
+/// WASM branch's original ordering, borrowing `&ctx.params` /
+/// `ctx.context.as_ref()`). This is behavior-identical to the guard-first
+/// ordering the `ActivePieces` / gRPC branches previously used: `StepContext`
+/// construction is pure (no I/O), and `begin_effect_guard` only borrows the
+/// same params and context values. Callers that mutate params before the
+/// guard must observe them (gRPC's `_grpc_endpoint` injection) do so before
+/// calling this helper.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_plugin<F, Fut>(
+    storage: &Arc<dyn StorageBackend>,
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    step_def: &StepDef,
+    params: serde_json::Value,
+    step_context: ExecutionContext,
+    attempt: u32,
+    handler_fn: F,
+) -> Result<bool, EngineError>
+where
+    F: FnOnce(super::StepContext) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, StepError>>,
+{
+    let ctx = super::StepContext {
+        instance_id: instance.id,
+        tenant_id: instance.tenant_id.clone(),
+        block_id: step_def.id.clone(),
+        params,
+        context: Arc::new(step_context),
+        attempt,
+        storage: Arc::clone(storage),
+        wait_for_input: step_def.wait_for_input.clone(),
+    };
+    let effect_guard = begin_effect_guard(
+        storage.as_ref(),
+        instance,
+        step_def,
+        &ctx.params,
+        attempt,
+        ctx.context.as_ref(),
+    )
+    .await?;
+    dispatch_plugin_with_effect(
+        storage.as_ref(),
+        node,
+        attempt,
+        move || handler_fn(ctx),
+        step_def.output_schema.as_ref(),
+        effect_guard,
+    )
+    .await
 }
 
 async fn begin_effect_guard<'a>(

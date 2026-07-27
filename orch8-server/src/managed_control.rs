@@ -201,3 +201,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "managed_control_coverage_tests.rs"]
+mod managed_control_coverage_tests;

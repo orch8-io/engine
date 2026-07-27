@@ -39,6 +39,23 @@ pub const GENERATOR_VERSION: &str = "orch8-dataflow-v2";
 const MAX_SCHEMA_DEPTH: usize = 32;
 const MAX_SCHEMA_NODES: usize = 4_096;
 
+/// Finding codes emitted by this compiler that must force a live-migration
+/// plan into the `Incompatible` disposition.
+pub(crate) const MISSING_PRODUCER: &str = "MISSING_PRODUCER";
+pub(crate) const SCHEMA_PATH_MISSING: &str = "SCHEMA_PATH_MISSING";
+
+/// Single source of truth for the fail-closed classification consumed by
+/// `continuity_advanced::compile_migration_plan`: renaming a code here keeps
+/// the migration gate in sync. `INCOMPATIBLE_COERCION` and the
+/// `INCOMPATIBLE:`-prefixed codes are produced by coercion and release-diff
+/// compilers outside this module.
+pub(crate) fn is_incompatible_code(code: &str) -> bool {
+    matches!(
+        code,
+        MISSING_PRODUCER | SCHEMA_PATH_MISSING | "INCOMPATIBLE_COERCION"
+    ) || code.starts_with("INCOMPATIBLE:")
+}
+
 /// Deterministic language bindings and their canonical source schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GeneratedDataflowTypes {
@@ -268,97 +285,244 @@ impl RenderBudget {
     }
 }
 
+/// JSON Schema primitive kinds dispatched by [`walk_schema`]; each language
+/// emitter maps them to its own type spelling.
+#[derive(Clone, Copy)]
+enum Primitive {
+    Null,
+    Boolean,
+    Integer,
+    Number,
+    String,
+}
+
+/// Per-language leaves for the shared JSON Schema walk in [`walk_schema`].
+/// Implementors supply only type spellings and composite rendering; the
+/// dispatch order (booleans, enum, anyOf/oneOf, type-array unions, typed
+/// kinds, objects) lives in exactly one place so it cannot drift across the
+/// generated TypeScript, Python, Swift, and Kotlin bindings.
+trait SchemaEmitter {
+    fn enter(&mut self, depth: usize) -> Result<(), DataflowGenerationError>;
+    fn bool_type(&self, value: bool) -> String;
+    /// Returns `None` when the schema has no usable `enum` for this language,
+    /// letting the walk continue with the remaining dispatch.
+    fn render_enum(&mut self, schema: &Value) -> Option<String>;
+    fn render_union(
+        &mut self,
+        items: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError>;
+    fn render_type_array(
+        &mut self,
+        types: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError>;
+    fn primitive_type(&self, kind: Primitive) -> String;
+    fn render_array(
+        &mut self,
+        items: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError>;
+    fn render_object(
+        &mut self,
+        schema: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError>;
+    fn open_object_type(&self) -> String;
+    fn fallback_type(&self) -> String;
+}
+
+/// Single language-neutral JSON Schema dispatch shared by every binding
+/// generator; language-specific spelling lives in [`SchemaEmitter`].
+fn walk_schema<E: SchemaEmitter>(
+    emitter: &mut E,
+    schema: &Value,
+    requested_name: &str,
+    depth: usize,
+) -> Result<String, DataflowGenerationError> {
+    emitter.enter(depth)?;
+    if let Value::Bool(value) = schema {
+        return Ok(emitter.bool_type(*value));
+    }
+    if let Some(rendered) = emitter.render_enum(schema) {
+        return Ok(rendered);
+    }
+    for union_key in ["anyOf", "oneOf"] {
+        if let Some(items) = schema.get(union_key).and_then(Value::as_array) {
+            return emitter.render_union(items, requested_name, depth);
+        }
+    }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        return emitter.render_type_array(types, requested_name, depth);
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("null") => Ok(emitter.primitive_type(Primitive::Null)),
+        Some("boolean") => Ok(emitter.primitive_type(Primitive::Boolean)),
+        Some("integer") => Ok(emitter.primitive_type(Primitive::Integer)),
+        Some("number") => Ok(emitter.primitive_type(Primitive::Number)),
+        Some("string") => Ok(emitter.primitive_type(Primitive::String)),
+        Some("array") => emitter.render_array(
+            schema.get("items").unwrap_or(&Value::Bool(true)),
+            requested_name,
+            depth,
+        ),
+        Some("object") | None if schema.get("properties").is_some() => {
+            emitter.render_object(schema, requested_name, depth)
+        }
+        Some("object") => Ok(emitter.open_object_type()),
+        _ => Ok(emitter.fallback_type()),
+    }
+}
+
+/// Required-property set shared by every object renderer.
+fn required_set(schema: &Value) -> BTreeSet<&str> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// Properties sorted by wire name, shared by every object renderer.
+fn sorted_properties(schema: &Value) -> BTreeMap<&String, &Value> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Enum and union members render in sorted, de-duplicated order so
+/// semantically equal schemas produce identical bindings.
+fn sort_dedup(rendered: &mut Vec<String>) {
+    rendered.sort();
+    rendered.dedup();
+}
+
+struct TypeScriptEmitter<'a> {
+    budget: &'a mut RenderBudget,
+}
+
+impl SchemaEmitter for TypeScriptEmitter<'_> {
+    fn enter(&mut self, depth: usize) -> Result<(), DataflowGenerationError> {
+        self.budget.enter(depth)
+    }
+
+    fn bool_type(&self, value: bool) -> String {
+        if value { "unknown" } else { "never" }.into()
+    }
+
+    fn render_enum(&mut self, schema: &Value) -> Option<String> {
+        schema.get("enum").and_then(Value::as_array).map(|values| {
+            let mut rendered: Vec<String> = values.iter().map(Value::to_string).collect();
+            sort_dedup(&mut rendered);
+            rendered.join(" | ")
+        })
+    }
+
+    fn render_union(
+        &mut self,
+        items: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let mut rendered = Vec::with_capacity(items.len());
+        for item in items {
+            rendered.push(walk_schema(self, item, requested_name, depth + 1)?);
+        }
+        sort_dedup(&mut rendered);
+        Ok(rendered.join(" | "))
+    }
+
+    fn render_type_array(
+        &mut self,
+        types: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let mut rendered = Vec::with_capacity(types.len());
+        for kind in types {
+            rendered.push(walk_schema(
+                self,
+                &serde_json::json!({"type": kind}),
+                requested_name,
+                depth + 1,
+            )?);
+        }
+        sort_dedup(&mut rendered);
+        Ok(rendered.join(" | "))
+    }
+
+    fn primitive_type(&self, kind: Primitive) -> String {
+        match kind {
+            Primitive::Null => "null",
+            Primitive::Boolean => "boolean",
+            Primitive::Integer | Primitive::Number => "number",
+            Primitive::String => "string",
+        }
+        .into()
+    }
+
+    fn render_array(
+        &mut self,
+        items: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let item = walk_schema(self, items, requested_name, depth + 1)?;
+        Ok(format!("Array<{item}>"))
+    }
+
+    fn render_object(
+        &mut self,
+        schema: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let required = required_set(schema);
+        let sorted = sorted_properties(schema);
+        let mut fields = Vec::with_capacity(sorted.len() + 1);
+        for (name, property_schema) in sorted {
+            let value = walk_schema(self, property_schema, requested_name, depth + 1)?;
+            let optional = if required.contains(name.as_str()) {
+                ""
+            } else {
+                "?"
+            };
+            fields.push(format!(
+                "{}{}: {value};",
+                serde_json::to_string(name).unwrap_or_else(|_| "\"invalid\"".into()),
+                optional
+            ));
+        }
+        if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+            fields.push("[key: string]: unknown;".into());
+        }
+        Ok(format!("{{ {} }}", fields.join(" ")))
+    }
+
+    fn open_object_type(&self) -> String {
+        "Record<string, unknown>".into()
+    }
+
+    fn fallback_type(&self) -> String {
+        "unknown".into()
+    }
+}
+
 fn render_typescript(
     schema: &Value,
     depth: usize,
     budget: &mut RenderBudget,
 ) -> Result<String, DataflowGenerationError> {
-    budget.enter(depth)?;
-    if schema == &Value::Bool(true) {
-        return Ok("unknown".into());
-    }
-    if schema == &Value::Bool(false) {
-        return Ok("never".into());
-    }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        let mut rendered: Vec<String> = values.iter().map(Value::to_string).collect();
-        rendered.sort();
-        rendered.dedup();
-        return Ok(rendered.join(" | "));
-    }
-    for union_key in ["anyOf", "oneOf"] {
-        if let Some(items) = schema.get(union_key).and_then(Value::as_array) {
-            let mut rendered = Vec::with_capacity(items.len());
-            for item in items {
-                rendered.push(render_typescript(item, depth + 1, budget)?);
-            }
-            rendered.sort();
-            rendered.dedup();
-            return Ok(rendered.join(" | "));
-        }
-    }
-    if let Some(types) = schema.get("type").and_then(Value::as_array) {
-        let mut rendered = Vec::with_capacity(types.len());
-        for kind in types {
-            rendered.push(render_typescript(
-                &serde_json::json!({"type": kind}),
-                depth + 1,
-                budget,
-            )?);
-        }
-        rendered.sort();
-        rendered.dedup();
-        return Ok(rendered.join(" | "));
-    }
-    match schema.get("type").and_then(Value::as_str) {
-        Some("null") => Ok("null".into()),
-        Some("boolean") => Ok("boolean".into()),
-        Some("integer" | "number") => Ok("number".into()),
-        Some("string") => Ok("string".into()),
-        Some("array") => {
-            let item = render_typescript(
-                schema.get("items").unwrap_or(&Value::Bool(true)),
-                depth + 1,
-                budget,
-            )?;
-            Ok(format!("Array<{item}>"))
-        }
-        Some("object") | None if schema.get("properties").is_some() => {
-            let required: BTreeSet<&str> = schema
-                .get("required")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect();
-            let properties = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let sorted: BTreeMap<_, _> = properties.iter().collect();
-            let mut fields = Vec::with_capacity(sorted.len() + 1);
-            for (name, property_schema) in sorted {
-                let value = render_typescript(property_schema, depth + 1, budget)?;
-                let optional = if required.contains(name.as_str()) {
-                    ""
-                } else {
-                    "?"
-                };
-                fields.push(format!(
-                    "{}{}: {value};",
-                    serde_json::to_string(name).unwrap_or_else(|_| "\"invalid\"".into()),
-                    optional
-                ));
-            }
-            if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
-                fields.push("[key: string]: unknown;".into());
-            }
-            Ok(format!("{{ {} }}", fields.join(" ")))
-        }
-        Some("object") => Ok("Record<string, unknown>".into()),
-        _ => Ok("unknown".into()),
-    }
+    walk_schema(&mut TypeScriptEmitter { budget }, schema, "", depth)
 }
 
 #[derive(Default)]
@@ -368,16 +532,114 @@ struct PythonContext {
     used_names: BTreeMap<String, usize>,
 }
 
-impl PythonContext {
-    fn unique_name(&mut self, requested: &str) -> String {
-        let base = pascal_case(requested);
-        let counter = self.used_names.entry(base.clone()).or_default();
-        *counter += 1;
-        if *counter == 1 {
-            base
-        } else {
-            format!("{base}{counter}")
+impl SchemaEmitter for PythonContext {
+    fn enter(&mut self, depth: usize) -> Result<(), DataflowGenerationError> {
+        self.budget.enter(depth)
+    }
+
+    fn bool_type(&self, value: bool) -> String {
+        if value { "Any" } else { "Never" }.into()
+    }
+
+    fn render_enum(&mut self, schema: &Value) -> Option<String> {
+        schema.get("enum").and_then(Value::as_array).map(|values| {
+            let mut rendered: Vec<String> = values.iter().map(python_literal).collect();
+            sort_dedup(&mut rendered);
+            format!("Literal[{}]", rendered.join(", "))
+        })
+    }
+
+    fn render_union(
+        &mut self,
+        items: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let mut rendered = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            rendered.push(walk_schema(
+                self,
+                item,
+                &format!("{requested_name}Variant{index}"),
+                depth + 1,
+            )?);
         }
+        sort_dedup(&mut rendered);
+        Ok(rendered.join(" | "))
+    }
+
+    fn render_type_array(
+        &mut self,
+        types: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let mut rendered = Vec::with_capacity(types.len());
+        for (index, kind) in types.iter().enumerate() {
+            rendered.push(walk_schema(
+                self,
+                &serde_json::json!({"type": kind}),
+                &format!("{requested_name}Variant{index}"),
+                depth + 1,
+            )?);
+        }
+        sort_dedup(&mut rendered);
+        Ok(rendered.join(" | "))
+    }
+
+    fn primitive_type(&self, kind: Primitive) -> String {
+        match kind {
+            Primitive::Null => "None",
+            Primitive::Boolean => "bool",
+            Primitive::Integer => "int",
+            Primitive::Number => "float",
+            Primitive::String => "str",
+        }
+        .into()
+    }
+
+    fn render_array(
+        &mut self,
+        items: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let item = walk_schema(self, items, &format!("{requested_name}Item"), depth + 1)?;
+        Ok(format!("list[{item}]"))
+    }
+
+    fn render_object(
+        &mut self,
+        schema: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let name = unique_name(&mut self.used_names, requested_name);
+        let required = required_set(schema);
+        let sorted = sorted_properties(schema);
+        let mut fields = BTreeMap::new();
+        for (field, property_schema) in sorted {
+            fields.insert(
+                field.clone(),
+                walk_schema(
+                    self,
+                    property_schema,
+                    &format!("{name}{}", pascal_case(field)),
+                    depth + 1,
+                )?,
+            );
+        }
+        self.definitions
+            .push(render_python_typed_dict(&name, &fields, &required));
+        Ok(name)
+    }
+
+    fn open_object_type(&self) -> String {
+        "dict[str, Any]".into()
+    }
+
+    fn fallback_type(&self) -> String {
+        "Any".into()
     }
 }
 
@@ -387,111 +649,18 @@ fn render_python(
     depth: usize,
     context: &mut PythonContext,
 ) -> Result<String, DataflowGenerationError> {
-    context.budget.enter(depth)?;
-    if schema == &Value::Bool(true) {
-        return Ok("Any".into());
-    }
-    if schema == &Value::Bool(false) {
-        return Ok("Never".into());
-    }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        let mut rendered: Vec<String> = values.iter().map(python_literal).collect();
-        rendered.sort();
-        rendered.dedup();
-        return Ok(format!("Literal[{}]", rendered.join(", ")));
-    }
-    for union_key in ["anyOf", "oneOf"] {
-        if let Some(items) = schema.get(union_key).and_then(Value::as_array) {
-            let mut rendered = Vec::with_capacity(items.len());
-            for (index, item) in items.iter().enumerate() {
-                rendered.push(render_python(
-                    item,
-                    &format!("{requested_name}Variant{index}"),
-                    depth + 1,
-                    context,
-                )?);
-            }
-            rendered.sort();
-            rendered.dedup();
-            return Ok(rendered.join(" | "));
-        }
-    }
-    if let Some(types) = schema.get("type").and_then(Value::as_array) {
-        let mut rendered = Vec::with_capacity(types.len());
-        for (index, kind) in types.iter().enumerate() {
-            rendered.push(render_python(
-                &serde_json::json!({"type": kind}),
-                &format!("{requested_name}Variant{index}"),
-                depth + 1,
-                context,
-            )?);
-        }
-        rendered.sort();
-        rendered.dedup();
-        return Ok(rendered.join(" | "));
-    }
-    match schema.get("type").and_then(Value::as_str) {
-        Some("null") => Ok("None".into()),
-        Some("boolean") => Ok("bool".into()),
-        Some("integer") => Ok("int".into()),
-        Some("number") => Ok("float".into()),
-        Some("string") => Ok("str".into()),
-        Some("array") => {
-            let item = render_python(
-                schema.get("items").unwrap_or(&Value::Bool(true)),
-                &format!("{requested_name}Item"),
-                depth + 1,
-                context,
-            )?;
-            Ok(format!("list[{item}]"))
-        }
-        Some("object") | None if schema.get("properties").is_some() => {
-            let name = context.unique_name(requested_name);
-            let required: BTreeSet<String> = schema
-                .get("required")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect();
-            let properties = schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            let sorted: BTreeMap<_, _> = properties.iter().collect();
-            let mut fields = BTreeMap::new();
-            for (field, property_schema) in sorted {
-                fields.insert(
-                    field.clone(),
-                    render_python(
-                        property_schema,
-                        &format!("{name}{}", pascal_case(field)),
-                        depth + 1,
-                        context,
-                    )?,
-                );
-            }
-            context
-                .definitions
-                .push(render_python_typed_dict(&name, &fields, &required));
-            Ok(name)
-        }
-        Some("object") => Ok("dict[str, Any]".into()),
-        _ => Ok("Any".into()),
-    }
+    walk_schema(context, schema, requested_name, depth)
 }
 
 fn render_python_typed_dict(
     name: &str,
     fields: &BTreeMap<String, String>,
-    required: &BTreeSet<String>,
+    required: &BTreeSet<&str>,
 ) -> String {
     let rendered = fields
         .iter()
         .map(|(field, value)| {
-            let qualifier = if required.contains(field) {
+            let qualifier = if required.contains(field.as_str()) {
                 "Required"
             } else {
                 "NotRequired"
@@ -527,14 +696,7 @@ impl NativeContext {
     }
 
     fn unique_name(&mut self, requested: &str) -> String {
-        let base = pascal_case(requested);
-        let counter = self.used_names.entry(base.clone()).or_default();
-        *counter += 1;
-        if *counter == 1 {
-            base
-        } else {
-            format!("{base}{counter}")
-        }
+        unique_name(&mut self.used_names, requested)
     }
 
     const fn unknown_type(&self) -> &'static str {
@@ -606,66 +768,103 @@ fn render_kotlin_bindings(
     Ok(source)
 }
 
+impl SchemaEmitter for NativeContext {
+    fn enter(&mut self, depth: usize) -> Result<(), DataflowGenerationError> {
+        self.budget.enter(depth)
+    }
+
+    fn bool_type(&self, _value: bool) -> String {
+        self.unknown_type().into()
+    }
+
+    fn render_enum(&mut self, schema: &Value) -> Option<String> {
+        schema
+            .get("enum")
+            .is_some()
+            .then(|| native_enum_type(schema, self))
+    }
+
+    fn render_union(
+        &mut self,
+        items: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        render_native_union(items, requested_name, depth, self)
+    }
+
+    fn render_type_array(
+        &mut self,
+        types: &[Value],
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let items: Vec<Value> = types
+            .iter()
+            .map(|kind| serde_json::json!({"type": kind}))
+            .collect();
+        render_native_union(&items, requested_name, depth, self)
+    }
+
+    fn primitive_type(&self, kind: Primitive) -> String {
+        match kind {
+            Primitive::Null => self.unknown_type(),
+            Primitive::Boolean => match self.language {
+                NativeLanguage::Swift => "Bool",
+                NativeLanguage::Kotlin => "Boolean",
+            },
+            Primitive::Integer => match self.language {
+                NativeLanguage::Swift => "Int64",
+                NativeLanguage::Kotlin => "Long",
+            },
+            Primitive::Number => "Double",
+            Primitive::String => "String",
+        }
+        .into()
+    }
+
+    fn render_array(
+        &mut self,
+        items: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        let item = walk_schema(self, items, &format!("{requested_name}Item"), depth + 1)?;
+        Ok(match self.language {
+            NativeLanguage::Swift => format!("[{item}]"),
+            NativeLanguage::Kotlin => format!("List<{item}>"),
+        })
+    }
+
+    fn render_object(
+        &mut self,
+        schema: &Value,
+        requested_name: &str,
+        depth: usize,
+    ) -> Result<String, DataflowGenerationError> {
+        render_native_object(schema, requested_name, depth, self)
+    }
+
+    fn open_object_type(&self) -> String {
+        match self.language {
+            NativeLanguage::Swift => "[String: JSONValue]",
+            NativeLanguage::Kotlin => "Map<String, JsonElement>",
+        }
+        .into()
+    }
+
+    fn fallback_type(&self) -> String {
+        self.unknown_type().into()
+    }
+}
+
 fn render_native(
     schema: &Value,
     requested_name: &str,
     depth: usize,
     context: &mut NativeContext,
 ) -> Result<String, DataflowGenerationError> {
-    context.budget.enter(depth)?;
-    if schema == &Value::Bool(true) || schema == &Value::Bool(false) {
-        return Ok(context.unknown_type().into());
-    }
-    if schema.get("enum").is_some() {
-        return Ok(native_enum_type(schema, context));
-    }
-    for union_key in ["anyOf", "oneOf"] {
-        if let Some(items) = schema.get(union_key).and_then(Value::as_array) {
-            return render_native_union(items, requested_name, depth, context);
-        }
-    }
-    if let Some(types) = schema.get("type").and_then(Value::as_array) {
-        let items: Vec<Value> = types
-            .iter()
-            .map(|kind| serde_json::json!({"type": kind}))
-            .collect();
-        return render_native_union(&items, requested_name, depth, context);
-    }
-    match schema.get("type").and_then(Value::as_str) {
-        Some("boolean") => Ok(match context.language {
-            NativeLanguage::Swift => "Bool",
-            NativeLanguage::Kotlin => "Boolean",
-        }
-        .into()),
-        Some("integer") => Ok(match context.language {
-            NativeLanguage::Swift => "Int64",
-            NativeLanguage::Kotlin => "Long",
-        }
-        .into()),
-        Some("number") => Ok("Double".into()),
-        Some("string") => Ok("String".into()),
-        Some("array") => {
-            let item = render_native(
-                schema.get("items").unwrap_or(&Value::Bool(true)),
-                &format!("{requested_name}Item"),
-                depth + 1,
-                context,
-            )?;
-            Ok(match context.language {
-                NativeLanguage::Swift => format!("[{item}]"),
-                NativeLanguage::Kotlin => format!("List<{item}>"),
-            })
-        }
-        Some("object") | None if schema.get("properties").is_some() => {
-            render_native_object(schema, requested_name, depth, context)
-        }
-        Some("object") => Ok(match context.language {
-            NativeLanguage::Swift => "[String: JSONValue]",
-            NativeLanguage::Kotlin => "Map<String, JsonElement>",
-        }
-        .into()),
-        _ => Ok(context.unknown_type().into()),
-    }
+    walk_schema(context, schema, requested_name, depth)
 }
 
 fn render_native_union(
@@ -692,19 +891,8 @@ fn render_native_object(
     context: &mut NativeContext,
 ) -> Result<String, DataflowGenerationError> {
     let name = context.unique_name(requested_name);
-    let required: BTreeSet<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect();
-    let properties = schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let sorted: BTreeMap<_, _> = properties.iter().collect();
+    let required = required_set(schema);
+    let sorted = sorted_properties(schema);
     let mut fields = Vec::with_capacity(sorted.len());
     for (field, field_schema) in sorted {
         let value = render_native(
@@ -915,6 +1103,19 @@ fn swift_json_value() -> &'static str {
 }"
 }
 
+/// Unique-name allocator shared by the named-definition emitters (Python
+/// `TypedDict`s, Swift structs, Kotlin data classes).
+fn unique_name(used_names: &mut BTreeMap<String, usize>, requested: &str) -> String {
+    let base = pascal_case(requested);
+    let counter = used_names.entry(base.clone()).or_default();
+    *counter += 1;
+    if *counter == 1 {
+        base
+    } else {
+        format!("{base}{counter}")
+    }
+}
+
 fn pascal_case(value: &str) -> String {
     let mut output = String::new();
     for segment in value.split(|character: char| !character.is_ascii_alphanumeric()) {
@@ -946,7 +1147,7 @@ fn python_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"invalid\"".into())
 }
 
-fn hex_sha256(value: &[u8]) -> String {
+pub(crate) fn hex_sha256(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     let mut output = String::with_capacity(64);
     for byte in digest {
@@ -1070,6 +1271,21 @@ fn parse_references(text: &str, output: &mut BTreeSet<Reference>) {
     for needle in ["outputs.", "data.", "state.", "config."] {
         let mut remaining = text;
         while let Some(position) = remaining.find(needle) {
+            // Require a word boundary: a needle glued onto a larger
+            // identifier ("metadata.user", "window.outputs.log") is prose,
+            // not a typed reference.
+            let absolute = text.len() - remaining.len() + position;
+            let glued_to_identifier =
+                text[..absolute]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
+                    });
+            if glued_to_identifier {
+                remaining = &remaining[position + needle.len()..];
+                continue;
+            }
             let tail = &remaining[position + needle.len()..];
             let token: String = tail
                 .chars()
@@ -1138,7 +1354,7 @@ fn validate_reference(
         Root::Output(producer) => match output_schemas.get(producer) {
             None => {
                 findings.push(finding(
-                    "MISSING_PRODUCER",
+                    MISSING_PRODUCER,
                     DataflowSeverity::Error,
                     consumer,
                     reference,
@@ -1165,7 +1381,7 @@ fn validate_reference(
         SchemaPathStatus::Present | SchemaPathStatus::Optional | SchemaPathStatus::Nullable
             if reference.has_fallback => {}
         SchemaPathStatus::Missing => findings.push(finding(
-            "SCHEMA_PATH_MISSING",
+            SCHEMA_PATH_MISSING,
             DataflowSeverity::Error,
             consumer,
             reference,
@@ -1317,6 +1533,18 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_code_classification_is_shared_with_migration_gate() {
+        assert!(is_incompatible_code(MISSING_PRODUCER));
+        assert!(is_incompatible_code(SCHEMA_PATH_MISSING));
+        assert!(is_incompatible_code("INCOMPATIBLE_COERCION"));
+        assert!(is_incompatible_code("INCOMPATIBLE:BLOCK_REMOVED"));
+        assert!(!is_incompatible_code("TYPE_UNKNOWN"));
+        assert!(!is_incompatible_code("VALUE_MAY_BE_ABSENT"));
+        assert!(!is_incompatible_code("VALUE_MAY_BE_NULL"));
+        assert!(!is_incompatible_code("SIDE_EFFECT_RISK:EFFECT"));
+    }
+
+    #[test]
     fn rejects_field_excluded_by_closed_schema() {
         let report = compile(&sequence(
             &json!([
@@ -1389,6 +1617,43 @@ mod tests {
             None,
         ));
         assert_eq!(report.findings[0].code, "MISSING_PRODUCER");
+    }
+
+    #[test]
+    fn prose_substrings_glued_to_identifiers_are_not_references() {
+        // "metadata.user" hides "data.user" and "window.outputs.log" hides
+        // "outputs.log" inside larger identifiers — prose, not typed
+        // references. Only the real `data.user.name` reference may be
+        // checked, and it resolves cleanly against the input schema.
+        let report = compile(&sequence(
+            &json!([
+                {"type":"step","id":"notes","handler":"noop","params":{
+                    "note":"metadata.user",
+                    "hint":"window.outputs.log"
+                }},
+                {"type":"step","id":"use","handler":"noop","params":{
+                    "x":"{{ data.user.name }}"
+                }}
+            ]),
+            Some(json!({
+                "type":"object",
+                "properties":{"user":{"type":"object","properties":{
+                    "name":{"type":"string"}
+                },"required":["name"],"additionalProperties":false}},
+                "required":["user"],
+                "additionalProperties":false
+            })),
+        ));
+        assert_eq!(
+            report.references_checked, 1,
+            "only the real reference should be parsed: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.is_empty(),
+            "prose must not produce findings: {:?}",
+            report.findings
+        );
     }
 
     #[test]
@@ -1527,3 +1792,7 @@ mod tests {
         assert_eq!(error, DataflowGenerationError::DepthLimit);
     }
 }
+
+#[cfg(test)]
+#[path = "dataflow_coverage_tests.rs"]
+mod dataflow_coverage_tests;

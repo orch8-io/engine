@@ -310,3 +310,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "tenant_partition_coverage_tests.rs"]
+mod tenant_partition_coverage_tests;

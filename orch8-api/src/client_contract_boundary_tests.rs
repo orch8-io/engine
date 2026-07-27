@@ -1,6 +1,6 @@
 //! Generated-client contract edge cases.
 //!
-//! Count contract: 20 independently named unit tests.
+//! Count contract: 21 independently named unit tests.
 
 use super::*;
 
@@ -49,6 +49,12 @@ escape_case!(
     coverage_client_contract_012_query_like_text,
     "/items?x=1",
     "~1items?x=1"
+);
+
+escape_case!(
+    coverage_client_contract_021_already_escaped_input_is_double_escaped,
+    "~0",
+    "~00"
 );
 
 macro_rules! generated_contains_case {

@@ -9,7 +9,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use orch8_engine::evaluator::{self, EvalOutcome};
+use orch8_engine::evaluator::{self, EvalOutcome, TerminalReason};
 use orch8_engine::handlers::{HandlerRegistry, builtin::register_builtins};
 use orch8_storage::{StorageBackend, sqlite::SqliteStorage};
 use orch8_types::execution::NodeState;
@@ -1551,8 +1551,7 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         matches!(
             outcome,
             EvalOutcome::Done {
-                any_failed: false,
-                any_cancelled: false
+                reason: TerminalReason::Succeeded
             }
         ),
         "first pass must complete self_mod step"
@@ -1571,8 +1570,7 @@ async fn self_modify_injects_blocks_and_evaluator_executes_them() {
         matches!(
             outcome,
             EvalOutcome::Done {
-                any_failed: false,
-                any_cancelled: false
+                reason: TerminalReason::Succeeded
             }
         ),
         "second pass must complete injected step"

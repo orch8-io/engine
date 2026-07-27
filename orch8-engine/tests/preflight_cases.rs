@@ -751,14 +751,16 @@ fn any_one_of_several_live_workers_satisfying_the_pin_is_enough() {
 }
 
 #[test]
-fn missing_pin_inventory_skips_pin_enforcement() {
+fn missing_pin_inventory_yields_unknown_not_pass() {
+    // version_pins = None means pin enforcement is unproven for external
+    // handlers — uncertainty is never turned into success.
     let mut inv = full_inventory();
     inv.worker_registrations = Some(vec![registration("custom_a", None, Some("0.0.1"))]);
     inv.version_pins = None;
     let report = run_preflight(&seq(json!([step("a", "custom_a")])), &inv, t0());
     assert_eq!(
         check(&report, "handlers_have_workers").status,
-        PreflightStatus::Pass
+        PreflightStatus::Unknown
     );
 }
 
@@ -1413,15 +1415,15 @@ fn routing_rule_without_match_queue_does_not_count_as_redirect() {
 }
 
 #[test]
-fn missing_routing_rules_inventory_is_treated_as_no_redirects() {
-    // routing_rules = None is NOT an unknown for this check — it just means
-    // no redirect credit; workers/dispatch still decide.
+fn missing_routing_rules_inventory_yields_unknown() {
+    // routing_rules = None means redirect evaluation is unproven — the
+    // check reports Unknown rather than assuming no redirects exist.
     let mut inv = full_inventory();
     inv.routing_rules = None;
     let report = run_preflight(&queue_seq("some-q"), &inv, t0());
     assert_eq!(
         check(&report, "queues_consumable").status,
-        PreflightStatus::Warning
+        PreflightStatus::Unknown
     );
 }
 

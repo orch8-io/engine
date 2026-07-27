@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+
+use crate::dataflow::hex_sha256;
 use orch8_types::continuity::{EffectReceipt, EffectState, RuntimeTrustLevel};
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, BudgetReservation, DeviceDelegation, DisclosureResult,
@@ -251,12 +253,9 @@ pub fn compile_migration_plan(
         return Err(AdvancedContinuityError::TooManyTransforms);
     }
     validate_state_transforms(&transforms)?;
-    let incompatible = typed_findings.iter().any(|code| {
-        matches!(
-            code.as_str(),
-            "MISSING_PRODUCER" | "SCHEMA_PATH_MISSING" | "INCOMPATIBLE_COERCION"
-        ) || code.starts_with("INCOMPATIBLE:")
-    });
+    let incompatible = typed_findings
+        .iter()
+        .any(|code| crate::dataflow::is_incompatible_code(code));
     plan.id = MigrationPlanId::new();
     plan.transforms = transforms;
     plan.finding_codes = typed_findings.to_vec();
@@ -424,10 +423,13 @@ pub fn generate_scenarios(
     })
 }
 
-/// Generate a bounded deterministic cross-product from workflow-derived
-/// dimensions. Dimension values are deliberately strings: schema/router/event
-/// compilers retain ownership of their rich ASTs and pass only stable case IDs
-/// into the laboratory.
+/// Generate a bounded deterministic sample of the cross-product from
+/// workflow-derived dimensions. Dimension values are deliberately strings:
+/// schema/router/event compilers retain ownership of their rich ASTs and pass
+/// only stable case IDs into the laboratory. Each dimension index derives from
+/// a deterministic hash of (seed, scenario index, dimension ordinal), so
+/// dimension choices are decorrelated and no stride pattern makes combinations
+/// unreachable within the 256-scenario cap.
 pub fn generate_scenarios_from_spec(
     spec: &ScenarioGenerationSpec,
 ) -> Result<Vec<GeneratedScenario>, AdvancedContinuityError> {
@@ -478,24 +480,44 @@ pub fn generate_scenarios_from_spec(
             vec![spec.faults[index % spec.faults.len()].clone()]
         };
         let mut policy_facts = Vec::new();
-        select_case(&mut policy_facts, "input", &spec.input_schema_cases, index);
+        select_case(
+            &mut policy_facts,
+            "input",
+            &spec.input_schema_cases,
+            dimension_index(spec.seed, index, 0),
+        );
         select_case(
             &mut policy_facts,
             "router",
             &spec.router_branches,
-            index / 2,
+            dimension_index(spec.seed, index, 1),
         );
-        select_case(&mut policy_facts, "join", &spec.event_joins, index / 3);
-        select_case(&mut policy_facts, "policy", &spec.policy_facts, index / 5);
+        select_case(
+            &mut policy_facts,
+            "join",
+            &spec.event_joins,
+            dimension_index(spec.seed, index, 2),
+        );
+        select_case(
+            &mut policy_facts,
+            "policy",
+            &spec.policy_facts,
+            dimension_index(spec.seed, index, 3),
+        );
         select_case(
             &mut policy_facts,
             "invariant",
             &spec.invariant_codes,
-            index / 7,
+            dimension_index(spec.seed, index, 4),
         );
-        let retry_attempt = select_number(&spec.retry_attempts, index).unwrap_or_default();
-        let handoff_delay_ms =
-            select_number(&spec.handoff_delays_ms, index / 2).unwrap_or_default();
+        let retry_attempt =
+            select_number(&spec.retry_attempts, dimension_index(spec.seed, index, 5))
+                .unwrap_or_default();
+        let handoff_delay_ms = select_number(
+            &spec.handoff_delays_ms,
+            dimension_index(spec.seed, index, 6),
+        )
+        .unwrap_or_default();
         scenarios.push(GeneratedScenario {
             id: deterministic_scenario_id(scenario_seed, index),
             event_order,
@@ -514,6 +536,20 @@ fn select_case(target: &mut Vec<String>, name: &str, values: &[String], index: u
     if let Some(value) = values.get(index % values.len().max(1)) {
         target.push(format!("{name}:{value}"));
     }
+}
+
+/// SplitMix64-style mix: deterministic and cheap, with no correlation between
+/// adjacent scenario indices or dimension ordinals.
+fn mix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
+fn dimension_index(seed: u64, scenario: usize, dimension: u64) -> usize {
+    let scenario = u64::try_from(scenario).unwrap_or(u64::MAX);
+    usize::try_from(mix64(mix64(seed ^ dimension).wrapping_add(scenario))).unwrap_or(usize::MAX)
 }
 
 fn select_number<T: Copy>(values: &[T], index: usize) -> Option<T> {
@@ -1167,8 +1203,11 @@ pub fn minimize_disclosure(
     let mut disclosed = serde_json::Map::new();
     let mut withheld_sha256 = Vec::new();
     if let Some(object) = payload.as_object() {
-        for (key, value) in object.iter().take(256) {
-            if allowed_top_level_fields.contains(key) {
+        for (index, (key, value)) in object.iter().enumerate() {
+            // Only the first 256 fields may be disclosed, but every withheld
+            // field — including those past the cap — is hashed so the audit
+            // trail accounts for the full payload.
+            if index < 256 && allowed_top_level_fields.contains(key) {
                 disclosed.insert(key.clone(), value.clone());
             } else if let Ok(encoded) = serde_json::to_vec(value) {
                 withheld_sha256.push(hex_sha256(&encoded));
@@ -1253,16 +1292,6 @@ fn sub_usage(reserved: BudgetUsage, actual: BudgetUsage) -> BudgetUsage {
 
 fn short_hash(bytes: &[u8]) -> String {
     hex_sha256(bytes)[..16].to_owned()
-}
-
-fn hex_sha256(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(64);
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 #[cfg(test)]
@@ -1698,5 +1727,90 @@ mod tests {
         assert_eq!(result.disclosed, serde_json::json!({"summary":"ok"}));
         assert_eq!(result.withheld_sha256.len(), 1);
         assert!(!result.disclosed.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn migration_compiler_shares_dataflow_incompatibility_classification() {
+        for code in [
+            crate::dataflow::MISSING_PRODUCER,
+            crate::dataflow::SCHEMA_PATH_MISSING,
+            "INCOMPATIBLE_COERCION",
+            "INCOMPATIBLE:OUTPUT_REFERENCE_DANGLING",
+        ] {
+            let plan =
+                compile_migration_plan(migration_seed(), &[code.into()], Vec::new(), Some(true))
+                    .unwrap();
+            assert_eq!(
+                plan.disposition,
+                MigrationDisposition::Incompatible,
+                "{code}"
+            );
+        }
+        for code in [
+            "TYPE_UNKNOWN",
+            "VALUE_MAY_BE_ABSENT",
+            "SIDE_EFFECT_RISK:EFFECT",
+        ] {
+            let plan =
+                compile_migration_plan(migration_seed(), &[code.into()], Vec::new(), Some(true))
+                    .unwrap();
+            assert_eq!(plan.disposition, MigrationDisposition::Automatic, "{code}");
+        }
+    }
+
+    #[test]
+    fn scenario_sampling_decorrelates_dimension_strides() {
+        // With stride-correlated selection both dimensions advanced on
+        // `index / 2`, so (device, 0) and (cloud, 50) were unreachable.
+        let spec = ScenarioGenerationSpec {
+            events: Vec::new(),
+            faults: Vec::new(),
+            input_schema_cases: Vec::new(),
+            router_branches: vec!["cloud".into(), "device".into()],
+            event_joins: Vec::new(),
+            policy_facts: Vec::new(),
+            invariant_codes: Vec::new(),
+            retry_attempts: vec![0],
+            handoff_delays_ms: vec![0, 50],
+            max_scenarios: 64,
+            max_steps: 100,
+            max_virtual_time_ms: 1_000,
+            seed: 7,
+        };
+        let scenarios = generate_scenarios_from_spec(&spec).unwrap();
+        let combinations: BTreeSet<(String, u64)> = scenarios
+            .iter()
+            .map(|scenario| {
+                (
+                    scenario
+                        .policy_facts
+                        .iter()
+                        .find(|fact| fact.starts_with("router:"))
+                        .cloned()
+                        .unwrap_or_default(),
+                    scenario.handoff_delay_ms,
+                )
+            })
+            .collect();
+        assert_eq!(combinations.len(), 4, "{combinations:?}");
+    }
+
+    #[test]
+    fn disclosure_hashes_every_withheld_field_past_the_disclosure_cap() {
+        let payload = serde_json::Value::Object(
+            (0..300)
+                .map(|index| (format!("field_{index:03}"), serde_json::Value::from(index)))
+                .collect(),
+        );
+        let result = minimize_disclosure(
+            &payload,
+            &BTreeSet::from(["field_000".to_string(), "field_299".to_string()]),
+            orch8_types::continuity::DataClassification::Restricted,
+        );
+        // field_000 is disclosed; field_299 is past the cap, so it is withheld
+        // — and every withheld field, capped or not, is hashed for the audit
+        // trail.
+        assert_eq!(result.disclosed, serde_json::json!({"field_000": 0}));
+        assert_eq!(result.withheld_sha256.len(), 299);
     }
 }

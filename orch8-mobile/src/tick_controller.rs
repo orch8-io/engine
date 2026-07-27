@@ -662,3 +662,7 @@ mod tests {
         assert!(schedule.dirty, "failed scans must remain pending");
     }
 }
+
+#[cfg(test)]
+#[path = "tick_controller_coverage_tests.rs"]
+mod tick_controller_coverage_tests;

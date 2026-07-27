@@ -152,3 +152,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "bootstrap_coverage_tests.rs"]
+mod bootstrap_coverage_tests;

@@ -19,6 +19,7 @@ use orch8_types::diagnosis::{
     RemediationPreview, rank_diagnoses,
 };
 use orch8_types::finding::{Confidence, Evidence, Finding, FindingSeverity, Remediation};
+use orch8_types::ids::InstanceId;
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::signal::Signal;
 use orch8_types::worker::{
@@ -143,20 +144,9 @@ pub fn remediation_previews(report: &InstanceDiagnosisReport) -> Vec<Remediation
                 .iter()
                 .enumerate()
                 .map(move |(index, remediation)| {
-                    let action = remediation.command.as_deref().map_or(
-                        RemediationAction::Manual,
-                        |command| {
-                            if command == format!("orch8 instance retry {}", report.instance_id) {
-                                RemediationAction::RetryInstance
-                            } else if command
-                                == format!("orch8 signal {} resume", report.instance_id)
-                            {
-                                RemediationAction::ResumeInstance
-                            } else {
-                                RemediationAction::Manual
-                            }
-                        },
-                    );
+                    // The action is typed at construction time; never parse
+                    // it back out of the command string.
+                    let action = remediation.action.unwrap_or(RemediationAction::Manual);
                     RemediationPreview {
                         preview_id: format!(
                             "{}:{}:{}:{diagnosis_index}:{index}",
@@ -175,6 +165,25 @@ pub fn remediation_previews(report: &InstanceDiagnosisReport) -> Vec<Remediation
         .collect()
 }
 
+/// Build a remediation for one of the instance-level actions the doctor
+/// can classify. The CLI command is derived from the typed action here —
+/// the single place command wording lives — so producers and the preview
+/// classifier can never drift apart.
+fn instance_action_remediation(
+    summary: impl Into<String>,
+    action: RemediationAction,
+    instance_id: InstanceId,
+) -> Remediation {
+    let command = match action {
+        RemediationAction::RetryInstance => format!("orch8 instance retry {instance_id}"),
+        RemediationAction::ResumeInstance => format!("orch8 signal {instance_id} resume"),
+        RemediationAction::Manual => unreachable!("manual remediations have no canonical command"),
+    };
+    Remediation::new(summary)
+        .with_command(command)
+        .with_action(action)
+}
+
 fn terminal_diagnosis(instance: &TaskInstance, now: DateTime<Utc>) -> Diagnosis {
     let mut finding = Finding::new(
         "TERMINAL_STATE",
@@ -188,9 +197,12 @@ fn terminal_diagnosis(instance: &TaskInstance, now: DateTime<Utc>) -> Diagnosis 
     );
     if instance.state == InstanceState::Failed {
         finding = finding.with_remediation(
-            Remediation::new("retry the instance from the DLQ")
-                .with_command(format!("orch8 instance retry {}", instance.id))
-                .with_side_effect_risk(),
+            instance_action_remediation(
+                "retry the instance from the DLQ",
+                RemediationAction::RetryInstance,
+                instance.id,
+            )
+            .with_side_effect_risk(),
         );
     }
     Diagnosis {
@@ -351,10 +363,11 @@ fn rule_paused(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec<Diagno
             Confidence::Certain,
             now,
         )
-        .with_remediation(
-            Remediation::new("raise the budget, then resume")
-                .with_command(format!("orch8 signal {} resume", instance.id)),
-        );
+        .with_remediation(instance_action_remediation(
+            "raise the budget, then resume",
+            RemediationAction::ResumeInstance,
+            instance.id,
+        ));
         if let Some(breach) = instance.metadata.get("budget_breach") {
             finding = finding
                 .with_evidence(Evidence::new("budget_breach", breach.to_string()).observed_at(now));
@@ -376,10 +389,11 @@ fn rule_paused(instance: &TaskInstance, now: DateTime<Utc>, out: &mut Vec<Diagno
                 Confidence::Certain,
                 now,
             )
-            .with_remediation(
-                Remediation::new("resume the instance")
-                    .with_command(format!("orch8 signal {} resume", instance.id)),
-            ),
+            .with_remediation(instance_action_remediation(
+                "resume the instance",
+                RemediationAction::ResumeInstance,
+                instance.id,
+            )),
         });
     }
 }
@@ -1386,4 +1400,24 @@ mod tests {
                 .contains(":failed:TERMINAL_STATE:0:0")
         );
     }
+
+    #[test]
+    fn paused_preview_classifies_resume_via_typed_action() {
+        let report = diagnose(&full_ctx(instance(InstanceState::Paused)), t0());
+        let remediation = &report.diagnoses[0].finding.remediation[0];
+        // The action is carried as typed data from construction time, so
+        // classification must hold regardless of command-string wording.
+        assert_eq!(remediation.action, Some(RemediationAction::ResumeInstance));
+        let previews = remediation_previews(&report);
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].action, RemediationAction::ResumeInstance);
+        assert_eq!(
+            previews[0].command.as_deref(),
+            Some(format!("orch8 signal {} resume", report.instance_id).as_str())
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "doctor_coverage_tests.rs"]
+mod doctor_coverage_tests;

@@ -433,3 +433,7 @@ mod tests {
         assert_eq!(superseded.as_deref(), Some("new"));
     }
 }
+
+#[cfg(test)]
+#[path = "push_outbox_coverage_tests.rs"]
+mod push_outbox_coverage_tests;

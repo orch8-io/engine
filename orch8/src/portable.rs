@@ -270,3 +270,7 @@ mod tests {
         assert!(validate_export_options(&value).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "portable_coverage_tests.rs"]
+mod portable_coverage_tests;
