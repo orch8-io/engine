@@ -1,7 +1,7 @@
 #![allow(clippy::items_after_statements)]
 //! Integration tests for the scheduler `tick_once` entry point.
 //!
-//! 100 tests covering: basic tick behavior, step execution via scheduler,
+//! 100+ tests covering: basic tick behavior, step execution via scheduler,
 //! delay and scheduling, concurrency and rate limiting, signal processing.
 
 use std::sync::Arc;
@@ -16,9 +16,10 @@ use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::scheduler::{TickOnceResult, tick_once};
 use orch8_storage::StorageBackend;
 use orch8_types::config::SchedulerConfig;
+use orch8_types::execution::NodeState;
 use orch8_types::ids::{BlockId, InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
-use orch8_types::sequence::{BlockDefinition, DelaySpec, SendWindow, StepDef};
+use orch8_types::sequence::{BlockDefinition, DelaySpec, ParallelDef, SendWindow, StepDef};
 use orch8_types::signal::{Signal, SignalType};
 
 mod common;
@@ -2415,4 +2416,145 @@ async fn crash_mid_step_reexecutes_step_after_reclaim() {
         .unwrap()
         .unwrap();
     assert_eq!(latest.output, json!({"result": "ran"}));
+}
+
+// ================================================================
+// COMPOSITE WORKFLOWS THROUGH THE PUBLIC SCHEDULER ENTRY POINT
+// ================================================================
+
+async fn tick_until_terminal(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    instance_id: InstanceId,
+) -> TaskInstance {
+    for _ in 0..16 {
+        tick(storage, handlers).await;
+        let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+        if instance.state.is_terminal() {
+            return instance;
+        }
+    }
+    panic!("instance {instance_id} did not reach a terminal state");
+}
+
+#[tokio::test]
+async fn tick_parallel_workflow_reschedules_then_completes_durable_tree() {
+    let storage = storage().await;
+    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("parallel"),
+        branches: vec![
+            vec![mk_step("left", "noop")],
+            vec![mk_step("right", "noop")],
+        ],
+    }))]);
+    storage.create_sequence(&sequence).await.unwrap();
+    let instance = mk_instance(sequence.id);
+    storage.create_instance(&instance).await.unwrap();
+
+    let handlers = Arc::new(registry());
+    let completed = tick_until_terminal(&storage, &handlers, instance.id).await;
+    assert_eq!(completed.state, InstanceState::Completed);
+
+    let tree = storage.get_execution_tree(instance.id).await.unwrap();
+    for block_id in ["parallel", "left", "right"] {
+        let node = tree
+            .iter()
+            .find(|node| node.block_id.as_str() == block_id)
+            .unwrap_or_else(|| panic!("missing {block_id} execution node"));
+        assert_eq!(node.state, NodeState::Completed, "block {block_id}");
+    }
+}
+
+#[tokio::test]
+async fn tick_parallel_failure_maps_tree_failure_to_instance_failure() {
+    let storage = storage().await;
+    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("parallel"),
+        branches: vec![
+            vec![mk_step("successful", "noop")],
+            vec![mk_step("broken", "fail")],
+        ],
+    }))]);
+    storage.create_sequence(&sequence).await.unwrap();
+    let instance = mk_instance(sequence.id);
+    storage.create_instance(&instance).await.unwrap();
+
+    let handlers = Arc::new(registry_with_fail());
+    let failed = tick_until_terminal(&storage, &handlers, instance.id).await;
+    assert_eq!(failed.state, InstanceState::Failed);
+
+    let tree = storage.get_execution_tree(instance.id).await.unwrap();
+    assert_eq!(
+        tree.iter()
+            .find(|node| node.block_id.as_str() == "parallel")
+            .unwrap()
+            .state,
+        NodeState::Failed
+    );
+    assert_eq!(
+        tree.iter()
+            .find(|node| node.block_id.as_str() == "broken")
+            .unwrap()
+            .state,
+        NodeState::Failed
+    );
+}
+
+#[tokio::test]
+async fn tick_parallel_external_step_enters_waiting_without_busy_reschedule() {
+    let storage = storage().await;
+    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("parallel"),
+        branches: vec![vec![mk_step("remote", "external_worker")]],
+    }))]);
+    storage.create_sequence(&sequence).await.unwrap();
+    let instance = mk_instance(sequence.id);
+    storage.create_instance(&instance).await.unwrap();
+
+    let handlers = Arc::new(registry());
+    tick(&storage, &handlers).await;
+
+    let waiting = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(waiting.state, InstanceState::Waiting);
+    let tasks = storage
+        .list_worker_tasks(
+            &orch8_types::worker_filter::WorkerTaskFilter::default(),
+            &orch8_types::filter::Pagination::default(),
+        )
+        .await
+        .unwrap();
+    let task = tasks
+        .iter()
+        .find(|task| task.instance_id == instance.id)
+        .expect("external worker task");
+    assert_eq!(task.handler_name, "external_worker");
+}
+
+#[tokio::test]
+async fn tick_rejects_composite_work_before_exceeding_step_budget_further() {
+    let storage = storage().await;
+    let sequence = mk_sequence(vec![BlockDefinition::Parallel(Box::new(ParallelDef {
+        id: BlockId::new("parallel"),
+        branches: vec![vec![mk_step("never-run", "noop")]],
+    }))]);
+    storage.create_sequence(&sequence).await.unwrap();
+    let mut instance = mk_instance(sequence.id);
+    instance.context.runtime.total_steps_executed = 3;
+    storage.create_instance(&instance).await.unwrap();
+
+    let handlers = Arc::new(registry());
+    let mut config = default_config();
+    config.max_steps_per_instance = 2;
+    tick_with_config(&storage, &handlers, &config).await;
+
+    let failed = storage.get_instance(instance.id).await.unwrap().unwrap();
+    assert_eq!(failed.state, InstanceState::Failed);
+    assert_eq!(failed.context.runtime.total_steps_executed, 3);
+    assert!(
+        storage
+            .get_execution_tree(instance.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

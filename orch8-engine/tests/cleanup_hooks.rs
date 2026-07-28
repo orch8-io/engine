@@ -158,6 +158,7 @@ async fn on_cancel_cleanup_runs_on_signal_cancel() {
 /// handler would silently no-op instead of running. This drives an actual
 /// WASM plugin through `on_failure` and asserts its output was persisted,
 /// proving the cleanup hook didn't just log-and-skip it.
+#[cfg(feature = "wasm")]
 #[tokio::test]
 async fn on_failure_cleanup_runs_for_registered_wasm_plugin_handler() {
     use std::io::Write;

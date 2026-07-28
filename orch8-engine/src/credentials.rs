@@ -311,12 +311,34 @@ mod tests {
     use super::*;
     use orch8_storage::AdminStore;
 
-    #[test]
-    fn resolve_string_ignores_non_reference() {
-        // A non-credentials string is left untouched.
-        let s = "hello";
-        let prefix_ok = !s.starts_with(SCHEME);
-        assert!(prefix_ok);
+    fn credential(id: &str, kind: CredentialKind) -> CredentialDef {
+        let now = chrono::Utc::now();
+        CredentialDef {
+            id: id.into(),
+            tenant_id: String::new(),
+            name: id.into(),
+            kind,
+            value: SecretString::new(r#"{"token":"secret"}"#.into()),
+            expires_at: None,
+            refresh_url: None,
+            refresh_token: None,
+            enabled: true,
+            description: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_string_ignores_non_reference() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            resolve_string(&storage, "tenant", "hello").await,
+            Ok(None)
+        ));
     }
 
     #[tokio::test]
@@ -529,5 +551,144 @@ mod tests {
         });
         resolve_in_value(&storage, "t1", &mut val).await.unwrap();
         assert_eq!(val["outer"]["inner"]["token"], "deep-token");
+    }
+
+    #[tokio::test]
+    async fn resolve_recurses_into_arrays() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        storage
+            .create_credential(&credential("array-token", CredentialKind::ApiKey))
+            .await
+            .unwrap();
+        let mut value = serde_json::json!([
+            "unchanged",
+            "credentials://array-token/token",
+            {"nested": ["credentials://array-token/token"]}
+        ]);
+
+        resolve_in_value(&storage, "tenant", &mut value)
+            .await
+            .unwrap();
+
+        assert_eq!(value[0], "unchanged");
+        assert_eq!(value[1], "secret");
+        assert_eq!(value[2]["nested"][0], "secret");
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_reference_without_an_id() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut value = serde_json::json!("credentials://");
+
+        let error = resolve_in_value(&storage, "tenant", &mut value)
+            .await
+            .unwrap_err();
+
+        let StepError::Permanent { message, .. } = error else {
+            panic!("missing credential id should be a permanent error");
+        };
+        assert!(message.contains("missing id"));
+        assert!(message.contains("credentials://"));
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_missing_structured_field() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        storage
+            .create_credential(&credential("structured", CredentialKind::ApiKey))
+            .await
+            .unwrap();
+        let mut value = serde_json::json!("credentials://structured/missing");
+
+        let error = resolve_in_value(&storage, "tenant", &mut value)
+            .await
+            .unwrap_err();
+
+        let StepError::Permanent { message, .. } = error else {
+            panic!("missing credential field should be a permanent error");
+        };
+        assert!(message.contains("credential 'structured'"));
+        assert!(message.contains("no field 'missing'"));
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_non_oauth_credentials_before_network_access() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let value = credential("api-key", CredentialKind::ApiKey);
+
+        let error = refresh_credential(&storage, value).await.unwrap_err();
+
+        assert!(error.contains("is not oauth2"));
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_refresh_url() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut value = credential("oauth", CredentialKind::Oauth2);
+        value.refresh_token = Some(SecretString::new("refresh-token".into()));
+
+        let error = refresh_credential(&storage, value).await.unwrap_err();
+
+        assert_eq!(error, "credential 'oauth' has no refresh_url");
+    }
+
+    #[tokio::test]
+    async fn refresh_requires_refresh_token() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut value = credential("oauth", CredentialKind::Oauth2);
+        value.refresh_url = Some("https://example.com/token".into());
+
+        let error = refresh_credential(&storage, value).await.unwrap_err();
+
+        assert_eq!(error, "credential 'oauth' has no refresh_token");
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_internal_token_endpoint() {
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let mut value = credential("oauth", CredentialKind::Oauth2);
+        value.refresh_url = Some("http://127.0.0.1/token".into());
+        value.refresh_token = Some(SecretString::new("refresh-token".into()));
+
+        let error = refresh_credential(&storage, value).await.unwrap_err();
+
+        assert!(error.contains("targets an internal or non-public address"));
+    }
+
+    #[tokio::test]
+    async fn refresh_loop_stops_when_cancelled() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run_refresh_loop(
+                storage,
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_secs(300),
+                cancel,
+            ),
+        )
+        .await
+        .expect("cancelled refresh loop should stop promptly");
     }
 }

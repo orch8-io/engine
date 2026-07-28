@@ -48,7 +48,9 @@ file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
 
 [dev-dependencies]
-tokio = { workspace = true }
+# Tests use `#[tokio::test(start_paused = true)]`; declare `test-util`
+# directly instead of relying on feature unification from optional deps.
+tokio = { workspace = true, features = ["test-util"] }
 criterion.workspace = true
 serial_test.workspace = true
 # Build tiny wasm modules from WAT text for wasm_plugin.rs execution-path tests.
