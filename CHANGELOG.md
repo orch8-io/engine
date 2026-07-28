@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-28
+
 ### Added
 
 - **Bounded concurrent `Parallel` execution and map/reduce reuse**: the scheduler can now run two ready, registered in-process steps concurrently when they belong to distinct branches of the same `Parallel` ancestor, while preserving durable branch state and awaiting both outcomes. `ForEach` remains the bounded map/reduce primitive and benefits from this dispatch path without introducing an unbounded task fan-out API. SQLite overlap/cap coverage, a PostgreSQL two-sleep E2E, and a Criterion comparison verify the concurrency ceiling and latency improvement; the benchmark midpoint fell from 59.846 ms to 42.743 ms. Existing parent/child instances, persisted execution trees, signals, and wakeups remain the durable spawn/join primitive rather than adding a second lifecycle model.
@@ -438,7 +440,8 @@ First public pre-release.
 
 ---
 
-[Unreleased]: https://github.com/orch8-io/engine/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/orch8-io/engine/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/orch8-io/engine/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/orch8-io/engine/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/orch8-io/engine/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/orch8-io/engine/compare/v0.3.1...v0.4.0
