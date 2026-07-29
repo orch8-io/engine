@@ -62,9 +62,11 @@ pub(crate) struct ListPinsQuery {
 )]
 pub(crate) async fn set_version_pin(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(req): Json<SetVersionPinRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
     let tenant_id = crate::auth::enforce_tenant_create(
         &tenant_ctx,
         &orch8_types::ids::TenantId::unchecked(req.tenant_id),
@@ -97,9 +99,11 @@ pub(crate) async fn set_version_pin(
 )]
 pub(crate) async fn list_version_pins(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(q): Query<ListPinsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
     let pins = state
         .storage
@@ -119,9 +123,11 @@ pub(crate) async fn list_version_pins(
 )]
 pub(crate) async fn delete_version_pin(
     State(state): State<AppState>,
+    admin: OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
     Path((tenant_id, handler_name)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
     crate::auth::enforce_tenant_access(
         &tenant_ctx,
         &orch8_types::ids::TenantId::unchecked(&tenant_id),
