@@ -9,6 +9,8 @@ on:
       - "orch8-engine/**"
       - "orch8-storage/**"
       - "orch8-types/**"
+      - "packages/**"
+      - "scripts/check-sdk-versions.sh"
       - ".github/workflows/mobile.yml"
   pull_request:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - "orch8-engine/**"
       - "orch8-storage/**"
       - "orch8-types/**"
+      - "packages/**"
+      - "scripts/check-sdk-versions.sh"
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
 

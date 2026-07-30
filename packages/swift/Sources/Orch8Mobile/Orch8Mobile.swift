@@ -4,3 +4,6 @@
 // provides a namespace for any convenience extensions.
 
 @_exported import Orch8MobileFFI
+
+/// Version of the Orch8 engine embedded in this SDK release.
+public let orch8MobileVersion = "0.7.0"

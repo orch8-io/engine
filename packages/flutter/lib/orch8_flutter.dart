@@ -36,7 +36,7 @@ class Orch8Config {
     this.telemetryEnabled = true,
     this.environment = 'production',
     this.rootPublicKey = '',
-    this.sdkVersion = '0.1.0',
+    this.sdkVersion = '0.7.0',
   });
 
   Map<String, dynamic> toMap() => {

@@ -49,6 +49,9 @@ jobs:
           fi
           echo "Tag ${TAG} matches workspace version ${CRATE_VERSION}."
 
+      - name: SDK versions match workspace version
+        run: ./scripts/check-sdk-versions.sh
+
       - name: CI is green on the tagged SHA
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

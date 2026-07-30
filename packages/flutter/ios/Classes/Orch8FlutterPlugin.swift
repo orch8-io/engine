@@ -59,7 +59,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             telemetryEnabled: args["telemetryEnabled"] as? Bool ?? true,
             environment: args["environment"] as? String ?? "production",
             rootPublicKey: args["rootPublicKey"] as? String ?? "",
-            sdkVersion: args["sdkVersion"] as? String ?? "0.1.0"
+            sdkVersion: args["sdkVersion"] as? String ?? "0.7.0"
         )
 
         do {

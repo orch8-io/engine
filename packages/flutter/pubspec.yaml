@@ -1,6 +1,6 @@
 name: orch8_flutter
 description: Flutter plugin for the Orch8 Mobile SDK — server-configurable on-device workflows.
-version: 0.1.0
+version: 0.7.0
 homepage: https://github.com/orch8-io/orch8-flutter
 
 environment:
