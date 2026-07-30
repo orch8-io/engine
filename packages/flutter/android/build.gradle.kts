@@ -22,5 +22,5 @@ android {
 }
 
 dependencies {
-    implementation("io.orch8:orch8-mobile:0.1.0")
+    implementation("io.orch8:orch8-mobile:0.7.0")
 }

@@ -31,7 +31,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
                 telemetryEnabled = if (config.hasKey("telemetryEnabled")) config.getBoolean("telemetryEnabled") else true,
                 environment = config.getString("environment") ?: "production",
                 rootPublicKey = config.getString("rootPublicKey") ?: "",
-                sdkVersion = config.getString("sdkVersion") ?: "0.1.0",
+                sdkVersion = config.getString("sdkVersion") ?: "0.7.0",
             )
 
             engine = MobileEngine(dbPath, cfg)
