@@ -1,5 +1,5 @@
 {
-  "name": "react-native-orch8",
+  "name": "@orch8.io/react-native-orch8",
   "version": "0.7.1",
   "description": "React Native bridge for the Orch8 Mobile SDK",
   "main": "src/index.ts",
