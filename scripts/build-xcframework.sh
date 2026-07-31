@@ -9,6 +9,7 @@ set -euo pipefail
 
 PROFILE="debug"
 CARGO_FLAGS=""
+export IPHONEOS_DEPLOYMENT_TARGET="16.0"
 if [[ "${1:-}" == "--release" ]]; then
     PROFILE="mobile-release"
     CARGO_FLAGS="--profile mobile-release"
@@ -17,7 +18,7 @@ fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${ROOT}/target/xcframework-build"
 rm -rf "${BUILD}"
-mkdir -p "${BUILD}/headers"
+mkdir -p "${BUILD}/headers" "${BUILD}/simulator"
 
 echo "==> Building iOS targets (${PROFILE})…"
 for TARGET in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
@@ -41,7 +42,7 @@ echo "==> Creating fat simulator library…"
 lipo -create \
     "target/aarch64-apple-ios-sim/${PROFILE}/liborch8_mobile.a" \
     "target/x86_64-apple-ios/${PROFILE}/liborch8_mobile.a" \
-    -output "${BUILD}/liborch8_mobile-sim.a"
+    -output "${BUILD}/simulator/liborch8_mobile.a"
 
 # Rename modulemap for Xcode compatibility.
 cp "${BUILD}/headers/Orch8MobileFFI.modulemap" "${BUILD}/headers/module.modulemap"
@@ -51,9 +52,11 @@ rm -rf "${ROOT}/packages/swift/Orch8Mobile.xcframework"
 xcodebuild -create-xcframework \
     -library "target/aarch64-apple-ios/${PROFILE}/liborch8_mobile.a" \
     -headers "${BUILD}/headers" \
-    -library "${BUILD}/liborch8_mobile-sim.a" \
+    -library "${BUILD}/simulator/liborch8_mobile.a" \
     -headers "${BUILD}/headers" \
     -output "${ROOT}/packages/swift/Orch8Mobile.xcframework"
+
+"${ROOT}/scripts/check-xcframework.sh" "${ROOT}/packages/swift/Orch8Mobile.xcframework"
 
 # Copy generated Swift source alongside the package.
 cp "${BUILD}/headers/Orch8Mobile.swift" \

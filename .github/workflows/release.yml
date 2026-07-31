@@ -49,7 +49,7 @@ jobs:
           fi
           echo "Tag ${TAG} matches workspace version ${CRATE_VERSION}."
 
-      - name: SDK versions match workspace version
+      - name: SDK versions are internally consistent
         run: ./scripts/check-sdk-versions.sh
 
       - name: CI is green on the tagged SHA
@@ -477,17 +477,19 @@ jobs:
           cp artifacts/bindings/swift/Orch8MobileFFI.h build/headers/
           cp artifacts/bindings/swift/Orch8MobileFFI.modulemap build/headers/module.modulemap
 
+          mkdir -p build/ios-simulator
           lipo -create \
             build/ios-sim-arm64/liborch8_mobile.a \
             build/ios-sim-x64/liborch8_mobile.a \
-            -output build/liborch8_mobile-sim.a
+            -output build/ios-simulator/liborch8_mobile.a
 
           xcodebuild -create-xcframework \
             -library build/ios-device/liborch8_mobile.a -headers build/headers \
-            -library build/liborch8_mobile-sim.a -headers build/headers \
+            -library build/ios-simulator/liborch8_mobile.a -headers build/headers \
             -output build/Orch8Mobile.xcframework
 
           cp LICENSE build/Orch8Mobile.xcframework/LICENSE
+          ./scripts/check-xcframework.sh build/Orch8Mobile.xcframework
 
       - name: Package XCFramework
         run: |

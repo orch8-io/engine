@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-07-30
+
+### Fixed
+
+- **Installable Apple mobile artifacts**: XCFramework device and simulator
+  slices now share the `liborch8_mobile.a` basename required by CocoaPods.
+  Release and mobile CI validate slice names and Mach-O deployment metadata,
+  and all Apple packages consistently require iOS 16 rather than advertising
+  an unsupported iOS 15 target or unnecessarily restricting consumers to iOS
+  26.
+
 ## [0.7.0] — 2026-07-28
 
 ### Added
