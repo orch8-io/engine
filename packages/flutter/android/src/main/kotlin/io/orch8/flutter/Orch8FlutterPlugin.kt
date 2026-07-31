@@ -67,7 +67,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
                 telemetryEnabled = args["telemetryEnabled"] as? Boolean ?: true,
                 environment = args["environment"] as? String ?: "production",
                 rootPublicKey = args["rootPublicKey"] as? String ?: "",
-                sdkVersion = args["sdkVersion"] as? String ?: "0.7.0",
+                sdkVersion = args["sdkVersion"] as? String ?: "0.7.1",
             )
 
             engine = MobileEngine(dbPath, cfg)

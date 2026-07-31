@@ -75,6 +75,8 @@ jobs:
         run: ./scripts/test-review-fix-guards.sh
       - name: SDK version alignment
         run: ./scripts/check-sdk-versions.sh
+      - name: SDK packaging contracts
+        run: ./scripts/check-sdk-packaging.sh
       - name: Expanded test counts
         run: bash ./scripts/check-expanded-test-counts.sh
       - name: Check

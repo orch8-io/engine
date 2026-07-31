@@ -1,0 +1,6 @@
+.dart_tool/
+.packages
+build/
+ios/Pods/
+ios/.symlinks/
+pubspec.lock

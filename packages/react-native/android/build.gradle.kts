@@ -1,9 +1,12 @@
+import com.android.build.api.dsl.LibraryExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
 }
 
-android {
+extensions.configure<LibraryExtension> {
     namespace = "io.orch8.reactnative"
     compileSdk = 35
 
@@ -16,12 +19,19 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
+}
+
+repositories {
+    maven("https://raw.githubusercontent.com/orch8-io/maven/main")
 }
 
 dependencies {
     implementation("com.facebook.react:react-android:+")
-    implementation(project(":orch8-mobile"))
+    implementation("io.orch8:orch8-mobile:0.7.1")
 }

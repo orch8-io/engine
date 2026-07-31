@@ -42,7 +42,7 @@ class Orch8Module: RCTEventEmitter {
             telemetryEnabled: config["telemetryEnabled"] as? Bool ?? true,
             environment: config["environment"] as? String ?? "production",
             rootPublicKey: config["rootPublicKey"] as? String ?? "",
-            sdkVersion: config["sdkVersion"] as? String ?? "0.7.0"
+            sdkVersion: config["sdkVersion"] as? String ?? "0.7.1"
         )
 
         do {

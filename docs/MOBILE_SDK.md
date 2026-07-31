@@ -2,10 +2,9 @@
 
 Server-configurable workflows running on-device. Update onboarding flows, promotions, and feature journeys without app store deployments.
 
-This document describes the bindings generated from the current workspace
-(`0.7.1`). Published Swift and Android artifacts may version independently.
-Replace `<published-version>` below with a version that exists in your package
-repository; do not assume it matches the Rust workspace version.
+This document describes the `0.7.1` SDK family. Engine and SDK releases use
+unified versioning: Swift, Android, Flutter, and React Native packages at
+`0.7.1` embed or resolve Orch8 Engine `0.7.1`.
 
 ## Architecture
 
@@ -38,7 +37,7 @@ Add the package dependency in Xcode or `Package.swift`:
 dependencies: [
     .package(
         url: "https://github.com/orch8-io/orch8-mobile-swift",
-        exact: "<published-version>"
+        exact: "0.7.1"
     ),
 ]
 ```
@@ -53,11 +52,15 @@ Or use the local path during development:
 
 ### Android (Gradle)
 
-Add the AAR dependency:
+Add Orch8's public Maven repository and the AAR dependency:
 
 ```kotlin
+repositories {
+    maven("https://raw.githubusercontent.com/orch8-io/maven/main")
+}
+
 dependencies {
-    implementation("io.orch8:orch8-mobile:<published-version>")
+    implementation("io.orch8:orch8-mobile:0.7.1")
 }
 ```
 
@@ -68,6 +71,22 @@ implementation(project(":orch8-mobile"))
 ```
 
 **Requirements:** Android API 24+ (Android 7.0), JDK 17.
+
+### Flutter
+
+```yaml
+dependencies:
+  orch8_flutter: ^0.7.1
+```
+
+### React Native
+
+```bash
+npm install react-native-orch8@0.7.1
+```
+
+Run `pod install` after installation on iOS. Both wrappers resolve the native
+SDK at exactly `0.7.1`.
 
 ## Quick Start
 
