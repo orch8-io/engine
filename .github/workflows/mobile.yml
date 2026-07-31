@@ -188,17 +188,19 @@ jobs:
           cp artifacts/bindings/swift/Orch8MobileFFI.h build/headers/
           cp artifacts/bindings/swift/Orch8MobileFFI.modulemap build/headers/module.modulemap
 
+          mkdir -p build/ios-simulator
           lipo -create \
             build/ios-sim-arm64/liborch8_mobile.a \
             build/ios-sim-x64/liborch8_mobile.a \
-            -output build/liborch8_mobile-sim.a
+            -output build/ios-simulator/liborch8_mobile.a
 
           xcodebuild -create-xcframework \
             -library build/ios-device/liborch8_mobile.a -headers build/headers \
-            -library build/liborch8_mobile-sim.a -headers build/headers \
+            -library build/ios-simulator/liborch8_mobile.a -headers build/headers \
             -output build/Orch8Mobile.xcframework
 
           cp LICENSE build/Orch8Mobile.xcframework/LICENSE
+          ./scripts/check-xcframework.sh build/Orch8Mobile.xcframework
 
       - name: Upload XCFramework
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
