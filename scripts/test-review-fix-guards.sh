@@ -161,8 +161,25 @@ assert_contains .github/workflows/release.yml 'bash ../../scripts/embed-aar-lice
 assert_contains .github/workflows/release.yml 'cp LICENSE bindings/LICENSE'
 assert_contains .github/workflows/mobile.yml 'cp LICENSE build/Orch8Mobile.xcframework/LICENSE'
 assert_contains .github/workflows/mobile.yml 'bash ../../scripts/embed-aar-license.sh'
+assert_contains .github/workflows/mobile.yml 'publish_version:'
+assert_contains .github/workflows/mobile.yml "startsWith(github.ref, 'refs/tags/v') || inputs.publish_version != ''"
+assert_contains .github/workflows/mobile.yml 'ORCH8_MOBILE_VERSION: ${{ inputs.publish_version || github.ref_name }}'
+assert_contains .github/workflows/mobile.yml 'requested_version="${ORCH8_MOBILE_VERSION#v}"'
+assert_contains .github/workflows/mobile.yml 'does not match VERSION_NAME=$checked_in_version'
 assert_not_contains .github/workflows/mobile.yml 'gh release create'
 assert_not_contains .github/workflows/mobile.yml 'gh release upload'
+assert_contains packages/flutter/.github/workflows/publish.yml 'workflow_dispatch:'
+assert_contains packages/flutter/.github/workflows/publish.yml 'https://pub.dev/api/packages/${PACKAGE}/versions/${VERSION}'
+assert_contains packages/flutter/.github/workflows/publish.yml "if: needs.check.outputs.exists != 'true'"
+assert_contains packages/react-native/.github/workflows/publish.yml 'workflow_dispatch:'
+assert_contains packages/react-native/.github/workflows/publish.yml 'npm view "${PACKAGE}@${VERSION}" version'
+assert_contains packages/react-native/.github/workflows/publish.yml "if: steps.registry.outputs.exists != 'true'"
+assert_contains packages/react-native/package.json '"url": "git+https://github.com/orch8-io/react-native-orch8.git"'
+android_version_file="$repo_root/packages/android/orch8-mobile/build.gradle.kts"
+release_version_line="$(grep -nF 'providers.environmentVariable("ORCH8_MOBILE_VERSION")' "$android_version_file" | cut -d: -f1)"
+fallback_version_line="$(grep -nF 'providers.gradleProperty("VERSION_NAME")' "$android_version_file" | cut -d: -f1)"
+[[ -n "$release_version_line" && -n "$fallback_version_line" && "$release_version_line" -lt "$fallback_version_line" ]] \
+    || fail "ORCH8_MOBILE_VERSION must take precedence over the checked-in VERSION_NAME"
 assert_contains packages/android/orch8-mobile/build.gradle.kts 'name.set("Business Source License 1.1")'
 assert_not_contains packages/android/orch8-mobile/build.gradle.kts 'Apache License 2.0'
 assert_contains .github/workflows/ci.yml 'Verify Cloud management surface'

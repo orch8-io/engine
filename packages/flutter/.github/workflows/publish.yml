@@ -3,9 +3,50 @@ name: Publish to pub.dev
 on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
 
 jobs:
+  check:
+    name: Check registry
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.registry.outputs.exists }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Read and validate package version
+        id: package
+        shell: bash
+        run: |
+          package="$(sed -n 's/^name:[[:space:]]*//p' pubspec.yaml)"
+          version="$(sed -n 's/^version:[[:space:]]*\([^+[:space:]]*\).*/\1/p' pubspec.yaml)"
+          test -n "$package" && test -n "$version"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pubspec version $version."
+            exit 1
+          fi
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check whether the version is already published
+        id: registry
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if curl -fsS "https://pub.dev/api/packages/${PACKAGE}/versions/${VERSION}" > /dev/null; then
+            echo "${PACKAGE} ${VERSION} is already on pub.dev; treating this run as verified."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${PACKAGE} ${VERSION} is not on pub.dev; publication is required."
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::error::pub.dev only authorizes new publications from version-tag pushes."
+              exit 1
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
   publish:
+    needs: check
+    if: needs.check.outputs.exists != 'true'
     permissions:
       id-token: write
     uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1

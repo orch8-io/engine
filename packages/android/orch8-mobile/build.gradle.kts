@@ -5,8 +5,11 @@ plugins {
 }
 
 group = "io.orch8"
-version = providers.gradleProperty("VERSION_NAME")
-    .orElse(providers.environmentVariable("ORCH8_MOBILE_VERSION"))
+// A release tag is authoritative. Keep the checked-in VERSION_NAME as the
+// local/CI default, but never let it override the version supplied by the
+// tag-publishing workflow.
+version = providers.environmentVariable("ORCH8_MOBILE_VERSION")
+    .orElse(providers.gradleProperty("VERSION_NAME"))
     .orElse("0.0.0-local")
     .get()
     .removePrefix("v")

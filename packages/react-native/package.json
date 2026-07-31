@@ -16,7 +16,10 @@
     "typescript": "tsc --noEmit"
   },
   "keywords": ["react-native", "orch8", "workflow", "orchestration"],
-  "repository": "https://github.com/orch8-io/react-native-orch8",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orch8-io/react-native-orch8.git"
+  },
   "license": "BUSL-1.1",
   "publishConfig": {
     "access": "public",

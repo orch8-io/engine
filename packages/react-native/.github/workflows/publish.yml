@@ -3,6 +3,7 @@ name: Publish npm package
 on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,4 +22,36 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typescript
-      - run: npm publish --provenance --access public
+      - name: Read and validate package version
+        id: package
+        shell: bash
+        run: |
+          package="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $version."
+            exit 1
+          fi
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check whether the version is already published
+        id: registry
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if npm view "${PACKAGE}@${VERSION}" version > /dev/null 2>&1; then
+            echo "${PACKAGE} ${VERSION} is already on npm; treating this run as verified."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${PACKAGE} ${VERSION} is not on npm; publication is required."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish npm package
+        if: steps.registry.outputs.exists != 'true'
+        run: npm publish --provenance --access public
+      - name: Verify npm package
+        env:
+          PACKAGE: ${{ steps.package.outputs.package }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: test "$(npm view "${PACKAGE}@${VERSION}" version)" = "$VERSION"

@@ -23,6 +23,11 @@ on:
       - "scripts/check-sdk-versions.sh"
       - ".github/workflows/mobile.yml"
   workflow_dispatch:
+    inputs:
+      publish_version:
+        description: "Android package version to publish from main (for release recovery)"
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -256,13 +261,20 @@ jobs:
           name: orch8-mobile.aar
           path: packages/android/orch8-mobile/build/outputs/aar/orch8-mobile-release.aar
       - name: Publish Android package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_version != ''
         working-directory: packages/android
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ github.token }}
-          ORCH8_MOBILE_VERSION: ${{ github.ref_name }}
-        run: gradle :orch8-mobile:publishReleasePublicationToGitHubPackagesRepository
+          ORCH8_MOBILE_VERSION: ${{ inputs.publish_version || github.ref_name }}
+        run: |
+          requested_version="${ORCH8_MOBILE_VERSION#v}"
+          checked_in_version="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
+          if [[ "$requested_version" != "$checked_in_version" ]]; then
+            echo "::error::Requested Android package version $requested_version does not match VERSION_NAME=$checked_in_version."
+            exit 1
+          fi
+          gradle :orch8-mobile:publishReleasePublicationToGitHubPackagesRepository
 
   # GitHub Release creation and native release assets are owned exclusively by
   # release.yml. Keeping a second publisher here creates a race and can produce
