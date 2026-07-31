@@ -161,6 +161,11 @@ assert_contains .github/workflows/release.yml 'bash ../../scripts/embed-aar-lice
 assert_contains .github/workflows/release.yml 'cp LICENSE bindings/LICENSE'
 assert_contains .github/workflows/mobile.yml 'cp LICENSE build/Orch8Mobile.xcframework/LICENSE'
 assert_contains .github/workflows/mobile.yml 'bash ../../scripts/embed-aar-license.sh'
+assert_contains .github/workflows/mobile.yml 'publish_version:'
+assert_contains .github/workflows/mobile.yml "startsWith(github.ref, 'refs/tags/v') || inputs.publish_version != ''"
+assert_contains .github/workflows/mobile.yml 'ORCH8_MOBILE_VERSION: ${{ inputs.publish_version || github.ref_name }}'
+assert_contains .github/workflows/mobile.yml 'requested_version="${ORCH8_MOBILE_VERSION#v}"'
+assert_contains .github/workflows/mobile.yml 'does not match VERSION_NAME=$checked_in_version'
 assert_not_contains .github/workflows/mobile.yml 'gh release create'
 assert_not_contains .github/workflows/mobile.yml 'gh release upload'
 assert_contains packages/flutter/.github/workflows/publish.yml 'workflow_dispatch:'
