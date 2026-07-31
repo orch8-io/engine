@@ -174,6 +174,7 @@ assert_contains packages/flutter/.github/workflows/publish.yml "if: needs.check.
 assert_contains packages/react-native/.github/workflows/publish.yml 'workflow_dispatch:'
 assert_contains packages/react-native/.github/workflows/publish.yml 'npm view "${PACKAGE}@${VERSION}" version'
 assert_contains packages/react-native/.github/workflows/publish.yml "if: steps.registry.outputs.exists != 'true'"
+assert_contains packages/react-native/package.json '"url": "git+https://github.com/orch8-io/react-native-orch8.git"'
 android_version_file="$repo_root/packages/android/orch8-mobile/build.gradle.kts"
 release_version_line="$(grep -nF 'providers.environmentVariable("ORCH8_MOBILE_VERSION")' "$android_version_file" | cut -d: -f1)"
 fallback_version_line="$(grep -nF 'providers.gradleProperty("VERSION_NAME")' "$android_version_file" | cut -d: -f1)"
