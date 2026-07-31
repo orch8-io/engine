@@ -37,6 +37,10 @@ jobs:
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "${PACKAGE} ${VERSION} is not on pub.dev; publication is required."
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::error::pub.dev only authorizes new publications from version-tag pushes."
+              exit 1
+            fi
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
