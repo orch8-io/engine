@@ -6,4 +6,4 @@
 @_exported import Orch8MobileFFI
 
 /// Version of the Orch8 engine embedded in this SDK release.
-public let orch8MobileVersion = "0.7.0"
+public let orch8MobileVersion = "0.7.1"

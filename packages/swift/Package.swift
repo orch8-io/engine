@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "Orch8Mobile",
     platforms: [
-        .iOS(.v15),
+        .iOS(.v16),
     ],
     products: [
         .library(
@@ -20,7 +20,8 @@ let package = Package(
         ),
         .binaryTarget(
             name: "Orch8MobileFFI",
-            path: "Orch8Mobile.xcframework"
+            url: "https://github.com/orch8-io/engine/releases/download/v0.7.1/Orch8Mobile-v0.7.1.xcframework.zip",
+            checksum: "0a83ce860c5b41bb7d5dcd9401e4466eb48fc0513658194293a4ca691b3f61d5"
         ),
     ]
 )

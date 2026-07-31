@@ -1,7 +1,6 @@
 library orch8_flutter;
 
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/services.dart';
 
 class Orch8Config {
@@ -36,7 +35,7 @@ class Orch8Config {
     this.telemetryEnabled = true,
     this.environment = 'production',
     this.rootPublicKey = '',
-    this.sdkVersion = '0.7.0',
+    this.sdkVersion = '0.7.1',
   });
 
   Map<String, dynamic> toMap() => {

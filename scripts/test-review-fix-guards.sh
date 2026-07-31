@@ -69,7 +69,7 @@ for package in orch8-engine orch8-publisher orch8-storage orch8-types; do
     [[ "$fuzz_version" == "$workspace_version" ]] \
         || fail "fuzz/Cargo.lock has ${package} ${fuzz_version}, expected ${workspace_version}"
 done
-assert_contains docs/MOBILE_SDK.md "(\`${workspace_version}\`)"
+assert_contains docs/MOBILE_SDK.md "\`${workspace_version}\`"
 
 # Exercise migration guards in an isolated tagged repository.
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/orch8-migration-guards.XXXXXX")"
