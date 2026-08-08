@@ -1302,6 +1302,80 @@ pub async fn cancel_subtree(
     Ok(())
 }
 
+/// Mark every non-terminal node in one or more branch subtrees as skipped.
+///
+/// Router branches can contain nested composites, so changing only the direct
+/// branch child leaves its descendants permanently Pending. Terminal nodes are
+/// preserved, but their non-terminal descendants are still skipped to repair
+/// any already-inconsistent subtree.
+pub async fn skip_subtrees(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    tree: &[ExecutionNode],
+    root_ids: &[ExecutionNodeId],
+) -> Result<(), EngineError> {
+    if root_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = tree
+        .iter()
+        .filter_map(|n| n.parent_id.map(|parent| (parent, n.id)))
+        .collect();
+    children_of.sort_unstable_by_key(|&(parent, _)| parent);
+
+    let mut subtree_ids = root_ids.to_vec();
+    let mut stack = root_ids.to_vec();
+    while let Some(current) = stack.pop() {
+        let start = children_of.partition_point(|&(parent, _)| parent < current);
+        for &(parent, child) in children_of.iter().skip(start) {
+            if parent != current {
+                break;
+            }
+            stack.push(child);
+            subtree_ids.push(child);
+        }
+    }
+    subtree_ids.sort_unstable();
+    subtree_ids.dedup();
+
+    let nodes_to_skip: Vec<&ExecutionNode> = tree
+        .iter()
+        .filter(|node| {
+            subtree_ids.binary_search(&node.id).is_ok()
+                && !matches!(
+                    node.state,
+                    NodeState::Skipped
+                        | NodeState::Cancelled
+                        | NodeState::Completed
+                        | NodeState::Failed
+                )
+        })
+        .collect();
+    let node_ids: Vec<ExecutionNodeId> = nodes_to_skip.iter().map(|node| node.id).collect();
+
+    if node_ids.is_empty() {
+        return Ok(());
+    }
+
+    storage
+        .update_nodes_state(&node_ids, NodeState::Skipped)
+        .await?;
+
+    let waiting_block_ids: Vec<String> = nodes_to_skip
+        .iter()
+        .filter(|node| node.state == NodeState::Waiting)
+        .map(|node| node.block_id.to_string())
+        .collect();
+    if !waiting_block_ids.is_empty() {
+        storage
+            .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &waiting_block_ids)
+            .await?;
+    }
+
+    Ok(())
+}
+
 /// Activate all `Pending` children by flipping them to `Running`.
 ///
 /// Use this for composites that need concurrent fan-out (`race`, `parallel`).
