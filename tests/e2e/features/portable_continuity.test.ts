@@ -1241,7 +1241,7 @@ describe("Portable Continuity", () => {
           provider_receipt_id: "forged-receipt",
         }),
       (error: unknown) => {
-        assert.equal((error as ApiError).status, 404);
+        assert.equal((error as ApiError).status, 409);
         return true;
       },
     );

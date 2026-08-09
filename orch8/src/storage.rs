@@ -184,4 +184,106 @@ mod tests {
             "path should appear: {debug}"
         );
     }
+
+    #[test]
+    fn postgres_debug_handles_passwordless_and_invalid_urls() {
+        let passwordless = format!("{:?}", Storage::postgres("postgres://user@host/db"));
+        assert!(passwordless.contains("postgres://user@host/db"));
+
+        let invalid = format!("{:?}", Storage::postgres("not a connection URL"));
+        assert!(invalid.contains("Postgres(<invalid-url>)"));
+        assert!(!invalid.contains("not a connection URL"));
+    }
+
+    #[tokio::test]
+    async fn in_memory_storage_connects_with_artifacts_disabled_by_default() {
+        let backend = Storage::sqlite_in_memory().connect().await.unwrap();
+
+        assert!(!backend.artifacts_enabled());
+        let error = backend
+            .get_artifact("missing/key")
+            .await
+            .expect_err("disabled artifacts must fail loudly");
+        assert!(error.to_string().contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn in_memory_artifact_configuration_round_trips_bytes() {
+        let backend = Storage::sqlite_in_memory()
+            .artifacts_in_memory()
+            .connect()
+            .await
+            .unwrap();
+        let instance_id = orch8_types::ids::InstanceId::new();
+
+        assert!(backend.artifacts_enabled());
+        let artifact = backend
+            .put_artifact(
+                instance_id,
+                "application/octet-stream",
+                bytes::Bytes::from_static(b"artifact payload"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.get_artifact(&artifact.key).await.unwrap().unwrap(),
+            b"artifact payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_storage_and_local_artifacts_survive_reconnection() {
+        let root = std::env::temp_dir().join(format!("orch8-facade-{}", uuid::Uuid::new_v4()));
+        let database = root.join("engine.db");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir_all(&root).unwrap();
+        let instance_id = orch8_types::ids::InstanceId::new();
+
+        let backend = Storage::sqlite(&database)
+            .artifacts_local(&artifacts)
+            .connect()
+            .await
+            .unwrap();
+        let artifact = backend
+            .put_artifact(
+                instance_id,
+                "text/plain",
+                bytes::Bytes::from_static(b"persistent"),
+            )
+            .await
+            .unwrap();
+        drop(backend);
+
+        let reopened = Storage::sqlite(&database)
+            .artifacts_local(&artifacts)
+            .connect()
+            .await
+            .unwrap();
+        assert!(reopened.artifacts_enabled());
+        assert_eq!(
+            reopened.get_artifact(&artifact.key).await.unwrap().unwrap(),
+            b"persistent"
+        );
+
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_artifact_directory_must_be_valid_utf8() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let invalid_path = PathBuf::from(OsString::from_vec(vec![0xff]));
+        let result = Storage::sqlite_in_memory()
+            .artifacts_local(invalid_path)
+            .connect()
+            .await;
+        let Err(error) = result else {
+            panic!("non-UTF-8 artifact paths must be rejected");
+        };
+
+        assert!(error.to_string().contains("valid UTF-8"));
+    }
 }

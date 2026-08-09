@@ -132,3 +132,54 @@ async fn missing_fields_and_bad_status_are_rejected() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn outbox_batch_is_replay_safe_and_validates_before_writing() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let batch = json!({"events": [
+        {"tenant_id":"t1","event_name":"order.created","producer_event_id":"outbox-1","correlation_key":"order-1","payload":{"n":1}},
+        {"tenant_id":"t1","event_name":"order.created","producer_event_id":"outbox-2","correlation_key":"order-2","payload":{"n":2}}
+    ]});
+    for expected_duplicates in [[false, false], [true, true]] {
+        let response = client
+            .post(format!("{base}/events/batch"))
+            .header("X-Tenant-Id", "t1")
+            .json(&batch)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["outcomes"][0]["duplicate"], expected_duplicates[0]);
+        assert_eq!(body["outcomes"][1]["duplicate"], expected_duplicates[1]);
+    }
+
+    let invalid = json!({"events": [
+        {"tenant_id":"t1","event_name":"valid","producer_event_id":"not-written","correlation_key":"k"},
+        {"tenant_id":"t1","event_name":" ","producer_event_id":"bad","correlation_key":"k"}
+    ]});
+    let response = client
+        .post(format!("{base}/events/batch"))
+        .header("X-Tenant-Id", "t1")
+        .json(&invalid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let listed: Vec<Value> = client
+        .get(format!("{base}/events"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !listed
+            .iter()
+            .any(|event| event["producer_event_id"] == "not-written")
+    );
+}

@@ -74,6 +74,7 @@ use utoipa::OpenApi;
         crate::inspect::debug_template_endpoint,
         // Events
         crate::events::ingest_event,
+        crate::events::ingest_event_batch,
         crate::events::list_events,
         crate::events::get_event,
         // Workbench
@@ -127,6 +128,7 @@ use utoipa::OpenApi;
         crate::workers::heartbeat_task,
         crate::workers::list_tasks,
         crate::workers::task_stats,
+        crate::workers::list_task_attempts,
         crate::workers::list_workers,
         crate::workers::list_handlers,
         crate::workers::enqueue_command,

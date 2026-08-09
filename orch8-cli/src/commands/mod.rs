@@ -21,3 +21,8 @@ pub mod signal;
 pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;
+
+#[cfg(test)]
+mod request_contract_tests;
+#[cfg(test)]
+pub(crate) mod test_support;

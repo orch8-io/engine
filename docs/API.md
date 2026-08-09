@@ -408,8 +408,8 @@ Returns the step logs for an execution, oldest first, each annotated with its `b
 To attach worker logs, include a `logs` array in the complete/fail body:
 
 ```
-POST /workers/tasks/{id}/complete   # { worker_id, output, logs: [{ ts, level, message }] }
-POST /workers/tasks/{id}/fail       # { worker_id, message, retryable, logs: [...] }
+POST /workers/tasks/{id}/complete   # { worker_id, claim_epoch, output, logs: [{ ts, level, message }] }
+POST /workers/tasks/{id}/fail       # { worker_id, claim_epoch, message, retryable, logs: [...] }
 ```
 
 ---
@@ -814,6 +814,7 @@ POST /workers/tasks/poll
     "worker_id": "node-worker-42",
     "claimed_at": "2024-01-15T14:00:00Z",
     "heartbeat_at": "2024-01-15T14:00:00Z",
+    "claim_epoch": 1,
     "completed_at": null,
     "output": null,
     "error_message": null,
@@ -842,6 +843,7 @@ POST /workers/tasks/{task_id}/complete
 ```json
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "output": {
     "email_id": "msg-abc123",
     "delivered": true
@@ -852,6 +854,7 @@ POST /workers/tasks/{task_id}/complete
 | Field | Type | Description |
 |-------|------|-------------|
 | `worker_id` | string | Must match the worker that claimed the task |
+| `claim_epoch` | integer | Must match the claim generation returned by polling |
 | `output` | object | Result JSON (saved as BlockOutput) |
 
 **Response:** `200 OK`
@@ -875,6 +878,7 @@ POST /workers/tasks/{task_id}/fail
 ```json
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "message": "SMTP connection refused",
   "retryable": true
 }
@@ -883,6 +887,7 @@ POST /workers/tasks/{task_id}/fail
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `worker_id` | string | **required** | Must match claimer |
+| `claim_epoch` | integer | **required** | Must match the claim generation returned by polling |
 | `message` | string | **required** | Error description |
 | `retryable` | boolean | `false` | Whether the error is transient |
 
@@ -908,13 +913,19 @@ POST /workers/tasks/{task_id}/heartbeat
 
 ```json
 {
-  "worker_id": "node-worker-42"
+  "worker_id": "node-worker-42",
+  "claim_epoch": 1
 }
 ```
 
 **Response:** `200 OK`
 
 Send heartbeats every 15-30 seconds for long-running tasks. Tasks without a heartbeat for 60 seconds are reclaimed by the reaper and returned to the queue.
+
+All complete, fail, heartbeat, and checkpoint requests must echo the
+`claim_epoch` returned by polling. A stale generation receives `409 Conflict`,
+even if a replacement process uses the same `worker_id`. Inspect durable lease
+history with `GET /workers/tasks/{task_id}/attempts?limit=100`.
 
 An activity may make the heartbeat durable and resumable by also sending
 `checkpoint_seq` plus a JSON `checkpoint` (maximum 256 KiB). The response

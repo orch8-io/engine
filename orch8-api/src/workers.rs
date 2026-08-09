@@ -10,7 +10,9 @@ use uuid::Uuid;
 use orch8_types::filter::Pagination;
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
-use orch8_types::worker::WorkerTaskState;
+use orch8_types::worker::{
+    WorkerAttemptEventKind, WorkerClaim, WorkerTaskAttemptEvent, WorkerTaskState,
+};
 use orch8_types::worker_filter::WorkerTaskFilter;
 
 use orch8_types::execution::NodeState;
@@ -25,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/handlers", get(list_handlers))
         .route("/workers/tasks", get(list_tasks))
         .route("/workers/tasks/stats", get(task_stats))
+        .route("/workers/tasks/{id}/attempts", get(list_task_attempts))
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
@@ -41,6 +44,71 @@ pub fn routes() -> Router<AppState> {
             "/workers/version-pins/{tenant_id}/{handler_name}",
             axum::routing::delete(delete_version_pin),
         )
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AttemptQuery {
+    #[serde(default = "default_attempt_limit")]
+    limit: u32,
+}
+
+const fn default_attempt_limit() -> u32 {
+    100
+}
+
+#[utoipa::path(get, path = "/workers/tasks/{id}/attempts", tag = "workers",
+    params(("id" = Uuid, Path), ("limit" = Option<u32>, Query)),
+    responses((status = 200, body = Vec<WorkerTaskAttemptEvent>), (status = 404))
+)]
+pub(crate) async fn list_task_attempts(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(task_id): Path<Uuid>,
+    Query(query): Query<AttemptQuery>,
+) -> Result<Json<Vec<WorkerTaskAttemptEvent>>, ApiError> {
+    let task = state
+        .storage
+        .get_worker_task(task_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    let instance = state
+        .storage
+        .get_instance(task.instance_id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "instance"))?
+        .ok_or_else(|| ApiError::NotFound(format!("instance {}", task.instance_id)))?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &instance.tenant_id,
+        &format!("worker_task {task_id}"),
+    )?;
+    let events = state
+        .storage
+        .list_worker_task_attempt_events(task_id, query.limit.min(1000))
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task_attempt"))?;
+    Ok(Json(events))
+}
+
+async fn record_stale_rejection(
+    state: &AppState,
+    task_id: Uuid,
+    claim: &WorkerClaim,
+    reason: &str,
+) {
+    let event = WorkerTaskAttemptEvent {
+        id: Uuid::now_v7(),
+        task_id,
+        claim_epoch: claim.claim_epoch,
+        worker_id: Some(claim.worker_id.clone()),
+        event: WorkerAttemptEventKind::StaleMutationRejected,
+        reason: Some(reason.to_string()),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(error) = state.storage.record_worker_task_attempt_event(&event).await {
+        tracing::warn!(%task_id, %error, "failed to record stale worker mutation");
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -603,6 +671,7 @@ pub(crate) async fn list_handlers(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct CompleteRequest {
     worker_id: String,
+    claim_epoch: u64,
     output: serde_json::Value,
     /// Optional log lines the worker captured while running this task.
     #[serde(default)]
@@ -651,11 +720,6 @@ pub(crate) async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-    if pre_task.state != WorkerTaskState::Claimed
-        || pre_task.worker_id.as_deref() != Some(req.worker_id.as_str())
-    {
-        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
-    }
     // Verify tenant access via the task's owning instance. If the instance is
     // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
     // caller cannot operate on orphaned tasks from another tenant.
@@ -670,6 +734,14 @@ pub(crate) async fn complete_task(
         &inst.tenant_id,
         &format!("worker_task {task_id}"),
     )?;
+    let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    if pre_task.state != WorkerTaskState::Claimed
+        || pre_task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+        || pre_task.claim_epoch != claim.claim_epoch
+    {
+        record_stale_rejection(&state, task_id, &claim, "complete rejected: lease changed").await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
 
@@ -684,12 +756,19 @@ pub(crate) async fn complete_task(
 
     let updated = state
         .storage
-        .complete_worker_task(task_id, &req.worker_id, &req.output)
+        .complete_worker_task(task_id, &claim, &req.output)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
     if !updated {
-        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "complete rejected: lease changed during commit",
+        )
+        .await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
     }
 
     // Persist any worker-reported logs for this step.
@@ -867,6 +946,7 @@ pub(crate) async fn complete_task(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct FailRequest {
     worker_id: String,
+    claim_epoch: u64,
     message: String,
     #[serde(default)]
     retryable: bool,
@@ -897,11 +977,6 @@ pub(crate) async fn fail_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?
         .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
-    if pre_task.state != WorkerTaskState::Claimed
-        || pre_task.worker_id.as_deref() != Some(req.worker_id.as_str())
-    {
-        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
-    }
     // Verify tenant access via the task's owning instance. If the instance is
     // missing we cannot confirm ownership — treat as NotFound so a tenant-scoped
     // caller cannot operate on orphaned tasks from another tenant.
@@ -916,6 +991,14 @@ pub(crate) async fn fail_task(
         &inst.tenant_id,
         &format!("worker_task {task_id}"),
     )?;
+    let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    if pre_task.state != WorkerTaskState::Claimed
+        || pre_task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+        || pre_task.claim_epoch != claim.claim_epoch
+    {
+        record_stale_rejection(&state, task_id, &claim, "fail rejected: lease changed").await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
+    }
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
 
@@ -929,7 +1012,7 @@ pub(crate) async fn fail_task(
 
     let updated = state
         .storage
-        .fail_worker_task(task_id, &req.worker_id, &req.message, req.retryable)
+        .fail_worker_task(task_id, &claim, &req.message, req.retryable)
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
@@ -937,7 +1020,14 @@ pub(crate) async fn fail_task(
     persist_reported_logs(&state, pre_task.instance_id, &pre_task.block_id, &req.logs).await;
 
     if !updated {
-        return Err(ApiError::NotFound(format!("worker_task {task_id}")));
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "fail rejected: lease changed during commit",
+        )
+        .await;
+        return Err(ApiError::Conflict("worker task lease changed".into()));
     }
 
     let task = state
@@ -1058,6 +1148,7 @@ pub(crate) async fn fail_task(
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                claim_epoch: 0,
                 resume_checkpoint: task.resume_checkpoint.clone(),
                 checkpoint_seq: task.checkpoint_seq,
                 completed_at: None,
@@ -1170,6 +1261,7 @@ pub(crate) async fn fail_task(
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                claim_epoch: 0,
                 resume_checkpoint: task.resume_checkpoint.clone(),
                 checkpoint_seq: task.checkpoint_seq,
                 completed_at: None,
@@ -1254,6 +1346,7 @@ pub(crate) async fn fail_task(
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct HeartbeatRequest {
     worker_id: String,
+    claim_epoch: u64,
     #[serde(default)]
     checkpoint: Option<serde_json::Value>,
     #[serde(default)]
@@ -1294,7 +1387,8 @@ pub(crate) async fn heartbeat_task(
         &format!("worker_task {task_id}"),
     )?;
 
-    let checkpoint_requested = req.checkpoint.is_some();
+    let claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+
     let next_checkpoint_seq = if let Some(checkpoint) = req.checkpoint {
         const MAX_ACTIVITY_CHECKPOINT_BYTES: usize = 256 * 1024;
         let checkpoint_bytes = serde_json::to_vec(&checkpoint)
@@ -1310,26 +1404,29 @@ pub(crate) async fn heartbeat_task(
         })?;
         state
             .storage
-            .checkpoint_worker_task(task_id, &req.worker_id, expected_seq, &checkpoint)
+            .checkpoint_worker_task(task_id, &claim, expected_seq, &checkpoint)
             .await
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?
     } else {
         let updated = state
             .storage
-            .heartbeat_worker_task(task_id, &req.worker_id)
+            .heartbeat_worker_task(task_id, &claim)
             .await
             .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
         updated.then_some(task.checkpoint_seq)
     };
 
     let Some(checkpoint_seq) = next_checkpoint_seq else {
-        return if checkpoint_requested {
-            Err(ApiError::Conflict(
-                "worker task ownership or checkpoint sequence changed".into(),
-            ))
-        } else {
-            Err(ApiError::NotFound(format!("worker_task {task_id}")))
-        };
+        record_stale_rejection(
+            &state,
+            task_id,
+            &claim,
+            "heartbeat/checkpoint rejected: lease or sequence changed",
+        )
+        .await;
+        return Err(ApiError::Conflict(
+            "worker task ownership or checkpoint sequence changed".into(),
+        ));
     };
 
     Ok(Json(

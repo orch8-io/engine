@@ -12,12 +12,12 @@ The first client frame must be `WorkerStreamOpen` and declares:
 - one to 64 handler names;
 - supported protocol features;
 - desired maximum in-flight work; and
-- protocol version `1`.
+- protocol version `2`.
 
 The server replies with `WorkerStreamHello`, containing the exact feature
 intersection and authoritative bounds. Version mismatches fail with
 `FAILED_PRECONDITION`; oversized or malformed opens fail before task claims.
-Version 1 supports `task_delivery`, `completion`, `failure`, `heartbeat`,
+Version 2 supports `task_delivery`, `completion`, `failure`, `heartbeat`,
 `cancellation`, `runtime_capabilities`, `draining`, and
 `placement_commands`. `task_delivery` is mandatory. Operations not negotiated
 by the client are rejected.
@@ -35,6 +35,11 @@ the unary RPCs, including worker ownership checks, tenant scoping, retry
 transactions, context bounds, and terminal-instance compare-and-set behavior.
 Successful mutations receive a `WorkerStreamAck`.
 
+Every delivered task includes a monotonic `claim_epoch`. Completion, failure,
+and heartbeat frames must echo it. This fences an old process even when a
+replacement process reuses the same `worker_id`; stale mutations receive
+`FAILED_PRECONDITION` and are retained as task-attempt evidence.
+
 The session tracks task identifiers it delivered. A worker cannot complete,
 fail, or heartbeat work claimed by another session. When a heartbeat discovers
 that a delivered task is no longer active, the server emits
@@ -45,7 +50,7 @@ that a delivered task is no longer active, the server emits
 Task claims and outcomes remain durable in the shared storage backend; the
 stream itself is not a durable log. After disconnect, uncompleted claims are
 recovered by the existing stale-worker reaper and can be claimed by a later
-session. Clients must treat task identifiers as idempotency keys and reconnect
+session. Clients must treat `(task_id, claim_epoch)` as the lease identity and reconnect
 with a new open handshake.
 
 ## Durable runtime sessions and control

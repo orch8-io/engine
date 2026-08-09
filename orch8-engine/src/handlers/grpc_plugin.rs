@@ -182,7 +182,31 @@ pub async fn handle_grpc_plugin(ctx: StepContext) -> Result<Value, StepError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use orch8_storage::sqlite::SqliteStorage;
+    use orch8_types::context::ExecutionContext;
+    use orch8_types::ids::{BlockId, InstanceId, TenantId};
+
     use super::*;
+
+    async fn context(endpoint: Option<&str>, dry_run: bool) -> StepContext {
+        let mut execution_context = ExecutionContext::default();
+        execution_context.runtime.dry_run = dry_run;
+        StepContext {
+            instance_id: InstanceId::new(),
+            tenant_id: TenantId::unchecked("tenant-a"),
+            block_id: BlockId::new("grpc-step"),
+            params: endpoint.map_or_else(
+                || json!({}),
+                |endpoint| json!({ "_grpc_endpoint": endpoint, "value": 7 }),
+            ),
+            context: Arc::new(execution_context),
+            attempt: 2,
+            storage: Arc::new(SqliteStorage::in_memory().await.unwrap()),
+            wait_for_input: None,
+        }
+    }
 
     #[test]
     fn is_grpc_handler_detects_prefix() {
@@ -241,5 +265,52 @@ mod tests {
         assert_eq!(scheme.as_str(), "https");
         assert_eq!(addr, "secure.svc:443");
         assert_eq!(method, "Auth.Verify");
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_a_missing_endpoint() {
+        let result = handle_grpc_plugin(context(None, false).await).await;
+
+        assert!(matches!(
+            result,
+            Err(StepError::Permanent { message, details: None })
+                if message.contains("missing _grpc_endpoint")
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_a_malformed_endpoint() {
+        let result =
+            handle_grpc_plugin(context(Some("grpc://host-without-method"), false).await).await;
+
+        assert!(matches!(
+            result,
+            Err(StepError::Permanent { message, details: None })
+                if message.contains("invalid endpoint format")
+        ));
+    }
+
+    #[tokio::test]
+    async fn dry_run_still_blocks_private_endpoints() {
+        let result =
+            handle_grpc_plugin(context(Some("grpc://127.0.0.1:50051/Svc.Run"), true).await).await;
+
+        assert!(matches!(
+            result,
+            Err(StepError::Permanent { message, details: None })
+                if message.contains("blocked by the SSRF guard")
+        ));
+    }
+
+    #[tokio::test]
+    async fn dry_run_validates_public_endpoint_without_sending_a_request() {
+        let output = handle_grpc_plugin(context(Some("grpcs://1.1.1.1:443/Svc.Run"), true).await)
+            .await
+            .unwrap();
+
+        assert_eq!(output["dry_run"], true);
+        assert_eq!(output["handler"], "grpc_plugin");
+        assert_eq!(output["would"]["method"], "Svc.Run");
+        assert_eq!(output["result"], Value::Null);
     }
 }

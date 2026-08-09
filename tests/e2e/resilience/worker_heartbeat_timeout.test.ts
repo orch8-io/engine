@@ -15,6 +15,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
+import { ApiError } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
 import type { WorkerTask } from "../client.ts";
@@ -77,6 +78,7 @@ describe("Worker Heartbeat Timeout", () => {
       const claimA = await client.pollWorkerTasks(handler, "worker-A");
       assert.equal(claimA.length, 1, "expected a single claimed task");
       const originalTaskId = claimA[0]!.id;
+      assert.equal(claimA[0]!.claim_epoch, 1);
       const heartbeat = await client.heartbeatWorkerTask(originalTaskId, "worker-A", {
         checkpoint: { completed_batches: 4, cursor: "resume-here" },
         checkpointSeq: 0,
@@ -84,32 +86,63 @@ describe("Worker Heartbeat Timeout", () => {
       assert.equal(heartbeat.checkpoint_seq, 1);
 
       // Wait for the reaper to reclaim the stale claim. Observable signal:
-      // a fresh poll from worker-B eventually succeeds for the same
-      // instance/block pair.
+      // a fresh process reusing worker-A's stable identity eventually succeeds
+      // for the same instance/block pair.
       const reclaimed = await waitFor<WorkerTask>(async () => {
-        const tasks = await client.pollWorkerTasks(handler, "worker-B");
+        const tasks = await client.pollWorkerTasks(handler, "worker-A");
         return tasks.length > 0 ? tasks[0] : undefined;
       });
 
       // The reaper resets the existing row (rather than creating a new one),
-      // so the task id stays stable but worker_id flips to worker-B.
+      // so the task id stays stable. The worker id is deliberately reused:
+      // only claim_epoch can distinguish the old process from the new one.
       assert.equal(
         reclaimed.id,
         originalTaskId,
         "reclaimed task should reuse the original worker_tasks row",
       );
-      assert.equal(reclaimed.worker_id, "worker-B");
+      assert.equal(reclaimed.worker_id, "worker-A");
       assert.equal(reclaimed.state, "claimed");
+      assert.equal(reclaimed.claim_epoch, 2);
       assert.equal(reclaimed.checkpoint_seq, 1);
       assert.deepEqual(reclaimed.resume_checkpoint, {
         completed_batches: 4,
         cursor: "resume-here",
       });
 
-      // worker-B finishes the job normally.
-      await client.completeWorkerTask(reclaimed.id, "worker-B", { ok: true });
+      // The old process may still be alive and may reuse the same stable
+      // worker_id after a restart. Its generation-1 lease must remain fenced.
+      await assert.rejects(
+        () => client.heartbeatWorkerTask(
+          originalTaskId,
+          "worker-A",
+          undefined,
+          claimA[0]!.claim_epoch,
+        ),
+        (error: unknown) => error instanceof ApiError && error.status === 409,
+      );
+
+      const beforeCompletion = await client.listWorkerTaskAttempts(originalTaskId);
+      assert.deepEqual(
+        beforeCompletion.map((event) => event.event),
+        ["claimed", "reclaimed", "claimed", "stale_mutation_rejected"],
+      );
+      assert.equal(beforeCompletion[1]!.worker_id, "worker-A");
+      assert.equal(beforeCompletion[2]!.worker_id, "worker-A");
+
+      // The replacement worker-A process finishes with generation 2.
+      await client.completeWorkerTask(
+        reclaimed.id,
+        "worker-A",
+        { ok: true },
+        reclaimed.claim_epoch,
+      );
       const done = await client.waitForState(id, "completed", { timeoutMs: 15_000 });
       assert.equal(done.state, "completed");
+
+      const afterCompletion = await client.listWorkerTaskAttempts(originalTaskId);
+      assert.equal(afterCompletion.at(-1)!.event, "completed");
+      assert.equal(afterCompletion.at(-1)!.claim_epoch, 2);
     },
   );
 });

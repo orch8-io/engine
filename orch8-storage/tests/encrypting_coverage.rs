@@ -1115,6 +1115,7 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -1149,7 +1150,7 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
     storage
         .checkpoint_worker_task(
             task_id,
-            "worker-1",
+            &orch8_types::worker::WorkerClaim::new("worker-1", 1),
             0,
             &json!({"cursor": "secret-progress"}),
         )
@@ -1178,7 +1179,11 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
 
     // complete_worker_task's bare `output` argument must be encrypted too.
     storage
-        .complete_worker_task(task_id, "worker-1", &json!({"result": "done"}))
+        .complete_worker_task(
+            task_id,
+            &orch8_types::worker::WorkerClaim::new("worker-1", 1),
+            &json!({"result": "done"}),
+        )
         .await
         .unwrap();
     let raw_completed = inner.get_worker_task(task_id).await.unwrap().unwrap();

@@ -129,6 +129,12 @@ pub struct WorkerTask {
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Monotonic ownership generation. Every successful claim increments this
+    /// value. Workers must echo it on every lease mutation so a process from an
+    /// older claim cannot act after the task has been reclaimed, even when the
+    /// same stable `worker_id` is reused.
+    #[serde(default)]
+    pub claim_epoch: u64,
     /// Latest durable progress snapshot supplied by the activity worker.
     /// A replacement worker receives this value when it claims the task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +146,119 @@ pub struct WorkerTask {
     pub output: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Proof that a caller owns one specific claim generation of a worker task.
+/// A stable worker identifier alone is insufficient because a restarted
+/// process may reuse it while an older process is still running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkerClaim {
+    pub worker_id: String,
+    pub claim_epoch: u64,
+}
+
+impl WorkerClaim {
+    #[must_use]
+    pub fn new(worker_id: impl Into<String>, claim_epoch: u64) -> Self {
+        Self {
+            worker_id: worker_id.into(),
+            claim_epoch,
+        }
+    }
+}
+
+/// Durable reason for a worker-task attempt transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerAttemptEventKind {
+    Claimed,
+    Reclaimed,
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    StaleMutationRejected,
+}
+
+impl WorkerAttemptEventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Reclaimed => "reclaimed",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::StaleMutationRejected => "stale_mutation_rejected",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkerAttemptEventKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "claimed" => Ok(Self::Claimed),
+            "reclaimed" => Ok(Self::Reclaimed),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "timed_out" => Ok(Self::TimedOut),
+            "cancelled" => Ok(Self::Cancelled),
+            "stale_mutation_rejected" => Ok(Self::StaleMutationRejected),
+            other => Err(format!("unknown worker attempt event kind: {other}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod attempt_tests {
+    use super::*;
+
+    #[test]
+    fn event_kind_has_stable_storage_roundtrip() {
+        for kind in [
+            WorkerAttemptEventKind::Claimed,
+            WorkerAttemptEventKind::Reclaimed,
+            WorkerAttemptEventKind::Completed,
+            WorkerAttemptEventKind::Failed,
+            WorkerAttemptEventKind::TimedOut,
+            WorkerAttemptEventKind::Cancelled,
+            WorkerAttemptEventKind::StaleMutationRejected,
+        ] {
+            assert_eq!(
+                kind.as_str().parse::<WorkerAttemptEventKind>().unwrap(),
+                kind
+            );
+        }
+        assert!("unknown".parse::<WorkerAttemptEventKind>().is_err());
+    }
+
+    #[test]
+    fn claim_serializes_as_protocol_contract() {
+        let claim = WorkerClaim::new("worker-a", 7);
+        assert_eq!(
+            serde_json::to_value(claim).unwrap(),
+            serde_json::json!({
+                "worker_id": "worker-a", "claim_epoch": 7
+            })
+        );
+    }
+}
+
+/// Append-only evidence for one transition of one worker claim generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkerTaskAttemptEvent {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub claim_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    pub event: WorkerAttemptEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

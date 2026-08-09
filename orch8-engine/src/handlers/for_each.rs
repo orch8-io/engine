@@ -877,6 +877,7 @@ mod tests {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,
@@ -889,9 +890,13 @@ mod tests {
         s.claim_worker_tasks("external_handler", "w1", 1)
             .await
             .unwrap();
-        s.complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
-            .await
-            .unwrap();
+        s.complete_worker_task(
+            iter0.id,
+            &orch8_types::worker::WorkerClaim::new("w1", 1),
+            &json!({"ok": true}),
+        )
+        .await
+        .unwrap();
 
         // Reset subtree must purge the completed worker_tasks row.
         reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
@@ -918,6 +923,7 @@ mod tests {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,

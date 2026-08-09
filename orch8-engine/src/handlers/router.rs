@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use tracing::debug;
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::execution::ExecutionNode;
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::RouterDef;
 

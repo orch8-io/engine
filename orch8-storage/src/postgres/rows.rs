@@ -318,6 +318,7 @@ pub(super) struct WorkerTaskRow {
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
+    pub claim_epoch: i64,
     pub resume_checkpoint: Option<serde_json::Value>,
     pub checkpoint_seq: i64,
     pub completed_at: Option<DateTime<Utc>>,
@@ -348,6 +349,8 @@ impl WorkerTaskRow {
             worker_id: self.worker_id,
             claimed_at: self.claimed_at,
             heartbeat_at: self.heartbeat_at,
+            claim_epoch: u64::try_from(self.claim_epoch)
+                .map_err(|_| StorageError::Query("negative worker claim_epoch".into()))?,
             resume_checkpoint: self.resume_checkpoint,
             checkpoint_seq: u64::try_from(self.checkpoint_seq)
                 .map_err(|_| StorageError::Query("negative worker checkpoint_seq".into()))?,

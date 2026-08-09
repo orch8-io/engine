@@ -28,6 +28,105 @@ fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
 }
 
+fn continuity_stream(tenant_id: TenantId, now: chrono::DateTime<Utc>) -> ContinuityStream {
+    ContinuityStream {
+        stream_id: StreamId::new(),
+        tenant_id,
+        continuity_id: ContinuityId::new(),
+        epoch: ExecutionEpoch::initial(),
+        created_at: now,
+        expires_at: now + Duration::minutes(5),
+    }
+}
+
+async fn seed_continuity_stream(storage: &SqliteStorage, stream: &ContinuityStream) {
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id: stream.continuity_id,
+            tenant_id: stream.tenant_id.clone(),
+            current_instance_id: InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: stream.epoch,
+            state: OwnershipState::Owned,
+            updated_at: stream.created_at,
+        })
+        .await
+        .unwrap();
+    storage.create_continuity_stream(stream).await.unwrap();
+}
+
+#[tokio::test]
+async fn continuity_stream_round_trip_is_tenant_scoped() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let stream = continuity_stream(tenant("tenant-a"), Utc::now());
+
+    seed_continuity_stream(&storage, &stream).await;
+
+    assert_eq!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await
+            .unwrap(),
+        Some(stream.clone())
+    );
+    assert_eq!(
+        storage
+            .get_continuity_stream(&tenant("tenant-b"), stream.stream_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, StreamId::new())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(storage.create_continuity_stream(&stream).await.is_err());
+}
+
+#[tokio::test]
+async fn continuity_stream_schema_rejects_negative_epoch_and_reader_rejects_bad_timestamps() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let stream = continuity_stream(tenant("tenant-a"), Utc::now());
+    seed_continuity_stream(&storage, &stream).await;
+
+    let negative_epoch =
+        sqlx::query("UPDATE continuity_streams SET epoch = -1 WHERE stream_id = ?")
+            .bind(stream.stream_id.to_string())
+            .execute(storage.pool())
+            .await;
+    assert!(negative_epoch.is_err());
+
+    sqlx::query("UPDATE continuity_streams SET created_at = 'bad' WHERE stream_id = ?")
+        .bind(stream.stream_id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await,
+        Err(orch8_types::error::StorageError::Query(_))
+    ));
+
+    sqlx::query(
+        "UPDATE continuity_streams SET created_at = ?, expires_at = 'bad' WHERE stream_id = ?",
+    )
+    .bind(stream.created_at.to_rfc3339())
+    .bind(stream.stream_id.to_string())
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await,
+        Err(orch8_types::error::StorageError::Query(_))
+    ));
+}
+
 #[tokio::test]
 async fn federation_receipts_admit_one_concurrent_delivery() {
     let storage = std::sync::Arc::new(SqliteStorage::in_memory().await.unwrap());

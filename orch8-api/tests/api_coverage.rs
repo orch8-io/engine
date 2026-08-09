@@ -87,6 +87,7 @@ async fn seed_worker_task(
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -1403,7 +1404,7 @@ async fn t56_complete_task_returns_200() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"result":"done"}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"result":"done"}}))
         .send()
         .await
         .unwrap();
@@ -1428,7 +1429,7 @@ async fn t57_complete_task_complex_output() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"items":[1,2,3],"nested":{"key":"val"}}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"items":[1,2,3],"nested":{"key":"val"}}}))
         .send()
         .await
         .unwrap();
@@ -1446,7 +1447,7 @@ async fn t58_complete_task_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{}}))
         .send()
         .await
         .unwrap();
@@ -1471,7 +1472,7 @@ async fn t59_complete_task_merges_context() {
     client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"new_key":"new_val"}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"new_key":"new_val"}}))
         .send()
         .await
         .unwrap();
@@ -1517,7 +1518,7 @@ async fn t60_complete_task_transitions_instance() {
     client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{}}))
         .send()
         .await
         .unwrap();
@@ -1549,7 +1550,7 @@ async fn t61_fail_task_returns_200() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"timeout exceeded","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"timeout exceeded","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1574,7 +1575,7 @@ async fn t62_fail_task_non_retryable_fails_instance() {
     client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"permanent error","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"permanent error","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1599,7 +1600,7 @@ async fn t63_fail_task_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"oops","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"oops","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1624,7 +1625,9 @@ async fn t64_fail_task_retryable() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"transient error","retryable":true}))
+        .json(
+            &json!({"worker_id":"w1","claim_epoch":1,"message":"transient error","retryable":true}),
+        )
         .send()
         .await
         .unwrap();
@@ -1646,7 +1649,7 @@ async fn t65_fail_task_with_detailed_message() {
         .send()
         .await
         .unwrap();
-    let resp = client.post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"worker_id":"w1","message":"Connection refused: host=db.internal port=5432","retryable":false})).send().await.unwrap();
+    let resp = client.post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"worker_id":"w1","claim_epoch":1,"message":"Connection refused: host=db.internal port=5432","retryable":false})).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -1671,7 +1674,7 @@ async fn t66_heartbeat_returns_200() {
             srv.base_url
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1"}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1}))
         .send()
         .await
         .unwrap();
@@ -1700,7 +1703,7 @@ async fn t67_heartbeat_multiple_times() {
                 srv.base_url
             ))
             .header("X-Tenant-Id", "t1")
-            .json(&json!({"worker_id":"w1"}))
+            .json(&json!({"worker_id":"w1","claim_epoch":1}))
             .send()
             .await
             .unwrap();
@@ -1719,7 +1722,7 @@ async fn t68_heartbeat_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1"}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1}))
         .send()
         .await
         .unwrap();

@@ -425,3 +425,7 @@ fn print_diagnosis(report: &Value) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "instance_tests.rs"]
+mod tests;

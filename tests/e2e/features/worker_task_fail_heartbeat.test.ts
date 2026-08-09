@@ -64,7 +64,7 @@ describe("Worker Task Fail and Heartbeat", () => {
     await client.waitForState(id, "failed", { timeoutMs: 5_000 });
   });
 
-  it("fail task with wrong worker_id returns 404", async () => {
+  it("fail task with wrong worker_id returns 409", async () => {
     const tenantId = `wt-fail-wid-${uuid().slice(0, 8)}`;
     const handler = `fail_wid_${uuid().slice(0, 8)}`;
 
@@ -82,9 +82,9 @@ describe("Worker Task Fail and Heartbeat", () => {
 
     try {
       await client.failWorkerTask(tasks[0]!.id, "wrong-worker", "error", false);
-      assert.fail("should throw 404");
+      assert.fail("should throw 409");
     } catch (err: any) {
-      assert.equal(err.status, 404);
+      assert.equal(err.status, 409);
     }
   });
 
@@ -108,7 +108,7 @@ describe("Worker Task Fail and Heartbeat", () => {
     assert.ok(ok, "heartbeat should be accepted");
   });
 
-  it("heartbeat on non-claimed task returns 404", async () => {
+  it("heartbeat on non-claimed task returns 409", async () => {
     const tenantId = `wt-hb-404-${uuid().slice(0, 8)}`;
     const handler = `hb_404_${uuid().slice(0, 8)}`;
 
@@ -128,13 +128,13 @@ describe("Worker Task Fail and Heartbeat", () => {
 
     try {
       await client.heartbeatWorkerTask(tasks[0]!.id, "worker-1");
-      assert.fail("should throw 404");
+      assert.fail("should throw 409");
     } catch (err: any) {
-      assert.equal(err.status, 404);
+      assert.equal(err.status, 409);
     }
   });
 
-  it("complete task with wrong worker_id returns 404", async () => {
+  it("complete task with wrong worker_id returns 409", async () => {
     const tenantId = `wt-comp-${uuid().slice(0, 8)}`;
     const handler = `comp_${uuid().slice(0, 8)}`;
 
@@ -152,9 +152,9 @@ describe("Worker Task Fail and Heartbeat", () => {
 
     try {
       await client.completeWorkerTask(tasks[0]!.id, "wrong-worker", { ok: true });
-      assert.fail("should throw 404");
+      assert.fail("should throw 409");
     } catch (err: any) {
-      assert.equal(err.status, 404);
+      assert.equal(err.status, 409);
     }
   });
 

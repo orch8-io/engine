@@ -387,6 +387,7 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -402,7 +403,7 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
             handler_names: vec!["payments".into()],
             supported_features: vec!["task_delivery".into(), "heartbeat".into()],
             max_in_flight: 10_000,
-            protocol_version: 1,
+            protocol_version: 2,
             runtime_capabilities_json: String::new(),
             tenant_id: "test".into(),
         })),
@@ -416,7 +417,7 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
     let Some(ServerPayload::Hello(hello)) = hello.payload else {
         panic!("first server frame must be hello");
     };
-    assert_eq!(hello.protocol_version, 1);
+    assert_eq!(hello.protocol_version, 2);
     assert_eq!(hello.max_in_flight, 256);
     assert_eq!(hello.negotiated_features, ["task_delivery", "heartbeat"]);
     let delivered = inbound.message().await.unwrap().unwrap();
@@ -497,7 +498,7 @@ async fn grpc_runtime_session_persists_capabilities_streams_commands_and_drains(
                 "placement_commands".into(),
             ],
             max_in_flight: 4,
-            protocol_version: 1,
+            protocol_version: 2,
             runtime_capabilities_json: capabilities(false),
             tenant_id: "test".into(),
         })),

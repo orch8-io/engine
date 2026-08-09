@@ -1484,28 +1484,30 @@ passthrough_impl! {
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &orch8_types::worker::WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
         let encrypted = self.encrypt_json_value(output)?;
         self.inner
-            .complete_worker_task(task_id, worker_id, &encrypted)
+            .complete_worker_task(task_id, claim, &encrypted)
             .await
     }
-    async fn fail_worker_task(&self, task_id: Uuid, worker_id: &str, message: &str, retryable: bool) -> Result<bool, StorageError>;
-    async fn heartbeat_worker_task(&self, task_id: Uuid, worker_id: &str) -> Result<bool, StorageError>;
+    async fn fail_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
+    async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim) -> Result<bool, StorageError>;
     async fn checkpoint_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &orch8_types::worker::WorkerClaim,
         expected_seq: u64,
         checkpoint: &serde_json::Value,
     ) -> Result<Option<u64>, StorageError> {
         let encrypted = self.encrypt_json_value(checkpoint)?;
         self.inner
-            .checkpoint_worker_task(task_id, worker_id, expected_seq, &encrypted)
+            .checkpoint_worker_task(task_id, claim, expected_seq, &encrypted)
             .await
     }
+    async fn record_worker_task_attempt_event(&self, event: &orch8_types::worker::WorkerTaskAttemptEvent) -> Result<(), StorageError>;
+    async fn list_worker_task_attempt_events(&self, task_id: Uuid, limit: u32) -> Result<Vec<orch8_types::worker::WorkerTaskAttemptEvent>, StorageError>;
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
 
     async fn retry_worker_task(

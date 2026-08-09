@@ -32,6 +32,7 @@ wasm = ["orch8-engine/wasm"]
 
 [dev-dependencies]
 axum = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true

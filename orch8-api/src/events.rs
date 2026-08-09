@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -21,10 +21,47 @@ use orch8_types::redaction::RedactionPolicy;
 use crate::AppState;
 use crate::error::ApiError;
 
+const MAX_OUTBOX_BATCH: usize = 100;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/events", post(ingest_event).get(list_events))
+        .route("/events/batch", post(ingest_event_batch))
         .route("/events/{id}", get(get_event))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct BatchIngestRequest {
+    /// Events read from a transactional outbox. Retries are safe because each
+    /// item carries its producer idempotency identity.
+    events: Vec<IngestEventRequest>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct BatchIngestResponse {
+    outcomes: Vec<IngestOutcome>,
+}
+
+fn validate_ingest_request(req: &IngestEventRequest) -> Result<(), ApiError> {
+    for (field, value) in [
+        ("event_name", &req.event_name),
+        ("producer_event_id", &req.producer_event_id),
+        ("correlation_key", &req.correlation_key),
+    ] {
+        if value.trim().is_empty() {
+            return Err(ApiError::InvalidArgument(format!("{field} is required")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_batch_size(size: usize) -> Result<(), ApiError> {
+    if size == 0 || size > MAX_OUTBOX_BATCH {
+        return Err(ApiError::InvalidArgument(format!(
+            "events must contain 1..={MAX_OUTBOX_BATCH} items"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -54,15 +91,7 @@ pub(crate) async fn ingest_event(
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id =
         crate::auth::enforce_tenant_create(&tenant_ctx, &TenantId::unchecked(&req.tenant_id))?;
-    for (field, value) in [
-        ("event_name", &req.event_name),
-        ("producer_event_id", &req.producer_event_id),
-        ("correlation_key", &req.correlation_key),
-    ] {
-        if value.trim().is_empty() {
-            return Err(ApiError::InvalidArgument(format!("{field} is required")));
-        }
-    }
+    validate_ingest_request(&req)?;
 
     let envelope = orch8_engine::event_correlation::envelope(
         tenant_id.as_str(),
@@ -80,6 +109,53 @@ pub(crate) async fn ingest_event(
         StatusCode::CREATED
     };
     Ok((status, Json(outcome)))
+}
+
+#[utoipa::path(post, path = "/events/batch", tag = "events",
+    request_body = BatchIngestRequest,
+    responses(
+        (status = 200, description = "Outbox batch accepted; individual duplicates are reported", body = BatchIngestResponse),
+        (status = 400, description = "Empty, oversized, or invalid batch"),
+    )
+)]
+pub(crate) async fn ingest_event_batch(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(batch): Json<BatchIngestRequest>,
+) -> Result<Json<BatchIngestResponse>, ApiError> {
+    validate_batch_size(batch.events.len())?;
+
+    // Validate the complete batch before writing its first item. A backend
+    // interruption can still yield a partial batch, which is safe to replay
+    // because storage deduplicates producer_event_id atomically per item.
+    let mut tenant_ids = Vec::with_capacity(batch.events.len());
+    for request in &batch.events {
+        validate_ingest_request(request)?;
+        tenant_ids.push(crate::auth::enforce_tenant_create(
+            &tenant_ctx,
+            &TenantId::unchecked(&request.tenant_id),
+        )?);
+    }
+
+    let mut outcomes = Vec::with_capacity(batch.events.len());
+    // Intentionally serial: events sharing a correlation key must observe
+    // producer order while they CAS a wait's accumulated matches. The hard
+    // batch cap bounds the query work; relays page their outbox above it.
+    for (request, tenant_id) in batch.events.into_iter().zip(tenant_ids) {
+        let envelope = orch8_engine::event_correlation::envelope(
+            tenant_id.as_str(),
+            &request.event_name,
+            &request.producer_event_id,
+            &request.correlation_key,
+            request.payload,
+        );
+        outcomes.push(
+            orch8_engine::event_correlation::ingest(&state.storage, envelope)
+                .await
+                .map_err(|error| ApiError::from_storage(error, "event"))?,
+        );
+    }
+    Ok(Json(BatchIngestResponse { outcomes }))
 }
 
 #[derive(Deserialize)]
@@ -157,4 +233,63 @@ pub(crate) async fn get_event(
     )?;
     event.payload = RedactionPolicy::default().redacted(&event.payload);
     Ok(Json(event))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(
+        event_name: &str,
+        producer_event_id: &str,
+        correlation_key: &str,
+    ) -> IngestEventRequest {
+        IngestEventRequest {
+            tenant_id: "tenant-a".into(),
+            event_name: event_name.into(),
+            producer_event_id: producer_event_id.into(),
+            correlation_key: correlation_key.into(),
+            payload: serde_json::json!({"ok": true}),
+        }
+    }
+
+    #[test]
+    fn outbox_item_accepts_complete_identity() {
+        assert!(validate_ingest_request(&request("order.created", "evt-1", "order-7")).is_ok());
+    }
+
+    #[test]
+    fn outbox_item_rejects_blank_event_name() {
+        assert!(validate_ingest_request(&request(" \t", "evt-1", "order-7")).is_err());
+    }
+
+    #[test]
+    fn outbox_item_rejects_blank_producer_event_id() {
+        assert!(validate_ingest_request(&request("order.created", "\n", "order-7")).is_err());
+    }
+
+    #[test]
+    fn outbox_item_rejects_blank_correlation_key() {
+        assert!(validate_ingest_request(&request("order.created", "evt-1", "  ")).is_err());
+    }
+
+    #[test]
+    fn outbox_batch_accepts_lower_boundary() {
+        assert!(validate_batch_size(1).is_ok());
+    }
+
+    #[test]
+    fn outbox_batch_accepts_upper_boundary() {
+        assert!(validate_batch_size(MAX_OUTBOX_BATCH).is_ok());
+    }
+
+    #[test]
+    fn outbox_batch_rejects_empty_input() {
+        assert!(validate_batch_size(0).is_err());
+    }
+
+    #[test]
+    fn outbox_batch_rejects_over_limit_input() {
+        assert!(validate_batch_size(MAX_OUTBOX_BATCH + 1).is_err());
+    }
 }

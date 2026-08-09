@@ -4,7 +4,7 @@ use std::time::Duration;
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 use orch8_types::instance::TaskInstance;
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{WorkerAttemptEventKind, WorkerTask};
 
 use super::SqliteStorage;
 use super::helpers::{row_to_instance, row_to_worker_task, ts};
@@ -225,6 +225,7 @@ async fn claim_from_queue_inner(
         t.worker_id = Some(worker_id.to_string());
         t.claimed_at = Some(now_dt);
         t.heartbeat_at = Some(now_dt);
+        t.claim_epoch = t.claim_epoch.saturating_add(1);
     }
     if !tasks.is_empty() {
         let mut qb = sqlx::QueryBuilder::new("UPDATE worker_tasks SET state='claimed', worker_id=");
@@ -233,6 +234,7 @@ async fn claim_from_queue_inner(
         qb.push_bind(&now);
         qb.push(", heartbeat_at=");
         qb.push_bind(&now);
+        qb.push(", claim_epoch=claim_epoch+1");
         qb.push(" WHERE id IN (");
         let mut separated = qb.separated(",");
         for t in &tasks {
@@ -240,6 +242,19 @@ async fn claim_from_queue_inner(
         }
         separated.push_unseparated(")");
         qb.build().execute(&mut *conn).await?;
+        let events: Vec<_> = tasks
+            .iter()
+            .map(|task| {
+                super::workers::transition_event(
+                    task.id,
+                    task.claim_epoch,
+                    task.worker_id.clone(),
+                    WorkerAttemptEventKind::Claimed,
+                    None,
+                )
+            })
+            .collect();
+        super::workers::insert_attempt_events(conn, &events).await?;
     }
     Ok(tasks)
 }

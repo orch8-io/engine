@@ -28,7 +28,7 @@ use orch8_types::rate_limit::RateLimitCheck;
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
 use orch8_types::session::{Session, SessionState};
 use orch8_types::signal::{Signal, SignalType};
-use orch8_types::worker::{WorkerTask, WorkerTaskState};
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -377,6 +377,7 @@ async fn worker_task_full_lifecycle() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -394,6 +395,7 @@ async fn worker_task_full_lifecycle() {
         .unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, task.id);
+    assert_eq!(claimed[0].claim_epoch, 1);
 
     // Should not be claimable again.
     let claimed2 = s
@@ -403,16 +405,26 @@ async fn worker_task_full_lifecycle() {
     assert_eq!(claimed2.len(), 0);
 
     // Heartbeat.
-    let hb = s.heartbeat_worker_task(task.id, "worker-1").await.unwrap();
+    let hb = s
+        .heartbeat_worker_task(task.id, &WorkerClaim::new("worker-1", 1))
+        .await
+        .unwrap();
     assert!(hb);
 
     // Heartbeat from wrong worker fails.
-    let hb_wrong = s.heartbeat_worker_task(task.id, "worker-X").await.unwrap();
+    let hb_wrong = s
+        .heartbeat_worker_task(task.id, &WorkerClaim::new("worker-X", 1))
+        .await
+        .unwrap();
     assert!(!hb_wrong);
 
     // Complete.
     let ok = s
-        .complete_worker_task(task.id, "worker-1", &json!({"status": 200}))
+        .complete_worker_task(
+            task.id,
+            &WorkerClaim::new("worker-1", 1),
+            &json!({"status": 200}),
+        )
         .await
         .unwrap();
     assert!(ok);
@@ -421,6 +433,17 @@ async fn worker_task_full_lifecycle() {
     let fetched = s.get_worker_task(task.id).await.unwrap().unwrap();
     assert_eq!(fetched.state, WorkerTaskState::Completed);
     assert_eq!(fetched.output.unwrap()["status"], 200);
+    let evidence = s
+        .list_worker_task_attempt_events(task.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>(),
+        ["claimed", "completed"]
+    );
 }
 
 #[tokio::test]
@@ -442,6 +465,7 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -456,15 +480,25 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         .unwrap();
 
     assert_eq!(
-        s.checkpoint_worker_task(task.id, "worker-1", 0, &json!({"offset": 42}))
-            .await
-            .unwrap(),
+        s.checkpoint_worker_task(
+            task.id,
+            &WorkerClaim::new("worker-1", 1),
+            0,
+            &json!({"offset": 42})
+        )
+        .await
+        .unwrap(),
         Some(1)
     );
     assert_eq!(
-        s.checkpoint_worker_task(task.id, "worker-1", 0, &json!({"offset": 99}))
-            .await
-            .unwrap(),
+        s.checkpoint_worker_task(
+            task.id,
+            &WorkerClaim::new("worker-1", 1),
+            0,
+            &json!({"offset": 99})
+        )
+        .await
+        .unwrap(),
         None,
         "stale checkpoint sequence must not overwrite newer progress"
     );
@@ -477,19 +511,30 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         .await
         .unwrap();
     assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].claim_epoch, 2);
     assert_eq!(resumed[0].resume_checkpoint, Some(json!({"offset": 42})));
     assert_eq!(resumed[0].checkpoint_seq, 1);
     assert_eq!(
-        s.checkpoint_worker_task(task.id, "worker-1", 1, &json!({"offset": 50}))
-            .await
-            .unwrap(),
+        s.checkpoint_worker_task(
+            task.id,
+            &WorkerClaim::new("worker-1", 1),
+            1,
+            &json!({"offset": 50})
+        )
+        .await
+        .unwrap(),
         None,
         "previous lease owner must not advance progress"
     );
     assert_eq!(
-        s.checkpoint_worker_task(task.id, "worker-2", 1, &json!({"offset": 50}))
-            .await
-            .unwrap(),
+        s.checkpoint_worker_task(
+            task.id,
+            &WorkerClaim::new("worker-2", 2),
+            1,
+            &json!({"offset": 50})
+        )
+        .await
+        .unwrap(),
         Some(2)
     );
 }
@@ -514,6 +559,7 @@ async fn worker_task_fail_and_cancel() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -529,7 +575,12 @@ async fn worker_task_fail_and_cancel() {
         .await
         .unwrap();
     let failed = s
-        .fail_worker_task(task.id, "w1", "timeout exceeded", true)
+        .fail_worker_task(
+            task.id,
+            &WorkerClaim::new("w1", 1),
+            "timeout exceeded",
+            true,
+        )
         .await
         .unwrap();
     assert!(failed);
@@ -553,6 +604,7 @@ async fn worker_task_fail_and_cancel() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -567,6 +619,15 @@ async fn worker_task_fail_and_cancel() {
         .await
         .unwrap();
     assert_eq!(cancelled, 1);
+    assert!(s.get_worker_task(task2.id).await.unwrap().is_none());
+    let cancellation_evidence = s
+        .list_worker_task_attempt_events(task2.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(cancellation_evidence.len(), 1);
+    assert_eq!(cancellation_evidence[0].event.as_str(), "cancelled");
+    assert_eq!(cancellation_evidence[0].claim_epoch, 0);
+    assert_eq!(cancellation_evidence[0].worker_id, None);
 }
 
 /// Regression: `cancel_worker_tasks_for_block` must DELETE rows regardless of
@@ -599,6 +660,7 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -612,7 +674,7 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         .await
         .unwrap();
     let ok = s
-        .complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
+        .complete_worker_task(iter0.id, &WorkerClaim::new("w1", 1), &json!({"ok": true}))
         .await
         .unwrap();
     assert!(ok);
@@ -642,6 +704,7 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -684,6 +747,7 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -697,7 +761,7 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         .await
         .unwrap();
     let failed = s
-        .fail_worker_task(task.id, "w1", "boom", false)
+        .fail_worker_task(task.id, &WorkerClaim::new("w1", 1), "boom", false)
         .await
         .unwrap();
     assert!(failed);
@@ -726,6 +790,7 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -778,6 +843,7 @@ async fn worker_task_queue_routing() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -801,6 +867,14 @@ async fn worker_task_queue_routing() {
         .await
         .unwrap();
     assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].claim_epoch, 1);
+    let evidence = s
+        .list_worker_task_attempt_events(task.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].event.as_str(), "claimed");
+    assert_eq!(evidence[0].worker_id.as_deref(), Some("w1"));
 }
 
 // ===========================================================================
@@ -2375,6 +2449,7 @@ async fn worker_task_list_and_stats() {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,
@@ -2567,6 +2642,7 @@ async fn perf_concurrent_worker_claims() {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,
@@ -3723,6 +3799,7 @@ async fn retry_worker_task_atomically_replaces_task() {
         worker_id: Some("w1".into()),
         claimed_at: Some(Utc::now()),
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: Some(Utc::now()),
@@ -3747,6 +3824,7 @@ async fn retry_worker_task_atomically_replaces_task() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,

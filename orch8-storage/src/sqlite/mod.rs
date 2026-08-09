@@ -86,7 +86,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
 /// One column's shape as reported by `PRAGMA table_info`, used by the additive
 /// column reconcile in [`SqliteStorage::create_tables`].
@@ -1354,38 +1354,53 @@ impl crate::WorkerStore for SqliteStorage {
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, worker_id, output).await
+        workers::complete(self, task_id, claim, output).await
     }
 
     async fn fail_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         message: &str,
         retryable: bool,
     ) -> Result<bool, StorageError> {
-        workers::fail(self, task_id, worker_id, message, retryable).await
+        workers::fail(self, task_id, claim, message, retryable).await
     }
 
     async fn heartbeat_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
     ) -> Result<bool, StorageError> {
-        workers::heartbeat(self, task_id, worker_id).await
+        workers::heartbeat(self, task_id, claim).await
     }
 
     async fn checkpoint_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         expected_seq: u64,
         checkpoint: &serde_json::Value,
     ) -> Result<Option<u64>, StorageError> {
-        workers::checkpoint(self, task_id, worker_id, expected_seq, checkpoint).await
+        workers::checkpoint(self, task_id, claim, expected_seq, checkpoint).await
+    }
+
+    async fn record_worker_task_attempt_event(
+        &self,
+        event: &WorkerTaskAttemptEvent,
+    ) -> Result<(), StorageError> {
+        workers::record_attempt_event(self, event).await
+    }
+
+    async fn list_worker_task_attempt_events(
+        &self,
+        task_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<WorkerTaskAttemptEvent>, StorageError> {
+        workers::list_attempt_events(self, task_id, limit).await
     }
 
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
@@ -1410,8 +1425,8 @@ impl crate::WorkerStore for SqliteStorage {
         sqlx::query(
             r"INSERT INTO worker_tasks
                 (id, instance_id, block_id, handler_name, queue_name, params, context,
-                 attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
-              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                 attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
+              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         )
         .bind(new_task.id.to_string())
         .bind(new_task.instance_id.into_uuid().to_string())
@@ -1423,6 +1438,7 @@ impl crate::WorkerStore for SqliteStorage {
         .bind(new_task.attempt as i64)
         .bind(new_task.timeout_ms)
         .bind(new_task.state.to_string())
+        .bind(i64::try_from(new_task.claim_epoch).unwrap_or(i64::MAX))
         .bind(
             new_task
                 .resume_checkpoint
@@ -3786,6 +3802,7 @@ mod tests {
                 worker_id: None,
                 claimed_at: None,
                 heartbeat_at: None,
+                claim_epoch: 0,
                 resume_checkpoint: None,
                 checkpoint_seq: 0,
                 completed_at: None,

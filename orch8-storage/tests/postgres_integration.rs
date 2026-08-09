@@ -28,7 +28,7 @@ use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 use orch8_types::webhook_outbox::{WebhookOutboxEntry, WebhookOutboxStatus};
-use orch8_types::worker::{WorkerTask, WorkerTaskState};
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 
 /// Returns `None` (test should skip) if `DATABASE_URL` isn't set.
 async fn store() -> Option<PostgresStorage> {
@@ -235,6 +235,7 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -303,6 +304,81 @@ fn source_pins_for_update_of_wt_in_tenant_claim_queries() {
     assert!(
         misc_rs.contains("FOR UPDATE OF wt SKIP LOCKED"),
         "postgres/misc.rs::claim_worker_tasks_from_queue_for_tenant must lock only `wt`, not the joined task_instances row"
+    );
+}
+
+#[tokio::test]
+async fn worker_claim_epoch_fences_restarted_postgres_worker() {
+    let s = require_postgres!();
+    let tenant = format!("t-worker-fence-{}", Uuid::new_v4());
+    let seq_id = SequenceId::new();
+    s.create_sequence(&mk_sequence(&tenant, seq_id))
+        .await
+        .unwrap();
+    let instance = mk_instance(&tenant, seq_id, None);
+    s.create_instance(&instance).await.unwrap();
+
+    let task = WorkerTask {
+        id: Uuid::new_v4(),
+        instance_id: instance.id,
+        block_id: BlockId::new("fenced_step"),
+        handler_name: "fenced_handler".into(),
+        queue_name: None,
+        params: serde_json::json!({}),
+        context: serde_json::json!({}),
+        attempt: 1,
+        timeout_ms: None,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        claim_epoch: 0,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: Utc::now(),
+    };
+    s.create_worker_task(&task).await.unwrap();
+
+    let first = s
+        .claim_worker_tasks("fenced_handler", "stable-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(first[0].claim_epoch, 1);
+    s.reap_stale_worker_tasks(std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let replacement = s
+        .claim_worker_tasks("fenced_handler", "stable-worker", 1)
+        .await
+        .unwrap();
+    assert_eq!(replacement[0].claim_epoch, 2);
+
+    assert!(
+        !s.heartbeat_worker_task(task.id, &WorkerClaim::new("stable-worker", 1))
+            .await
+            .unwrap(),
+        "generation 1 must be fenced after reclaim"
+    );
+    assert!(
+        s.heartbeat_worker_task(task.id, &WorkerClaim::new("stable-worker", 2))
+            .await
+            .unwrap(),
+        "generation 2 must retain the lease"
+    );
+    let evidence = s
+        .list_worker_task_attempt_events(task.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>(),
+        ["claimed", "reclaimed", "claimed"]
     );
 }
 

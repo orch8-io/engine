@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use orch8_storage::artifacts::ObjectArtifactStore;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_types::config::ExternalizationMode;
 use tokio_util::sync::CancellationToken;
@@ -55,20 +56,27 @@ impl Drop for TestServer {
 /// Panics if the in-memory storage cannot be initialised or the TCP listener
 /// fails to bind — both indicate a broken test environment, not a product bug.
 pub async fn spawn_test_server() -> TestServer {
-    spawn_test_server_inner(false).await
+    spawn_test_server_inner(false, false).await
 }
 
 /// Like [`spawn_test_server`] but with mobile sync endpoints enabled.
 pub async fn spawn_test_server_with_mobile_sync() -> TestServer {
-    spawn_test_server_inner(true).await
+    spawn_test_server_inner(true, false).await
 }
 
-async fn spawn_test_server_inner(mobile_sync_enabled: bool) -> TestServer {
-    let storage = Arc::new(
-        SqliteStorage::in_memory()
-            .await
-            .expect("in-memory sqlite storage must initialise for tests"),
-    );
+/// Like [`spawn_test_server`] but with an ephemeral artifact backend enabled.
+pub async fn spawn_test_server_with_artifacts() -> TestServer {
+    spawn_test_server_inner(false, true).await
+}
+
+async fn spawn_test_server_inner(mobile_sync_enabled: bool, artifacts_enabled: bool) -> TestServer {
+    let mut storage = SqliteStorage::in_memory()
+        .await
+        .expect("in-memory sqlite storage must initialise for tests");
+    if artifacts_enabled {
+        storage = storage.with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+    }
+    let storage = Arc::new(storage);
     let shutdown = CancellationToken::new();
     let state = AppState {
         storage: storage.clone(),

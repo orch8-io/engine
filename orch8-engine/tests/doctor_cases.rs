@@ -88,6 +88,7 @@ fn task_named(state: WorkerTaskState, handler: &str, block: &str, age_secs: i64)
         worker_id: Some("w-1".into()),
         claimed_at: Some(t0() - Duration::seconds(age_secs)),
         heartbeat_at: Some(t0() - Duration::seconds(age_secs)),
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,

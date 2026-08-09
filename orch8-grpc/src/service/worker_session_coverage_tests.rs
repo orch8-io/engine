@@ -2,7 +2,7 @@
 //! negotiation, per-frame feature gating, session ownership checks, demand
 //! flow control, and heartbeat-driven cancellation.
 //!
-//! Count contract: 49 independently named unit tests.
+//! Count contract: 50 independently named unit tests.
 
 use super::*;
 
@@ -181,7 +181,7 @@ fn coverage_session_019_duplicate_request_still_enables_feature() {
 
 #[test]
 fn coverage_session_020_protocol_constants_match_documented_contract() {
-    assert_eq!(WORKER_STREAM_PROTOCOL_VERSION, 1);
+    assert_eq!(WORKER_STREAM_PROTOCOL_VERSION, 2);
     assert_eq!(WORKER_STREAM_MAX_IN_FLIGHT, 256);
     assert_eq!(WORKER_STREAM_MAX_MESSAGE_BYTES, 1024 * 1024);
     assert_eq!(WORKER_STREAM_HEARTBEAT_SECS, 15);
@@ -242,6 +242,14 @@ async fn session(features: &[&str], tenant: Option<&str>) -> Session {
             .await
             .unwrap(),
     );
+    session_with_storage(features, tenant, storage)
+}
+
+fn session_with_storage(
+    features: &[&str],
+    tenant: Option<&str>,
+    storage: Arc<dyn StorageBackend>,
+) -> Session {
     let (sender, receiver) = mpsc::channel(16);
     Session {
         service: Orch8GrpcService::new(Arc::clone(&storage)),
@@ -341,6 +349,7 @@ fn pending_task(inst_id: &str, handler: &str) -> WorkerTask {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -440,6 +449,7 @@ async fn coverage_session_030_completion_requires_negotiated_feature() {
                 task_id: Uuid::now_v7().to_string(),
                 worker_id: "worker-a".into(),
                 output_json: "{}".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -457,6 +467,7 @@ async fn coverage_session_031_failure_requires_negotiated_feature() {
                 worker_id: "worker-a".into(),
                 message: "boom".into(),
                 retryable: false,
+                claim_epoch: 1,
             },
         ))
         .await
@@ -472,6 +483,7 @@ async fn coverage_session_032_heartbeat_requires_negotiated_feature() {
             proto::HeartbeatTaskRequest {
                 task_id: Uuid::now_v7().to_string(),
                 worker_id: "worker-a".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -488,6 +500,7 @@ async fn coverage_session_033_completion_with_malformed_task_id_is_invalid_argum
                 task_id: "not-a-uuid".into(),
                 worker_id: "worker-a".into(),
                 output_json: "{}".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -506,6 +519,7 @@ async fn coverage_session_034_completion_from_foreign_worker_is_denied() {
                 task_id: task_id.to_string(),
                 worker_id: "worker-b".into(),
                 output_json: "{}".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -523,6 +537,7 @@ async fn coverage_session_035_completion_for_task_outside_session_is_denied() {
                 task_id: Uuid::now_v7().to_string(),
                 worker_id: "worker-a".into(),
                 output_json: "{}".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -542,6 +557,7 @@ async fn coverage_session_036_failure_from_foreign_worker_is_denied() {
                 worker_id: "worker-b".into(),
                 message: "boom".into(),
                 retryable: false,
+                claim_epoch: 1,
             },
         ))
         .await
@@ -559,6 +575,7 @@ async fn coverage_session_037_heartbeat_from_foreign_worker_is_denied() {
             proto::HeartbeatTaskRequest {
                 task_id: task_id.to_string(),
                 worker_id: "worker-b".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -675,6 +692,7 @@ async fn coverage_session_042_heartbeat_on_dead_task_cancels_and_evicts() {
             proto::HeartbeatTaskRequest {
                 task_id: task_id.to_string(),
                 worker_id: "worker-a".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -850,6 +868,7 @@ async fn coverage_session_049_heartbeat_on_live_claimed_task_is_acked() {
             proto::HeartbeatTaskRequest {
                 task_id: task.id.to_string(),
                 worker_id: "worker-a".into(),
+                claim_epoch: 1,
             },
         ))
         .await
@@ -862,4 +881,102 @@ async fn coverage_session_049_heartbeat_on_live_claimed_task_is_acked() {
     assert_eq!(ack.task_id, task.id.to_string());
     // A successful heartbeat keeps the task in the session's outstanding set.
     assert!(session.outstanding.contains(&task.id));
+}
+
+#[tokio::test]
+async fn coverage_session_050_reclaim_fences_old_generation_with_same_worker_id() {
+    const SEQ: &str = "00000000-0000-0000-0000-000000000107";
+    const INST: &str = "00000000-0000-0000-0000-000000000108";
+    let mut old_process = session(&["task_delivery", "heartbeat"], None).await;
+    old_process
+        .storage
+        .create_sequence(&sequence_definition(SEQ, "test"))
+        .await
+        .unwrap();
+    old_process
+        .storage
+        .create_instance(&task_instance(INST, SEQ, "test"))
+        .await
+        .unwrap();
+    let task = pending_task(INST, "payments");
+    old_process.storage.create_worker_task(&task).await.unwrap();
+
+    old_process
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 1 },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Task(first_frame) = old_process.next_frame() else {
+        panic!("first process must receive the task");
+    };
+    let first_claim: WorkerTask = serde_json::from_str(&first_frame.task_json).unwrap();
+    assert_eq!(first_claim.claim_epoch, 1);
+
+    old_process
+        .storage
+        .reap_stale_worker_tasks(std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let mut replacement = session_with_storage(
+        &["task_delivery", "heartbeat"],
+        None,
+        Arc::clone(&old_process.storage),
+    );
+    replacement
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 1 },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Task(second_frame) = replacement.next_frame() else {
+        panic!("replacement process must receive the reclaimed task");
+    };
+    let second_claim: WorkerTask = serde_json::from_str(&second_frame.task_json).unwrap();
+    assert_eq!(second_claim.claim_epoch, 2);
+    assert_eq!(second_claim.worker_id.as_deref(), Some("worker-a"));
+
+    old_process
+        .dispatch(proto::worker_stream_client::Payload::Heartbeat(
+            proto::HeartbeatTaskRequest {
+                task_id: task.id.to_string(),
+                worker_id: "worker-a".into(),
+                claim_epoch: 1,
+            },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Cancellation(cancelled) = old_process.next_frame()
+    else {
+        panic!("stale generation must be cancelled");
+    };
+    assert_eq!(cancelled.task_id, task.id.to_string());
+
+    replacement
+        .dispatch(proto::worker_stream_client::Payload::Heartbeat(
+            proto::HeartbeatTaskRequest {
+                task_id: task.id.to_string(),
+                worker_id: "worker-a".into(),
+                claim_epoch: 2,
+            },
+        ))
+        .await
+        .unwrap();
+    let proto::worker_stream_server::Payload::Ack(ack) = replacement.next_frame() else {
+        panic!("current generation heartbeat must be acknowledged");
+    };
+    assert_eq!(ack.operation, "heartbeat");
+
+    let evidence = replacement
+        .storage
+        .list_worker_task_attempt_events(task.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        evidence
+            .iter()
+            .map(|event| event.event.as_str())
+            .collect::<Vec<_>>(),
+        ["claimed", "reclaimed", "claimed", "stale_mutation_rejected"]
+    );
 }

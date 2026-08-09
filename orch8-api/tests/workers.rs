@@ -79,6 +79,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -148,6 +149,7 @@ async fn complete_task_transitions_instance() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "output": { "result": "ok" }
         }))
         .send()
@@ -204,6 +206,7 @@ async fn fail_task_with_retryable_false_fails_instance() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "message": "boom",
             "retryable": false
         }))
@@ -252,7 +255,7 @@ async fn heartbeat_extends_task_claim() {
             srv.base_url
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({ "worker_id": "worker-1" }))
+        .json(&json!({ "worker_id": "worker-1", "claim_epoch": 1 }))
         .send()
         .await
         .unwrap();
@@ -268,6 +271,7 @@ async fn heartbeat_extends_task_claim() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "checkpoint_seq": 0,
             "checkpoint": { "page": 7, "cursor": "abc" }
         }))
@@ -294,6 +298,7 @@ async fn heartbeat_extends_task_claim() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "checkpoint_seq": 0,
             "checkpoint": { "page": 999 }
         }))
@@ -301,6 +306,77 @@ async fn heartbeat_extends_task_claim() {
         .await
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn reclaimed_task_fences_same_worker_process_and_explains_recovery() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    let task_id = seed_worker_task(&srv, inst_id).await;
+
+    for expected_epoch in [1_u64, 2] {
+        let response = client
+            .post(format!("{}/workers/tasks/poll", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({"handler_name":"external_handler","worker_id":"stable-worker","limit":1}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let tasks: Vec<serde_json::Value> = response.json().await.unwrap();
+        assert_eq!(tasks[0]["claim_epoch"], expected_epoch);
+        if expected_epoch == 1 {
+            srv.storage
+                .reap_stale_worker_tasks(std::time::Duration::ZERO)
+                .await
+                .unwrap();
+        }
+    }
+
+    let stale = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"worker_id":"stable-worker","claim_epoch":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let current = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"worker_id":"stable-worker","claim_epoch":2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(current.status(), StatusCode::OK);
+
+    let attempts: Vec<serde_json::Value> = client
+        .get(format!("{}/workers/tasks/{task_id}/attempts", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kinds: Vec<_> = attempts
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["claimed", "reclaimed", "claimed", "stale_mutation_rejected"]
+    );
+    assert_eq!(attempts[1]["worker_id"], "stable-worker");
 }
 
 #[tokio::test]
@@ -642,6 +718,7 @@ async fn worker_reported_logs_persist_and_list() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "output": { "ok": true },
             "logs": [
                 { "ts": "2026-01-01T00:00:00Z", "level": "info", "message": "started" },
@@ -695,6 +772,7 @@ async fn worker_reported_logs_persist_on_fail_path() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "message": "boom",
             "retryable": false,
             "logs": [

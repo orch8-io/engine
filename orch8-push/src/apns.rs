@@ -273,6 +273,22 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
 
+    const TEST_P256_KEY: &str = r"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWTFfCGljY6aw3Hrt
+kHmPRiazukxPLb6ilpRAewjW8nihRANCAATDskChT+Altkm9X7MI69T3IUmrQU0L
+950IxEzvw/x5BMEINRMrXLBJhqzO9Bm+d6JbqA21YQmd1Kt4RzLJR1W+
+-----END PRIVATE KEY-----";
+
+    fn config(sandbox: bool) -> ApnsConfig {
+        ApnsConfig {
+            key_pem: TEST_P256_KEY.into(),
+            key_id: "TESTKEY01".into(),
+            team_id: "TESTTEAM01".into(),
+            topic: "io.orch8.test".into(),
+            sandbox,
+        }
+    }
+
     #[test]
     fn classify_apns_status_success_on_2xx() {
         assert_eq!(classify_apns_status(StatusCode::OK), ApnsOutcome::Success);
@@ -337,5 +353,76 @@ mod tests {
             classify_apns_status(StatusCode::UNAUTHORIZED),
             ApnsOutcome::Permanent
         );
+    }
+
+    #[test]
+    fn retry_backoff_doubles_and_saturates() {
+        assert_eq!(retry_backoff(0), Duration::from_millis(200));
+        assert_eq!(retry_backoff(1), Duration::from_millis(400));
+        assert_eq!(retry_backoff(2), Duration::from_millis(800));
+        assert_eq!(retry_backoff(63), Duration::from_millis(u64::MAX));
+    }
+
+    #[test]
+    fn provider_rejects_an_invalid_signing_key() {
+        let mut invalid = config(false);
+        invalid.key_pem = "not a private key".into();
+
+        let Err(error) = ApnsProvider::new(invalid) else {
+            panic!("invalid APNs signing keys must be rejected");
+        };
+        assert!(matches!(error, PushError::Config(_)));
+        assert!(error.to_string().contains("invalid APNs key"));
+    }
+
+    #[test]
+    fn provider_selects_the_expected_apple_environment() {
+        let production = ApnsProvider::new(config(false)).unwrap();
+        let sandbox = ApnsProvider::new(config(true)).unwrap();
+
+        assert_eq!(production.base_url, "https://api.push.apple.com");
+        assert_eq!(sandbox.base_url, "https://api.sandbox.push.apple.com");
+        assert_eq!(production.topic, "io.orch8.test");
+    }
+
+    #[tokio::test]
+    async fn generated_provider_token_is_cached_and_carries_the_key_id() {
+        let provider = ApnsProvider::new(config(false)).unwrap();
+
+        let first = provider.get_or_refresh_token().await.unwrap();
+        let second = provider.get_or_refresh_token().await.unwrap();
+        let header = jsonwebtoken::decode_header(&first).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(header.alg, Algorithm::ES256);
+        assert_eq!(header.kid.as_deref(), Some("TESTKEY01"));
+    }
+
+    #[tokio::test]
+    async fn expired_cached_token_is_replaced() {
+        let provider = ApnsProvider::new(config(false)).unwrap();
+        *provider.cached_token.lock().await = Some(CachedToken {
+            token: "stale-token".into(),
+            created_at: Instant::now().checked_sub(TOKEN_REFRESH_INTERVAL).unwrap(),
+        });
+
+        let refreshed = provider.get_or_refresh_token().await.unwrap();
+
+        assert_ne!(refreshed, "stale-token");
+        assert_eq!(
+            provider.cached_token.lock().await.as_ref().unwrap().token,
+            refreshed
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_device_token_is_rejected_before_network_or_signing() {
+        let provider = ApnsProvider::new(config(false)).unwrap();
+        let oversized = "a".repeat(MAX_TOKEN_LEN + 1);
+
+        let result = provider.send_silent_push(&oversized, "ios").await;
+
+        assert!(matches!(result, Err(PushError::InvalidToken)));
+        assert!(provider.cached_token.lock().await.is_none());
     }
 }

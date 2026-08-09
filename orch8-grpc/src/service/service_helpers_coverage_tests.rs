@@ -178,6 +178,7 @@ fn claimed_task() -> WorkerTask {
         worker_id: Some("worker-a".into()),
         claimed_at: Some(chrono::Utc::now()),
         heartbeat_at: Some(chrono::Utc::now()),
+        claim_epoch: 3,
         resume_checkpoint: Some(serde_json::json!({"cursor": 10})),
         checkpoint_seq: 7,
         completed_at: Some(chrono::Utc::now()),
