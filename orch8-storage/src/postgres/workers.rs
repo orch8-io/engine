@@ -110,7 +110,7 @@ pub(super) async fn claim(
           SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
               claim_epoch = claim_epoch + 1
           WHERE id IN (
-              SELECT id, claim_epoch, worker_id FROM worker_tasks
+              SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending'
               ORDER BY created_at
               LIMIT $3
@@ -394,7 +394,7 @@ pub(super) async fn reap_stale(
     let mut tx = store.pool.begin().await?;
     let rows: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
         r"WITH stale AS (
-              SELECT id FROM worker_tasks
+              SELECT id, claim_epoch, worker_id FROM worker_tasks
               WHERE state = 'claimed'
                 AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)
               ORDER BY heartbeat_at ASC

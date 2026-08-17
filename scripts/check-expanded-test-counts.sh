@@ -78,8 +78,8 @@ e2e_files=(
 unit_count="$(grep -ohE 'coverage_[a-z0-9_]+' "${unit_files[@]}" | sort -u | wc -l | tr -d ' ')"
 e2e_count="$(grep -hEc '^[[:space:]]*it\(' "${e2e_files[@]}" | awk '{ total += $1 } END { print total + 0 }')"
 
-if [[ "$unit_count" -ne 1933 ]]; then
-  echo "expected exactly 1933 expanded Rust unit tests, found $unit_count" >&2
+if [[ "$unit_count" -ne 1936 ]]; then
+  echo "expected exactly 1936 expanded Rust unit tests, found $unit_count" >&2
   exit 1
 fi
 

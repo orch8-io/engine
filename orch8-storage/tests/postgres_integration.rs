@@ -311,6 +311,7 @@ fn source_pins_for_update_of_wt_in_tenant_claim_queries() {
 async fn worker_claim_epoch_fences_restarted_postgres_worker() {
     let s = require_postgres!();
     let tenant = format!("t-worker-fence-{}", Uuid::new_v4());
+    let handler = format!("fenced_handler-{}", Uuid::new_v4());
     let seq_id = SequenceId::new();
     s.create_sequence(&mk_sequence(&tenant, seq_id))
         .await
@@ -322,7 +323,7 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         id: Uuid::new_v4(),
         instance_id: instance.id,
         block_id: BlockId::new("fenced_step"),
-        handler_name: "fenced_handler".into(),
+        handler_name: handler.clone(),
         queue_name: None,
         params: serde_json::json!({}),
         context: serde_json::json!({}),
@@ -344,7 +345,7 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
     s.create_worker_task(&task).await.unwrap();
 
     let first = s
-        .claim_worker_tasks("fenced_handler", "stable-worker", 1)
+        .claim_worker_tasks(&handler, "stable-worker", 1)
         .await
         .unwrap();
     assert_eq!(first[0].claim_epoch, 1);
@@ -352,7 +353,7 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         .await
         .unwrap();
     let replacement = s
-        .claim_worker_tasks("fenced_handler", "stable-worker", 1)
+        .claim_worker_tasks(&handler, "stable-worker", 1)
         .await
         .unwrap();
     assert_eq!(replacement[0].claim_epoch, 2);
