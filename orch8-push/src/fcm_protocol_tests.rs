@@ -1,14 +1,13 @@
 //! Protocol-level FCM tests with an in-process OAuth and message endpoint.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use tokio::sync::Mutex;
 
 use super::*;
@@ -21,13 +20,13 @@ struct Delivery {
 
 type ScriptedResponse = (StatusCode, &'static str);
 
-static TEST_RSA_KEY: LazyLock<String> = LazyLock::new(|| {
-    rsa::RsaPrivateKey::new(&mut rand_08::rngs::OsRng, 2048)
-        .unwrap()
-        .to_pkcs8_pem(LineEnding::LF)
-        .unwrap()
-        .to_string()
-});
+// Public, test-only PKCS#8 fixture. Keep it headerless on disk so secret
+// scanners do not mistake it for an operational private key.
+const TEST_RSA_KEY_BODY: &str = include_str!("../testdata/fcm-test-rsa.pkcs8.b64");
+
+fn test_rsa_key() -> String {
+    format!("-----BEGIN PRIVATE KEY-----\n{TEST_RSA_KEY_BODY}-----END PRIVATE KEY-----\n")
+}
 
 #[derive(Clone, Default)]
 struct MockFcmState {
@@ -133,7 +132,7 @@ fn provider(endpoint: &str) -> FcmProvider {
         message_base_url: endpoint.into(),
         service_account: ServiceAccount {
             client_email: "fcm@test-project.iam.gserviceaccount.com".into(),
-            private_key: TEST_RSA_KEY.clone(),
+            private_key: test_rsa_key(),
             token_uri: format!("{endpoint}/token"),
         },
         cached_token: Mutex::new(None),

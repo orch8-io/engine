@@ -12,7 +12,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 chrono.workspace = true
 tokio.workspace = true
 urlencoding = "2"
@@ -25,8 +25,6 @@ hex = "0.4"
 
 [dev-dependencies]
 axum.workspace = true
-rand_08 = { package = "rand", version = "0.8" }
-rsa = { version = "0.9", features = ["pem"] }
 
 [lints]
 workspace = true
