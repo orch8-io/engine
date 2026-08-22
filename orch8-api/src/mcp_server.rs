@@ -91,6 +91,7 @@ type ToolResult = Result<Value, String>;
 async fn handle_mcp(
     State(state): State<AppState>,
     tenant_ctx: OptionalTenant,
+    admin_ctx: crate::auth::OptionalAdmin,
     body: Bytes,
 ) -> Response {
     let msg: Value = match serde_json::from_slice(&body) {
@@ -132,7 +133,7 @@ async fn handle_mcp(
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_catalog() })),
-        "tools/call" => tools_call(state, tenant_ctx, &params).await,
+        "tools/call" => tools_call(state, tenant_ctx, admin_ctx, &params).await,
         other => Err((METHOD_NOT_FOUND, format!("method not found: {other}"))),
     };
     match outcome {
@@ -162,6 +163,7 @@ fn initialize_result(params: &Value) -> Value {
 async fn tools_call(
     state: AppState,
     tenant_ctx: OptionalTenant,
+    admin_ctx: crate::auth::OptionalAdmin,
     params: &Value,
 ) -> Result<Value, (i64, String)> {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
@@ -180,7 +182,7 @@ async fn tools_call(
         "send_signal" => tool_send_signal(state, tenant_ctx, &args).await,
         "retry_instance" => tool_retry_instance(state, tenant_ctx, &args).await,
         "list_dlq" => tool_list_dlq(state, tenant_ctx, &args).await,
-        "get_usage" => tool_get_usage(state, tenant_ctx, &args).await,
+        "get_usage" => tool_get_usage(state, tenant_ctx, admin_ctx, &args).await,
         // Unknown tool name → -32602 (documented choice, see module docs):
         // the catalog is static, so a bad name is a protocol-level caller
         // bug rather than a domain outcome.
@@ -361,7 +363,12 @@ async fn tool_list_dlq(state: AppState, tenant_ctx: OptionalTenant, args: &Value
 }
 
 /// `get_usage`: tenant-scoped LLM token/cost aggregation over a time window.
-async fn tool_get_usage(state: AppState, tenant_ctx: OptionalTenant, args: &Value) -> ToolResult {
+async fn tool_get_usage(
+    state: AppState,
+    tenant_ctx: OptionalTenant,
+    admin_ctx: crate::auth::OptionalAdmin,
+    args: &Value,
+) -> ToolResult {
     let mut query = serde_json::Map::new();
     for key in ["tenant", "start", "end"] {
         if let Some(v) = args.get(key) {
@@ -369,7 +376,7 @@ async fn tool_get_usage(state: AppState, tenant_ctx: OptionalTenant, args: &Valu
         }
     }
     let q: crate::usage::UsageQuery = parse_args(Value::Object(query))?;
-    rest_json(crate::usage::get_usage(State(state), tenant_ctx, Query(q)).await).await
+    rest_json(crate::usage::get_usage(State(state), tenant_ctx, admin_ctx, Query(q)).await).await
 }
 
 // ---- Plumbing ---------------------------------------------------------------

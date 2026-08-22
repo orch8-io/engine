@@ -12,7 +12,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::AppState;
-use crate::auth::TenantContext;
+use crate::api_keys::require_admin;
+use crate::auth::{OptionalAdmin, TenantContext};
 use crate::error::ApiError;
 use crate::model_pricing;
 
@@ -49,6 +50,7 @@ pub struct UsageQuery {
 pub async fn get_usage(
     State(state): State<AppState>,
     tenant_ctx: Option<axum::Extension<TenantContext>>,
+    admin_ctx: OptionalAdmin,
     Query(q): Query<UsageQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     // A header-scoped caller is locked to its own tenant (the `?tenant=` param
@@ -56,11 +58,14 @@ pub async fn get_usage(
     // caller may select a tenant via the query param.
     let tenant = match &tenant_ctx {
         Some(axum::Extension(ctx)) => ctx.tenant_id.as_str().to_string(),
-        None => q.tenant.clone().ok_or_else(|| {
-            ApiError::InvalidArgument(
-                "usage requires a tenant (X-Tenant-Id header or ?tenant=)".into(),
-            )
-        })?,
+        None => {
+            require_admin(&admin_ctx)?;
+            q.tenant.clone().ok_or_else(|| {
+                ApiError::InvalidArgument(
+                    "usage requires a tenant (X-Tenant-Id header or ?tenant=)".into(),
+                )
+            })?
+        }
     };
 
     let end = q.end.unwrap_or_else(Utc::now);
