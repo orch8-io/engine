@@ -935,7 +935,10 @@ async fn phase_composite_reevaluation(
     }))
 }
 
-fn tree_state_changed(pre_states: &[(ExecutionNodeId, NodeState)], current_tree: &[ExecutionNode]) -> bool {
+fn tree_state_changed(
+    pre_states: &[(ExecutionNodeId, NodeState)],
+    current_tree: &[ExecutionNode],
+) -> bool {
     pre_states.len() != current_tree.len()
         || pre_states
             .iter()
