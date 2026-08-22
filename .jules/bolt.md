@@ -85,3 +85,7 @@
 ## 2025-11-04 - [Avoid HashMap Allocation for Parent-to-Child Grouping on Hot Paths]
 **Learning:** In the `cancel_scoped` function within `orch8-engine/src/signals.rs`, allocating a `HashMap<ExecutionNodeId, Vec<&ExecutionNode>>` inside a hot path loop across all tree nodes results in severe memory allocation and hashing overhead, negatively impacting CPU and scaling.
 **Action:** Always replace dynamic `HashMap` allocations inside tree processing loops with a `Vec<(ParentId, &ChildType)>`. Sort the vector by the parent ID using `.sort_unstable_by_key()` and retrieve matching children efficiently in O(log N) time using `.partition_point()` and bounded `.skip()` iteration, achieving completely zero-allocation queries inside nested functions like `is_inside_finally_branch`.
+
+## 2026-10-15 - [Zero-Allocation Slice Comparison]
+**Learning:** In the `phase_composite_reevaluation` hot loop within `orch8-engine/src/evaluator.rs`, the code collected `tree.iter().map(|n| (n.id, n.state))` into intermediate `Vec`s multiple times purely to check if the tree state changed between steps. Allocating vectors for comparison adds significant memory overhead.
+**Action:** When determining if two slices or collections have structurally changed, avoid collecting them into intermediate vectors. Instead, create a helper function to perform inline `len()` comparisons and `.iter().zip(...).any(...)` checks to compare elements on the fly with zero allocation.

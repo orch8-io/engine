@@ -910,9 +910,7 @@ async fn phase_composite_reevaluation(
         if may_mutate_instance(block) {
             ctx.instance_stale = true;
             let mid_tree = storage.get_execution_tree(instance_id).await?;
-            let mid_states: Vec<(ExecutionNodeId, NodeState)> =
-                mid_tree.iter().map(|n| (n.id, n.state)).collect();
-            if pre_states != mid_states {
+            if tree_state_changed(&pre_states, &mid_tree) {
                 ctx.set_tree(mid_tree);
                 early_restart = true;
                 break;
@@ -924,9 +922,7 @@ async fn phase_composite_reevaluation(
     }
 
     let post_tree = storage.get_execution_tree(instance_id).await?;
-    let post_states: Vec<(ExecutionNodeId, NodeState)> =
-        post_tree.iter().map(|n| (n.id, n.state)).collect();
-    if pre_states != post_states {
+    if tree_state_changed(&pre_states, &post_tree) {
         ctx.set_tree(post_tree);
         return Ok(IterAction::Continue);
     }
@@ -937,6 +933,14 @@ async fn phase_composite_reevaluation(
     Ok(IterAction::Return(EvalOutcome::MoreWork {
         has_waiting_nodes: post_tree.iter().any(|n| n.state == NodeState::Waiting),
     }))
+}
+
+fn tree_state_changed(pre_states: &[(ExecutionNodeId, NodeState)], current_tree: &[ExecutionNode]) -> bool {
+    pre_states.len() != current_tree.len()
+        || pre_states
+            .iter()
+            .zip(current_tree.iter())
+            .any(|(pre, curr)| pre.0 != curr.id || pre.1 != curr.state)
 }
 
 fn may_mutate_instance(block: &BlockDefinition) -> bool {
