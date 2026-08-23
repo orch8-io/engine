@@ -1,0 +1,18 @@
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(49:10446 ~ tokio[697b]::sync::mutex::{impl#10}::lock::{opaque#0}) }, args: [std::option::Option<apns::CachedToken>, '{erased}], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(0:47 ~ orch8_push[5ca6]::apns::{impl#1}::get_or_refresh_token::{opaque#0}) }, args: ['{erased}], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(92:899 ~ reqwest[17b5]::async_impl::request::{impl#1}::send::{opaque#0}) }, args: [], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(92:955 ~ reqwest[17b5]::async_impl::response::{impl#0}::text::{opaque#0}) }, args: [], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(49:10446 ~ tokio[697b]::sync::mutex::{impl#10}::lock::{opaque#0}) }, args: [std::option::Option<fcm::CachedToken>, '{erased}], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(92:959 ~ reqwest[17b5]::async_impl::response::{impl#0}::json::{opaque#0}) }, args: [fcm::TokenResponse], .. })
+disabled backtrace
+delayed bug: unexpected rigid alias in layout_of after normalization: Alias(Yes, Alias { kind: Opaque { def_id: DefId(0:110 ~ orch8_push[5ca6]::fcm::{impl#2}::get_or_refresh_token::{opaque#0}) }, args: ['{erased}], .. })
+disabled backtrace
+
+
+rustc version: 1.100.0-nightly (c54751567 2026-08-22)
+platform: x86_64-unknown-linux-gnu
