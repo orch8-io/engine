@@ -885,11 +885,7 @@ async fn phase_composite_reevaluation(
         return Ok(IterAction::FallThrough);
     }
 
-    // Snapshot node states before dispatching any composite.
-    let pre_states: Vec<(ExecutionNodeId, NodeState)> =
-        ctx.tree.iter().map(|n| (n.id, n.state)).collect();
-
-    let mut early_restart = false;
+    let mut tree_mutated = false;
     for idx in &composite_indices {
         let node = &ctx.tree[*idx];
         let Some(block) = block_map.get(&node.block_id).copied() else {
@@ -910,23 +906,19 @@ async fn phase_composite_reevaluation(
         if may_mutate_instance(block) {
             ctx.instance_stale = true;
             let mid_tree = storage.get_execution_tree(instance_id).await?;
-            let mid_states: Vec<(ExecutionNodeId, NodeState)> =
-                mid_tree.iter().map(|n| (n.id, n.state)).collect();
-            if pre_states != mid_states {
+            if states_differ(&ctx.tree, &mid_tree) {
                 ctx.set_tree(mid_tree);
-                early_restart = true;
+                tree_mutated = true;
                 break;
             }
         }
     }
-    if early_restart {
+    if tree_mutated {
         return Ok(IterAction::Continue);
     }
 
     let post_tree = storage.get_execution_tree(instance_id).await?;
-    let post_states: Vec<(ExecutionNodeId, NodeState)> =
-        post_tree.iter().map(|n| (n.id, n.state)).collect();
-    if pre_states != post_states {
+    if states_differ(&ctx.tree, &post_tree) {
         ctx.set_tree(post_tree);
         return Ok(IterAction::Continue);
     }
@@ -937,6 +929,16 @@ async fn phase_composite_reevaluation(
     Ok(IterAction::Return(EvalOutcome::MoreWork {
         has_waiting_nodes: post_tree.iter().any(|n| n.state == NodeState::Waiting),
     }))
+}
+
+fn states_differ(a: &[ExecutionNode], b: &[ExecutionNode]) -> bool {
+    // ⚡ Bolt: Rather than allocating Vecs of states to compare snapshots of the tree
+    // after executing a block, we use a zero-allocation length and element-wise comparison.
+    // Iteration short-circuits on the first mismatch.
+    a.len() != b.len()
+        || a.iter()
+            .zip(b.iter())
+            .any(|(na, nb)| na.id != nb.id || na.state != nb.state)
 }
 
 fn may_mutate_instance(block: &BlockDefinition) -> bool {
