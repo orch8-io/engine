@@ -330,7 +330,7 @@ pub async fn activate_capsule(
 mod tests {
     use std::sync::Arc;
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use chrono::{Duration, Utc};
     use ed25519_dalek::{Signer as _, SigningKey};
     use orch8_engine::capsule::{CapsuleExportRequest, export_paused_capsule};
