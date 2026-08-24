@@ -67,18 +67,16 @@ fn classify_fcm_response(status: reqwest::StatusCode, body: &str) -> FcmOutcome 
     // with 404 "Requested entity was not found") is a project-level failure:
     // treating it as InvalidToken would let one config typo wipe every
     // registered device token.
-    let unregistered = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .is_some_and(|v| {
-            v.get("error")
-                .and_then(|e| e.get("details"))
-                .and_then(|d| d.as_array())
-                .is_some_and(|details| {
-                    details.iter().any(|d| {
-                        d.get("errorCode").and_then(|c| c.as_str()) == Some("UNREGISTERED")
-                    })
-                })
-        });
+    let unregistered = serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
+        v.get("error")
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.as_array())
+            .is_some_and(|details| {
+                details
+                    .iter()
+                    .any(|d| d.get("errorCode").and_then(|c| c.as_str()) == Some("UNREGISTERED"))
+            })
+    });
     if unregistered {
         return FcmOutcome::InvalidToken;
     }
