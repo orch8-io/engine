@@ -1,6 +1,6 @@
 //! Static LLM model pricing table used to estimate USD cost from token usage.
 //!
-//! Prices are **estimates** (USD per 1M tokens, list prices as of mid-2025)
+//! Prices are **estimates** (USD per 1M tokens, list prices as of 2026-08-23)
 //! and exist so `GET /usage` can attach a ballpark `cost_usd` to each
 //! aggregate without calling out to any provider. Deployments can correct or
 //! extend the table at process start via the `ORCH8_MODEL_PRICING` env var
@@ -26,6 +26,19 @@ pub struct ModelPrice {
 /// family entry.
 const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     // OpenAI
+    ("gpt-5.6-sol", price(5.00, 30.00)),
+    ("gpt-5.6-terra", price(2.50, 15.00)),
+    ("gpt-5.6-luna", price(1.00, 6.00)),
+    ("gpt-5.5", price(5.00, 30.00)),
+    ("gpt-5.5-pro", price(30.00, 180.00)),
+    ("gpt-5.4", price(2.50, 15.00)),
+    ("gpt-5.4-mini", price(0.75, 4.50)),
+    ("gpt-5.4-nano", price(0.20, 1.25)),
+    ("gpt-5.4-pro", price(30.00, 180.00)),
+    ("gpt-5.3-codex", price(1.75, 14.00)),
+    ("gpt-5", price(1.25, 10.00)),
+    ("gpt-5-mini", price(0.25, 2.00)),
+    ("gpt-5-nano", price(0.05, 0.40)),
     ("gpt-4o", price(2.50, 10.00)),
     ("gpt-4o-mini", price(0.15, 0.60)),
     ("gpt-4.1", price(2.00, 8.00)),
@@ -38,6 +51,16 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("o3-mini", price(1.10, 4.40)),
     ("o4-mini", price(1.10, 4.40)),
     // Anthropic
+    ("claude-fable-5", price(10.00, 50.00)),
+    ("claude-mythos-5", price(10.00, 50.00)),
+    ("claude-opus-5", price(5.00, 25.00)),
+    ("claude-sonnet-5", price(2.00, 10.00)),
+    ("claude-opus-4-8", price(5.00, 25.00)),
+    ("claude-opus-4-7", price(5.00, 25.00)),
+    ("claude-opus-4-6", price(5.00, 25.00)),
+    ("claude-opus-4-5", price(5.00, 25.00)),
+    ("claude-sonnet-4-6", price(3.00, 15.00)),
+    ("claude-sonnet-4-5", price(3.00, 15.00)),
     ("claude-opus-4", price(15.00, 75.00)),
     ("claude-sonnet-4", price(3.00, 15.00)),
     ("claude-haiku", price(1.00, 5.00)),
@@ -47,37 +70,63 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("claude-3-7-sonnet", price(3.00, 15.00)),
     ("claude-3-opus", price(15.00, 75.00)),
     // Google
+    // Promotional standard pricing through 2026-12-31.
+    ("gemini-3.7-flash", price(0.75, 3.75)),
+    ("gemini-3.6-flash", price(0.75, 3.75)),
+    ("gemini-3.5-flash", price(1.50, 9.00)),
+    ("gemini-3.5-flash-lite", price(0.30, 2.50)),
+    ("gemini-3.1-pro", price(2.00, 12.00)),
+    ("gemini-3.1-flash-lite", price(0.25, 1.50)),
     ("gemini-2.5-pro", price(1.25, 10.00)),
     ("gemini-2.5-flash", price(0.30, 2.50)),
+    ("gemini-2.5-flash-lite", price(0.10, 0.40)),
     ("gemini-2.0-flash", price(0.10, 0.40)),
     ("gemini-1.5-pro", price(1.25, 5.00)),
     ("gemini-1.5-flash", price(0.075, 0.30)),
     // DeepSeek
-    ("deepseek-chat", price(0.27, 1.10)),
-    ("deepseek-reasoner", price(0.55, 2.19)),
+    ("deepseek-v4-flash", price(0.14, 0.28)),
+    ("deepseek-v4-pro", price(0.435, 0.87)),
+    // Deprecated aliases currently map to V4 Flash modes.
+    ("deepseek-chat", price(0.14, 0.28)),
+    ("deepseek-reasoner", price(0.14, 0.28)),
     // Mistral
-    ("mistral-large", price(2.00, 6.00)),
-    ("mistral-medium", price(0.40, 2.00)),
-    ("mistral-small", price(0.10, 0.30)),
+    ("mistral-large-3", price(0.50, 1.50)),
+    ("mistral-medium-3.5", price(1.50, 7.50)),
+    ("mistral-small-4", price(0.15, 0.60)),
+    ("ministral-3-14b", price(0.20, 0.20)),
+    ("ministral-3-8b", price(0.15, 0.15)),
+    ("ministral-3-3b", price(0.10, 0.10)),
+    ("mistral-large", price(0.50, 1.50)),
+    ("mistral-medium", price(1.50, 7.50)),
+    ("mistral-small", price(0.15, 0.60)),
     // Meta
+    ("llama-4-maverick", price(0.24, 0.97)),
     ("llama-3.3-70b", price(0.59, 0.79)),
     ("llama-3.1-70b", price(0.59, 0.79)),
     ("llama-3.1-8b", price(0.05, 0.08)),
     ("llama-3.1-405b", price(3.50, 3.50)),
     // xAI
+    ("grok-4.6", price(2.00, 6.00)),
+    ("grok-4.5", price(2.00, 6.00)),
     ("grok-3", price(3.00, 15.00)),
     ("grok-3-mini", price(0.30, 0.50)),
     ("grok-2", price(2.00, 10.00)),
     // Alibaba
+    ("qwen3.7-max", price(2.50, 7.50)),
+    ("qwen3.7-plus", price(0.40, 1.60)),
+    ("qwen3.6-flash", price(0.165, 0.99)),
+    ("qwen3.5-flash", price(0.10, 0.40)),
     ("qwen-max", price(1.60, 6.40)),
     ("qwen-plus", price(0.40, 1.20)),
     ("qwen-turbo", price(0.05, 0.20)),
     // Cohere
+    ("command-a", price(2.50, 10.00)),
     ("command-r", price(0.15, 0.60)),
     ("command-r-plus", price(2.50, 10.00)),
     // Amazon
     ("nova-pro", price(0.80, 3.20)),
     ("nova-lite", price(0.06, 0.24)),
+    ("nova-micro", price(0.035, 0.14)),
 ];
 
 /// `const`-context constructor so [`DEFAULT_PRICES`] stays readable.
@@ -188,6 +237,26 @@ mod tests {
         assert_eq!((p.input_per_1m, p.output_per_1m), (2.50, 10.00));
         let p = price_for_model("claude-opus-4").unwrap();
         assert_eq!((p.input_per_1m, p.output_per_1m), (15.00, 75.00));
+    }
+
+    #[test]
+    fn prices_current_models_across_provider_families() {
+        let expected = [
+            ("gpt-5.6-terra", (2.50, 15.00)),
+            ("claude-sonnet-5", (2.00, 10.00)),
+            ("gemini-3.7-flash", (0.75, 3.75)),
+            ("deepseek-v4-pro", (0.435, 0.87)),
+            ("mistral-small-4", (0.15, 0.60)),
+            ("llama-4-maverick", (0.24, 0.97)),
+            ("grok-4.6", (2.00, 6.00)),
+            ("qwen3.7-plus", (0.40, 1.60)),
+            ("command-a", (2.50, 10.00)),
+            ("nova-micro", (0.035, 0.14)),
+        ];
+        for (model, pair) in expected {
+            let p = price_for_model(model).unwrap();
+            assert_eq!((p.input_per_1m, p.output_per_1m), pair, "{model}");
+        }
     }
 
     #[test]
