@@ -885,10 +885,6 @@ async fn phase_composite_reevaluation(
         return Ok(IterAction::FallThrough);
     }
 
-    // Snapshot node states before dispatching any composite.
-    let pre_states: Vec<(ExecutionNodeId, NodeState)> =
-        ctx.tree.iter().map(|n| (n.id, n.state)).collect();
-
     let mut early_restart = false;
     for idx in &composite_indices {
         let node = &ctx.tree[*idx];
@@ -910,9 +906,13 @@ async fn phase_composite_reevaluation(
         if may_mutate_instance(block) {
             ctx.instance_stale = true;
             let mid_tree = storage.get_execution_tree(instance_id).await?;
-            let mid_states: Vec<(ExecutionNodeId, NodeState)> =
-                mid_tree.iter().map(|n| (n.id, n.state)).collect();
-            if pre_states != mid_states {
+            let changed = mid_tree.len() != ctx.tree.len()
+                || ctx
+                    .tree
+                    .iter()
+                    .zip(mid_tree.iter())
+                    .any(|(pre, post)| pre.id != post.id || pre.state != post.state);
+            if changed {
                 ctx.set_tree(mid_tree);
                 early_restart = true;
                 break;
@@ -924,9 +924,13 @@ async fn phase_composite_reevaluation(
     }
 
     let post_tree = storage.get_execution_tree(instance_id).await?;
-    let post_states: Vec<(ExecutionNodeId, NodeState)> =
-        post_tree.iter().map(|n| (n.id, n.state)).collect();
-    if pre_states != post_states {
+    let changed = post_tree.len() != ctx.tree.len()
+        || ctx
+            .tree
+            .iter()
+            .zip(post_tree.iter())
+            .any(|(pre, post)| pre.id != post.id || pre.state != post.state);
+    if changed {
         ctx.set_tree(post_tree);
         return Ok(IterAction::Continue);
     }
