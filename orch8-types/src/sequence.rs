@@ -681,6 +681,140 @@ fn collect_unknown_block_field(block: &serde_json::Value, path: &str, unknown: &
     }
 }
 
+fn typed_block_decode_error<T>(value: &serde_json::Value, path: &str) -> Option<SequenceDecodeError>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let error = serde_path_to_error::deserialize::<_, T>(value.clone()).err()?;
+    let inner_path = readable_json_path(&error.path().to_string());
+    let message = if inner_path.is_empty() {
+        format!("{path}: {}", error.inner())
+    } else {
+        format!("{path}.{inner_path}: {}", error.inner())
+    };
+    Some(SequenceDecodeError { message })
+}
+
+fn nested_block_decode_error(value: &serde_json::Value, path: &str) -> Option<SequenceDecodeError> {
+    let object = value.as_object()?;
+    let block_type = object.get("type").and_then(serde_json::Value::as_str)?;
+    let inspect_list = |value: &serde_json::Value, child_path: &str| {
+        value.as_array().and_then(|blocks| {
+            blocks.iter().enumerate().find_map(|(index, block)| {
+                precise_block_decode_error(block, &format!("{child_path}[{index}]"))
+            })
+        })
+    };
+
+    match block_type {
+        "parallel" | "race" => object
+            .get("branches")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|branches| {
+                branches.iter().enumerate().find_map(|(index, branch)| {
+                    inspect_list(branch, &format!("{path}.branches[{index}]"))
+                })
+            }),
+        "loop" | "for_each" => object
+            .get("body")
+            .and_then(|body| inspect_list(body, &format!("{path}.body"))),
+        "router" => object
+            .get("routes")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|routes| {
+                routes.iter().enumerate().find_map(|(index, route)| {
+                    route.get("blocks").and_then(|blocks| {
+                        inspect_list(blocks, &format!("{path}.routes[{index}].blocks"))
+                    })
+                })
+            })
+            .or_else(|| {
+                object
+                    .get("default")
+                    .and_then(|blocks| inspect_list(blocks, &format!("{path}.default")))
+            }),
+        "try_catch" => ["try_block", "catch_block", "finally_block"]
+            .into_iter()
+            .find_map(|field| {
+                object
+                    .get(field)
+                    .and_then(|blocks| inspect_list(blocks, &format!("{path}.{field}")))
+            }),
+        "ab_split" | "a_b_split" => object
+            .get("variants")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|variants| {
+                variants.iter().enumerate().find_map(|(index, variant)| {
+                    variant.get("blocks").and_then(|blocks| {
+                        inspect_list(blocks, &format!("{path}.variants[{index}].blocks"))
+                    })
+                })
+            }),
+        "cancellation_scope" => object
+            .get("blocks")
+            .and_then(|blocks| inspect_list(blocks, &format!("{path}.blocks"))),
+        "saga" => object
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|steps| {
+                steps.iter().enumerate().find_map(|(index, step)| {
+                    ["action", "compensation"].into_iter().find_map(|field| {
+                        step.get(field).and_then(|block| {
+                            precise_block_decode_error(
+                                block,
+                                &format!("{path}.steps[{index}].{field}"),
+                            )
+                        })
+                    })
+                })
+            }),
+        _ => None,
+    }
+}
+
+/// Decode variants directly so serde's internally-tagged enum adapter cannot
+/// erase the failing field path. Composite children are inspected first.
+fn precise_block_decode_error(
+    value: &serde_json::Value,
+    path: &str,
+) -> Option<SequenceDecodeError> {
+    let object = value.as_object()?;
+    let block_type = object.get("type").and_then(serde_json::Value::as_str)?;
+    if let Some(error) = nested_block_decode_error(value, path) {
+        return Some(error);
+    }
+
+    match block_type {
+        "step" => typed_block_decode_error::<StepDef>(value, path),
+        "parallel" => typed_block_decode_error::<ParallelDef>(value, path),
+        "race" => typed_block_decode_error::<RaceDef>(value, path),
+        "loop" => typed_block_decode_error::<LoopDef>(value, path),
+        "for_each" => typed_block_decode_error::<ForEachDef>(value, path),
+        "router" => typed_block_decode_error::<RouterDef>(value, path),
+        "try_catch" => typed_block_decode_error::<TryCatchDef>(value, path),
+        "sub_sequence" => typed_block_decode_error::<SubSequenceDef>(value, path),
+        "ab_split" | "a_b_split" => typed_block_decode_error::<ABSplitDef>(value, path),
+        "cancellation_scope" => typed_block_decode_error::<CancellationScopeDef>(value, path),
+        "saga" => typed_block_decode_error::<SagaDef>(value, path),
+        _ => typed_block_decode_error::<BlockDefinition>(value, path),
+    }
+}
+
+fn precise_sequence_decode_error(value: &serde_json::Value) -> Option<SequenceDecodeError> {
+    ["blocks", "on_failure", "on_cancel"]
+        .into_iter()
+        .find_map(|field| {
+            value
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .and_then(|blocks| {
+                    blocks.iter().enumerate().find_map(|(index, block)| {
+                        precise_block_decode_error(block, &format!("{field}[{index}]"))
+                    })
+                })
+        })
+}
+
 fn readable_json_path(path: &str) -> String {
     let mut rendered = String::new();
     for segment in path.split('.') {
@@ -753,6 +887,9 @@ pub fn deserialize_sequence_lenient(
             .collect();
         Ok((sequence, warnings))
     } else {
+        if let Some(error) = precise_sequence_decode_error(value) {
+            return Err(error);
+        }
         let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
         serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
             let path = readable_json_path(&error.path().to_string());
@@ -2052,6 +2189,36 @@ mod tests {
 
         let error = deserialize_sequence_strict(&value).unwrap_err();
         assert!(error.to_string().contains("blocks[1]"), "{error}");
+        assert!(error.to_string().contains("expected a string"), "{error}");
+    }
+
+    #[test]
+    fn strict_sequence_decode_reports_type_error_inside_composite() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "tenant_id": "tenant",
+            "namespace": "default",
+            "name": "bad-nested-handler",
+            "version": 1,
+            "blocks": [{
+                "type": "parallel",
+                "id": "fanout",
+                "branches": [[{
+                    "type": "step",
+                    "id": "bad",
+                    "handler": 42
+                }]]
+            }],
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+
+        let error = deserialize_sequence_strict(&value).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("blocks[0].branches[0][0].handler"),
+            "{error}"
+        );
         assert!(error.to_string().contains("expected a string"), "{error}");
     }
 

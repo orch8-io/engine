@@ -97,10 +97,7 @@ describe("Workflow Interceptors", () => {
       const tenantId = `intercept-sig-${uuid().slice(0, 8)}`;
       const seq = testSequence(
         "intercept-on-signal",
-        // Keep the instance alive until the signal is delivered. A single log
-        // step can complete between createInstance and sendSignal on a busy CI
-        // runner, making the signal interceptor assertion race the scheduler.
-        [step("s1", "sleep", { duration_ms: 2_000 })],
+        [step("s1", "log", { message: "x" })],
         { tenantId },
       );
       (seq as Record<string, unknown>).interceptors = {
@@ -119,23 +116,40 @@ describe("Workflow Interceptors", () => {
         sequence_id: seq.id,
         tenant_id: tenantId,
         namespace: "default",
+        // Keep the instance out of the normal claim cycle until the signal
+        // interceptor has been observed.
+        next_fire_at: new Date(Date.now() + 60_000).toISOString(),
       });
 
-      await client.waitForState(id, "running", { timeoutMs: 5_000 });
+      await client.updateState(id, "paused");
+      await client.waitForState(id, "paused", { timeoutMs: 3_000 });
 
-      // Deliver a signal mid-flight. `on_signal` fires synchronously on
-      // delivery.
+      // The scheduler's signalled-instance sweep consumes custom signals for
+      // paused instances and emits the interceptor artifact.
       // SignalType::Custom(String) is a newtype variant in serde — send
       // as { custom: "probe" } rather than the unit "custom".
       await client.sendSignal(id, { custom: "probe" } as unknown as string, {
         ping: true,
       });
 
+      let outputs = await client.getOutputs(id);
+      const signalDeadline = Date.now() + 5_000;
+      while (
+        !outputs.some((o) => o.block_id === "_interceptor:on_signal") &&
+        Date.now() < signalDeadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        outputs = await client.getOutputs(id);
+      }
+
+      // Resume the instance after the signal hook is visible so the ordinary
+      // step and completion interceptor can drain.
+      await client.updateState(id, "scheduled", new Date().toISOString());
       await client.waitForState(id, "completed");
 
       // Proposed observable artefacts (exact block_id scheme TBD when the
       // engine author picks one — adjust when the dispatch code lands).
-      const outputs = await client.getOutputs(id);
+      outputs = await client.getOutputs(id);
       const onSignal = outputs.find(
         (o) => o.block_id === "_interceptor:on_signal",
       );
