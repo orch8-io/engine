@@ -633,7 +633,10 @@ mod tests {
             name: "local-worker".into(),
             adapter: GatewayAdapter::LocalProcess,
             entrypoint: "/bin/sh".into(),
-            arguments: vec!["-c".into(), "printf '{\"ok\":true}'".into()],
+            // Consume the request before responding. Exiting without reading
+            // stdin races the parent's write and intermittently produces
+            // EPIPE on fast CI runners.
+            arguments: vec!["-c".into(), "cat >/dev/null; printf '{\"ok\":true}'".into()],
             handler: "tool.run".into(),
             policy_source: "classification=internal;runtime_kinds=desktop;handlers=tool.run".into(),
             environment_allowlist: vec![],

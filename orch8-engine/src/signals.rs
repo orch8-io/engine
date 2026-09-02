@@ -45,6 +45,20 @@ async fn process_signals_inner(
         return Ok(false);
     }
 
+    // Some signal paths run outside normal sequence evaluation (for example,
+    // the paused/waiting sweep and interruptible built-in handlers). Resolve
+    // the definition here when the caller could not supply it so lifecycle
+    // interceptors are not silently skipped on those paths.
+    let loaded_sequence = if sequence_def.is_none() {
+        match storage.get_instance(instance_id).await? {
+            Some(instance) => storage.get_sequence(instance.sequence_id).await?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let sequence_def = sequence_def.or(loaded_sequence.as_ref());
+
     for signal in &signals {
         // Re-read current state before every signal so control signals
         // (pause/resume/cancel) act on storage reality, not the stale
@@ -442,7 +456,10 @@ fn is_descendant_of_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch8_storage::{ExecutionTreeStore, InstanceStore, SignalStore, sqlite::SqliteStorage};
+    use orch8_storage::{
+        ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore, SignalStore,
+        sqlite::SqliteStorage,
+    };
     use orch8_types::context::{ExecutionContext, RuntimeContext};
     use orch8_types::ids::{Namespace, SequenceId, TenantId};
     use orch8_types::instance::{Priority, TaskInstance};
@@ -863,6 +880,48 @@ mod tests {
         assert!(r);
         let stored = storage.get_instance(inst.id).await.unwrap().unwrap();
         assert_eq!(stored.state, InstanceState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn process_signals_loads_sequence_for_on_signal_interceptor() {
+        use orch8_types::interceptor::{InterceptorAction, InterceptorDef};
+
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let mut sequence = mk_sequence(vec![]);
+        sequence.interceptors = Some(InterceptorDef {
+            on_signal: Some(InterceptorAction {
+                handler: "log".into(),
+                params: json!({"message": "signal"}),
+            }),
+            ..Default::default()
+        });
+        storage.create_sequence(&sequence).await.unwrap();
+
+        let mut instance = mk_instance_with_state(InstanceState::Running);
+        instance.sequence_id = sequence.id;
+        storage.create_instance(&instance).await.unwrap();
+        let signal = mk_signal(
+            instance.id,
+            SignalType::Custom("probe".into()),
+            json!({"ping": true}),
+        );
+        storage.enqueue_signal(&signal).await.unwrap();
+
+        process_signals(&storage, instance.id, InstanceState::Running)
+            .await
+            .unwrap();
+
+        let output = storage
+            .get_block_output(
+                instance.id,
+                &orch8_types::ids::BlockId::new("_interceptor:on_signal"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            output.is_some(),
+            "on_signal interceptor should be persisted"
+        );
     }
 
     #[tokio::test]
