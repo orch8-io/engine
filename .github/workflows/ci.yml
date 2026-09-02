@@ -368,7 +368,9 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install --locked cargo-fuzz
       - name: Fuzz ${{ matrix.target }} (60s)
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60
+        # rust-toolchain.toml pins the workspace MSRV, so select the nightly
+        # installed above explicitly for cargo-fuzz's sanitizer flags.
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
 
   # scripts/test-mobile-sync.sh is CI-runnable: it only needs a server on
   # localhost:8080 with mobile sync enabled. Boots one on SQLite and runs it.

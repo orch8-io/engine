@@ -28,7 +28,8 @@ RUN mkdir -p orch8/src && echo "" > orch8/src/lib.rs \
     && mkdir -p orch8-grpc/src && echo "" > orch8-grpc/src/lib.rs \
     && mkdir -p orch8-server/src && echo "fn main() {}" > orch8-server/src/main.rs \
     && mkdir -p orch8-cli/src && echo "fn main() {}" > orch8-cli/src/main.rs \
-    && mkdir -p orch8-mobile/src && echo "" > orch8-mobile/src/lib.rs \
+    && mkdir -p orch8-mobile/src/bin && echo "" > orch8-mobile/src/lib.rs \
+    && echo "fn main() {}" > orch8-mobile/src/bin/uniffi-bindgen.rs \
     && mkdir -p orch8-publisher/src && echo "" > orch8-publisher/src/lib.rs \
     && mkdir -p orch8-push/src && echo "" > orch8-push/src/lib.rs
 
