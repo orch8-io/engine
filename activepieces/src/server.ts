@@ -4,7 +4,7 @@
 import * as http from "node:http";
 import { buildActionContext, buildTriggerContext } from "./context";
 import { classifyError, PieceExecutionError } from "./errors";
-import { createDefaultLoader, findAction, findTrigger, Piece, PieceLoader } from "./registry";
+import { createDefaultLoader, findAction, findTrigger, pieceCatalog, Piece, PieceLoader } from "./registry";
 
 /**
  * HTTP shape exchanged with the Rust `ap://` handler.
@@ -121,6 +121,15 @@ async function handleRequest(
 
   if (req.method === "GET" && (url === "/health" || url === "/")) {
     writeJson(res, 200, { ok: true, service: "orch8-activepieces-worker" });
+    return;
+  }
+
+  if (req.method === "GET" && url.startsWith("/catalog")) {
+    const query = new URL(url, "http://localhost").searchParams.get("q")?.toLowerCase() ?? "";
+    const pieces = pieceCatalog().filter((piece) =>
+      !query || piece.name.includes(query) || piece.description.toLowerCase().includes(query)
+    );
+    writeJson(res, 200, { pieces });
     return;
   }
 

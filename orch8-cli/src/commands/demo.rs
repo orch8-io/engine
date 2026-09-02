@@ -34,6 +34,17 @@ use crate::OutputFormat;
 pub enum DemoCmd {
     /// Run a real cloud -> private device -> cloud capsule round trip locally.
     PortableAgent,
+    /// Simulate a process crash and prove stale work is reclaimed after restart.
+    CrashRecovery,
+}
+
+#[derive(Debug, Serialize)]
+struct CrashRecoveryReport {
+    database: String,
+    instance_id: String,
+    before_restart: String,
+    recovered: u64,
+    after_restart: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,8 +73,75 @@ pub async fn run(cmd: DemoCmd, format: OutputFormat) -> Result<()> {
                 OutputFormat::Table => print_portable_agent_report(&report),
             }
         }
+        DemoCmd::CrashRecovery => {
+            let report = run_crash_recovery().await?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                OutputFormat::Table => {
+                    println!("Crash recovery completed");
+                    println!("  instance: {}", report.instance_id);
+                    println!(
+                        "  state:    {} -> {}",
+                        report.before_restart, report.after_restart
+                    );
+                    println!("  reclaimed: {}", report.recovered);
+                }
+            }
+        }
     }
     Ok(())
+}
+
+async fn run_crash_recovery() -> Result<CrashRecoveryReport> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("crash-recovery.db");
+    let path_string = path.display().to_string();
+    let tenant = TenantId::new("crash-demo").map_err(anyhow::Error::msg)?;
+    let sequence = demo_sequence(&tenant)?;
+    let now = Utc::now();
+    let instance = TaskInstance {
+        id: InstanceId::new(),
+        sequence_id: sequence.id,
+        tenant_id: tenant,
+        namespace: Namespace::new("default"),
+        state: InstanceState::Running,
+        next_fire_at: Some(now - Duration::minutes(10)),
+        priority: Priority::Normal,
+        timezone: "UTC".into(),
+        metadata: json!({"demo": "crash-recovery"}),
+        context: ExecutionContext::default(),
+        concurrency_key: None,
+        max_concurrency: None,
+        idempotency_key: None,
+        session_id: None,
+        parent_instance_id: None,
+        budget: None,
+        created_at: now - Duration::minutes(10),
+        updated_at: now - Duration::minutes(10),
+    };
+    {
+        let storage = SqliteStorage::file(&path_string).await?;
+        storage.create_sequence(&sequence).await?;
+        storage.create_instance(&instance).await?;
+        // Dropping the only pool simulates the engine process disappearing.
+    }
+    let restarted = SqliteStorage::file(&path_string).await?;
+    let recovered = orch8_engine::recovery::recover_stale_instances(&restarted, 60).await?;
+    let state = restarted
+        .get_instance(instance.id)
+        .await?
+        .context("recovered instance disappeared")?
+        .state;
+    if recovered != 1 || state != InstanceState::Scheduled {
+        bail!("recovery invariant failed: recovered={recovered}, state={state}");
+    }
+    Ok(CrashRecoveryReport {
+        database: path_string,
+        instance_id: instance.id.to_string(),
+        before_restart: InstanceState::Running.to_string(),
+        recovered,
+        after_restart: state.to_string(),
+    })
 }
 
 fn print_portable_agent_report(report: &PortableAgentReport) {

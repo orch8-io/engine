@@ -14,7 +14,7 @@
 //! - `initialize` → protocol version + `{"tools": {}}` capabilities.
 //! - any notification (no `id`, e.g. `notifications/initialized`) → HTTP 202.
 //! - `ping` → `{}` (keepalive; some hosts poll it).
-//! - `tools/list` → the eight-tool catalog below.
+//! - `tools/list` → the eleven-tool catalog below.
 //! - `tools/call` → dispatch to the matching REST handler logic.
 //!
 //! Error contract: **domain** failures (instance not found, wrong state, …)
@@ -176,6 +176,9 @@ async fn tools_call(
 
     let result = match name {
         "list_sequences" => tool_list_sequences(state, tenant_ctx, &args).await,
+        "create_sequence" => tool_create_sequence(state, tenant_ctx, &args).await,
+        "preflight_sequence" => tool_preflight_sequence(state, tenant_ctx, &args).await,
+        "lint_sequence" => tool_lint_sequence(&args),
         "create_instance" => tool_create_instance(state, tenant_ctx, &args).await,
         "get_instance_status" => tool_get_instance_status(state, tenant_ctx, &args).await,
         "get_instance_outputs" => tool_get_instance_outputs(state, tenant_ctx, &args).await,
@@ -217,6 +220,70 @@ async fn tool_list_sequences(
     }
     let q: crate::sequences::ListSequencesQuery = parse_args(Value::Object(query))?;
     rest_json(crate::sequences::list_sequences(State(state), tenant_ctx, Query(q)).await).await
+}
+
+/// `create_sequence`: validate and persist a complete sequence definition.
+async fn tool_create_sequence(
+    state: AppState,
+    tenant_ctx: OptionalTenant,
+    args: &Value,
+) -> ToolResult {
+    let sequence = args
+        .get("sequence")
+        .cloned()
+        .unwrap_or_else(|| args.clone());
+    rest_json(
+        crate::sequences::create_sequence(
+            State(state),
+            tenant_ctx,
+            Query(crate::sequences::DraftDecodeOptions { strict: true }),
+            Json(sequence),
+        )
+        .await,
+    )
+    .await
+}
+
+/// `preflight_sequence`: run storage-aware readiness checks without saving.
+async fn tool_preflight_sequence(
+    state: AppState,
+    tenant_ctx: OptionalTenant,
+    args: &Value,
+) -> ToolResult {
+    let sequence = args
+        .get("sequence")
+        .cloned()
+        .unwrap_or_else(|| args.clone());
+    rest_json(
+        crate::preflight::preflight_draft(
+            State(state),
+            tenant_ctx,
+            Query(crate::sequences::DraftDecodeOptions { strict: true }),
+            Json(sequence),
+        )
+        .await,
+    )
+    .await
+}
+
+/// `lint_sequence`: pure authoring feedback, suitable for an LLM repair loop.
+fn tool_lint_sequence(args: &Value) -> ToolResult {
+    let sequence = args
+        .get("sequence")
+        .cloned()
+        .unwrap_or_else(|| args.clone());
+    let sequence = orch8_types::sequence::deserialize_sequence_strict(&sequence)
+        .map_err(|error| error.to_string())?;
+    let validation_error = sequence.validate().err().map(|error| error.to_string());
+    let findings = orch8_engine::lint::lint_sequence(&sequence)
+        .into_iter()
+        .map(|finding| finding.to_string())
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "valid": validation_error.is_none(),
+        "error": validation_error,
+        "findings": findings,
+    }))
 }
 
 /// `create_instance`: launch a durable workflow from a sequence id or name.
@@ -465,6 +532,36 @@ fn tool_catalog() -> Value {
             },
         },
         {
+            "name": "create_sequence",
+            "description": "Strictly validate and persist a workflow sequence definition.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence": { "type": "object" } },
+                "required": ["sequence"],
+                "additionalProperties": false,
+            },
+        },
+        {
+            "name": "preflight_sequence",
+            "description": "Run handler, credential, plugin, and structural readiness checks without persisting.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence": { "type": "object" } },
+                "required": ["sequence"],
+                "additionalProperties": false,
+            },
+        },
+        {
+            "name": "lint_sequence",
+            "description": "Strictly decode and lint a workflow sequence for an authoring repair loop.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "sequence": { "type": "object" } },
+                "required": ["sequence"],
+                "additionalProperties": false,
+            },
+        },
+        {
             "name": "create_instance",
             "description": "Launch a durable workflow instance from a sequence. \
                             Provide either sequence_id or sequence_name.",
@@ -595,10 +692,10 @@ mod tests {
     }
 
     #[test]
-    fn catalog_lists_eight_tools_with_object_schemas() {
+    fn catalog_lists_eleven_tools_with_object_schemas() {
         let catalog = tool_catalog();
         let tools = catalog.as_array().expect("catalog is an array");
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 11);
         for tool in tools {
             assert!(tool["name"].is_string());
             assert!(tool["description"].is_string());

@@ -262,6 +262,8 @@ mod tests {
     async fn seed_sequence(storage: &SqliteStorage, tenant: &str, name: &str) -> SequenceId {
         let id = SequenceId::new();
         let seq = SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id,
             tenant_id: TenantId::unchecked(tenant),
             namespace: Namespace::new("default"),

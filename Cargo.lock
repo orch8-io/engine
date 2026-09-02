@@ -3115,6 +3115,7 @@ dependencies = [
  "orch8-publisher",
  "orch8-storage",
  "orch8-types",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

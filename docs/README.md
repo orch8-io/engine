@@ -5,8 +5,8 @@ tutorials, task-oriented guides, reference, explanation, and historical audit
 records so readers know what kind of answer each document provides.
 
 The running server is the source of truth for HTTP schemas: open `/swagger-ui`
-or download `/api-docs/openapi.json`. Both require the configured API key;
-health probes and inbound webhook routes are intentionally public.
+or download `/api-docs/openapi.json`. Published snapshots live at
+`https://orch8.io/contracts/openapi.json` and `sequence.schema.json`.
 
 ## Learn
 
@@ -25,6 +25,9 @@ health probes and inbound webhook routes are intentionally public.
 - [Dashboard](DASHBOARD.md) — connect the operator console and use its current surfaces.
 - [Safe releases](RELEASES.md) — diff, validate, canary, evaluate, promote, and roll back.
 - [Deployment](DEPLOYMENT.md) — Docker, Kubernetes, cloud targets, and the production checklist.
+- [Migration guides](MIGRATION_GUIDES.md) — move from Temporal, Airflow, or Prefect with a reversible cutover.
+- [Local tunnel](LOCAL_TUNNEL.md) — receive signed webhooks during development.
+- [Authentication and SSO](AUTHENTICATION.md) — engine keys and the Cloud OIDC boundary.
 - [Secure production bootstrap](SECURE_BOOTSTRAP.md) — scaffold, validate, start, and readiness-check a secure node.
 - [Node roles](NODE_ROLES.md) — assemble all-in-one, control, executor, gateway, and edge processes; operate managed-control sessions and fleet draining.
 - [Operator support bundle](SUPPORT_BUNDLE.md) — collect bounded, redacted diagnostics atomically.
@@ -52,6 +55,9 @@ health probes and inbound webhook routes are intentionally public.
 - [Externalized state](EXTERNALIZATION.md) — payload offloading behavior and metrics.
 - [Governed durable memory](GOVERNED_MEMORY.md) — memory authorization, retention, residency labels, deletion, and provenance.
 - [Package registry](PACKAGE_REGISTRY.md) — signed object layout, publication, and consumer verification.
+- [MCP authoring](MCP_AUTHORING.md) — Claude/Cursor setup and sequence authoring tools.
+- [Agent-framework adapters](FRAMEWORK_ADAPTERS.md) — portable integration boundary for agent runtimes.
+- [1.0 stability contract](../STABILITY.md) — compatibility and support windows.
 - [Governed distribution](DISTRIBUTION_GOVERNANCE.md) — channels, deltas, private policy, attestations, and dependency locks.
 - [Workflow compiler optimization](WORKFLOW_OPTIMIZER.md) — immutable optimization sidecars and equivalence guarantees.
 - [Database migrations](../migrations/README.md) — immutability and checksum rules.

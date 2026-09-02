@@ -544,6 +544,8 @@ mod tests {
     ) -> InvariantId {
         storage
             .create_sequence(&SequenceDefinition {
+                schema: None,
+                schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                 id: instance.sequence_id,
                 tenant_id: instance.tenant_id.clone(),
                 namespace: instance.namespace.clone(),

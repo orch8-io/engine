@@ -5,6 +5,14 @@ use utoipa::ToSchema;
 
 use crate::ids::{BlockId, Namespace, SequenceId, TenantId};
 
+/// Current persisted workflow-definition format. Older documents without the
+/// field decode as v1; future incompatible formats must be upgraded explicitly.
+pub const SEQUENCE_SCHEMA_VERSION: u32 = 1;
+
+const fn default_sequence_schema_version() -> u32 {
+    SEQUENCE_SCHEMA_VERSION
+}
+
 /// Lifecycle status for sequences: Draft → Staging → Production → Unpublished.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +65,11 @@ impl SequenceStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SequenceDefinition {
+    /// Editor-facing JSON Schema link. It is metadata and does not affect execution.
+    #[serde(default, rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default = "default_sequence_schema_version")]
+    pub schema_version: u32,
     pub id: SequenceId,
     pub tenant_id: TenantId,
     pub namespace: Namespace,
@@ -1319,6 +1332,15 @@ impl SequenceDefinition {
     /// Structural validation performed at submit time (before the sequence
     /// reaches storage).
     pub fn validate(&self) -> Result<(), SequenceValidationError> {
+        if self.schema_version == 0 || self.schema_version > SEQUENCE_SCHEMA_VERSION {
+            return Err(SequenceValidationError::InvalidBlock {
+                block_id: "(root)".into(),
+                message: format!(
+                    "unsupported schema_version {} (this engine supports {})",
+                    self.schema_version, SEQUENCE_SCHEMA_VERSION
+                ),
+            });
+        }
         if self.blocks.is_empty() {
             return Err(SequenceValidationError::InvalidBlock {
                 block_id: "(root)".into(),
@@ -1905,6 +1927,8 @@ mod tests {
 
     fn seq_with(block: BlockDefinition) -> SequenceDefinition {
         SequenceDefinition {
+            schema: None,
+            schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("default"),
@@ -2412,6 +2436,8 @@ mod tests {
 
     fn sample_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            schema: None,
+            schema_version: SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("default"),

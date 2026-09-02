@@ -34,6 +34,11 @@ pub enum SequenceCmd {
     },
     /// Deprecate a sequence version.
     Deprecate { id: Uuid },
+    /// Rebind a non-terminal instance to another stored sequence version.
+    MigrateInstance {
+        instance_id: Uuid,
+        target_sequence_id: Uuid,
+    },
     /// Git-ops apply: diff a local sequence definition against the server and,
     /// on change, upload it with the version bumped. Accepts a file or a
     /// directory of `.json` files. Idempotent — an unchanged sequence is left
@@ -69,6 +74,33 @@ pub enum SequenceCmd {
         #[arg(long)]
         out_dir: Option<PathBuf>,
     },
+    /// Upgrade a sequence document to the current persisted format.
+    UpgradeFormat {
+        /// Existing sequence JSON.
+        file: PathBuf,
+        /// Destination; omit to print upgraded JSON to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+fn upgrade_block_types(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                upgrade_block_types(item);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object.get("type").and_then(serde_json::Value::as_str) == Some("a_b_split") {
+                object.insert("type".into(), serde_json::json!("ab_split"));
+            }
+            for child in object.values_mut() {
+                upgrade_block_types(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The content fields that define a sequence's behavior — everything except
@@ -279,6 +311,50 @@ pub async fn run(
                 .send()
                 .await?;
             print_response(resp, format).await?;
+        }
+        SequenceCmd::MigrateInstance {
+            instance_id,
+            target_sequence_id,
+        } => {
+            let resp = client
+                .post(format!("{base}/sequences/migrate-instance"))
+                .json(&serde_json::json!({
+                    "instance_id": instance_id,
+                    "target_sequence_id": target_sequence_id,
+                }))
+                .send()
+                .await?;
+            print_response(resp, format).await?;
+        }
+        SequenceCmd::UpgradeFormat { file, out } => {
+            let raw = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let mut value: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("invalid JSON in {}", file.display()))?;
+            let object = value
+                .as_object_mut()
+                .context("sequence document must be a JSON object")?;
+            object.insert(
+                "$schema".into(),
+                serde_json::json!("https://orch8.io/contracts/sequence.schema.json"),
+            );
+            object.insert(
+                "schema_version".into(),
+                serde_json::json!(orch8_types::sequence::SEQUENCE_SCHEMA_VERSION),
+            );
+            upgrade_block_types(&mut value);
+            let sequence = orch8_types::sequence::deserialize_sequence_strict(&value)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            sequence
+                .validate()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let rendered = format!("{}\n", serde_json::to_string_pretty(&value)?);
+            if let Some(out) = out {
+                atomic_write(&out, rendered.as_bytes())?;
+                println!("upgraded {} → {}", file.display(), out.display());
+            } else {
+                print!("{rendered}");
+            }
         }
         SequenceCmd::Apply { path, dry_run } => {
             let files = collect_json_files(&path)?;

@@ -2636,6 +2636,8 @@ async fn cancellation_scope_cancel_preserves_completed_outputs() {
 async fn sub_sequence_calls_child_sequence() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2674,6 +2676,8 @@ async fn sub_sequence_calls_child_sequence() {
 async fn sub_sequence_inherits_parent_context() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2712,6 +2716,8 @@ async fn sub_sequence_inherits_parent_context() {
 async fn sub_sequence_failure_propagates_to_parent() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2751,6 +2757,8 @@ async fn sub_sequence_failure_propagates_to_parent() {
 async fn sub_sequence_output_available_to_parent() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2789,6 +2797,8 @@ async fn sub_sequence_output_available_to_parent() {
 async fn sub_sequence_with_custom_input() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2828,6 +2838,8 @@ async fn sub_sequence_nested_two_levels() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     // grandchild
     let grandchild_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2846,6 +2858,8 @@ async fn sub_sequence_nested_two_levels() {
     storage.create_sequence(&grandchild_seq).await.unwrap();
     // child
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2890,6 +2904,8 @@ async fn sub_sequence_nested_two_levels() {
 async fn sub_sequence_in_parallel_branch() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2935,6 +2951,8 @@ async fn sub_sequence_in_parallel_branch() {
 async fn sub_sequence_with_retry() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -2973,6 +2991,8 @@ async fn sub_sequence_with_retry() {
 async fn sub_sequence_timeout() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -3011,6 +3031,8 @@ async fn sub_sequence_timeout() {
 async fn sub_sequence_cancel_propagates() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let child_seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -3666,6 +3688,8 @@ async fn signal_during_waiting_state() {
 async fn sequence_with_interceptors_on_start() {
     // InterceptorDef presence doesn't block execution of the sequence.
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -3701,6 +3725,8 @@ async fn sequence_with_interceptors_on_start() {
 #[tokio::test]
 async fn sequence_with_interceptors_on_complete() {
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -3736,6 +3762,8 @@ async fn sequence_with_interceptors_on_complete() {
 #[tokio::test]
 async fn sequence_with_interceptors_on_error() {
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),

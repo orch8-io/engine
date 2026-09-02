@@ -22,6 +22,8 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SequenceStatus,
 
 fn make_sequence() -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("bench"),
         namespace: Namespace::new("default"),
@@ -509,6 +511,8 @@ fn bench_evaluate_deep_tree(c: &mut Criterion) {
             || {
                 let s = rt.block_on(SqliteStorage::in_memory()).unwrap();
                 let seq = SequenceDefinition {
+                    schema: None,
+                    schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                     id: SequenceId::new(),
                     tenant_id: TenantId::unchecked("bench"),
                     namespace: Namespace::new("default"),
@@ -585,6 +589,8 @@ fn bench_parallel_in_process_latency(c: &mut Criterion) {
                     tokio::runtime::Handle::current().block_on(async {
                         let storage = SqliteStorage::in_memory().await.unwrap();
                         let sequence = SequenceDefinition {
+                            schema: None,
+                            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
                             id: SequenceId::new(),
                             tenant_id: TenantId::unchecked("bench"),
                             namespace: Namespace::new("default"),

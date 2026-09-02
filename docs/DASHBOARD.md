@@ -1,8 +1,10 @@
 # Operator dashboard
 
-The dashboard is an operational decision interface. It is embedded only in
-`orch8 dev --server`; the production `orch8-server` binary serves the API and
-operational endpoints but does not serve `/` or `/dashboard`.
+The dashboard is an operational decision interface. It is embedded in
+`orch8 dev`, which starts the Studio and persistent SQLite store by default;
+use `--no-server` only for ephemeral CLI/CI runs. The production
+`orch8-server` binary serves the API and operational endpoints but does not
+serve `/` or `/dashboard`.
 It groups surfaces by the action an operator is trying to take: monitor, build and
 ship, manage runtime capacity, or administer credentials and integrations.
 

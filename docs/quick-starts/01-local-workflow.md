@@ -62,7 +62,7 @@ stay small.
 ## 2. Run exactly one instance
 
 ```bash
-orch8 dev . --skip-timers --once
+orch8 dev . --skip-timers --no-server --once
 ```
 
 `--once` exits after the instance reaches a terminal state. `--skip-timers`
@@ -100,7 +100,7 @@ Make a temporary invalid copy with duplicate block IDs:
 ```bash
 cp sequence.json invalid-sequence.json
 sed -i.bak 's/"id": "finish"/"id": "greet"/' invalid-sequence.json
-orch8 dev invalid-sequence.json --once
+orch8 dev invalid-sequence.json --no-server --once
 ```
 
 The command must reject the definition before executing it. Remove the
@@ -132,7 +132,7 @@ server introduced in Level 3.
 
 You are ready for Level 2 when all of these are true:
 
-- `orch8 dev . --skip-timers --once` exits successfully.
+- `orch8 dev . --skip-timers --no-server --once` exits successfully.
 - You can identify the sequence, its three blocks, their handlers, and the one
   instance created by the command.
 - You understand that `delay.duration` is milliseconds and `--skip-timers`

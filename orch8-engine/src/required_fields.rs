@@ -186,6 +186,8 @@ mod tests {
 
     fn seq_with_blocks(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("ns"),

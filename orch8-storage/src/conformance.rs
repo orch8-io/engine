@@ -332,6 +332,8 @@ fn require(check: &'static str, condition: bool, message: &str) -> Result<(), Co
 
 fn conformance_sequence(tenant: &TenantId, run_id: Uuid) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: tenant.clone(),
         namespace: Namespace::new("conformance"),

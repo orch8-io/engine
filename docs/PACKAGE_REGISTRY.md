@@ -27,6 +27,23 @@ for another tenant or namespace is rejected before publication.
 
 ## Publication contract
 
+The CLI consumes this contract directly:
+
+```bash
+orch8 package publish acme-checkout.orch8pkg \
+  --key @publisher.seed --tenant-id tenant-a --namespace acme \
+  --public-url https://registry.example.com \
+  --endpoint https://s3.example.com --bucket orch8-registry
+
+orch8 package search checkout \
+  --registry-url https://registry.example.com/tenant-a/registry/acme
+orch8 package install --name acme/checkout --tenant-id tenant-a \
+  --registry-url https://registry.example.com/tenant-a/registry/acme
+```
+
+S3 credentials come from the documented `ORCH8_REGISTRY_S3_*` variables; the
+secret key is never sent to the public discovery endpoint.
+
 Call `PackageRegistryPublisher::publish` with:
 
 - a `SignedPackage` produced by `build_package`;

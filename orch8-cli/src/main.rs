@@ -19,9 +19,11 @@ use commands::demo::DemoCmd;
 use commands::deploy::DeployCmd;
 use commands::dev::DevCmd;
 use commands::doctor::DoctorCmd;
+use commands::generate::GenerateCmd;
 use commands::inspect_cmd::InspectCmd;
 use commands::instance::InstanceCmd;
 use commands::package_cmd::PackageCmd;
+use commands::pieces::PiecesCmd;
 use commands::portable::PortableCmd;
 use commands::release::ReleaseCmd;
 use commands::sequence::SequenceCmd;
@@ -139,6 +141,9 @@ enum Commands {
     /// Signed workflow packages: keygen, build, verify, inspect, install.
     #[command(subcommand)]
     Package(PackageCmd),
+    /// Search and install Activepieces connector packages.
+    #[command(subcommand)]
+    Pieces(PiecesCmd),
     /// Checkpoint management.
     #[command(subcommand)]
     Checkpoint(CheckpointCmd),
@@ -157,6 +162,8 @@ enum Commands {
         #[arg(long, default_value = "default")]
         template: String,
     },
+    /// Generate, strictly validate, and repair a sequence with an LLM.
+    Generate(GenerateCmd),
     /// Browse built-in sequence templates.
     #[command(subcommand)]
     Templates(TemplatesCmd),
@@ -487,6 +494,7 @@ async fn main() -> Result<()> {
         Commands::Deploy(cmd) => commands::deploy::run(&client, base, cmd, format).await?,
         Commands::Release(cmd) => commands::release::run(&client, base, cmd, format).await?,
         Commands::Package(cmd) => commands::package_cmd::run(&client, base, cmd, format).await?,
+        Commands::Pieces(cmd) => commands::pieces::run(cmd).await?,
         Commands::Checkpoint(cmd) => commands::checkpoint::run(&client, base, cmd, format).await?,
         Commands::Config(cmd) => commands::config::run(cmd)?,
         Commands::Context(..) => {
@@ -495,7 +503,8 @@ async fn main() -> Result<()> {
             )
         }
         Commands::Init { dir, template } => commands::init::run(&dir, &template)?,
-        Commands::Templates(cmd) => commands::templates::run(cmd)?,
+        Commands::Generate(cmd) => commands::generate::run(cmd).await?,
+        Commands::Templates(cmd) => commands::templates::run(cmd).await?,
         Commands::Test(cmd) => commands::test_cmd::run(&client, base, cmd, format).await?,
         Commands::Dev(..)
         | Commands::Bootstrap(..)
@@ -716,12 +725,15 @@ mod tests {
         let cli = Cli::try_parse_from(["orch8", "templates", "list"]).unwrap();
         assert!(matches!(
             cli.command,
-            Commands::Templates(TemplatesCmd::List)
+            Commands::Templates(TemplatesCmd::List { catalog_url: None })
         ));
 
         let cli = Cli::try_parse_from(["orch8", "templates", "show", "react-loop"]).unwrap();
         match cli.command {
-            Commands::Templates(TemplatesCmd::Show { name }) => assert_eq!(name, "react-loop"),
+            Commands::Templates(TemplatesCmd::Show {
+                name,
+                catalog_url: None,
+            }) => assert_eq!(name, "react-loop"),
             _ => panic!("expected templates show command"),
         }
     }

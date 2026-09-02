@@ -1,0 +1,29 @@
+app = "orch8-engine"
+primary_region = "gru"
+
+[build]
+  image = "ghcr.io/orch8-io/engine:latest"
+
+[env]
+  ORCH8_STORAGE_BACKEND = "sqlite"
+  ORCH8_DATABASE_URL = "sqlite:///data/orch8.db?mode=rwc"
+  ORCH8_HTTP_ADDR = "0.0.0.0:8080"
+  ORCH8_REQUIRE_TENANT_HEADER = "true"
+
+[mounts]
+  source = "orch8_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    grace_period = "15s"
+    interval = "10s"
+    method = "GET"
+    path = "/health/ready"
+    timeout = "3s"

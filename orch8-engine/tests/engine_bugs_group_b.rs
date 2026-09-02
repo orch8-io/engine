@@ -124,6 +124,8 @@ async fn setup_single_step(
     let storage = SqliteStorage::in_memory().await.unwrap();
     let step_id = step.id.clone();
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -343,6 +345,8 @@ async fn b28_apply_self_modify_append_preserves_prior_blocks() {
     let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -426,6 +430,8 @@ async fn b28_apply_self_modify_position_still_preserves_prior() {
     let storage_dyn: Arc<dyn StorageBackend> = Arc::new(storage);
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),

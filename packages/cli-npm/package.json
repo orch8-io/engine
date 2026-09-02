@@ -1,0 +1,15 @@
+{
+  "name": "@orch8/cli",
+  "version": "0.7.1",
+  "description": "Verified zero-install shim for the Orch8 CLI",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "bin": { "orch8": "bin/orch8.mjs" },
+  "files": ["bin", "install.mjs", "README.md"],
+  "scripts": {
+    "postinstall": "node install.mjs",
+    "test": "ORCH8_SKIP_BINARY_INSTALL=1 node install.mjs --check"
+  },
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/orch8-io/engine.git" }
+}

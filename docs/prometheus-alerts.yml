@@ -1,0 +1,22 @@
+groups:
+  - name: orch8
+    rules:
+      - alert: Orch8EngineDown
+        expr: up{job="orch8"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations: { summary: "Orch8 engine is unavailable" }
+      - alert: Orch8QueueBacklogGrowing
+        expr: deriv(orch8_queue_depth[15m]) > 0 and orch8_queue_depth > 100
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Orch8 queue backlog is growing" }
+      - alert: Orch8HighFailureRatio
+        expr: rate(orch8_instances_failed_total[10m]) / clamp_min(rate(orch8_instances_completed_total[10m]) + rate(orch8_instances_failed_total[10m]), 0.001) > 0.1
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "More than 10% of Orch8 instances are failing" }
+      - alert: Orch8StaleRecovery
+        expr: increase(orch8_recovery_stale_instances_total[10m]) > 0
+        labels: { severity: warning }
+        annotations: { summary: "Orch8 reclaimed stale running instances" }

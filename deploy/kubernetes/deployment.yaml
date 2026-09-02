@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orch8-engine
+  namespace: orch8
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orch8-engine
+  template:
+    metadata:
+      labels:
+        app: orch8-engine
+    spec:
+      containers:
+        - name: engine
+          image: ghcr.io/orch8-io/engine:latest
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 50051
+          env:
+            - { name: ORCH8_STORAGE_BACKEND, value: postgres }
+            - { name: ORCH8_HTTP_ADDR, value: "0.0.0.0:8080" }
+            - { name: ORCH8_GRPC_ADDR, value: "0.0.0.0:50051" }
+            - { name: ORCH8_REQUIRE_TENANT_HEADER, value: "true" }
+            - name: ORCH8_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: orch8-secrets, key: database-url } }
+            - name: ORCH8_API_KEY
+              valueFrom: { secretKeyRef: { name: orch8-secrets, key: api-key } }
+            - name: ORCH8_ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: orch8-secrets, key: encryption-key } }
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "2", memory: 2Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orch8-engine
+  namespace: orch8
+spec:
+  selector:
+    app: orch8-engine
+  ports:
+    - { name: http, port: 80, targetPort: http }
+    - { name: grpc, port: 50051, targetPort: grpc }

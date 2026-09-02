@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "orch8-engine-native"
+version = "0.7.1"
+requires-python = ">=3.10"
+description = "PyO3 bindings for Orch8 sequence validation"
+
+[tool.maturin]
+python-source = "python"
+module-name = "orch8_engine._native"
+features = ["pyo3/extension-module"]

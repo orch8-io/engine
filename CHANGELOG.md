@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1.0 authoring and distribution surface**: published versioned OpenAPI and
+  recursive sequence JSON Schema contracts; added sequence format upgrade and
+  instance migration commands, an OpenAI-compatible generate/repair loop, a
+  reusable GitHub workflow gate, Windows release binaries, checksum-verifying
+  npm/pipx launchers, and automated Homebrew formula publishing.
+- **Local-to-hosted developer path**: `orch8 dev` now starts the persistent
+  SQLite-backed Studio by default; cloud-backed template pulling, connector
+  catalog search/install, a crash-recovery demo, deploy manifests, MCP
+  authoring tools, hosted signed-package publishing/search, and documented
+  migration, tunnel, authentication, framework-adapter, and stability
+  contracts complete the path from first run to production.
+- **Native embedding and operations**: added napi-rs and PyO3 bindings over the
+  Rust sequence validator, alert-ready Grafana assets, and schema-versioned
+  sequence definitions with backward-compatible defaults.
+
 - **Framework-neutral agent continuity product surface**: added the versioned
   Durable Agent Handoff Protocol, portable work offers and runtime passports,
   verifiable execution receipts, a fail-closed placement-policy compiler,

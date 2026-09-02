@@ -227,6 +227,8 @@ async fn new_run_and_atomic_webhook_operations_forward_through_encryption_decora
 
 async fn seed_sequence(storage: &dyn StorageBackend, seq_id: SequenceId, tenant: &str) {
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: seq_id,
         tenant_id: TenantId::unchecked(tenant),
         namespace: Namespace::new("default"),
@@ -832,6 +834,8 @@ async fn delegated_sequence_crud_passes_through_encryption_layer() {
     let storage = EncryptingStorage::new(inner, enc);
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t1"),
         namespace: Namespace::new("ns"),

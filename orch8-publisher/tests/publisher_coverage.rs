@@ -117,6 +117,8 @@ fn make_sequence_definition_with_tenant(
     tenant_id: &str,
 ) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::new(tenant_id).unwrap(),
         namespace: Namespace::new("default"),
@@ -1180,6 +1182,8 @@ async fn test_100_publisher_required_handlers_extracted_from_sequence() {
         .expect("valid tenant_id");
 
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::new("handler_t").unwrap(),
         namespace: Namespace::new("default"),

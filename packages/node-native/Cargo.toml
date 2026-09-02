@@ -1,0 +1,15 @@
+[package]
+name = "orch8-node"
+version = "0.7.1"
+edition = "2024"
+license = "BUSL-1.1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "3"
+orch8 = { path = "../../orch8", default-features = false }
+orch8-types = { path = "../../orch8-types" }
+serde_json = "1"

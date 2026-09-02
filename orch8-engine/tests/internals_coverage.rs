@@ -54,6 +54,8 @@ fn mk_credential(id: &str, tenant_id: &str, value: &str, enabled: bool) -> Crede
 
 fn mk_seq(name: &str) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("t"),
         namespace: Namespace::new("ns"),
@@ -1729,6 +1731,8 @@ async fn handler_91_emit_event_creates_child() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("T1"),
         namespace: Namespace::new("default"),
@@ -1806,6 +1810,8 @@ async fn handler_94_emit_event_cross_tenant() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("T2"),
         namespace: Namespace::new("default"),
@@ -1852,6 +1858,8 @@ async fn handler_95_emit_event_disabled_trigger() {
     let caller = mk_handler_instance("T1", InstanceState::Running);
     storage.create_instance(&caller).await.unwrap();
     let seq = SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::unchecked("T1"),
         namespace: Namespace::new("default"),

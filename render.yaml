@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: orch8-engine
+    runtime: image
+    image:
+      url: ghcr.io/orch8-io/engine:latest
+    healthCheckPath: /health/ready
+    envVars:
+      - key: ORCH8_STORAGE_BACKEND
+        value: postgres
+      - key: ORCH8_DATABASE_URL
+        fromDatabase:
+          name: orch8-postgres
+          property: connectionString
+      - key: ORCH8_HTTP_ADDR
+        value: 0.0.0.0:8080
+      - key: ORCH8_REQUIRE_TENANT_HEADER
+        value: "true"
+      - key: ORCH8_API_KEY
+        generateValue: true
+      - key: ORCH8_ENCRYPTION_KEY
+        sync: false
+
+databases:
+  - name: orch8-postgres
+    databaseName: orch8
+    user: orch8
+    plan: basic-256mb

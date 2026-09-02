@@ -178,7 +178,7 @@ async fn initialize_handshake_and_notification() {
 }
 
 #[tokio::test]
-async fn tools_list_returns_all_eight_tools_with_schemas() {
+async fn tools_list_returns_all_eleven_tools_with_schemas() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
 
@@ -191,7 +191,7 @@ async fn tools_list_returns_all_eight_tools_with_schemas() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let tools = body["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 11);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
@@ -203,6 +203,9 @@ async fn tools_list_returns_all_eight_tools_with_schemas() {
         "retry_instance",
         "list_dlq",
         "get_usage",
+        "create_sequence",
+        "preflight_sequence",
+        "lint_sequence",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
     }

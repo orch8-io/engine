@@ -1,0 +1,1239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orch8.io/contracts/sequence.schema.json",
+  "title": "Orch8 Sequence Definition",
+  "type": "object",
+  "required": [
+    "id",
+    "tenant_id",
+    "namespace",
+    "name",
+    "version",
+    "blocks",
+    "created_at"
+  ],
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Editor-facing JSON Schema link. It is metadata and does not affect execution."
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/BlockDefinition"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "deprecated": {
+      "type": "boolean",
+      "description": "If true, this version is deprecated. New instances should use a newer version.\nRunning instances bound to this version continue unaffected."
+    },
+    "id": {
+      "$ref": "#/$defs/SequenceId"
+    },
+    "input_schema": {
+      "description": "Optional JSON Schema validated against `context.data` at instance\ncreate. When present, a create whose data fails validation is\nrejected (HTTP 422) before the instance is persisted. Doubles as the\ncontract the dashboard renders an input form from."
+    },
+    "interceptors": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/InterceptorDef",
+          "description": "Lifecycle interceptors (before/after step, on-signal, on-complete, on-failure)."
+        }
+      ]
+    },
+    "name": {
+      "type": "string"
+    },
+    "namespace": {
+      "$ref": "#/$defs/Namespace"
+    },
+    "on_cancel": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/BlockDefinition"
+      },
+      "description": "Best-effort cleanup blocks run when the instance reaches terminal\n`Cancelled`. Same semantics as `on_failure`."
+    },
+    "on_failure": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/BlockDefinition"
+      },
+      "description": "Best-effort cleanup blocks run when the instance reaches terminal\n`Failed`. Each top-level step block is dispatched once; errors are\nswallowed (the instance is already failing). Use to release resources,\nsend a death notification, etc. — so a failed run doesn't \"just die\"."
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "int32",
+      "minimum": 0
+    },
+    "sla": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/SlaPolicy",
+          "description": "Alert-only SLA policy. When set, an instance exceeding `max_runtime`\n(or a step exceeding `max_step_runtime`) emits an `instance.sla_breached`\nwebhook and increments `orch8_sla_breached_total` — the instance is NOT\nfailed or paused."
+        }
+      ]
+    },
+    "status": {
+      "$ref": "#/$defs/SequenceStatus"
+    },
+    "tenant_id": {
+      "$ref": "#/$defs/TenantId"
+    },
+    "version": {
+      "type": "integer",
+      "format": "int32"
+    }
+  },
+  "$defs": {
+    "ABSplitDef": {
+      "type": "object",
+      "description": "A/B split: deterministically route each instance to one of several\nweighted variants. The chosen variant is persisted in the block output\nso re-executions always follow the same path.",
+      "required": [
+        "id",
+        "variants"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ABVariant"
+          },
+          "description": "Weighted variants. Weights are relative (e.g. 70 + 30 = 100%)."
+        }
+      }
+    },
+    "ABVariant": {
+      "type": "object",
+      "description": "One arm of an A/B split.",
+      "required": [
+        "name",
+        "weight",
+        "blocks"
+      ],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          },
+          "description": "Blocks to execute when this variant is chosen."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable label (e.g. \"control\", `\"variant_a\"`)."
+        },
+        "weight": {
+          "type": "integer",
+          "format": "int32",
+          "description": "Relative weight. Higher = more traffic.",
+          "minimum": 0
+        }
+      }
+    },
+    "BlockDefinition": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/StepDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "step"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ParallelDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "parallel"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RaceDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "race"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/LoopDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "loop"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ForEachDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "for_each"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RouterDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "router"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/TryCatchDef"
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "try_catch"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SubSequenceDef",
+              "description": "Invoke another sequence as a sub-workflow."
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "sub_sequence"
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "Invoke another sequence as a sub-workflow."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ABSplitDef",
+              "description": "A/B split: route traffic to one of several variants by weight."
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "ab_split"
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "A/B split: route traffic to one of several variants by weight."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/CancellationScopeDef",
+              "description": "Cancellation scope: child blocks cannot be cancelled by external cancel signals.\nProvides subtree-level non-cancellability (Temporal-style structured concurrency)."
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "cancellation_scope"
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "Cancellation scope: child blocks cannot be cancelled by external cancel signals.\nProvides subtree-level non-cancellability (Temporal-style structured concurrency)."
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SagaDef",
+              "description": "Saga: sequential steps with compensating actions, rolled back in\nreverse order if any step's action fails."
+            },
+            {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "saga"
+                  ]
+                }
+              }
+            }
+          ],
+          "description": "Saga: sequential steps with compensating actions, rolled back in\nreverse order if any step's action fails."
+        }
+      ],
+      "description": "A block is either a leaf (step) or a composite (parallel, race, etc.).\n\nThis recursive enum IS the workflow DSL.\nEach variant wraps its definition in `Box<T>` so the enum itself stays a\nsingle word. `StepDef` is large (14 fields with many `Option<...>`), and\nwithout boxing every `BlockDefinition` — even `SubSequence`, which is small\n— paid the full size. `Box<T>` is transparent to both `serde` (the default\nimpl delegates to the inner type so wire format is unchanged) and `utoipa`\n(which forwards `ToSchema` through `Box<T>`), so this is an internal\nrepresentation change only."
+    },
+    "BlockId": {
+      "type": "string"
+    },
+    "CancellationScopeDef": {
+      "type": "object",
+      "description": "Cancellation scope: wraps child blocks in a non-cancellable boundary.\n\nWhen a cancel signal is received, blocks inside a `CancellationScope`\ncontinue executing until completion. The cancel takes effect only after\nall scoped blocks finish.",
+      "required": [
+        "id",
+        "blocks"
+      ],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          },
+          "description": "Child blocks protected from cancellation."
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        }
+      }
+    },
+    "CompensationVerificationPolicy": {
+      "type": "string",
+      "enum": [
+        "handler_result",
+        "provider_receipt",
+        "manual"
+      ]
+    },
+    "ContextAccess": {
+      "type": "object",
+      "description": "Controls which context sections a step handler can see.\nWhen set, only the listed sections are passed to the handler.\n\n`data` supports field-level granularity via [`FieldAccess`]; other sections\nare all-or-nothing because they are small by design (`config`, `runtime`)\nor append-only streams (`audit`).",
+      "properties": {
+        "audit": {
+          "type": "boolean",
+          "description": "Allow reading `context.audit`."
+        },
+        "config": {
+          "type": "boolean",
+          "description": "Allow reading `context.config`."
+        },
+        "data": {
+          "description": "Controls read access to `context.data`. Accepts legacy `true`/`false`,\nthe keywords `\"all\"`/`\"none\"`, or an explicit `{\"fields\": [..]}` list."
+        },
+        "runtime": {
+          "type": "boolean",
+          "description": "Allow reading `context.runtime`."
+        }
+      }
+    },
+    "DelaySpec": {
+      "type": "object",
+      "required": [
+        "duration"
+      ],
+      "properties": {
+        "business_days_only": {
+          "type": "boolean"
+        },
+        "duration": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "fire_at_local": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fire at a specific local wall-clock time (ISO 8601 `NaiveDateTime`,\ne.g. `\"2026-03-08T02:30:00\"`). When set, `duration` is ignored and\nthe engine converts this local time to UTC using the step-level\n`timezone` (or the instance timezone as fallback). DST transitions\nare handled by rolling forward to the next valid local time."
+        },
+        "holidays": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Holiday dates (YYYY-MM-DD) to skip when `business_days_only` is true.\nMerged with `context.config.holidays` at runtime for tenant-level calendars."
+        },
+        "jitter": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        },
+        "timezone": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Timezone for `fire_at_local` (IANA, e.g. `\"America/New_York\"`).\nFalls back to the instance's timezone if omitted."
+        }
+      }
+    },
+    "EscalationDef": {
+      "type": "object",
+      "description": "Action to take when an SLA deadline is breached.",
+      "required": [
+        "handler"
+      ],
+      "properties": {
+        "handler": {
+          "type": "string",
+          "description": "Handler name to invoke on breach (e.g. `\"notify_slack\"`, `\"send_alert\"`)."
+        },
+        "params": {
+          "description": "Parameters passed to the escalation handler."
+        }
+      }
+    },
+    "ForEachDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "collection",
+        "body"
+      ],
+      "properties": {
+        "body": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "collection": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "item_var": {
+          "type": "string"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "retain_iterations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "Keep only the most recent N iterations' body-step outputs; older outputs\nare compacted at each iteration boundary. `None` retains everything.",
+          "minimum": 0
+        }
+      }
+    },
+    "HumanChoice": {
+      "type": "object",
+      "description": "One option presented to the human reviewer in advanced mode.",
+      "required": [
+        "label",
+        "value"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "Display text shown in the UI."
+        },
+        "value": {
+          "type": "string",
+          "description": "Stable identifier stored in context and used for router matching."
+        }
+      }
+    },
+    "HumanInputDef": {
+      "type": "object",
+      "description": "Configuration for human-in-the-loop steps.",
+      "properties": {
+        "allow_comment": {
+          "type": "boolean",
+          "description": "When true, the reviewer can attach a free-text comment to their decision."
+        },
+        "choices": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/HumanChoice"
+          },
+          "description": "Choices the human can pick from. If `None`, the engine applies the\ndefault yes/no preset."
+        },
+        "escalation_handler": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "If set and timeout expires, send a signal to this escalation target\ninstead of failing the step."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Prompt or instructions for the human reviewer."
+        },
+        "store_as": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Context-variable name under which the picked value is stored\n(`context.data[store_as]`). If `None`, the block id is used."
+        },
+        "timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Timeout in milliseconds before the step fails or escalates.\nIf omitted, waits indefinitely.",
+          "minimum": 0
+        }
+      }
+    },
+    "InterceptorAction": {
+      "type": "object",
+      "description": "An interceptor action that fires at a lifecycle point.",
+      "required": [
+        "handler"
+      ],
+      "properties": {
+        "handler": {
+          "type": "string",
+          "description": "Handler name to invoke (must be registered or dispatched to external worker)."
+        },
+        "params": {
+          "description": "Static params passed to the handler."
+        }
+      }
+    },
+    "InterceptorDef": {
+      "type": "object",
+      "description": "Defines lifecycle hooks attached to a sequence.\nInterceptors are evaluated at defined points in the instance lifecycle.",
+      "properties": {
+        "after_step": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InterceptorAction",
+              "description": "Called after each step completes (success or failure)."
+            }
+          ]
+        },
+        "before_step": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InterceptorAction",
+              "description": "Called before each step executes. Can modify context or skip the step."
+            }
+          ]
+        },
+        "on_complete": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InterceptorAction",
+              "description": "Called when the instance completes."
+            }
+          ]
+        },
+        "on_failure": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InterceptorAction",
+              "description": "Called when the instance fails."
+            }
+          ]
+        },
+        "on_signal": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InterceptorAction",
+              "description": "Called when a signal is received."
+            }
+          ]
+        }
+      }
+    },
+    "LoopDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "condition",
+        "body"
+      ],
+      "properties": {
+        "body": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "break_on": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "condition": {
+          "type": "string"
+        },
+        "continue_on_error": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "poll_interval": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Seconds to wait between loop-condition polls.",
+          "minimum": 0
+        },
+        "retain_iterations": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "Keep only the most recent N iterations' body-step outputs; older outputs\nare compacted (deleted) at each iteration boundary to bound storage\ngrowth on long-running loops. `None` retains everything (default).",
+          "minimum": 0
+        }
+      }
+    },
+    "Namespace": {
+      "type": "string"
+    },
+    "ParallelDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "branches"
+      ],
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/BlockDefinition"
+            }
+          }
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        }
+      }
+    },
+    "RaceDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "branches"
+      ],
+      "properties": {
+        "branches": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/BlockDefinition"
+            }
+          }
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "semantics": {
+          "$ref": "#/$defs/RaceSemantics"
+        }
+      }
+    },
+    "RaceSemantics": {
+      "type": "string",
+      "enum": [
+        "first_to_resolve",
+        "first_to_succeed"
+      ]
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "required": [
+        "max_attempts"
+      ],
+      "properties": {
+        "backoff_multiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "initial_backoff": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        },
+        "max_backoff": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 0
+        },
+        "non_retryable_codes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "retry_if": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "Route": {
+      "type": "object",
+      "required": [
+        "condition",
+        "blocks"
+      ],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "condition": {
+          "type": "string"
+        }
+      }
+    },
+    "RouterDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "routes"
+      ],
+      "properties": {
+        "default": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Route"
+          }
+        }
+      }
+    },
+    "SagaDef": {
+      "type": "object",
+      "description": "A saga: a sequence of steps that each carry an optional compensating\naction. If any step's action fails, the compensations for every\nalready-completed step run in reverse order (LIFO) — the classic saga\npattern for distributed transactions without two-phase commit.\n\nCompensation failures are recorded but do not stop the rollback: every\ncompleted step's compensation gets a chance to run, best-effort. The\nsaga node itself always fails once compensation finishes (whether or\nnot every compensation succeeded) — the original action failure is\nnever silently absorbed.",
+      "required": [
+        "id",
+        "steps"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SagaStep"
+          }
+        }
+      }
+    },
+    "SagaStep": {
+      "type": "object",
+      "required": [
+        "id",
+        "action"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/BlockDefinition",
+          "description": "The forward action for this saga step."
+        },
+        "compensation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/BlockDefinition",
+              "description": "Compensating action run (in reverse order across all completed\nsteps) if a later step's action fails. `None` means this step has\nno compensation — it is skipped during rollback."
+            }
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        }
+      }
+    },
+    "SendWindow": {
+      "type": "object",
+      "description": "Time window during which a step is allowed to execute.\nHours are in 24h format relative to the instance's timezone.",
+      "properties": {
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "description": "Days of week allowed (0=Mon .. 6=Sun). Empty means all days."
+        },
+        "end_hour": {
+          "type": "integer",
+          "format": "int32",
+          "description": "End hour (0-23, exclusive). Defaults to 17.",
+          "minimum": 0
+        },
+        "start_hour": {
+          "type": "integer",
+          "format": "int32",
+          "description": "Start hour (0-23). Defaults to 9.",
+          "minimum": 0
+        }
+      }
+    },
+    "SequenceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "SequenceStatus": {
+      "type": "string",
+      "description": "Lifecycle status for sequences: Draft → Staging → Production → Unpublished.",
+      "enum": [
+        "draft",
+        "staging",
+        "production",
+        "unpublished"
+      ]
+    },
+    "SlaPolicy": {
+      "type": "object",
+      "description": "Alert-only service-level-agreement policy for a sequence. A breach is a\nsignal, not a state change: it fires one webhook + metric per breach kind\nand leaves the instance running. Both bounds are optional.",
+      "properties": {
+        "max_runtime": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Maximum wall-clock lifetime of an instance, measured from `created_at`.\nOne `max_runtime` alert per instance.",
+          "minimum": 0
+        },
+        "max_step_runtime": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Maximum wall-clock time the current step may stay running/waiting,\nmeasured from when it started. One alert per breaching step.",
+          "minimum": 0
+        }
+      }
+    },
+    "StepCompensation": {
+      "type": "object",
+      "required": [
+        "handler"
+      ],
+      "properties": {
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockId"
+          },
+          "description": "Effect blocks that must be compensated after this block. The planner\nreverses these forward dependencies deterministically."
+        },
+        "handler": {
+          "type": "string"
+        },
+        "params": {},
+        "verification": {
+          "$ref": "#/$defs/CompensationVerificationPolicy"
+        }
+      }
+    },
+    "StepDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "handler"
+      ],
+      "properties": {
+        "cache_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "If set, cache step output under this key in the instance KV state.\nOn subsequent executions, if a cached value exists for the resolved key,\nthe handler is skipped and the cached value is returned directly.\nThe key is template-resolved before lookup (e.g. `\"rate_{{ data.currency }}\"`)."
+        },
+        "cancellable": {
+          "type": "boolean",
+          "description": "If false, this step will not be cancelled when the instance receives a cancel signal.\nUsed for cleanup/finalization steps that must complete."
+        },
+        "compensation": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/StepCompensation",
+              "description": "Receipt-backed recovery action for this externally visible step."
+            }
+          ]
+        },
+        "context_access": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/ContextAccess",
+              "description": "Restrict which context sections this step can access. If omitted, all sections visible."
+            }
+          ]
+        },
+        "deadline": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "SLA deadline: maximum wall-clock time from when this step starts running.\nIf breached, the escalation handler is invoked and the step is failed.",
+          "minimum": 0
+        },
+        "delay": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DelaySpec"
+            }
+          ]
+        },
+        "fallback_handler": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Fallback handler to invoke when the primary handler's circuit breaker\nis `Open`. When set, step dispatch re-targets to this handler instead\nof deferring the instance for the cooldown window; when unset, the\nlegacy behaviour applies (defer to `now + remaining_cooldown_secs`).\nUses the same params + context as the primary handler; its own\nfailures are tracked under its own breaker key."
+        },
+        "handler": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "on_deadline_breach": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/EscalationDef",
+              "description": "Handler to invoke when the SLA deadline is breached.\nIf omitted but deadline is set, the step simply fails on breach."
+            }
+          ]
+        },
+        "output_schema": {
+          "description": "Optional JSON Schema that the handler output must conform to.\nValidated after handler returns; schema violation is a permanent failure."
+        },
+        "params": {},
+        "queue_name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Named task queue for routing to dedicated worker pools.\nIf omitted, uses the default queue."
+        },
+        "rate_limit_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "If set, this step consumes a rate limit token for the given resource key."
+        },
+        "retry": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/RetryPolicy"
+            }
+          ]
+        },
+        "send_window": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/SendWindow",
+              "description": "If set, only execute during the specified time window (per instance timezone)."
+            }
+          ]
+        },
+        "timeout": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "minimum": 0
+        },
+        "wait_for_input": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/HumanInputDef",
+              "description": "If set, this step pauses execution and waits for human input via a signal.\nThe signal name is `human_input:{block_id}`. Contains optional timeout."
+            }
+          ]
+        },
+        "when": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Conditional guard expression. When set, the step is only executed if the\nexpression evaluates to a truthy value; otherwise the step is skipped\n(marked `NodeState::Skipped`). Uses the same expression syntax as router\nconditions — `data.*`, `outputs.*`, comparisons, boolean ops."
+        }
+      }
+    },
+    "SubSequenceDef": {
+      "type": "object",
+      "description": "Invoke another sequence as a child workflow.\nThe child instance is created and linked; the parent waits for completion.",
+      "required": [
+        "id",
+        "sequence_name"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "input": {
+          "description": "Input data to pass as the child instance's initial context data."
+        },
+        "sequence_name": {
+          "type": "string",
+          "description": "Name of the sequence to invoke (resolved by tenant + namespace + name)."
+        },
+        "version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "description": "Optional specific version. If omitted, uses the latest non-deprecated version."
+        }
+      }
+    },
+    "TenantId": {
+      "type": "string"
+    },
+    "TryCatchDef": {
+      "type": "object",
+      "required": [
+        "id",
+        "try_block",
+        "catch_block"
+      ],
+      "properties": {
+        "catch_block": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "finally_block": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        },
+        "id": {
+          "$ref": "#/$defs/BlockId"
+        },
+        "try_block": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BlockDefinition"
+          }
+        }
+      }
+    }
+  }
+}

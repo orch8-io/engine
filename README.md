@@ -100,7 +100,14 @@ non-guarantees, see the [changelog](CHANGELOG.md#unreleased).
 curl -fsSL https://raw.githubusercontent.com/orch8-io/engine/main/install.sh | sh
 
 # Homebrew
-brew tap orch8-io/orch8 && brew install orch8-server
+brew tap orch8-io/orch8 && brew install orch8
+
+# npm or pipx shims (download and verify the same native release)
+npm install --global @orch8/cli
+pipx install orch8-cli
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/orch8-io/engine/main/install.ps1 | iex
 ```
 
 The container image is `ghcr.io/orch8-io/engine:latest`, but a secure container
@@ -110,11 +117,25 @@ image with only a port mapping.
 
 ## Quick Start
 
-Run one local instance without starting a server:
+Start the local Studio. `orch8 dev` now uses a persistent `.orch8/dev.db`,
+hot reloads the sequence, and serves the dashboard at `http://localhost:8080`:
 
 ```bash
 orch8 init my-project
-orch8 dev my-project --skip-timers --once
+orch8 dev my-project
+```
+
+For a one-shot, in-memory CI run use
+`orch8 dev my-project --no-server --skip-timers --once`.
+
+Authoring shortcuts:
+
+```bash
+orch8 templates list --catalog-url https://cloud.orch8.io/api/catalog/templates
+orch8 templates pull react-loop --out sequence.json
+orch8 generate "triage support tickets with human escalation"
+orch8 pieces search slack
+orch8 demo crash-recovery
 ```
 
 Then follow the [progressive quick starts](docs/quick-starts/README.md) to add
@@ -156,7 +177,15 @@ All SDKs live in their own repositories under the [orch8-io](https://github.com/
 | Python | `orch8-io-sdk` | `pip install orch8-io-sdk` | [sdk-python](https://github.com/orch8-io/sdk-python) |
 | Go | `github.com/orch8-io/sdk-go` | `go get github.com/orch8-io/sdk-go` | [sdk-go](https://github.com/orch8-io/sdk-go) |
 
-The TypeScript SDK includes both workflow authoring (sequence builder, deploy via REST) and worker support (task polling, handler registration, concurrent execution).
+The TypeScript, Python, and Go SDKs include code-first builders for all eleven
+workflow block types. TypeScript carries handler-specific parameter types
+through nested builders; Python accepts `TypedDict` mappings and Go exposes
+`TypedStep`. Framework-neutral adapters wrap `ainvoke`, `invoke`, `kickoff`,
+and `run` agent contracts as durable handlers.
+
+For zero-server validation inside an existing process, the source tree also
+ships napi-rs (`packages/node-native`) and PyO3 (`packages/python-native`)
+bindings compiled from the same Rust sequence types as the server.
 
 The Expo SDK provides a REST client, React hooks, and a native engine bridge for running workflows on-device with offline-first execution and push-notification-based approvals.
 
@@ -212,7 +241,9 @@ for field names, defaults, environment overrides, and complete examples.
 ## API Surface
 
 The generated OpenAPI document and Swagger UI are served by the running binary
-at `/api-docs/openapi.json` and `/swagger-ui`. Canonical product routes use the
+at `/api-docs/openapi.json` and `/swagger-ui`; stable snapshots are published at
+`https://orch8.io/contracts/openapi.json` and
+`https://orch8.io/contracts/sequence.schema.json`. Canonical product routes use the
 `/api/v1` prefix; bare paths remain compatibility aliases. The surface covers:
 
 - **Sequences** — CRUD, versioning, deprecation, migration, by-name lookup, preflight readiness, template inspection, dataflow bindings
@@ -378,7 +409,9 @@ Honest about what it is not yet:
 - **Not battle-tested at Temporal-scale.** Largest internal load test: ~10K concurrent instances. If you're past that or have multiple engineers depending on uptime, run Temporal until 1.0.
 - **No deterministic replay debugger.** Temporal's SDKs ship deterministic replay; we don't yet, though continuity checkpoints support bounded time-travel and effect-free what-if simulation from any boundary (see [Continuity Debugging](docs/CONTINUITY_DEBUGGING.md)). Time-skipping tests *are* supported: inject a `ManualClock` via `SchedulerConfig::clock` and advance virtual time manually — a workflow with a 3-day delay completes in a millisecond-scale test.
 - **Workflow versioning is younger.** Sequence definitions are versioned, but the migration ergonomics for in-flight instances aren't as polished as Temporal's `GetVersion` / patch system.
-- **SDK depth varies.** TypeScript SDK has both authoring + worker support; Go and Python SDKs are worker-focused for now.
+- **SDK depth varies.** TypeScript has the broadest generated API surface;
+  Python and Go now have complete workflow builders and workers but fewer
+  convenience methods for the long-tail continuity endpoints.
 - **API is stable but evolving.** Pre-1.0 means breaking changes are possible; we'll mark them in releases and keep them minimal.
 
 If any of these are dealbreakers, file an issue — the gap-to-feature roadmap is driven by what users hit first.

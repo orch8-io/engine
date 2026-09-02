@@ -1,0 +1,11 @@
+{
+  "name": "@orch8/engine-native",
+  "version": "0.7.1",
+  "description": "napi-rs bindings for Orch8 sequence validation",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": { "name": "orch8_engine_native", "triples": { "defaults": true } },
+  "scripts": { "build": "napi build --platform --release" },
+  "devDependencies": { "@napi-rs/cli": "^3.0.0" },
+  "license": "BUSL-1.1"
+}

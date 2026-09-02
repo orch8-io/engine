@@ -106,6 +106,18 @@ test("GET /health returns health", async () => {
   );
 });
 
+test("GET /catalog exposes searchable connector metadata", async () => {
+  await withServer(
+    () => {},
+    async (baseUrl) => {
+      const { status, body } = await get(`${baseUrl}/catalog?q=slack`);
+      assert.equal(status, 200);
+      assert.deepEqual(body.pieces.map((piece: { name: string }) => piece.name), ["slack"]);
+      assert.equal(body.pieces[0].package, "@activepieces/piece-slack");
+    },
+  );
+});
+
 test("POST to unknown path returns 404", async () => {
   await withServer(
     () => {},

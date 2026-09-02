@@ -63,6 +63,10 @@ jobs:
         run: ./scripts/check-sdk-packaging.sh
       - name: Check
         run: cargo check --locked --workspace
+      - name: Native Node and Python bindings
+        run: |
+          cargo check --locked --manifest-path packages/node-native/Cargo.toml
+          cargo check --locked --manifest-path packages/python-native/Cargo.toml
       - name: Generated client contract
         run: ./scripts/check-generated-clients.sh
       - name: Clippy (all targets)

@@ -89,6 +89,8 @@ impl SequenceRow {
                 )
             };
         Ok(SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::from_uuid(self.id),
             tenant_id: TenantId::unchecked(self.tenant_id),
             namespace: Namespace::new(self.namespace),

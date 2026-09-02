@@ -66,6 +66,8 @@ fn fixed_sequence_id(name: &str) -> SequenceId {
 
 fn sequence_definition(name: &str, handlers: &[&str]) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: fixed_sequence_id(name),
         tenant_id: TenantId::new("pkg_tenant").unwrap(),
         namespace: Namespace::new("default"),

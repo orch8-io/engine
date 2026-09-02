@@ -3026,6 +3026,8 @@ mod tests {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("default"),
@@ -3754,6 +3756,8 @@ mod tests {
         let now = Utc::now();
 
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("ns"),
@@ -4469,6 +4473,8 @@ mod tests {
     async fn update_sequence_status_roundtrip() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t1"),
             namespace: Namespace::new("default"),
@@ -4525,6 +4531,8 @@ mod tests {
     async fn seed_instances(storage: &SqliteStorage, n: usize) -> Vec<InstanceId> {
         let now = Utc::now();
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: SequenceId::new(),
             tenant_id: TenantId::unchecked("t"),
             namespace: Namespace::new("ns"),

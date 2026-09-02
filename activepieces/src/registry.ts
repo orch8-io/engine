@@ -47,6 +47,34 @@ export interface PieceLoader {
   clear(): void;
 }
 
+export interface PieceCatalogEntry {
+  name: string;
+  package: string;
+  description: string;
+  installed: boolean;
+}
+
+/** Pieces bundled with the sidecar. Additional catalog names can be supplied
+ * through ORCH8_PIECES_CATALOG as a comma-separated allowlist. */
+export function pieceCatalog(): PieceCatalogEntry[] {
+  const bundled: Record<string, string> = {
+    http: "Make authenticated HTTP requests",
+    slack: "Send messages and interact with Slack",
+  };
+  const configured = (process.env.ORCH8_PIECES_CATALOG ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return [...new Set([...Object.keys(bundled), ...configured])]
+    .sort()
+    .map((name) => ({
+      name,
+      package: `@activepieces/piece-${name}`,
+      description: bundled[name] ?? "Activepieces community connector",
+      installed: Object.hasOwn(bundled, name),
+    }));
+}
+
 const SAFE_PIECE_NAME = /^[a-z0-9][a-z0-9-]*$/;
 
 /**

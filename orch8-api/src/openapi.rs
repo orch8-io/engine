@@ -669,6 +669,9 @@ impl Modify for ContinuityOpenApi {
         orch8_types::sequence::Route,
         orch8_types::sequence::ABSplitDef,
         orch8_types::sequence::ABVariant,
+        orch8_types::sequence::CancellationScopeDef,
+        orch8_types::sequence::SagaDef,
+        orch8_types::sequence::SagaStep,
         orch8_types::sequence::EscalationDef,
         // Signal
         orch8_types::signal::Signal,

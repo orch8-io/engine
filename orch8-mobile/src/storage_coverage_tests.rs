@@ -15,6 +15,8 @@ async fn setup() -> (MobileStorage, Arc<SqliteStorage>) {
 
 fn sequence(name: &str, created_at: DateTime<Utc>) -> SequenceDefinition {
     SequenceDefinition {
+        schema: None,
+        schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         id: SequenceId::new(),
         tenant_id: TenantId::new("mobile").unwrap(),
         namespace: Namespace::new("default"),

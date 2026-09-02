@@ -2089,6 +2089,8 @@ mod tests {
 
     fn mk_seq(blocks: Vec<BlockDefinition>) -> SequenceDefinition {
         SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::from_uuid(uuid::Uuid::nil()),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
             namespace: orch8_types::ids::Namespace::new("ns"),

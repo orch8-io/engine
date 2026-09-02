@@ -406,6 +406,8 @@ mod tests {
 
     async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
         let seq = orch8_types::sequence::SequenceDefinition {
+            schema: None,
+            schema_version: orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
             id: orch8_types::ids::SequenceId::new(),
             tenant_id: TenantId::new("mobile").unwrap(),
             namespace: Namespace::new("default"),
