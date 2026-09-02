@@ -70,6 +70,7 @@ pub async fn run(client: &Client, base: &str, cmd: CronCmd, format: OutputFormat
             print_response(resp, format).await?;
         }
         CronCmd::Delete { id } => {
+            crate::confirm_destructive(&format!("Delete cron schedule {id}?"))?;
             let resp = client.delete(format!("{base}/cron/{id}")).send().await?;
             if resp.status().is_success() {
                 println!("Deleted cron schedule {id}");

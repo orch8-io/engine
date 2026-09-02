@@ -3,7 +3,7 @@ use std::time::Duration;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{WorkerAttemptEventKind, WorkerTask};
 
 use super::PostgresStorage;
 use super::rows::{InstanceRow, WorkerTaskRow};
@@ -161,13 +161,15 @@ pub(super) async fn claim_worker_tasks_from_queue(
     worker_id: &str,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW()
+        SET state = 'claimed', worker_id = $4, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
         WHERE id IN (
             SELECT id FROM worker_tasks
             WHERE handler_name = $1 AND state = 'pending' AND queue_name = $5
+              AND requirements = '{}'::jsonb
             ORDER BY created_at ASC
             LIMIT $3
             FOR UPDATE SKIP LOCKED
@@ -180,9 +182,27 @@ pub(super) async fn claim_worker_tasks_from_queue(
     .bind(i64::from(limit))
     .bind(worker_id)
     .bind(queue_name)
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+    let tasks: Vec<_> = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<_, _>>()?;
+    let events: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            super::workers::transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect();
+    super::workers::insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
 }
 
 /// Tenant-scoped variant — same lock-and-filter discipline as
@@ -196,15 +216,17 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     tenant_id: &orch8_types::TenantId,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
-        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW()
+        SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(), claim_epoch = claim_epoch + 1
         WHERE id IN (
             SELECT wt.id FROM worker_tasks wt
             JOIN task_instances ti ON ti.id = wt.instance_id
             WHERE wt.handler_name = $1
               AND wt.state = 'pending'
+              AND wt.requirements = '{}'::jsonb
               AND wt.queue_name = $3
               AND ti.tenant_id = $5
             ORDER BY wt.created_at ASC
@@ -219,9 +241,27 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     .bind(queue_name)
     .bind(i64::from(limit))
     .bind(tenant_id.as_str())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+    let tasks: Vec<_> = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<_, _>>()?;
+    let events: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            super::workers::transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect();
+    super::workers::insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
 }
 
 // === Dynamic Step Injection ===

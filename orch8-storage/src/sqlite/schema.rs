@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     state TEXT NOT NULL DEFAULT 'pending',
     worker_id TEXT,
     queue_name TEXT,
+    requirements TEXT NOT NULL DEFAULT '{}',
     output TEXT,
     error_message TEXT,
     error_retryable INTEGER,
@@ -119,6 +120,7 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     timeout_ms INTEGER,
     claimed_at TEXT,
     heartbeat_at TEXT,
+    claim_epoch INTEGER NOT NULL DEFAULT 0 CHECK(claim_epoch >= 0),
     resume_checkpoint TEXT,
     checkpoint_seq INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_seq >= 0),
     completed_at TEXT,
@@ -126,6 +128,23 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     UNIQUE(instance_id, block_id),
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS worker_task_attempt_events (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    claim_epoch INTEGER NOT NULL CHECK(claim_epoch >= 0),
+    worker_id TEXT,
+    event TEXT NOT NULL CHECK(event IN (
+        'claimed', 'reclaimed', 'completed', 'failed',
+        'timed_out', 'cancelled', 'stale_mutation_rejected'
+    )),
+    reason TEXT,
+    -- No foreign key: task rows may be deleted during retries while this
+    -- append-only evidence must survive.
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worker_task_attempt_events_task
+    ON worker_task_attempt_events(task_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS worker_registrations (
     worker_id TEXT NOT NULL,
@@ -1089,4 +1108,4 @@ CREATE INDEX IF NOT EXISTS idx_tenant_storage_placements_backend
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 39;
+pub(super) const SCHEMA_VERSION: i64 = 40;

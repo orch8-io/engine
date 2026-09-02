@@ -58,7 +58,7 @@ use orch8_types::output::BlockOutput;
 use orch8_types::rate_limit::{RateLimit, RateLimitCheck};
 use orch8_types::sequence::SequenceDefinition;
 use orch8_types::signal::Signal;
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
@@ -1081,41 +1081,77 @@ impl crate::WorkerStore for PostgresStorage {
         workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
     }
 
+    async fn claim_worker_tasks_matching(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        tenant_id: Option<&orch8_types::TenantId>,
+        queue_name: Option<&str>,
+        capabilities: &orch8_types::continuity::RuntimeCapabilities,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        workers::claim_matching(
+            self,
+            handler_name,
+            worker_id,
+            tenant_id,
+            queue_name,
+            capabilities,
+            limit,
+        )
+        .await
+    }
+
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, worker_id, output).await
+        workers::complete(self, task_id, claim, output).await
     }
 
     async fn fail_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         message: &str,
         retryable: bool,
     ) -> Result<bool, StorageError> {
-        workers::fail(self, task_id, worker_id, message, retryable).await
+        workers::fail(self, task_id, claim, message, retryable).await
     }
 
     async fn heartbeat_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
     ) -> Result<bool, StorageError> {
-        workers::heartbeat(self, task_id, worker_id).await
+        workers::heartbeat(self, task_id, claim).await
     }
 
     async fn checkpoint_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         expected_seq: u64,
         checkpoint: &serde_json::Value,
     ) -> Result<Option<u64>, StorageError> {
-        workers::checkpoint(self, task_id, worker_id, expected_seq, checkpoint).await
+        workers::checkpoint(self, task_id, claim, expected_seq, checkpoint).await
+    }
+
+    async fn record_worker_task_attempt_event(
+        &self,
+        event: &WorkerTaskAttemptEvent,
+    ) -> Result<(), StorageError> {
+        workers::record_attempt_event(self, event).await
+    }
+
+    async fn list_worker_task_attempt_events(
+        &self,
+        task_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<WorkerTaskAttemptEvent>, StorageError> {
+        workers::list_attempt_events(self, task_id, limit).await
     }
 
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError> {
@@ -1916,6 +1952,18 @@ impl crate::ResourceStore for PostgresStorage {
     ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
         crate::artifacts::require_store(self.artifact_store.as_ref())?
             .put(&instance_id.to_string(), content_type, bytes)
+            .await
+    }
+
+    async fn put_artifact_with_id(
+        &self,
+        instance_id: InstanceId,
+        artifact_id: Uuid,
+        content_type: &str,
+        bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .put_with_id(&instance_id.to_string(), artifact_id, content_type, bytes)
             .await
     }
 

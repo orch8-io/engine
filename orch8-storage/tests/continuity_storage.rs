@@ -4,7 +4,7 @@ use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore, LiveMigratio
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
-    ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
+    CapsuleId, ContinuationGrant, ContinuationGrantId, ContinuationGrantState, ContinuityExecution,
     ContinuityId, ContinuityStream, EffectDispatchOutcome, EffectId, EffectKind, EffectReceipt,
     EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId, HandoffState,
     OwnershipState, PlacementDecision, PlacementDecisionId, PlacementEvidence,
@@ -20,12 +20,155 @@ use orch8_types::continuity_advanced::{
     WhatIfScenario,
 };
 use orch8_types::dlq::{DlqIncidentReproduction, ReproductionStatus};
+use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::sequence::CompensationVerificationPolicy;
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
+}
+
+#[tokio::test]
+async fn external_capsule_import_is_idempotent_and_instance_bound() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let tenant = tenant("tenant-external-import");
+    let capsule_id = CapsuleId::new();
+    let runtime_id = RuntimeId::new();
+    let first_instance = InstanceId::new();
+    let bound = storage
+        .record_external_capsule_import(&tenant, capsule_id, runtime_id, first_instance, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(bound, first_instance);
+    assert!(
+        storage
+            .is_capsule_import_instance(&tenant, capsule_id, runtime_id, first_instance)
+            .await
+            .unwrap()
+    );
+
+    let retry_with_another_instance = storage
+        .record_external_capsule_import(
+            &tenant,
+            capsule_id,
+            runtime_id,
+            InstanceId::new(),
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry_with_another_instance, first_instance);
+
+    let collision = storage
+        .record_external_capsule_import(
+            &tenant,
+            CapsuleId::new(),
+            runtime_id,
+            first_instance,
+            Utc::now(),
+        )
+        .await;
+    assert!(matches!(collision, Err(StorageError::Conflict(_))));
+}
+
+fn continuity_stream(tenant_id: TenantId, now: chrono::DateTime<Utc>) -> ContinuityStream {
+    ContinuityStream {
+        stream_id: StreamId::new(),
+        tenant_id,
+        continuity_id: ContinuityId::new(),
+        epoch: ExecutionEpoch::initial(),
+        created_at: now,
+        expires_at: now + Duration::minutes(5),
+    }
+}
+
+async fn seed_continuity_stream(storage: &SqliteStorage, stream: &ContinuityStream) {
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id: stream.continuity_id,
+            tenant_id: stream.tenant_id.clone(),
+            current_instance_id: InstanceId::new(),
+            owner_runtime_id: RuntimeId::new(),
+            epoch: stream.epoch,
+            state: OwnershipState::Owned,
+            updated_at: stream.created_at,
+        })
+        .await
+        .unwrap();
+    storage.create_continuity_stream(stream).await.unwrap();
+}
+
+#[tokio::test]
+async fn continuity_stream_round_trip_is_tenant_scoped() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let stream = continuity_stream(tenant("tenant-a"), Utc::now());
+
+    seed_continuity_stream(&storage, &stream).await;
+
+    assert_eq!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await
+            .unwrap(),
+        Some(stream.clone())
+    );
+    assert_eq!(
+        storage
+            .get_continuity_stream(&tenant("tenant-b"), stream.stream_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, StreamId::new())
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(storage.create_continuity_stream(&stream).await.is_err());
+}
+
+#[tokio::test]
+async fn continuity_stream_schema_rejects_negative_epoch_and_reader_rejects_bad_timestamps() {
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let stream = continuity_stream(tenant("tenant-a"), Utc::now());
+    seed_continuity_stream(&storage, &stream).await;
+
+    let negative_epoch =
+        sqlx::query("UPDATE continuity_streams SET epoch = -1 WHERE stream_id = ?")
+            .bind(stream.stream_id.to_string())
+            .execute(storage.pool())
+            .await;
+    assert!(negative_epoch.is_err());
+
+    sqlx::query("UPDATE continuity_streams SET created_at = 'bad' WHERE stream_id = ?")
+        .bind(stream.stream_id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await,
+        Err(orch8_types::error::StorageError::Query(_))
+    ));
+
+    sqlx::query(
+        "UPDATE continuity_streams SET created_at = ?, expires_at = 'bad' WHERE stream_id = ?",
+    )
+    .bind(stream.created_at.to_rfc3339())
+    .bind(stream.stream_id.to_string())
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        storage
+            .get_continuity_stream(&stream.tenant_id, stream.stream_id)
+            .await,
+        Err(orch8_types::error::StorageError::Query(_))
+    ));
 }
 
 #[tokio::test]

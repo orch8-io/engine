@@ -12,7 +12,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-jsonwebtoken = "10"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 chrono.workspace = true
 tokio.workspace = true
 urlencoding = "2"
@@ -22,6 +22,9 @@ base64.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hex = "0.4"
+
+[dev-dependencies]
+axum.workspace = true
 
 [lints]
 workspace = true

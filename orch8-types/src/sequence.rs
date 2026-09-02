@@ -146,6 +146,7 @@ pub enum BlockDefinition {
     /// Invoke another sequence as a sub-workflow.
     SubSequence(Box<SubSequenceDef>),
     /// A/B split: route traffic to one of several variants by weight.
+    #[serde(rename = "ab_split", alias = "a_b_split")]
     ABSplit(Box<ABSplitDef>),
     /// Cancellation scope: child blocks cannot be cancelled by external cancel signals.
     /// Provides subtree-level non-cancellability (Temporal-style structured concurrency).
@@ -161,7 +162,9 @@ pub struct StepDef {
     pub handler: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay: Option<DelaySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     #[serde(
         default,
@@ -348,7 +351,7 @@ const fn default_true_seq() -> bool {
 /// can opt into selective fetch with `{"data": {"fields": ["user_id"]}}`,
 /// which lets the scheduler preload only the required fields and skip the
 /// rest when hydrating externalized context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum FieldAccess {
     /// Legacy boolean: `true` = all fields, `false` = no fields.
@@ -358,6 +361,424 @@ pub enum FieldAccess {
     Fields { fields: Vec<String> },
     /// String keyword: `"all"` or `"none"`.
     Keyword(AccessKeyword),
+}
+
+impl<'de> Deserialize<'de> for FieldAccess {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct FieldAccessVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for FieldAccessVisitor {
+            type Value = FieldAccess;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(
+                    "true, false, \"all\", \"none\", or an object {\"fields\": [\"field\"]}",
+                )
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(FieldAccess::Bool(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "all" => Ok(FieldAccess::Keyword(AccessKeyword::All)),
+                    "none" => Ok(FieldAccess::Keyword(AccessKeyword::None)),
+                    other => Err(E::unknown_variant(other, &["all", "none"])),
+                }
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "fields" {
+                        if fields.is_some() {
+                            return Err(serde::de::Error::duplicate_field("fields"));
+                        }
+                        fields = Some(map.next_value::<Vec<String>>()?);
+                    } else {
+                        return Err(serde::de::Error::unknown_field(&key, &["fields"]));
+                    }
+                }
+                fields
+                    .map(|fields| FieldAccess::Fields { fields })
+                    .ok_or_else(|| serde::de::Error::missing_field("fields"))
+            }
+        }
+
+        deserializer.deserialize_any(FieldAccessVisitor)
+    }
+}
+
+/// A workflow-definition decoding failure with a JSON path suitable for CLI
+/// and API diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct SequenceDecodeError {
+    message: String,
+}
+
+impl SequenceDecodeError {
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+const SEQUENCE_FIELD_NAMES: &[&str] = &[
+    "id",
+    "tenant_id",
+    "namespace",
+    "name",
+    "version",
+    "deprecated",
+    "status",
+    "blocks",
+    "interceptors",
+    "input_schema",
+    "sla",
+    "on_failure",
+    "on_cancel",
+    "created_at",
+    "type",
+    "handler",
+    "params",
+    "delay",
+    "retry",
+    "timeout",
+    "rate_limit_key",
+    "send_window",
+    "context_access",
+    "cancellable",
+    "wait_for_input",
+    "queue_name",
+    "deadline",
+    "on_deadline_breach",
+    "fallback_handler",
+    "cache_key",
+    "when",
+    "retry_if",
+    "max_attempts",
+    "initial_backoff",
+    "max_backoff",
+    "backoff_multiplier",
+    "output_schema",
+    "compensation",
+    "branches",
+    "semantics",
+    "condition",
+    "body",
+    "max_iterations",
+    "break_on",
+    "continue_on_error",
+    "poll_interval",
+    "retain_iterations",
+    "collection",
+    "item_var",
+    "routes",
+    "default",
+    "try_block",
+    "catch_block",
+    "finally_block",
+    "sequence_name",
+    "input",
+    "variants",
+    "steps",
+];
+
+fn collect_unknown_block_fields(blocks: &serde_json::Value, path: &str, unknown: &mut Vec<String>) {
+    let Some(blocks) = blocks.as_array() else {
+        return;
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        collect_unknown_block_field(block, &format!("{path}.{index}"), unknown);
+    }
+}
+
+fn collect_unknown_object_fields(
+    value: &serde_json::Value,
+    allowed: &[&str],
+    path: &str,
+    unknown: &mut Vec<String>,
+) {
+    if let Some(object) = value.as_object() {
+        for key in object.keys() {
+            if !allowed.contains(&key.as_str()) {
+                unknown.push(format!("{path}.{key}"));
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn collect_unknown_block_field(block: &serde_json::Value, path: &str, unknown: &mut Vec<String>) {
+    let Some(object) = block.as_object() else {
+        return;
+    };
+    let Some(block_type) = object.get("type").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let allowed: &[&str] = match block_type {
+        "step" => &[
+            "type",
+            "id",
+            "handler",
+            "params",
+            "delay",
+            "retry",
+            "timeout",
+            "rate_limit_key",
+            "send_window",
+            "context_access",
+            "cancellable",
+            "wait_for_input",
+            "queue_name",
+            "deadline",
+            "on_deadline_breach",
+            "fallback_handler",
+            "cache_key",
+            "output_schema",
+            "when",
+            "compensation",
+        ],
+        "parallel" => &["type", "id", "branches"],
+        "race" => &["type", "id", "branches", "semantics"],
+        "loop" => &[
+            "type",
+            "id",
+            "condition",
+            "body",
+            "max_iterations",
+            "break_on",
+            "continue_on_error",
+            "poll_interval",
+            "retain_iterations",
+        ],
+        "for_each" => &[
+            "type",
+            "id",
+            "collection",
+            "item_var",
+            "body",
+            "max_iterations",
+            "retain_iterations",
+        ],
+        "router" => &["type", "id", "routes", "default"],
+        "try_catch" => &["type", "id", "try_block", "catch_block", "finally_block"],
+        "sub_sequence" => &["type", "id", "sequence_name", "version", "input"],
+        "ab_split" | "a_b_split" => &["type", "id", "variants"],
+        "cancellation_scope" => &["type", "id", "blocks"],
+        "saga" => &["type", "id", "steps"],
+        _ => return,
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            unknown.push(format!("{path}.{key}"));
+        }
+    }
+
+    match block_type {
+        "parallel" | "race" => {
+            if let Some(branches) = object.get("branches").and_then(serde_json::Value::as_array) {
+                for (index, branch) in branches.iter().enumerate() {
+                    collect_unknown_block_fields(
+                        branch,
+                        &format!("{path}.branches.{index}"),
+                        unknown,
+                    );
+                }
+            }
+        }
+        "loop" | "for_each" => {
+            if let Some(body) = object.get("body") {
+                collect_unknown_block_fields(body, &format!("{path}.body"), unknown);
+            }
+        }
+        "router" => {
+            if let Some(routes) = object.get("routes").and_then(serde_json::Value::as_array) {
+                for (index, route) in routes.iter().enumerate() {
+                    collect_unknown_object_fields(
+                        route,
+                        &["condition", "blocks"],
+                        &format!("{path}.routes.{index}"),
+                        unknown,
+                    );
+                    if let Some(children) = route.get("blocks") {
+                        collect_unknown_block_fields(
+                            children,
+                            &format!("{path}.routes.{index}.blocks"),
+                            unknown,
+                        );
+                    }
+                }
+            }
+            if let Some(default) = object.get("default") {
+                collect_unknown_block_fields(default, &format!("{path}.default"), unknown);
+            }
+        }
+        "try_catch" => {
+            for field in ["try_block", "catch_block", "finally_block"] {
+                if let Some(children) = object.get(field) {
+                    collect_unknown_block_fields(children, &format!("{path}.{field}"), unknown);
+                }
+            }
+        }
+        "ab_split" | "a_b_split" => {
+            if let Some(variants) = object.get("variants").and_then(serde_json::Value::as_array) {
+                for (index, variant) in variants.iter().enumerate() {
+                    collect_unknown_object_fields(
+                        variant,
+                        &["name", "weight", "blocks"],
+                        &format!("{path}.variants.{index}"),
+                        unknown,
+                    );
+                    if let Some(children) = variant.get("blocks") {
+                        collect_unknown_block_fields(
+                            children,
+                            &format!("{path}.variants.{index}.blocks"),
+                            unknown,
+                        );
+                    }
+                }
+            }
+        }
+        "cancellation_scope" => {
+            if let Some(children) = object.get("blocks") {
+                collect_unknown_block_fields(children, &format!("{path}.blocks"), unknown);
+            }
+        }
+        "saga" => {
+            if let Some(steps) = object.get("steps").and_then(serde_json::Value::as_array) {
+                for (index, step) in steps.iter().enumerate() {
+                    collect_unknown_object_fields(
+                        step,
+                        &["id", "action", "compensation"],
+                        &format!("{path}.steps.{index}"),
+                        unknown,
+                    );
+                    for field in ["action", "compensation"] {
+                        if let Some(child) = step.get(field) {
+                            collect_unknown_block_field(
+                                child,
+                                &format!("{path}.steps.{index}.{field}"),
+                                unknown,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn readable_json_path(path: &str) -> String {
+    let mut rendered = String::new();
+    for segment in path.split('.') {
+        if segment == "?" || segment.is_empty() {
+            continue;
+        }
+        if segment.bytes().all(|byte| byte.is_ascii_digit()) {
+            rendered.push('[');
+            rendered.push_str(segment);
+            rendered.push(']');
+        } else {
+            if !rendered.is_empty() {
+                rendered.push('.');
+            }
+            rendered.push_str(segment);
+        }
+    }
+    rendered
+}
+
+fn unknown_field_message(path: &str) -> String {
+    let path = readable_json_path(path);
+    let field = path
+        .rsplit(['.', ']'])
+        .find(|part| !part.is_empty() && !part.bytes().all(|byte| byte.is_ascii_digit()))
+        .unwrap_or(path.as_str());
+    let common_typo = match field {
+        "retires" | "retries" => Some("retry"),
+        "wehn" => Some("when"),
+        "timeout_ms" => Some("timeout"),
+        _ => None,
+    };
+    let suggestion = common_typo
+        .or_else(|| crate::suggest::did_you_mean(field, SEQUENCE_FIELD_NAMES))
+        .filter(|candidate| *candidate != field)
+        .map_or_else(String::new, |candidate| {
+            format!(" (did you mean \"{candidate}\"?)")
+        });
+    format!("unknown field \"{field}\" at {path}{suggestion}")
+}
+
+/// Deserialize a workflow while retaining unknown-field diagnostics.
+/// Syntax/type errors retain their precise JSON path.
+pub fn deserialize_sequence_lenient(
+    value: &serde_json::Value,
+) -> Result<(SequenceDefinition, Vec<String>), SequenceDecodeError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| SequenceDecodeError {
+        message: format!("could not encode sequence input: {error}"),
+    })?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+    let mut ignored = Vec::new();
+    if let Some(blocks) = value.get("blocks") {
+        collect_unknown_block_fields(blocks, "blocks", &mut ignored);
+    }
+    for field in ["on_failure", "on_cancel"] {
+        if let Some(blocks) = value.get(field) {
+            collect_unknown_block_fields(blocks, field, &mut ignored);
+        }
+    }
+    let parsed = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored.push(path.to_string());
+    });
+
+    if let Ok(sequence) = parsed {
+        ignored.sort();
+        ignored.dedup();
+        let warnings = ignored
+            .iter()
+            .map(|path| unknown_field_message(path))
+            .collect();
+        Ok((sequence, warnings))
+    } else {
+        let mut deserializer = serde_json::Deserializer::from_slice(&bytes);
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = readable_json_path(&error.path().to_string());
+            let message = if path.is_empty() {
+                error.inner().to_string()
+            } else {
+                format!("{path}: {}", error.inner())
+            };
+            SequenceDecodeError { message }
+        })
+    }
+}
+
+/// Deserialize a workflow and reject every unknown field. Use this mode for
+/// local authoring/CI and explicit API `?strict=true` validation.
+pub fn deserialize_sequence_strict(
+    value: &serde_json::Value,
+) -> Result<SequenceDefinition, SequenceDecodeError> {
+    let (sequence, warnings) = deserialize_sequence_lenient(value)?;
+    if warnings.is_empty() {
+        Ok(sequence)
+    } else {
+        Err(SequenceDecodeError {
+            message: warnings.join("; "),
+        })
+    }
 }
 
 /// String form of [`FieldAccess`] for human-authored YAML/JSON.
@@ -430,7 +851,7 @@ pub struct HumanInputDef {
     /// Prompt or instructions for the human reviewer.
     #[serde(default)]
     pub prompt: String,
-    /// Timeout in seconds before the step fails or escalates.
+    /// Timeout in milliseconds before the step fails or escalates.
     /// If omitted, waits indefinitely.
     #[serde(
         default,
@@ -522,10 +943,10 @@ pub struct EscalationDef {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
-    #[serde(with = "crate::serde_duration")]
+    #[serde(default = "default_initial_backoff", with = "crate::serde_duration")]
     #[schema(value_type = u64)]
     pub initial_backoff: Duration,
-    #[serde(with = "crate::serde_duration")]
+    #[serde(default = "default_max_backoff", with = "crate::serde_duration")]
     #[schema(value_type = u64)]
     pub max_backoff: Duration,
     #[serde(default = "default_backoff_multiplier")]
@@ -534,6 +955,14 @@ pub struct RetryPolicy {
     pub retry_if: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_retryable_codes: Option<Vec<String>>,
+}
+
+fn default_initial_backoff() -> Duration {
+    Duration::from_secs(1)
+}
+
+fn default_max_backoff() -> Duration {
+    Duration::from_secs(60)
 }
 
 const fn default_backoff_multiplier() -> f64 {
@@ -567,7 +996,7 @@ pub struct TryCatchDef {
     pub id: BlockId,
     pub try_block: Vec<BlockDefinition>,
     pub catch_block: Vec<BlockDefinition>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finally_block: Option<Vec<BlockDefinition>>,
 }
 
@@ -583,6 +1012,7 @@ pub struct LoopDef {
     #[serde(default)]
     pub continue_on_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Seconds to wait between loop-condition polls.
     pub poll_interval: Option<u64>,
     /// Keep only the most recent N iterations' body-step outputs; older outputs
     /// are compacted (deleted) at each iteration boundary to bound storage
@@ -646,7 +1076,7 @@ fn default_item_var() -> String {
 pub struct RouterDef {
     pub id: BlockId,
     pub routes: Vec<Route>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Vec<BlockDefinition>>,
 }
 
@@ -1551,6 +1981,120 @@ mod tests {
     }
 
     #[test]
+    fn field_access_invalid_value_lists_accepted_forms() {
+        let error = serde_json::from_str::<FieldAccess>(r#""some""#).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `some`"));
+        assert!(error.to_string().contains("`all` or `none`"));
+
+        let error = serde_json::from_str::<FieldAccess>(r#"{"fieldz": []}"#).unwrap_err();
+        assert!(error.to_string().contains("unknown field `fieldz`"));
+        assert!(error.to_string().contains("expected `fields`"));
+    }
+
+    #[test]
+    fn ab_split_uses_documented_name_and_accepts_legacy_alias() {
+        let block = BlockDefinition::ABSplit(Box::new(ABSplitDef {
+            id: BlockId::new("experiment"),
+            variants: vec![],
+        }));
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(value["type"], "ab_split");
+
+        let legacy = serde_json::json!({
+            "type": "a_b_split",
+            "id": "experiment",
+            "variants": []
+        });
+        assert!(serde_json::from_value::<BlockDefinition>(legacy).is_ok());
+    }
+
+    #[test]
+    fn strict_sequence_decode_rejects_unknown_fields_with_path_and_suggestion() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "tenant_id": "tenant",
+            "namespace": "default",
+            "name": "typo",
+            "version": 1,
+            "blocks": [{
+                "type": "step",
+                "id": "work",
+                "handler": "http",
+                "retires": {"max_attempts": 3}
+            }],
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+
+        let error = deserialize_sequence_strict(&value).unwrap_err();
+        assert!(error.to_string().contains("retires"), "{error}");
+        assert!(error.to_string().contains("blocks[0]"), "{error}");
+        assert!(
+            error.to_string().contains("did you mean \"retry\""),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn strict_sequence_decode_reports_nested_type_error_path() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "tenant_id": "tenant",
+            "namespace": "default",
+            "name": "bad-handler",
+            "version": 1,
+            "blocks": [{"type": "step", "id": "ok", "handler": "http"}, {
+                "type": "step",
+                "id": "bad",
+                "handler": 42
+            }],
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+
+        let error = deserialize_sequence_strict(&value).unwrap_err();
+        assert!(error.to_string().contains("blocks[1]"), "{error}");
+        assert!(error.to_string().contains("expected a string"), "{error}");
+    }
+
+    #[test]
+    fn lenient_decode_reports_unknown_fields_in_nested_wrappers() {
+        let value = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "tenant_id": "tenant",
+            "namespace": "default",
+            "name": "nested-typo",
+            "version": 1,
+            "blocks": [{
+                "type": "router",
+                "id": "route",
+                "routes": [{
+                    "condition": "true",
+                    "blokcs": [],
+                    "blocks": [{
+                        "type": "step",
+                        "id": "work",
+                        "handler": "noop",
+                        "wehn": "true"
+                    }]
+                }]
+            }],
+            "created_at": "2026-09-01T00:00:00Z"
+        });
+
+        let (sequence, warnings) = deserialize_sequence_lenient(&value).unwrap();
+        assert_eq!(sequence.name, "nested-typo");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| { warning.contains("blocks[0].routes[0].blokcs") })
+        );
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("blocks[0].routes[0].blocks[0].wehn")
+                && warning.contains("did you mean \"when\"")
+        }));
+        assert!(deserialize_sequence_strict(&value).is_err());
+    }
+
+    #[test]
     fn field_access_required_fields() {
         assert_eq!(
             FieldAccess::Fields {
@@ -1617,6 +2161,14 @@ mod tests {
         let out = serde_json::to_value(&rp).unwrap();
         assert_eq!(out["initial_backoff"], 1000);
         assert_eq!(out["max_backoff"], 30000);
+    }
+
+    #[test]
+    fn retry_policy_has_author_friendly_backoff_defaults() {
+        let retry: RetryPolicy = serde_json::from_str(r#"{"max_attempts":3}"#).unwrap();
+        assert_eq!(retry.max_attempts, 3);
+        assert_eq!(retry.initial_backoff, Duration::from_secs(1));
+        assert_eq!(retry.max_backoff, Duration::from_secs(60));
     }
 
     #[test]

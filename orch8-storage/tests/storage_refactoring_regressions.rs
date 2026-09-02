@@ -79,6 +79,7 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         block_id: BlockId::new("s1"),
         handler_name: "h".into(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -87,6 +88,7 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -141,6 +143,14 @@ async fn expire_timed_out_expires_tasks_past_their_deadline() {
 
     let reread = s.get_worker_task(task.id).await.unwrap().unwrap();
     assert_eq!(reread.state, WorkerTaskState::Failed);
+    let evidence = s
+        .list_worker_task_attempt_events(task.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].event.as_str(), "timed_out");
+    assert_eq!(evidence[0].claim_epoch, 0);
+    assert_eq!(evidence[0].reason.as_deref(), Some("timeout_ms exceeded"));
 }
 
 // ---------------------------------------------------------------------------

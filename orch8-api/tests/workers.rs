@@ -6,6 +6,14 @@ use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
 
+async fn poll_tasks(response: reqwest::Response) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["lease_secs"].as_u64().is_some());
+    assert!(body["heartbeat_interval_secs"].as_u64().is_some());
+    assert!(body["poll_after_ms"].as_u64().is_some());
+    body["tasks"].as_array().unwrap().clone()
+}
+
 fn mk_sequence_body(id: Uuid) -> serde_json::Value {
     json!({
         "id": id,
@@ -71,6 +79,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         block_id: orch8_types::ids::BlockId::new("s1"),
         handler_name: "external_handler".into(),
         queue_name: Some("q1".into()),
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -79,6 +88,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -111,7 +121,7 @@ async fn poll_tasks_returns_claimed_task() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], task_id.to_string());
     // The claim API returns the task as it was selected (pending) even though
@@ -148,6 +158,7 @@ async fn complete_task_transitions_instance() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "output": { "result": "ok" }
         }))
         .send()
@@ -204,6 +215,7 @@ async fn fail_task_with_retryable_false_fails_instance() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "message": "boom",
             "retryable": false
         }))
@@ -252,7 +264,7 @@ async fn heartbeat_extends_task_claim() {
             srv.base_url
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({ "worker_id": "worker-1" }))
+        .json(&json!({ "worker_id": "worker-1", "claim_epoch": 1 }))
         .send()
         .await
         .unwrap();
@@ -268,6 +280,7 @@ async fn heartbeat_extends_task_claim() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "checkpoint_seq": 0,
             "checkpoint": { "page": 7, "cursor": "abc" }
         }))
@@ -294,6 +307,7 @@ async fn heartbeat_extends_task_claim() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "checkpoint_seq": 0,
             "checkpoint": { "page": 999 }
         }))
@@ -301,6 +315,77 @@ async fn heartbeat_extends_task_claim() {
         .await
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn reclaimed_task_fences_same_worker_process_and_explains_recovery() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let inst_id = create_instance(&client, &srv.base_url, seq_id).await;
+    let task_id = seed_worker_task(&srv, inst_id).await;
+
+    for expected_epoch in [1_u64, 2] {
+        let response = client
+            .post(format!("{}/workers/tasks/poll", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({"handler_name":"external_handler","worker_id":"stable-worker","limit":1}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let tasks = poll_tasks(response).await;
+        assert_eq!(tasks[0]["claim_epoch"], expected_epoch);
+        if expected_epoch == 1 {
+            srv.storage
+                .reap_stale_worker_tasks(std::time::Duration::ZERO)
+                .await
+                .unwrap();
+        }
+    }
+
+    let stale = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"worker_id":"stable-worker","claim_epoch":1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    let current = client
+        .post(format!(
+            "{}/workers/tasks/{task_id}/heartbeat",
+            srv.base_url
+        ))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"worker_id":"stable-worker","claim_epoch":2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(current.status(), StatusCode::OK);
+
+    let attempts: Vec<serde_json::Value> = client
+        .get(format!("{}/workers/tasks/{task_id}/attempts", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kinds: Vec<_> = attempts
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["claimed", "reclaimed", "claimed", "stale_mutation_rejected"]
+    );
+    assert_eq!(attempts[1]["worker_id"], "stable-worker");
 }
 
 #[tokio::test]
@@ -324,7 +409,7 @@ async fn poll_from_named_queue_isolates_tasks() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0]["id"], task_id.to_string());
 
@@ -342,7 +427,7 @@ async fn poll_from_named_queue_isolates_tasks() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -411,7 +496,7 @@ async fn get_workers_reports_in_flight_and_queue() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 
     let resp = client
@@ -531,7 +616,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0, "old worker must be blocked by the pin");
 
     // A worker with no version is also blocked.
@@ -542,10 +627,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.json::<Vec<serde_json::Value>>().await.unwrap().len(),
-        0
-    );
+    assert_eq!(poll_tasks(resp).await.len(), 0);
 
     // A 2.1 worker satisfies the pin and claims the task.
     let resp = client
@@ -555,7 +637,7 @@ async fn version_pin_blocks_old_worker_and_allows_new() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1, "new worker must satisfy the pin");
 }
 
@@ -642,6 +724,7 @@ async fn worker_reported_logs_persist_and_list() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "output": { "ok": true },
             "logs": [
                 { "ts": "2026-01-01T00:00:00Z", "level": "info", "message": "started" },
@@ -695,6 +778,7 @@ async fn worker_reported_logs_persist_on_fail_path() {
         .header("X-Tenant-Id", "t1")
         .json(&json!({
             "worker_id": "worker-1",
+            "claim_epoch": 1,
             "message": "boom",
             "retryable": false,
             "logs": [

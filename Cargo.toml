@@ -31,6 +31,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlit
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_ignored = "0.1"
+serde_path_to_error = "0.1"
 
 # IDs & time
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
@@ -61,7 +63,7 @@ tonic-prost-build = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
 tower = { version = "0.5", features = ["limit"] }
-tower-http = { version = "0.7", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "timeout", "trace"] }
 
 # Configuration
 clap = { version = "4", features = ["derive", "env"] }
@@ -114,7 +116,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 tikv-jemallocator = "0.6"
 async-nats = "0.49"
 notify = { version = "8", features = ["serde"] }
-wasmtime = "45"
+wasmtime = "46"
 dashmap = "6"
 tempfile = "3"
 serial_test = "3"
@@ -122,6 +124,10 @@ serial_test = "3"
 # Speed up debug builds: keep our own crates cheap to compile (opt-level 0)
 # but build 3rd-party deps at opt-level 1. Big win for sqlx, tokio, axum
 # etc. in E2E tests where we pay dep runtime cost on every server boot.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [profile.dev.package."*"]
 opt-level = 1
 

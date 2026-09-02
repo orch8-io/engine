@@ -7,6 +7,12 @@ Canonical base URL: `http://localhost:8080/api/v1` (listen address configurable 
 > `/swagger-ui` are generated from the current code and are authoritative for
 > fields, status codes, and routes.
 
+The Durable Agent Handoff Protocol endpoints—portable work offers, policy
+compilation, gateway validation, receipts, profiles, conformance certificates
+and badges, and commercial relay validation—are covered in
+[Agent continuity product](AGENT_CONTINUITY_PRODUCT.md) and generated under the
+`continuity-product` OpenAPI tag.
+
 All request/response bodies are JSON. Dates use ISO 8601 / RFC 3339 format.
 
 Product routes are served under `/api/v1`. Bare product paths remain compatibility
@@ -408,8 +414,8 @@ Returns the step logs for an execution, oldest first, each annotated with its `b
 To attach worker logs, include a `logs` array in the complete/fail body:
 
 ```
-POST /workers/tasks/{id}/complete   # { worker_id, output, logs: [{ ts, level, message }] }
-POST /workers/tasks/{id}/fail       # { worker_id, message, retryable, logs: [...] }
+POST /workers/tasks/{id}/complete   # { worker_id, claim_epoch, output, logs: [{ ts, level, message }] }
+POST /workers/tasks/{id}/fail       # { worker_id, claim_epoch, message, retryable, logs: [...] }
 ```
 
 ---
@@ -554,8 +560,9 @@ GET /instances/{id}/effects?tenant_id={tenant_id}
 **Response:** `200 OK`
 
 ```json
-[
-  {
+{
+  "tasks": [
+    {
     "id": "f1e2d3c4-...",
     "instance_id": "a1b2c3d4-...",
     "block_id": "send_welcome",
@@ -814,16 +821,22 @@ POST /workers/tasks/poll
     "worker_id": "node-worker-42",
     "claimed_at": "2024-01-15T14:00:00Z",
     "heartbeat_at": "2024-01-15T14:00:00Z",
+    "claim_epoch": 1,
     "completed_at": null,
     "output": null,
     "error_message": null,
     "error_retryable": null,
     "created_at": "2024-01-15T13:59:58Z"
-  }
-]
+    }
+  ],
+  "lease_secs": 60,
+  "heartbeat_interval_secs": 15,
+  "poll_after_ms": 1000
+}
 ```
 
-Returns empty array `[]` if no tasks available.
+Returns an empty `tasks` array if no tasks are available. Clients should use
+the advertised heartbeat and poll intervals instead of hard-coded timing.
 
 **Mechanics:**
 - Uses `FOR UPDATE SKIP LOCKED` — concurrent workers never get the same task.
@@ -842,6 +855,7 @@ POST /workers/tasks/{task_id}/complete
 ```json
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "output": {
     "email_id": "msg-abc123",
     "delivered": true
@@ -852,6 +866,7 @@ POST /workers/tasks/{task_id}/complete
 | Field | Type | Description |
 |-------|------|-------------|
 | `worker_id` | string | Must match the worker that claimed the task |
+| `claim_epoch` | integer | Must match the claim generation returned by polling |
 | `output` | object | Result JSON (saved as BlockOutput) |
 
 **Response:** `200 OK`
@@ -875,6 +890,7 @@ POST /workers/tasks/{task_id}/fail
 ```json
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "message": "SMTP connection refused",
   "retryable": true
 }
@@ -883,6 +899,7 @@ POST /workers/tasks/{task_id}/fail
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `worker_id` | string | **required** | Must match claimer |
+| `claim_epoch` | integer | **required** | Must match the claim generation returned by polling |
 | `message` | string | **required** | Error description |
 | `retryable` | boolean | `false` | Whether the error is transient |
 
@@ -908,13 +925,19 @@ POST /workers/tasks/{task_id}/heartbeat
 
 ```json
 {
-  "worker_id": "node-worker-42"
+  "worker_id": "node-worker-42",
+  "claim_epoch": 1
 }
 ```
 
 **Response:** `200 OK`
 
 Send heartbeats every 15-30 seconds for long-running tasks. Tasks without a heartbeat for 60 seconds are reclaimed by the reaper and returned to the queue.
+
+All complete, fail, heartbeat, and checkpoint requests must echo the
+`claim_epoch` returned by polling. A stale generation receives `409 Conflict`,
+even if a replacement process uses the same `worker_id`. Inspect durable lease
+history with `GET /workers/tasks/{task_id}/attempts?limit=100`.
 
 An activity may make the heartbeat durable and resumable by also sending
 `checkpoint_seq` plus a JSON `checkpoint` (maximum 256 KiB). The response

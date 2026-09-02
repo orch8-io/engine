@@ -18,6 +18,9 @@ import type {
   StepBlock,
   WaitOptions,
   WorkerTask,
+  WorkerTaskAttemptEvent,
+  EventIngestRequest,
+  EventIngestOutcome,
 } from "./types.ts";
 
 // Default base URL honours `ORCH8_E2E_BASE_URL` (full override) and
@@ -96,6 +99,7 @@ function toQuery(query: Record<string, unknown>): string {
 export class Orch8Client {
   readonly baseUrl: string;
   readonly #defaultHeaders: Record<string, string>;
+  readonly #workerClaimEpochs = new Map<string, number>();
 
   constructor(
     baseUrl: string = DEFAULT_BASE,
@@ -298,8 +302,16 @@ export class Orch8Client {
     return this.#post(`/continuity/handoffs/${id}/accept`, req);
   }
 
+  async acceptExternalHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/accept-external`, req);
+  }
+
   async resumeHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
     return this.#post(`/continuity/handoffs/${id}/resume`, req);
+  }
+
+  async resumeExternalHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
+    return this.#post(`/continuity/handoffs/${id}/resume-external`, req);
   }
 
   async rejectHandoff(id: string, req: Record<string, unknown>): Promise<ApiResponse> {
@@ -864,11 +876,13 @@ export class Orch8Client {
     workerId: string,
     limit: number = 1,
   ): Promise<WorkerTask[]> {
-    return this.#post<WorkerTask[]>("/workers/tasks/poll/queue", {
+    const { tasks } = await this.#post<{ tasks: WorkerTask[] }>("/workers/tasks/poll/queue", {
       queue_name: queueName,
       worker_id: workerId,
       limit,
     });
+    for (const task of tasks) this.#workerClaimEpochs.set(task.id, task.claim_epoch);
+    return tasks;
   }
 
   // --- Cron ---
@@ -900,22 +914,28 @@ export class Orch8Client {
     workerId: string,
     limit: number = 1,
   ): Promise<WorkerTask[]> {
-    return this.#post<WorkerTask[]>("/workers/tasks/poll", {
+    const { tasks } = await this.#post<{ tasks: WorkerTask[] }>("/workers/tasks/poll", {
       handler_name: handlerName,
       worker_id: workerId,
       limit,
     });
+    for (const task of tasks) this.#workerClaimEpochs.set(task.id, task.claim_epoch);
+    return tasks;
   }
 
   async completeWorkerTask(
     taskId: string,
     workerId: string,
     output: Record<string, unknown> = {},
+    claimEpoch?: number,
   ): Promise<ApiResponse> {
-    return this.#post(`/workers/tasks/${taskId}/complete`, {
+    const result = await this.#post(`/workers/tasks/${taskId}/complete`, {
       worker_id: workerId,
+      claim_epoch: claimEpoch ?? this.#workerClaimEpochs.get(taskId) ?? 1,
       output,
     });
+    this.#workerClaimEpochs.delete(taskId);
+    return result;
   }
 
   async failWorkerTask(
@@ -923,21 +943,27 @@ export class Orch8Client {
     workerId: string,
     message: string,
     retryable: boolean = false,
+    claimEpoch?: number,
   ): Promise<ApiResponse> {
-    return this.#post(`/workers/tasks/${taskId}/fail`, {
+    const result = await this.#post(`/workers/tasks/${taskId}/fail`, {
       worker_id: workerId,
+      claim_epoch: claimEpoch ?? this.#workerClaimEpochs.get(taskId) ?? 1,
       message,
       retryable,
     });
+    this.#workerClaimEpochs.delete(taskId);
+    return result;
   }
 
   async heartbeatWorkerTask(
     taskId: string,
     workerId: string,
     progress?: { checkpoint: unknown; checkpointSeq: number },
+    claimEpoch?: number,
   ): Promise<ApiResponse> {
     return this.#post(`/workers/tasks/${taskId}/heartbeat`, {
       worker_id: workerId,
+      claim_epoch: claimEpoch ?? this.#workerClaimEpochs.get(taskId) ?? 1,
       ...(progress == null
         ? {}
         : {
@@ -955,6 +981,24 @@ export class Orch8Client {
 
   async workerTaskStats(): Promise<ApiResponse> {
     return this.#get("/workers/tasks/stats");
+  }
+
+  async listWorkerTaskAttempts(taskId: string): Promise<WorkerTaskAttemptEvent[]> {
+    return this.#get<WorkerTaskAttemptEvent[]>(`/workers/tasks/${taskId}/attempts`);
+  }
+
+  // --- Durable event / transactional-outbox intake ---
+
+  async ingestEventBatch(events: EventIngestRequest[]): Promise<EventIngestOutcome[]> {
+    const response = await this.#post<{ outcomes: EventIngestOutcome[] }>(
+      "/events/batch",
+      { events },
+    );
+    return response.outcomes;
+  }
+
+  async listEvents(query: Record<string, unknown> = {}): Promise<ApiResponse[]> {
+    return this.#get<ApiResponse[]>(`/events${toQuery(query)}`);
   }
 
   // --- Triggers ---

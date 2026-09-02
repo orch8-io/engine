@@ -43,10 +43,10 @@ use orch8_types::sequence::SequenceDefinition;
 use orch8_types::session::Session;
 use orch8_types::signal::Signal;
 use orch8_types::trigger::{TriggerDef, TriggerPollState};
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 78;
+pub const STORAGE_SCHEMA_VERSION: u32 = 81;
 
 /// Represents a single telemetry event for batch ingestion.
 #[derive(Debug, Clone)]
@@ -783,8 +783,9 @@ pub trait InstanceStore: Send + Sync + 'static {
     /// Atomically merge new blocks into an instance's existing injected-blocks
     /// array at the given position, inside a single transaction.
     ///
-    /// If `position` is `None`, `new_blocks_json` replaces any prior value
-    /// (equivalent to `inject_blocks`). If `position` is `Some(pos)`, the
+    /// If `position` is `None`, `new_blocks_json` replaces any prior value.
+    /// [`DynamicStepStore::inject_blocks`] remains the append-only operation.
+    /// If `position` is `Some(pos)`, the
     /// current injected blocks are read, `new_blocks_json`'s entries are
     /// inserted at `pos` (clamped to the current length), and the resulting
     /// array is written back -- all within one transaction so two concurrent
@@ -1352,11 +1353,23 @@ pub trait WorkerStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
+    /// Atomically claim only tasks whose durable runtime requirements are
+    /// satisfied by this worker's current capability advertisement.
+    async fn claim_worker_tasks_matching(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        tenant_id: Option<&TenantId>,
+        queue_name: Option<&str>,
+        capabilities: &RuntimeCapabilities,
+        limit: u32,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
     /// Mark a claimed task as completed with output. Verifies `worker_id` ownership.
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError>;
 
@@ -1364,7 +1377,7 @@ pub trait WorkerStore: Send + Sync + 'static {
     async fn fail_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         message: &str,
         retryable: bool,
     ) -> Result<bool, StorageError>;
@@ -1373,7 +1386,7 @@ pub trait WorkerStore: Send + Sync + 'static {
     async fn heartbeat_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
     ) -> Result<bool, StorageError>;
 
     /// Atomically persist resumable activity progress and heartbeat the lease.
@@ -1382,10 +1395,25 @@ pub trait WorkerStore: Send + Sync + 'static {
     async fn checkpoint_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &WorkerClaim,
         expected_seq: u64,
         checkpoint: &serde_json::Value,
     ) -> Result<Option<u64>, StorageError>;
+
+    /// Append evidence for a rejected or externally classified mutation.
+    /// Normal claim/complete/fail/reap transitions are recorded atomically by
+    /// their corresponding storage operation.
+    async fn record_worker_task_attempt_event(
+        &self,
+        event: &WorkerTaskAttemptEvent,
+    ) -> Result<(), StorageError>;
+
+    /// Return append-only attempt evidence for one task in creation order.
+    async fn list_worker_task_attempt_events(
+        &self,
+        task_id: Uuid,
+        limit: u32,
+    ) -> Result<Vec<WorkerTaskAttemptEvent>, StorageError>;
 
     /// Delete a worker task (used when retryable failure needs re-dispatch).
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
@@ -2331,6 +2359,18 @@ pub trait ResourceStore: Send + Sync + 'static {
         ))
     }
 
+    async fn put_artifact_with_id(
+        &self,
+        _instance_id: InstanceId,
+        _artifact_id: Uuid,
+        _content_type: &str,
+        _bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        Err(StorageError::Unsupported(
+            "artifact storage is not configured".into(),
+        ))
+    }
+
     async fn get_artifact(&self, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         Err(StorageError::Unsupported(
             "artifact storage is not configured".into(),
@@ -2874,6 +2914,19 @@ pub trait ContinuityStore: Send + Sync + 'static {
         destination_runtime_id: RuntimeId,
         instance: &TaskInstance,
         checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError>;
+
+    /// Idempotently bind a capsule to an instance hosted by an external
+    /// runtime. Unlike `import_capsule_instance`, this records control-plane
+    /// evidence only; the instance and checkpoint remain in the destination
+    /// runtime's local store.
+    async fn record_external_capsule_import(
+        &self,
+        tenant_id: &TenantId,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance_id: InstanceId,
+        imported_at: DateTime<Utc>,
     ) -> Result<InstanceId, StorageError>;
 
     /// Verify that an imported instance was created from the given capsule for

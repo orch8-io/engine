@@ -10,6 +10,12 @@ use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
 
+async fn poll_tasks(response: reqwest::Response) -> Vec<serde_json::Value> {
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["lease_secs"].as_u64().is_some());
+    body["tasks"].as_array().unwrap().clone()
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn mk_sequence_body(id: Uuid, tenant: &str, namespace: &str, name: &str) -> serde_json::Value {
@@ -79,6 +85,7 @@ async fn seed_worker_task(
         block_id: orch8_types::ids::BlockId::new("s1"),
         handler_name: handler.into(),
         queue_name: queue.map(String::from),
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
         context: json!({}),
         attempt: 0,
@@ -87,6 +94,7 @@ async fn seed_worker_task(
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -1309,7 +1317,7 @@ async fn t51_poll_tasks_returns_task() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 }
 
@@ -1325,7 +1333,7 @@ async fn t52_poll_tasks_no_match_returns_empty() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -1346,7 +1354,7 @@ async fn t53_poll_tasks_respects_limit() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert!(tasks.len() <= 2);
 }
 
@@ -1360,7 +1368,7 @@ async fn t54_poll_tasks_from_named_queue() {
     seed_worker_task(&srv, inst_uuid, "handler_c", Some("my-queue")).await;
     let resp = client.post(format!("{}/workers/tasks/poll/queue", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"queue_name":"my-queue","handler_name":"handler_c","worker_id":"w1","limit":10})).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 1);
 }
 
@@ -1381,7 +1389,7 @@ async fn t55_poll_tasks_wrong_queue_empty() {
         .send()
         .await
         .unwrap();
-    let tasks: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let tasks = poll_tasks(resp).await;
     assert_eq!(tasks.len(), 0);
 }
 
@@ -1403,7 +1411,7 @@ async fn t56_complete_task_returns_200() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"result":"done"}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"result":"done"}}))
         .send()
         .await
         .unwrap();
@@ -1428,7 +1436,7 @@ async fn t57_complete_task_complex_output() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"items":[1,2,3],"nested":{"key":"val"}}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"items":[1,2,3],"nested":{"key":"val"}}}))
         .send()
         .await
         .unwrap();
@@ -1446,7 +1454,7 @@ async fn t58_complete_task_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{}}))
         .send()
         .await
         .unwrap();
@@ -1471,7 +1479,7 @@ async fn t59_complete_task_merges_context() {
     client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{"new_key":"new_val"}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{"new_key":"new_val"}}))
         .send()
         .await
         .unwrap();
@@ -1517,7 +1525,7 @@ async fn t60_complete_task_transitions_instance() {
     client
         .post(format!("{}/workers/tasks/{task_id}/complete", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","output":{}}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"output":{}}))
         .send()
         .await
         .unwrap();
@@ -1549,7 +1557,7 @@ async fn t61_fail_task_returns_200() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"timeout exceeded","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"timeout exceeded","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1574,7 +1582,7 @@ async fn t62_fail_task_non_retryable_fails_instance() {
     client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"permanent error","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"permanent error","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1599,7 +1607,7 @@ async fn t63_fail_task_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"oops","retryable":false}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1,"message":"oops","retryable":false}))
         .send()
         .await
         .unwrap();
@@ -1624,7 +1632,9 @@ async fn t64_fail_task_retryable() {
     let resp = client
         .post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1","message":"transient error","retryable":true}))
+        .json(
+            &json!({"worker_id":"w1","claim_epoch":1,"message":"transient error","retryable":true}),
+        )
         .send()
         .await
         .unwrap();
@@ -1646,7 +1656,7 @@ async fn t65_fail_task_with_detailed_message() {
         .send()
         .await
         .unwrap();
-    let resp = client.post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"worker_id":"w1","message":"Connection refused: host=db.internal port=5432","retryable":false})).send().await.unwrap();
+    let resp = client.post(format!("{}/workers/tasks/{task_id}/fail", srv.base_url)).header("X-Tenant-Id", "t1").json(&json!({"worker_id":"w1","claim_epoch":1,"message":"Connection refused: host=db.internal port=5432","retryable":false})).send().await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
@@ -1671,7 +1681,7 @@ async fn t66_heartbeat_returns_200() {
             srv.base_url
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1"}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1}))
         .send()
         .await
         .unwrap();
@@ -1700,7 +1710,7 @@ async fn t67_heartbeat_multiple_times() {
                 srv.base_url
             ))
             .header("X-Tenant-Id", "t1")
-            .json(&json!({"worker_id":"w1"}))
+            .json(&json!({"worker_id":"w1","claim_epoch":1}))
             .send()
             .await
             .unwrap();
@@ -1719,7 +1729,7 @@ async fn t68_heartbeat_not_found_404() {
             Uuid::now_v7()
         ))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"worker_id":"w1"}))
+        .json(&json!({"worker_id":"w1","claim_epoch":1}))
         .send()
         .await
         .unwrap();
@@ -2119,7 +2129,13 @@ async fn t91_not_found_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("not found"));
+    assert_eq!(v["error"]["code"], "not_found");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 }
 
 #[tokio::test]
@@ -2137,7 +2153,13 @@ async fn t92_invalid_argument_error_body() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("invalid argument"));
+    assert_eq!(v["error"]["code"], "invalid_argument");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid argument")
+    );
 }
 
 #[tokio::test]
@@ -2154,7 +2176,8 @@ async fn t93_conflict_error_409() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let v: serde_json::Value = resp.json().await.unwrap();
-    assert!(v["error"].as_str().unwrap().contains("conflict"));
+    assert_eq!(v["error"]["code"], "conflict");
+    assert!(v["error"]["message"].as_str().unwrap().contains("conflict"));
 }
 
 #[tokio::test]

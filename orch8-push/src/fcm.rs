@@ -67,18 +67,16 @@ fn classify_fcm_response(status: reqwest::StatusCode, body: &str) -> FcmOutcome 
     // with 404 "Requested entity was not found") is a project-level failure:
     // treating it as InvalidToken would let one config typo wipe every
     // registered device token.
-    let unregistered = serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .is_some_and(|v| {
-            v.get("error")
-                .and_then(|e| e.get("details"))
-                .and_then(|d| d.as_array())
-                .is_some_and(|details| {
-                    details.iter().any(|d| {
-                        d.get("errorCode").and_then(|c| c.as_str()) == Some("UNREGISTERED")
-                    })
-                })
-        });
+    let unregistered = serde_json::from_str::<serde_json::Value>(body).is_ok_and(|v| {
+        v.get("error")
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.as_array())
+            .is_some_and(|details| {
+                details
+                    .iter()
+                    .any(|d| d.get("errorCode").and_then(|c| c.as_str()) == Some("UNREGISTERED"))
+            })
+    });
     if unregistered {
         return FcmOutcome::InvalidToken;
     }
@@ -147,6 +145,7 @@ impl Drop for CachedToken {
 pub struct FcmProvider {
     client: reqwest::Client,
     project_id: String,
+    message_base_url: String,
     service_account: ServiceAccount,
     cached_token: Mutex<Option<CachedToken>>,
 }
@@ -171,6 +170,7 @@ impl FcmProvider {
         Ok(Self {
             client,
             project_id: config.project_id,
+            message_base_url: "https://fcm.googleapis.com".into(),
             service_account,
             cached_token: Mutex::new(None),
         })
@@ -286,8 +286,8 @@ impl FcmProvider {
         }
 
         let url = format!(
-            "https://fcm.googleapis.com/v1/projects/{}/messages:send",
-            self.project_id
+            "{}/v1/projects/{}/messages:send",
+            self.message_base_url, self.project_id
         );
         let payload = Self::wake_payload(token, metadata)?;
 
@@ -537,3 +537,7 @@ mod tests {
 #[cfg(test)]
 #[path = "fcm_coverage_tests.rs"]
 mod fcm_coverage_tests;
+
+#[cfg(test)]
+#[path = "fcm_protocol_tests.rs"]
+mod fcm_protocol_tests;

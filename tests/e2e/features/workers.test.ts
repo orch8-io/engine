@@ -66,6 +66,7 @@ describe("External Workers", () => {
     assert.equal(tasks.length, 1);
     assert.equal(tasks[0]!.handler_name, "my_custom_handler");
     assert.equal(tasks[0]!.state, "claimed");
+    assert.equal(tasks[0]!.claim_epoch, 1);
     assert.deepEqual(tasks[0]!.params, { foo: "bar" });
 
     // Complete the task.
@@ -260,9 +261,15 @@ describe("External Workers", () => {
       "queue-scoped poll should return the routed task",
     );
     assert.equal(viaQueue[0]!.handler_name, handler);
+    assert.equal(viaQueue[0]!.claim_epoch, 1);
 
     // Completing the task should drive the instance to completion.
-    await client.completeWorkerTask(viaQueue[0]!.id, "worker-q-1", { ok: 1 });
+    await client.completeWorkerTask(
+      viaQueue[0]!.id,
+      "worker-q-1",
+      { ok: 1 },
+      viaQueue[0]!.claim_epoch,
+    );
     const completed = await client.waitForState(id, "completed");
     assert.equal(completed.state, "completed");
   });

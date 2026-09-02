@@ -1,8 +1,12 @@
 use tracing::{debug, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
-use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId};
+#[cfg(test)]
+use orch8_types::execution::BlockType;
+use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::ids::InstanceId;
+#[cfg(test)]
+use orch8_types::ids::{BlockId, ExecutionNodeId};
 use orch8_types::instance::TaskInstance;
 use orch8_types::output::BlockOutput;
 use orch8_types::sequence::ForEachDef;
@@ -256,8 +260,14 @@ pub async fn execute_for_each(
         // rationale as loop_block). Skipped at the cap so the body stays
         // terminal for clean close-out.
         if next_index < effective_max {
-            reset_subtree_to_pending(storage, tree, &instance.tenant_id, instance.id, node.id)
-                .await?;
+            evaluator::reset_subtree_to_pending(
+                storage,
+                tree,
+                &instance.tenant_id,
+                instance.id,
+                node.id,
+            )
+            .await?;
         }
 
         storage.save_block_output(&marker).await?;
@@ -384,88 +394,6 @@ async fn cleanup_item_var(storage: &dyn StorageBackend, instance_id: InstanceId,
     }
 }
 
-/// Walk the subtree rooted at `root_id` (exclusive) and transition every
-/// descendant back to [`NodeState::Pending`]. Additionally purge composite
-/// iteration-counter markers from descendant `Loop` / `ForEach` blocks via
-/// `StorageBackend::delete_block_outputs`.
-///
-/// Mirror of `crate::handlers::loop_block::reset_subtree_to_pending`.
-/// Called at iteration boundaries so the body can re-execute without stale
-/// terminal state. Step body outputs are left in place — under the
-/// write-append model each iteration appends a fresh row for each step.
-/// Composite markers are internal iteration state and MUST be purged here
-/// or the descendant's cap guard would observe the previous iteration's
-/// counter on the next tick and complete without running.
-///
-/// The root node's own marker is intentionally NOT purged: the caller is
-/// the composite that owns it, and it has already advanced its own
-/// counter for the next outer iteration.
-async fn reset_subtree_to_pending(
-    storage: &dyn StorageBackend,
-    tree: &[ExecutionNode],
-    tenant_id: &orch8_types::ids::TenantId,
-    instance_id: InstanceId,
-    root_id: ExecutionNodeId,
-) -> Result<(), EngineError> {
-    let mut frontier: Vec<ExecutionNodeId> = vec![root_id];
-    let mut descendants: Vec<(ExecutionNodeId, BlockType, BlockId)> = Vec::new();
-    while let Some(parent) = frontier.pop() {
-        for node in tree.iter().filter(|n| n.parent_id == Some(parent)) {
-            descendants.push((node.id, node.block_type, node.block_id.clone()));
-            frontier.push(node.id);
-        }
-    }
-    if descendants.is_empty() {
-        return Ok(());
-    }
-
-    // Collapse three per-descendant loops into three batched calls — on a
-    // deep subtree this turns O(descendants × 3) round-trips into 3.
-    let node_ids: Vec<ExecutionNodeId> = descendants.iter().map(|(id, _, _)| *id).collect();
-    storage
-        .update_nodes_state(&node_ids, NodeState::Pending)
-        .await?;
-
-    let composite_block_ids: Vec<BlockId> = descendants
-        .iter()
-        .filter(|(_, bt, _)| matches!(bt, BlockType::Loop | BlockType::ForEach))
-        .map(|(_, _, bid)| bid.clone())
-        .collect();
-    if !composite_block_ids.is_empty() {
-        storage
-            .delete_block_outputs_batch(instance_id, &composite_block_ids)
-            .await?;
-    }
-
-    // Clear any effect receipt recorded for a `Step` descendant being reset
-    // to Pending — see `loop_block::reset_subtree_to_pending` for why: a
-    // step that permanently failed on the previous iteration re-enters this
-    // tick at the same attempt number, and without this a stale `unknown`
-    // receipt from that prior iteration would wrongly block the re-run.
-    let step_block_ids: Vec<BlockId> = descendants
-        .iter()
-        .filter(|(_, bt, _)| matches!(bt, BlockType::Step))
-        .map(|(_, _, bid)| bid.clone())
-        .collect();
-    if !step_block_ids.is_empty() {
-        storage
-            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
-            .await?;
-    }
-
-    // Purge any stale worker_tasks row for every descendant block_id.
-    // Composite descendants have no worker_tasks row — the delete is a
-    // no-op for them, so we include all block_ids unconditionally.
-    let all_block_ids: Vec<String> = descendants
-        .iter()
-        .map(|(_, _, bid)| bid.as_str().to_owned())
-        .collect();
-    storage
-        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
-        .await?;
-    Ok(())
-}
-
 async fn resolve_collection(
     path: &str,
     context: &orch8_types::context::ExecutionContext,
@@ -531,6 +459,7 @@ fn resolved_type_name(v: &serde_json::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluator::reset_subtree_to_pending;
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
 
@@ -869,6 +798,7 @@ mod tests {
             block_id: step.block_id.clone(),
             handler_name: "external_handler".into(),
             queue_name: None,
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({}),
             context: json!({}),
             attempt: 1,
@@ -877,6 +807,7 @@ mod tests {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,
@@ -889,9 +820,13 @@ mod tests {
         s.claim_worker_tasks("external_handler", "w1", 1)
             .await
             .unwrap();
-        s.complete_worker_task(iter0.id, "w1", &json!({"ok": true}))
-            .await
-            .unwrap();
+        s.complete_worker_task(
+            iter0.id,
+            &orch8_types::worker::WorkerClaim::new("w1", 1),
+            &json!({"ok": true}),
+        )
+        .await
+        .unwrap();
 
         // Reset subtree must purge the completed worker_tasks row.
         reset_subtree_to_pending(&s, &tree, &TenantId::unchecked("t"), inst, outer.id)
@@ -910,6 +845,7 @@ mod tests {
             block_id: step.block_id.clone(),
             handler_name: "external_handler".into(),
             queue_name: None,
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({}),
             context: json!({}),
             attempt: 1,
@@ -918,6 +854,7 @@ mod tests {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,

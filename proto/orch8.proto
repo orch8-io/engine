@@ -167,6 +167,7 @@ message CompleteTaskRequest {
   string task_id = 1;
   string worker_id = 2;
   string output_json = 3;
+  uint64 claim_epoch = 4;
 }
 
 message FailTaskRequest {
@@ -174,11 +175,13 @@ message FailTaskRequest {
   string worker_id = 2;
   string message = 3;
   bool retryable = 4;
+  uint64 claim_epoch = 5;
 }
 
 message HeartbeatTaskRequest {
   string task_id = 1;
   string worker_id = 2;
+  uint64 claim_epoch = 3;
 }
 
 message WorkerStreamOpen {

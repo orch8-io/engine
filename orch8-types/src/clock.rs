@@ -208,4 +208,20 @@ mod tests {
         let after = Utc::now();
         assert!(before <= observed && observed <= after);
     }
+
+    #[test]
+    fn shared_clock_wraps_a_concrete_clock_for_inherent_and_trait_calls() {
+        let instant = Utc::now() + Duration::hours(6);
+        let shared = SharedClock::new(ManualClock::new(instant));
+
+        assert_eq!(shared.now(), instant);
+        assert_eq!(Clock::now(&shared), instant);
+    }
+
+    #[test]
+    fn shared_clock_debug_hides_the_concrete_clock() {
+        let shared = SharedClock::new(ManualClock::new(Utc::now()));
+
+        assert_eq!(format!("{shared:?}"), "SharedClock(..)");
+    }
 }

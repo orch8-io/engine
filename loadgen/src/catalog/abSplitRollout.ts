@@ -14,7 +14,7 @@ export const abSplitRollout: Template = {
   weight: 1,
   buildBlocks: () => [
     {
-      type: "a_b_split",
+      type: "ab_split",
       id: "split",
       variants: [
         {

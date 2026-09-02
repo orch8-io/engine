@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use tracing::debug;
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::{ExecutionNode, NodeState};
+use orch8_types::execution::ExecutionNode;
 use orch8_types::instance::TaskInstance;
 use orch8_types::sequence::RouterDef;
 
@@ -68,24 +68,15 @@ pub async fn execute_router(
 
     let all_children = evaluator::children_of(tree, node.id, None);
 
-    // Skip all non-selected branches.
-    for child in &all_children {
-        let is_selected = child.branch_index.is_some_and(|bi| bi == branch_idx);
-
-        if !is_selected
-            && !matches!(
-                child.state,
-                NodeState::Skipped
-                    | NodeState::Cancelled
-                    | NodeState::Completed
-                    | NodeState::Failed
-            )
-        {
-            storage
-                .update_node_state(child.id, NodeState::Skipped)
-                .await?;
-        }
-    }
+    // Skip entire non-selected branch subtrees. A branch child may itself be a
+    // composite; skipping only that direct child strands its descendants in
+    // Pending even though the route can never execute.
+    let non_selected_roots: Vec<_> = all_children
+        .iter()
+        .filter(|child| child.branch_index != Some(branch_idx))
+        .map(|child| child.id)
+        .collect();
+    evaluator::skip_subtrees(storage, instance.id, tree, &non_selected_roots).await?;
 
     // Activate selected branch children — sequential cursor semantics.
     // Only the first Pending child should start; later blocks wait their turn.
@@ -819,6 +810,103 @@ mod tests {
             after.iter().find(|n| n.id == r1_selected.id).unwrap().state,
             NodeState::Running
         );
+    }
+
+    // RT8: Skipping a route recursively skips nested non-terminal descendants.
+    #[tokio::test]
+    async fn router_skips_entire_non_selected_subtree() {
+        let inst_id = InstanceId::new();
+        let parent = mk_node_rt(
+            None,
+            "r",
+            BlockType::Router,
+            NodeState::Running,
+            None,
+            inst_id,
+        );
+        let selected = mk_node_rt(
+            Some(parent.id),
+            "selected",
+            BlockType::Step,
+            NodeState::Pending,
+            Some(0),
+            inst_id,
+        );
+        let skipped_root = mk_node_rt(
+            Some(parent.id),
+            "skipped_root",
+            BlockType::Parallel,
+            NodeState::Pending,
+            Some(1),
+            inst_id,
+        );
+        let completed_descendant = mk_node_rt(
+            Some(skipped_root.id),
+            "already_done",
+            BlockType::Step,
+            NodeState::Completed,
+            None,
+            inst_id,
+        );
+        let pending_descendant = mk_node_rt(
+            Some(completed_descendant.id),
+            "never_runs",
+            BlockType::Step,
+            NodeState::Pending,
+            None,
+            inst_id,
+        );
+        let (s, tree) = setup_rt(
+            vec![
+                parent.clone(),
+                selected.clone(),
+                skipped_root.clone(),
+                completed_descendant.clone(),
+                pending_descendant.clone(),
+            ],
+            inst_id,
+        )
+        .await;
+        let inst = mk_instance_rt(
+            inst_id,
+            ExecutionContext {
+                data: json!({"take_selected": true}),
+                ..Default::default()
+            },
+        );
+        let router = RouterDef {
+            id: BlockId::new("r"),
+            routes: vec![
+                Route {
+                    condition: "take_selected".into(),
+                    blocks: vec![],
+                },
+                Route {
+                    condition: "false".into(),
+                    blocks: vec![],
+                },
+            ],
+            default: None,
+        };
+
+        execute_router(
+            &s,
+            &HandlerRegistry::new(),
+            &inst,
+            &parent,
+            &router,
+            &tree,
+            &OutputsSnapshot::new(),
+        )
+        .await
+        .unwrap();
+
+        let after = s.get_execution_tree(inst_id).await.unwrap();
+        let state = |id| after.iter().find(|node| node.id == id).unwrap().state;
+        assert_eq!(state(selected.id), NodeState::Running);
+        assert_eq!(state(skipped_root.id), NodeState::Skipped);
+        assert_eq!(state(completed_descendant.id), NodeState::Completed);
+        assert_eq!(state(pending_descendant.id), NodeState::Skipped);
     }
 
     /// A missing externalized payload leaves the marker in place. The router

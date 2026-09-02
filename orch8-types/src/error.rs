@@ -7,6 +7,12 @@ pub enum StorageError {
     #[error("query failed: {0}")]
     Query(String),
 
+    #[error("constraint violation: {0}")]
+    Constraint(String),
+
+    #[error("encryption failed: {0}")]
+    Encryption(String),
+
     #[error("not found: {entity} with id {id}")]
     NotFound { entity: &'static str, id: String },
 
@@ -98,6 +104,11 @@ impl From<sqlx::Error> for StorageError {
                 match db_err.kind() {
                     sqlx::error::ErrorKind::UniqueViolation => {
                         Self::Conflict(db_err.message().to_string())
+                    }
+                    sqlx::error::ErrorKind::ForeignKeyViolation
+                    | sqlx::error::ErrorKind::NotNullViolation
+                    | sqlx::error::ErrorKind::CheckViolation => {
+                        Self::Constraint(db_err.message().to_string())
                     }
                     // Deadlocks (SQLSTATE 40P01), serialization failures
                     // (40001), and SQLite lock contention (BUSY/LOCKED) are

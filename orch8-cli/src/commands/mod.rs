@@ -15,9 +15,15 @@ pub mod init;
 pub mod inspect_cmd;
 pub mod instance;
 pub mod package_cmd;
+pub mod portable;
 pub mod release;
 pub mod sequence;
 pub mod signal;
 pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;
+
+#[cfg(test)]
+mod request_contract_tests;
+#[cfg(test)]
+pub(crate) mod test_support;

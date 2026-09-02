@@ -2,17 +2,64 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
-use orch8_types::worker::WorkerTask;
+use orch8_types::worker::{
+    WorkerAttemptEventKind, WorkerClaim, WorkerTask, WorkerTaskAttemptEvent,
+};
+use sqlx::{Postgres, Transaction};
 
 use super::PostgresStorage;
 use super::rows::WorkerTaskRow;
 
+const REAPER_BATCH_SIZE: i64 = 1_000;
+
+pub(super) async fn insert_attempt_events(
+    tx: &mut Transaction<'_, Postgres>,
+    events: &[WorkerTaskAttemptEvent],
+) -> Result<(), StorageError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut qb = sqlx::QueryBuilder::new(
+        "INSERT INTO worker_task_attempt_events \
+         (id, task_id, claim_epoch, worker_id, event, reason, created_at) ",
+    );
+    qb.push_values(events, |mut row, event| {
+        row.push_bind(event.id)
+            .push_bind(event.task_id)
+            .push_bind(i64::try_from(event.claim_epoch).unwrap_or(i64::MAX))
+            .push_bind(&event.worker_id)
+            .push_bind(event.event.as_str())
+            .push_bind(&event.reason)
+            .push_bind(event.created_at);
+    });
+    qb.build().execute(&mut **tx).await?;
+    Ok(())
+}
+
+pub(super) fn transition_event(
+    task_id: Uuid,
+    claim_epoch: u64,
+    worker_id: Option<String>,
+    event: WorkerAttemptEventKind,
+    reason: Option<String>,
+) -> WorkerTaskAttemptEvent {
+    WorkerTaskAttemptEvent {
+        id: Uuid::now_v7(),
+        task_id,
+        claim_epoch,
+        worker_id,
+        event,
+        reason,
+        created_at: chrono::Utc::now(),
+    }
+}
+
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO worker_tasks
-            (id, instance_id, block_id, handler_name, queue_name, params, context,
-             attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
+             attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(task.id)
@@ -20,11 +67,13 @@ pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result
     .bind(task.block_id.as_str())
     .bind(&task.handler_name)
     .bind(&task.queue_name)
+    .bind(serde_json::to_value(&task.requirements)?)
     .bind(&task.params)
     .bind(&task.context)
     .bind(task.attempt as i16)
     .bind(task.timeout_ms)
     .bind(task.state.to_string())
+    .bind(i64::try_from(task.claim_epoch).unwrap_or(i64::MAX))
     .bind(&task.resume_checkpoint)
     .bind(i64::try_from(task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(task.created_at)
@@ -38,9 +87,9 @@ pub(super) async fn get(
     task_id: Uuid,
 ) -> Result<Option<WorkerTask>, StorageError> {
     let row = sqlx::query_as::<_, WorkerTaskRow>(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
+        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                 resume_checkpoint, checkpoint_seq,
+                 claim_epoch, resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at
           FROM worker_tasks WHERE id = $1",
     )
@@ -56,27 +105,47 @@ pub(super) async fn claim(
     worker_id: &str,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"UPDATE worker_tasks
-          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW()
+          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
+              claim_epoch = claim_epoch + 1
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending'
+              WHERE handler_name = $1 AND state = 'pending' AND requirements = '{}'::jsonb
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
+          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                    resume_checkpoint, checkpoint_seq,
+                    claim_epoch, resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
     )
     .bind(handler_name)
     .bind(worker_id)
     .bind(i64::from(limit))
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+    let tasks: Vec<_> = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<_, _>>()?;
+    let events: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
 }
 
 /// Tenant-scoped claim: the `task_instances` join is inside the same
@@ -92,83 +161,246 @@ pub(super) async fn claim_for_tenant(
     tenant_id: &orch8_types::TenantId,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let mut tx = store.pool.begin().await?;
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"UPDATE worker_tasks
-          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW()
+          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
+              claim_epoch = claim_epoch + 1
           WHERE id IN (
               SELECT wt.id FROM worker_tasks wt
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
                 AND wt.state = 'pending'
+                AND wt.requirements = '{}'::jsonb
                 AND ti.tenant_id = $4
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
           )
-          RETURNING id, instance_id, block_id, handler_name, queue_name, params, context,
+          RETURNING id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                     attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                    resume_checkpoint, checkpoint_seq,
+                    claim_epoch, resume_checkpoint, checkpoint_seq,
                     completed_at, output, error_message, error_retryable, created_at",
     )
     .bind(handler_name)
     .bind(worker_id)
     .bind(i64::from(limit))
     .bind(tenant_id.as_str())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *tx)
     .await?;
-    rows.into_iter().map(WorkerTaskRow::into_task).collect()
+    let tasks: Vec<_> = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<_, _>>()?;
+    let events: Vec<_> = tasks
+        .iter()
+        .map(|task| {
+            transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
+}
+
+pub(super) async fn claim_matching(
+    store: &PostgresStorage,
+    handler_name: &str,
+    worker_id: &str,
+    tenant_id: Option<&orch8_types::TenantId>,
+    queue_name: Option<&str>,
+    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    limit: u32,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tx = store.pool.begin().await?;
+    let now = chrono::Utc::now();
+    let mut ids = Vec::with_capacity(limit as usize);
+    let mut cursor: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
+    while ids.len() < limit as usize {
+        let mut query = sqlx::QueryBuilder::<Postgres>::new(
+            "SELECT wt.id, wt.instance_id, wt.block_id, wt.handler_name, wt.queue_name, \
+             wt.requirements, wt.params, wt.context, wt.attempt, wt.timeout_ms, wt.state, \
+             wt.worker_id, wt.claimed_at, wt.heartbeat_at, wt.claim_epoch, \
+             wt.resume_checkpoint, wt.checkpoint_seq, wt.completed_at, wt.output, \
+             wt.error_message, wt.error_retryable, wt.created_at FROM worker_tasks wt",
+        );
+        if tenant_id.is_some() {
+            query.push(" JOIN task_instances ti ON ti.id = wt.instance_id");
+        }
+        query
+            .push(" WHERE wt.handler_name = ")
+            .push_bind(handler_name);
+        query.push(" AND wt.state = 'pending'");
+        if let Some(queue) = queue_name {
+            query.push(" AND wt.queue_name = ").push_bind(queue);
+        }
+        if let Some(tenant) = tenant_id {
+            query
+                .push(" AND ti.tenant_id = ")
+                .push_bind(tenant.as_str());
+        }
+        if let Some((created_at, id)) = cursor {
+            query
+                .push(" AND (wt.created_at, wt.id) > (")
+                .push_bind(created_at)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        query.push(" ORDER BY wt.created_at, wt.id LIMIT 256 FOR UPDATE OF wt SKIP LOCKED");
+        let candidates = query
+            .build_query_as::<WorkerTaskRow>()
+            .fetch_all(&mut *tx)
+            .await?;
+        if candidates.is_empty() {
+            break;
+        }
+        let tasks = candidates
+            .into_iter()
+            .map(WorkerTaskRow::into_task)
+            .collect::<Result<Vec<_>, _>>()?;
+        cursor = tasks.last().map(|task| (task.created_at, task.id));
+        ids.extend(
+            tasks
+                .into_iter()
+                .filter(|task| task.requirements.is_satisfied_by(capabilities, now))
+                .take(limit as usize - ids.len())
+                .map(|task| task.id),
+        );
+    }
+    if ids.is_empty() {
+        tx.commit().await?;
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, WorkerTaskRow>(
+        r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
+             heartbeat_at=NOW(), claim_epoch=claim_epoch+1
+           WHERE id = ANY($2)
+           RETURNING id, instance_id, block_id, handler_name, queue_name, requirements,
+             params, context, attempt, timeout_ms, state, worker_id, claimed_at,
+             heartbeat_at, claim_epoch, resume_checkpoint, checkpoint_seq, completed_at,
+             output, error_message, error_retryable, created_at",
+    )
+    .bind(worker_id)
+    .bind(&ids)
+    .fetch_all(&mut *tx)
+    .await?;
+    let tasks = rows
+        .into_iter()
+        .map(WorkerTaskRow::into_task)
+        .collect::<Result<Vec<_>, _>>()?;
+    let events = tasks
+        .iter()
+        .map(|task| {
+            transition_event(
+                task.id,
+                task.claim_epoch,
+                task.worker_id.clone(),
+                WorkerAttemptEventKind::Claimed,
+                None,
+            )
+        })
+        .collect::<Vec<_>>();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(tasks)
 }
 
 pub(super) async fn complete(
     store: &PostgresStorage,
     task_id: Uuid,
-    worker_id: &str,
+    claim: &WorkerClaim,
     output: &serde_json::Value,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(
+    let mut tx = store.pool.begin().await?;
+    let row: Option<(i64,)> = sqlx::query_as(
         r"UPDATE worker_tasks
           SET state = 'completed', output = $3, completed_at = NOW()
-          WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed'
+          RETURNING claim_epoch",
     )
     .bind(task_id)
-    .bind(worker_id)
+    .bind(&claim.worker_id)
     .bind(output)
-    .execute(&store.pool)
+    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+    if row.is_some() {
+        insert_attempt_events(
+            &mut tx,
+            &[transition_event(
+                task_id,
+                claim.claim_epoch,
+                Some(claim.worker_id.clone()),
+                WorkerAttemptEventKind::Completed,
+                None,
+            )],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(row.is_some())
 }
 
 pub(super) async fn fail(
     store: &PostgresStorage,
     task_id: Uuid,
-    worker_id: &str,
+    claim: &WorkerClaim,
     message: &str,
     retryable: bool,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(
+    let mut tx = store.pool.begin().await?;
+    let row: Option<(i64,)> = sqlx::query_as(
         r"UPDATE worker_tasks
           SET state = 'failed', error_message = $3, error_retryable = $4, completed_at = NOW()
-          WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $5 AND state = 'claimed'
+          RETURNING claim_epoch",
     )
     .bind(task_id)
-    .bind(worker_id)
+    .bind(&claim.worker_id)
     .bind(message)
     .bind(retryable)
-    .execute(&store.pool)
+    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+    if row.is_some() {
+        insert_attempt_events(
+            &mut tx,
+            &[transition_event(
+                task_id,
+                claim.claim_epoch,
+                Some(claim.worker_id.clone()),
+                WorkerAttemptEventKind::Failed,
+                Some(message.to_string()),
+            )],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(row.is_some())
 }
 
 pub(super) async fn heartbeat(
     store: &PostgresStorage,
     task_id: Uuid,
-    worker_id: &str,
+    claim: &WorkerClaim,
 ) -> Result<bool, StorageError> {
     let result = sqlx::query(
-        "UPDATE worker_tasks SET heartbeat_at = NOW() WHERE id = $1 AND worker_id = $2 AND state = 'claimed'",
+        "UPDATE worker_tasks SET heartbeat_at = NOW() \
+         WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3 AND state = 'claimed'",
     )
     .bind(task_id)
-    .bind(worker_id)
+    .bind(&claim.worker_id)
+    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -177,7 +409,7 @@ pub(super) async fn heartbeat(
 pub(super) async fn checkpoint(
     store: &PostgresStorage,
     task_id: Uuid,
-    worker_id: &str,
+    claim: &WorkerClaim,
     expected_seq: u64,
     checkpoint: &serde_json::Value,
 ) -> Result<Option<u64>, StorageError> {
@@ -188,17 +420,70 @@ pub(super) async fn checkpoint(
         .ok_or_else(|| StorageError::Query("checkpoint sequence overflow".into()))?;
     let result = sqlx::query(
         "UPDATE worker_tasks
-         SET heartbeat_at = NOW(), resume_checkpoint = $4, checkpoint_seq = $5
-         WHERE id = $1 AND worker_id = $2 AND state = 'claimed' AND checkpoint_seq = $3",
+         SET heartbeat_at = NOW(), resume_checkpoint = $5, checkpoint_seq = $6
+         WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3
+           AND state = 'claimed' AND checkpoint_seq = $4",
     )
     .bind(task_id)
-    .bind(worker_id)
+    .bind(&claim.worker_id)
+    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
     .bind(expected)
     .bind(checkpoint)
     .bind(next)
     .execute(&store.pool)
     .await?;
     Ok((result.rows_affected() == 1).then_some(next as u64))
+}
+
+pub(super) async fn record_attempt_event(
+    store: &PostgresStorage,
+    event: &WorkerTaskAttemptEvent,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+    insert_attempt_events(&mut tx, std::slice::from_ref(event)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn list_attempt_events(
+    store: &PostgresStorage,
+    task_id: Uuid,
+    limit: u32,
+) -> Result<Vec<WorkerTaskAttemptEvent>, StorageError> {
+    type Row = (
+        Uuid,
+        Uuid,
+        i64,
+        Option<String>,
+        String,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id,task_id,claim_epoch,worker_id,event,reason,created_at \
+         FROM worker_task_attempt_events WHERE task_id=$1 \
+         ORDER BY created_at ASC,id ASC LIMIT $2",
+    )
+    .bind(task_id)
+    .bind(i64::from(limit.min(1000)))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter()
+        .map(
+            |(id, task_id, epoch, worker_id, event, reason, created_at)| {
+                Ok(WorkerTaskAttemptEvent {
+                    id,
+                    task_id,
+                    claim_epoch: u64::try_from(epoch)
+                        .map_err(|_| StorageError::Query("negative claim_epoch".into()))?,
+                    worker_id,
+                    event: event.parse().map_err(StorageError::Query)?,
+                    reason,
+                    created_at,
+                })
+            },
+        )
+        .collect()
 }
 
 pub(super) async fn delete(store: &PostgresStorage, task_id: Uuid) -> Result<(), StorageError> {
@@ -214,23 +499,49 @@ pub(super) async fn reap_stale(
     stale_threshold: Duration,
 ) -> Result<u64, StorageError> {
     let threshold_secs = stale_threshold.as_secs_f64();
-    let result = sqlx::query(
-        r"UPDATE worker_tasks
+    let mut tx = store.pool.begin().await?;
+    let rows: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
+        r"WITH stale AS (
+              SELECT id, claim_epoch, worker_id FROM worker_tasks
+              WHERE state = 'claimed'
+                AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)
+              ORDER BY heartbeat_at ASC
+              LIMIT $2
+              FOR UPDATE SKIP LOCKED
+          )
+          UPDATE worker_tasks wt
           SET state = 'pending', worker_id = NULL, claimed_at = NULL, heartbeat_at = NULL
-          WHERE state = 'claimed'
-            AND heartbeat_at < NOW() - make_interval(secs => $1::double precision)",
+          FROM stale
+          WHERE wt.id = stale.id
+          RETURNING wt.id, stale.claim_epoch, stale.worker_id",
     )
     .bind(threshold_secs)
-    .execute(&store.pool)
+    .bind(REAPER_BATCH_SIZE)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(result.rows_affected())
+    let events: Vec<_> = rows
+        .iter()
+        .map(|(id, epoch, worker)| {
+            transition_event(
+                *id,
+                u64::try_from(*epoch).unwrap_or(0),
+                worker.clone(),
+                WorkerAttemptEventKind::Reclaimed,
+                Some("heartbeat lease expired".into()),
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(rows.len() as u64)
 }
 
 /// Fail worker tasks whose `timeout_ms` has elapsed since `created_at`.
 /// Only affects tasks in `pending` or `claimed` state that have a non-NULL
 /// `timeout_ms`. Sets state to `failed` with a descriptive error message.
 pub(super) async fn expire_timed_out(store: &PostgresStorage) -> Result<u64, StorageError> {
-    let result = sqlx::query(
+    let mut tx = store.pool.begin().await?;
+    let rows: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
         r"UPDATE worker_tasks
           SET state = 'failed',
               error_message = 'task timed out (timeout_ms exceeded)',
@@ -238,11 +549,26 @@ pub(super) async fn expire_timed_out(store: &PostgresStorage) -> Result<u64, Sto
               completed_at = NOW()
           WHERE state IN ('pending', 'claimed')
             AND timeout_ms IS NOT NULL
-            AND created_at + make_interval(secs => timeout_ms::double precision / 1000.0) < NOW()",
+            AND created_at + make_interval(secs => timeout_ms::double precision / 1000.0) < NOW()
+          RETURNING id, claim_epoch, worker_id",
     )
-    .execute(&store.pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(result.rows_affected())
+    let events: Vec<_> = rows
+        .iter()
+        .map(|(id, epoch, worker)| {
+            transition_event(
+                *id,
+                u64::try_from(*epoch).unwrap_or(0),
+                worker.clone(),
+                WorkerAttemptEventKind::TimedOut,
+                Some("timeout_ms exceeded".into()),
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(rows.len() as u64)
 }
 
 pub(super) async fn retry(
@@ -262,9 +588,9 @@ pub(super) async fn retry(
 
     sqlx::query(
         r"INSERT INTO worker_tasks
-            (id, instance_id, block_id, handler_name, queue_name, params, context,
-             attempt, timeout_ms, state, resume_checkpoint, checkpoint_seq, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
+             attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (instance_id, block_id) DO NOTHING",
     )
     .bind(new_task.id)
@@ -272,11 +598,13 @@ pub(super) async fn retry(
     .bind(new_task.block_id.as_str())
     .bind(&new_task.handler_name)
     .bind(&new_task.queue_name)
+    .bind(serde_json::to_value(&new_task.requirements)?)
     .bind(&new_task.params)
     .bind(&new_task.context)
     .bind(new_task.attempt as i16)
     .bind(new_task.timeout_ms)
     .bind(new_task.state.to_string())
+    .bind(i64::try_from(new_task.claim_epoch).unwrap_or(i64::MAX))
     .bind(&new_task.resume_checkpoint)
     .bind(i64::try_from(new_task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(new_task.created_at)
@@ -311,12 +639,27 @@ pub(super) async fn cancel_for_block(
     //   2. ForEach/Loop iteration reset — must purge `completed` rows so
     //      the next iteration's INSERT isn't blocked by the
     //      UNIQUE(instance_id, block_id) constraint on worker_tasks.
-    let result = sqlx::query("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = $2")
+    let mut tx = store.pool.begin().await?;
+    let rows: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = $2 RETURNING id,claim_epoch,worker_id")
         .bind(instance_id)
         .bind(block_id)
-        .execute(&store.pool)
+        .fetch_all(&mut *tx)
         .await?;
-    Ok(result.rows_affected())
+    let events: Vec<_> = rows
+        .iter()
+        .map(|(id, epoch, worker)| {
+            transition_event(
+                *id,
+                u64::try_from(*epoch).unwrap_or(0),
+                worker.clone(),
+                WorkerAttemptEventKind::Cancelled,
+                Some("workflow branch cancelled or reset".into()),
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(rows.len() as u64)
 }
 
 /// Batch variant of [`cancel_for_block`]: single `DELETE ... = ANY($2)`
@@ -329,13 +672,28 @@ pub(super) async fn cancel_for_blocks(
     if block_ids.is_empty() {
         return Ok(0);
     }
-    let result =
-        sqlx::query("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = ANY($2)")
+    let mut tx = store.pool.begin().await?;
+    let rows: Vec<(Uuid, i64, Option<String>)> =
+        sqlx::query_as("DELETE FROM worker_tasks WHERE instance_id = $1 AND block_id = ANY($2) RETURNING id,claim_epoch,worker_id")
             .bind(instance_id)
             .bind(block_ids)
-            .execute(&store.pool)
+            .fetch_all(&mut *tx)
             .await?;
-    Ok(result.rows_affected())
+    let events: Vec<_> = rows
+        .iter()
+        .map(|(id, epoch, worker)| {
+            transition_event(
+                *id,
+                u64::try_from(*epoch).unwrap_or(0),
+                worker.clone(),
+                WorkerAttemptEventKind::Cancelled,
+                Some("workflow branches cancelled or reset".into()),
+            )
+        })
+        .collect();
+    insert_attempt_events(&mut tx, &events).await?;
+    tx.commit().await?;
+    Ok(rows.len() as u64)
 }
 
 pub(super) async fn list(
@@ -344,9 +702,9 @@ pub(super) async fn list(
     pagination: &orch8_types::filter::Pagination,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut qb = sqlx::QueryBuilder::new(
-        r"SELECT id, instance_id, block_id, handler_name, queue_name, params, context,
+        r"SELECT id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
                  attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at,
-                 resume_checkpoint, checkpoint_seq,
+                 claim_epoch, resume_checkpoint, checkpoint_seq,
                  completed_at, output, error_message, error_retryable, created_at
            FROM worker_tasks WHERE 1=1",
     );

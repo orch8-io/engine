@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::extract::Request;
-use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -114,7 +113,7 @@ pub async fn api_key_middleware(
     root_key_digest: Option<[u8; 32]>,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let Some(expected_digest) = root_key_digest else {
         // --insecure mode: authentication disabled (server warns at startup).
         // Treat everyone as admin so management endpoints remain usable in dev.
@@ -128,7 +127,7 @@ pub async fn api_key_middleware(
         .and_then(|v| v.to_str().ok())
         .map(String::from)
     else {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(ApiError::Unauthorized);
     };
 
     // Root/admin key: unscoped. Tenant (if any) comes from the header, handled
@@ -153,13 +152,20 @@ pub async fn api_key_middleware(
                 && !hdr.is_empty()
                 && hdr != record.tenant_id
             {
-                return Err(StatusCode::FORBIDDEN);
+                return Err(ApiError::Forbidden(
+                    "X-Tenant-Id does not match the authenticated API key".into(),
+                ));
             }
             request.extensions_mut().insert(TenantContext {
-                tenant_id: TenantId::unchecked(record.tenant_id.clone()),
+                tenant_id: TenantId::new(record.tenant_id.clone()).map_err(|error| {
+                    tracing::error!(%error, key_id = %record.id, "stored API key has invalid tenant");
+                    ApiError::Internal("invalid tenant bound to API key".into())
+                })?,
             });
             if !capabilities_allow(&record.capabilities, request.method(), request.uri().path()) {
-                return Err(StatusCode::FORBIDDEN);
+                return Err(ApiError::Forbidden(
+                    "API key does not grant this capability".into(),
+                ));
             }
             request.extensions_mut().insert(PrincipalContext {
                 key_id: record.id.clone(),
@@ -168,10 +174,10 @@ pub async fn api_key_middleware(
             Ok(next.run(request).await)
         }
         // No match, revoked, or expired.
-        Ok(_) => Err(StatusCode::UNAUTHORIZED),
+        Ok(_) => Err(ApiError::Unauthorized),
         Err(e) => {
             tracing::error!(error = %e, "api key lookup failed");
-            Err(StatusCode::INTERNAL_SERVER_ERROR)
+            Err(ApiError::Internal("API key lookup failed".into()))
         }
     }
 }
@@ -213,7 +219,7 @@ pub async fn tenant_middleware(
     require_tenant: bool,
     mut request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     // A per-tenant API key (resolved in `api_key_middleware`) already bound the
     // tenant identity from the key record. Honour it and skip header handling —
     // the header was already cross-checked against the key, and `require_tenant`
@@ -231,15 +237,19 @@ pub async fn tenant_middleware(
         .map(String::from)
     {
         if tenant_id.is_empty() && require_tenant {
-            return Err(StatusCode::BAD_REQUEST);
+            return Err(ApiError::InvalidArgument(
+                "X-Tenant-Id must not be empty".into(),
+            ));
         }
         if !tenant_id.is_empty() {
             request.extensions_mut().insert(TenantContext {
-                tenant_id: TenantId::unchecked(tenant_id),
+                tenant_id: TenantId::new(tenant_id).map_err(ApiError::InvalidArgument)?,
             });
         }
     } else if require_tenant {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(ApiError::InvalidArgument(
+            "missing required X-Tenant-Id header".into(),
+        ));
     }
 
     Ok(next.run(request).await)

@@ -32,15 +32,7 @@ async fn cancel_non_terminal_nodes(
 ) -> Result<(), EngineError> {
     let victims: Vec<&ExecutionNode> = candidates
         .iter()
-        .filter(|n| {
-            !matches!(
-                n.state,
-                NodeState::Completed
-                    | NodeState::Failed
-                    | NodeState::Cancelled
-                    | NodeState::Skipped
-            )
-        })
+        .filter(|n| !n.state.is_terminal())
         .copied()
         .collect();
     if victims.is_empty() {
@@ -131,13 +123,6 @@ pub async fn execute_race(
         branches.entry(idx).or_default().push(*c);
     }
 
-    let is_terminal = |n: &ExecutionNode| {
-        matches!(
-            n.state,
-            NodeState::Completed | NodeState::Failed | NodeState::Cancelled | NodeState::Skipped
-        )
-    };
-
     let mut any_branch_won = false;
     let mut any_branch_failed = false;
 
@@ -155,7 +140,7 @@ pub async fn execute_race(
             continue;
         }
 
-        if branch_nodes.iter().all(|n| is_terminal(n)) {
+        if branch_nodes.iter().all(|n| n.state.is_terminal()) {
             // Fully drained with no failure (Completed/Skipped only) — winner.
             any_branch_won = true;
             continue;
@@ -163,7 +148,7 @@ pub async fn execute_race(
 
         // Cursor = first non-terminal node; activate it if still Pending so
         // the branch advances one block at a time.
-        if let Some(cursor) = branch_nodes.iter().find(|n| !is_terminal(n))
+        if let Some(cursor) = branch_nodes.iter().find(|n| !n.state.is_terminal())
             && cursor.state == NodeState::Pending
         {
             storage
@@ -551,6 +536,7 @@ mod tests {
             block_id: BlockId::new("waiting"),
             handler_name: "ext".into(),
             queue_name: None,
+            requirements: orch8_types::continuity::CapsuleRequirements::default(),
             params: json!({}),
             context: json!({}),
             attempt: 1,
@@ -559,6 +545,7 @@ mod tests {
             worker_id: None,
             claimed_at: None,
             heartbeat_at: None,
+            claim_epoch: 0,
             resume_checkpoint: None,
             checkpoint_seq: 0,
             completed_at: None,

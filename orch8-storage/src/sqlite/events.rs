@@ -123,24 +123,25 @@ pub(super) async fn find_pending(
     event_names: &[String],
     correlation_key: &str,
 ) -> Result<Vec<EventEnvelope>, StorageError> {
-    // Names are matched app-side to avoid dynamic IN-list SQL.
-    let rows = sqlx::query(&format!(
-        "SELECT {EVENT_COLUMNS} FROM event_inbox
-         WHERE tenant_id = ?1 AND correlation_key = ?2 AND status = 'pending'
-         ORDER BY received_at ASC"
-    ))
-    .bind(tenant_id)
-    .bind(correlation_key)
-    .fetch_all(&storage.pool)
-    .await?;
-    let mut out = Vec::new();
-    for row in &rows {
-        let event = row_to_event(row)?;
-        if event_names.iter().any(|n| n == &event.event_name) {
-            out.push(event);
-        }
+    if event_names.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(out)
+    let mut query = sqlx::QueryBuilder::new(format!(
+        "SELECT {EVENT_COLUMNS} FROM event_inbox
+         WHERE tenant_id = "
+    ));
+    query.push_bind(tenant_id);
+    query
+        .push(" AND correlation_key = ")
+        .push_bind(correlation_key);
+    query.push(" AND status = 'pending' AND event_name IN (");
+    let mut names = query.separated(", ");
+    for event_name in event_names {
+        names.push_bind(event_name);
+    }
+    names.push_unseparated(") ORDER BY received_at ASC LIMIT 10000");
+    let rows = query.build().fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_event).collect()
 }
 
 pub(super) async fn consume(

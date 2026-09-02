@@ -60,6 +60,38 @@ fn capabilities_json(config: &ManagedControlConfig, draining: bool) -> Result<St
     serde_json::to_string(&safe_capabilities(config, draining)).context("encode safe capabilities")
 }
 
+async fn handle_command(
+    command: &WorkerCommand,
+    sender: &tokio::sync::mpsc::Sender<WorkerStreamClient>,
+    shutdown: &CancellationToken,
+) -> Result<()> {
+    match command.command {
+        WorkerCommandKind::Ping | WorkerCommandKind::Reload => {
+            sender
+                .send(client_frame(ClientPayload::CommandAck(WorkerCommandAck {
+                    command_id: command.id.to_string(),
+                })))
+                .await
+                .context("ack managed control command")?;
+        }
+        WorkerCommandKind::Drain => {
+            sender
+                .send(client_frame(ClientPayload::CommandAck(WorkerCommandAck {
+                    command_id: command.id.to_string(),
+                })))
+                .await
+                .context("ack managed drain")?;
+            shutdown.cancel();
+        }
+        WorkerCommandKind::Place => {
+            // This tunnel deliberately carries no workload demand or data.
+            // Placement remains pending for a workload-capable executor channel.
+            tracing::warn!(command_id = %command.id, "managed control-only session refused placement payload");
+        }
+    }
+    Ok(())
+}
+
 async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken) -> Result<()> {
     let endpoint = Endpoint::from_shared(config.endpoint.clone())?
         .connect_timeout(Duration::from_secs(10))
@@ -130,24 +162,7 @@ async fn run_session(config: &ManagedControlConfig, shutdown: &CancellationToken
                 if let Some(ServerPayload::Command(frame)) = message.payload {
                     let command: WorkerCommand = serde_json::from_str(&frame.command_json)
                         .context("decode managed control command")?;
-                    match command.command {
-                        WorkerCommandKind::Ping | WorkerCommandKind::Reload => {
-                            sender.send(client_frame(ClientPayload::CommandAck(WorkerCommandAck {
-                                command_id: command.id.to_string(),
-                            }))).await.context("ack managed control command")?;
-                        }
-                        WorkerCommandKind::Drain => {
-                            sender.send(client_frame(ClientPayload::CommandAck(WorkerCommandAck {
-                                command_id: command.id.to_string(),
-                            }))).await.context("ack managed drain")?;
-                            shutdown.cancel();
-                        }
-                        WorkerCommandKind::Place => {
-                            // This tunnel deliberately carries no workload demand or data.
-                            // Placement remains pending for a workload-capable executor channel.
-                            tracing::warn!(command_id = %command.id, "managed control-only session refused placement payload");
-                        }
-                    }
+                    handle_command(&command, &sender, shutdown).await?;
                 }
             }
         }
@@ -180,6 +195,26 @@ pub(crate) fn spawn(
 mod tests {
     use super::*;
 
+    fn command(kind: WorkerCommandKind) -> WorkerCommand {
+        WorkerCommand {
+            id: uuid::Uuid::new_v4(),
+            worker_id: "edge-1".into(),
+            command: kind,
+            payload: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    async fn received_ack(
+        receiver: &mut tokio::sync::mpsc::Receiver<WorkerStreamClient>,
+    ) -> WorkerCommandAck {
+        let frame = receiver.recv().await.expect("command acknowledgment");
+        let Some(ClientPayload::CommandAck(ack)) = frame.payload else {
+            panic!("expected a command acknowledgment");
+        };
+        ack
+    }
+
     #[test]
     fn managed_advertisement_contains_no_protected_workload_data() {
         let config = ManagedControlConfig {
@@ -199,6 +234,65 @@ mod tests {
         ] {
             assert!(!rendered.contains(forbidden));
         }
+    }
+
+    #[tokio::test]
+    async fn ping_and_reload_are_acknowledged_without_draining() {
+        for kind in [WorkerCommandKind::Ping, WorkerCommandKind::Reload] {
+            let command = command(kind);
+            let shutdown = CancellationToken::new();
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+            handle_command(&command, &sender, &shutdown).await.unwrap();
+
+            assert_eq!(
+                received_ack(&mut receiver).await.command_id,
+                command.id.to_string()
+            );
+            assert!(!shutdown.is_cancelled());
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_is_acknowledged_before_cancelling_the_session() {
+        let command = command(WorkerCommandKind::Drain);
+        let shutdown = CancellationToken::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+        handle_command(&command, &sender, &shutdown).await.unwrap();
+
+        assert_eq!(
+            received_ack(&mut receiver).await.command_id,
+            command.id.to_string()
+        );
+        assert!(shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn placement_is_refused_without_acknowledgment_or_shutdown() {
+        let command = command(WorkerCommandKind::Place);
+        let shutdown = CancellationToken::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+
+        handle_command(&command, &sender, &shutdown).await.unwrap();
+
+        assert!(receiver.try_recv().is_err());
+        assert!(!shutdown.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn acknowledgment_failure_is_returned_when_the_stream_is_closed() {
+        let command = command(WorkerCommandKind::Ping);
+        let shutdown = CancellationToken::new();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+
+        let error = handle_command(&command, &sender, &shutdown)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("ack managed control command"));
+        assert!(!shutdown.is_cancelled());
     }
 }
 

@@ -46,6 +46,8 @@ const fn error_kind(err: &StorageError) -> &'static str {
     match err {
         StorageError::Connection(_) => "connection",
         StorageError::Query(_) => "query",
+        StorageError::Constraint(_) => "constraint",
+        StorageError::Encryption(_) => "encryption",
         StorageError::NotFound { .. } => "not_found",
         StorageError::Conflict(_) => "conflict",
         StorageError::QuotaExceeded(_) => "quota_exceeded",

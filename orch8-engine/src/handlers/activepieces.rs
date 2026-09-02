@@ -122,6 +122,10 @@ pub fn parse_handler(handler: &str) -> Result<(&str, &str), StepError> {
 
 /// Execute a step via the `ActivePieces` sidecar.
 pub async fn handle_ap(ctx: StepContext, handler_name: &str) -> Result<Value, StepError> {
+    handle_ap_at(ctx, handler_name, AP_URL.as_str()).await
+}
+
+async fn handle_ap_at(ctx: StepContext, handler_name: &str, url: &str) -> Result<Value, StepError> {
     let (piece, action) = parse_handler(handler_name)?;
 
     // Dry-run: piece/action parsed and validated; skip the sidecar dispatch.
@@ -152,8 +156,6 @@ pub async fn handle_ap(ctx: StepContext, handler_name: &str) -> Result<Value, St
         "block_id": ctx.block_id.to_string(),
         "attempt": ctx.attempt,
     });
-
-    let url: &str = AP_URL.as_str();
 
     debug!(
         instance_id = %ctx.instance_id,
@@ -307,3 +309,7 @@ mod tests {
         assert!(matches!(unknown, StepError::Retryable { .. }));
     }
 }
+
+#[cfg(test)]
+#[path = "activepieces_protocol_tests.rs"]
+mod activepieces_protocol_tests;

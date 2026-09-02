@@ -109,7 +109,42 @@ export interface WorkerTask {
   params: Record<string, unknown>;
   resume_checkpoint?: unknown;
   checkpoint_seq: number;
+  claim_epoch: number;
   [k: string]: unknown;
+}
+
+export type WorkerAttemptEventKind =
+  | "claimed"
+  | "reclaimed"
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "stale_mutation_rejected";
+
+export interface WorkerTaskAttemptEvent {
+  id: string;
+  task_id: string;
+  claim_epoch: number;
+  worker_id?: string;
+  event: WorkerAttemptEventKind;
+  reason?: string;
+  created_at: string;
+}
+
+export interface EventIngestRequest {
+  tenant_id: string;
+  event_name: string;
+  producer_event_id: string;
+  correlation_key: string;
+  payload?: unknown;
+}
+
+export interface EventIngestOutcome {
+  event_id: string;
+  duplicate: boolean;
+  matched_wait?: string | null;
+  satisfied: boolean;
 }
 
 export interface ListInstancesQuery {

@@ -159,7 +159,7 @@ impl EncryptingStorage {
         inst.context.data = self
             .encryptor
             .encrypt_value_with_aad(&inst.context.data, &aad)
-            .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+            .map_err(|e| StorageError::Encryption(e.to_string()))?;
         Ok(Cow::Owned(inst))
     }
 
@@ -179,7 +179,7 @@ impl EncryptingStorage {
         ctx.data = self
             .encryptor
             .encrypt_value_with_aad(&ctx.data, &aad)
-            .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+            .map_err(|e| StorageError::Encryption(e.to_string()))?;
         Ok(Cow::Owned(ctx))
     }
 
@@ -195,7 +195,7 @@ impl EncryptingStorage {
             context.data = self
                 .encryptor
                 .encrypt_value_with_aad(&context.data, &aad)
-                .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+                .map_err(|e| StorageError::Encryption(e.to_string()))?;
         }
         Ok(())
     }
@@ -213,7 +213,7 @@ impl EncryptingStorage {
         }
         self.encryptor
             .encrypt_value(value)
-            .map_err(|e| StorageError::Query(format!("encryption: {e}")))
+            .map_err(|e| StorageError::Encryption(e.to_string()))
     }
 
     /// Decrypt an arbitrary JSON value produced by `encrypt_json_value`.
@@ -227,7 +227,7 @@ impl EncryptingStorage {
             return self
                 .encryptor
                 .decrypt_value(value)
-                .map_err(|e| StorageError::Query(format!("encryption: {e}")));
+                .map_err(|e| StorageError::Encryption(e.to_string()));
         }
         Ok(value.clone())
     }
@@ -434,7 +434,7 @@ impl EncryptingStorage {
             instance.context.data = self
                 .encryptor
                 .decrypt_value_with_aad(&instance.context.data, &aad)
-                .map_err(|e| StorageError::Query(format!("encryption: {e}")))?;
+                .map_err(|e| StorageError::Encryption(e.to_string()))?;
         }
         Ok(())
     }
@@ -461,7 +461,7 @@ impl EncryptingStorage {
             let encrypted_value = self
                 .encryptor
                 .encrypt_value(&plain_value)
-                .map_err(|e| StorageError::Query(format!("credential encryption: {e}")))?;
+                .map_err(|e| StorageError::Encryption(format!("credential: {e}")))?;
             if let serde_json::Value::String(s) = encrypted_value {
                 cred.value = orch8_types::config::SecretString::new(s);
             }
@@ -472,7 +472,7 @@ impl EncryptingStorage {
                 let encrypted_rt = self
                     .encryptor
                     .encrypt_value(&plain_rt)
-                    .map_err(|e| StorageError::Query(format!("credential encryption: {e}")))?;
+                    .map_err(|e| StorageError::Encryption(format!("credential: {e}")))?;
                 if let serde_json::Value::String(s) = encrypted_rt {
                     cred.refresh_token = Some(orch8_types::config::SecretString::new(s));
                 }
@@ -498,7 +498,7 @@ impl EncryptingStorage {
             let decrypted = self
                 .encryptor
                 .decrypt_value(&val)
-                .map_err(|e| StorageError::Query(format!("credential decryption: {e}")))?;
+                .map_err(|e| StorageError::Encryption(format!("credential: {e}")))?;
             if let serde_json::Value::String(s) = decrypted {
                 credential.value = orch8_types::config::SecretString::new(s);
             }
@@ -509,7 +509,7 @@ impl EncryptingStorage {
                 let decrypted = self
                     .encryptor
                     .decrypt_value(&rt_val)
-                    .map_err(|e| StorageError::Query(format!("credential decryption: {e}")))?;
+                    .map_err(|e| StorageError::Encryption(format!("credential: {e}")))?;
                 if let serde_json::Value::String(s) = decrypted {
                     credential.refresh_token = Some(orch8_types::config::SecretString::new(s));
                 }
@@ -556,7 +556,7 @@ impl EncryptingStorage {
         match self
             .encryptor
             .encrypt_value(&val)
-            .map_err(|e| StorageError::Query(format!("field encryption: {e}")))?
+            .map_err(|e| StorageError::Encryption(format!("field: {e}")))?
         {
             serde_json::Value::String(s) => Ok(s),
             _ => Ok(plain.to_string()),
@@ -574,7 +574,7 @@ impl EncryptingStorage {
         match self
             .encryptor
             .decrypt_value(&val)
-            .map_err(|e| StorageError::Query(format!("field decryption: {e}")))?
+            .map_err(|e| StorageError::Encryption(format!("field: {e}")))?
         {
             serde_json::Value::String(s) => Ok(s),
             _ => Ok(stored.to_string()),
@@ -637,6 +637,7 @@ passthrough_impl! {
             }
             self.inner.import_capsule_instance(capsule_id, destination_runtime_id, encrypted_instance.as_ref(), &encrypted_checkpoint).await
         }
+        async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;
         async fn list_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, observed_after: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::RuntimeCapabilities>, StorageError>;
@@ -1481,31 +1482,58 @@ passthrough_impl! {
         }
         Ok(tasks)
     }
+    async fn claim_worker_tasks_matching(
+        &self,
+        handler_name: &str,
+        worker_id: &str,
+        tenant_id: Option<&orch8_types::TenantId>,
+        queue_name: Option<&str>,
+        capabilities: &orch8_types::continuity::RuntimeCapabilities,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self
+            .inner
+            .claim_worker_tasks_matching(
+                handler_name,
+                worker_id,
+                tenant_id,
+                queue_name,
+                capabilities,
+                limit,
+            )
+            .await?;
+        for task in &mut tasks {
+            self.decrypt_worker_task(task)?;
+        }
+        Ok(tasks)
+    }
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &orch8_types::worker::WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
         let encrypted = self.encrypt_json_value(output)?;
         self.inner
-            .complete_worker_task(task_id, worker_id, &encrypted)
+            .complete_worker_task(task_id, claim, &encrypted)
             .await
     }
-    async fn fail_worker_task(&self, task_id: Uuid, worker_id: &str, message: &str, retryable: bool) -> Result<bool, StorageError>;
-    async fn heartbeat_worker_task(&self, task_id: Uuid, worker_id: &str) -> Result<bool, StorageError>;
+    async fn fail_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
+    async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim) -> Result<bool, StorageError>;
     async fn checkpoint_worker_task(
         &self,
         task_id: Uuid,
-        worker_id: &str,
+        claim: &orch8_types::worker::WorkerClaim,
         expected_seq: u64,
         checkpoint: &serde_json::Value,
     ) -> Result<Option<u64>, StorageError> {
         let encrypted = self.encrypt_json_value(checkpoint)?;
         self.inner
-            .checkpoint_worker_task(task_id, worker_id, expected_seq, &encrypted)
+            .checkpoint_worker_task(task_id, claim, expected_seq, &encrypted)
             .await
     }
+    async fn record_worker_task_attempt_event(&self, event: &orch8_types::worker::WorkerTaskAttemptEvent) -> Result<(), StorageError>;
+    async fn list_worker_task_attempt_events(&self, task_id: Uuid, limit: u32) -> Result<Vec<orch8_types::worker::WorkerTaskAttemptEvent>, StorageError>;
     async fn delete_worker_task(&self, task_id: Uuid) -> Result<(), StorageError>;
 
     async fn retry_worker_task(
@@ -1912,6 +1940,72 @@ passthrough_impl! {
         // ref the caller sees matches the bytes they put in.
         aref.size = plaintext_len;
         Ok(aref)
+    }
+    async fn put_artifact_with_id(
+        &self,
+        instance_id: InstanceId,
+        artifact_id: Uuid,
+        content_type: &str,
+        bytes: bytes::Bytes,
+    ) -> Result<orch8_types::artifact::ArtifactRef, StorageError> {
+        let key = format!("{instance_id}/{artifact_id}");
+        if let Some(existing) = self.get_artifact(&key).await? {
+            if existing != bytes {
+                return Err(StorageError::Conflict(format!(
+                    "artifact upload id {artifact_id} already contains different bytes"
+                )));
+            }
+            return Ok(orch8_types::artifact::ArtifactRef {
+                id: artifact_id.to_string(),
+                instance_id: instance_id.to_string(),
+                key: key.clone(),
+                content_type: content_type.to_string(),
+                size: bytes.len() as u64,
+                uri: format!("artifact://{key}"),
+            });
+        }
+        let plaintext_len = bytes.len() as u64;
+        let ciphertext = self
+            .encryptor
+            .encrypt_bytes(&bytes)
+            .map_err(|e| StorageError::Backend(format!("artifact encrypt: {e}")))?;
+        let mut framed = Vec::with_capacity(ARTIFACT_ENC_MAGIC.len() + ciphertext.len());
+        framed.extend_from_slice(ARTIFACT_ENC_MAGIC);
+        framed.extend_from_slice(&ciphertext);
+        match self
+            .inner
+            .put_artifact_with_id(
+                instance_id,
+                artifact_id,
+                content_type,
+                bytes::Bytes::from(framed),
+            )
+            .await
+        {
+            Ok(mut artifact) => {
+                artifact.size = plaintext_len;
+                Ok(artifact)
+            }
+            Err(StorageError::Conflict(_)) => {
+                let existing = self.get_artifact(&key).await?.ok_or_else(|| {
+                    StorageError::Conflict(format!("artifact upload id {artifact_id} raced"))
+                })?;
+                if existing != bytes {
+                    return Err(StorageError::Conflict(format!(
+                        "artifact upload id {artifact_id} already contains different bytes"
+                    )));
+                }
+                Ok(orch8_types::artifact::ArtifactRef {
+                    id: artifact_id.to_string(),
+                    instance_id: instance_id.to_string(),
+                    key: key.clone(),
+                    content_type: content_type.to_string(),
+                    size: plaintext_len,
+                    uri: format!("artifact://{key}"),
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
     async fn get_artifact(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         match self.inner.get_artifact(key).await? {

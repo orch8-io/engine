@@ -131,7 +131,7 @@ export function abSplitBlock(
   id: string,
   variants: Array<{ name: string; weight: number; blocks: Block[] }>,
 ): Block {
-  return { type: "a_b_split", id, variants } as Block;
+  return { type: "ab_split", id, variants } as Block;
 }
 
 export function cancellationScopeBlock(id: string, blocks: Block[]): Block {
@@ -464,7 +464,7 @@ export async function caseSubSequenceInputCheckedAndOutputUnknown(
   assert.equal(finding.reference, "outputs.sub.result");
 }
 
-/** a_b_split: producers inside weighted variants resolve downstream. */
+/** ab_split: producers inside weighted variants resolve downstream. */
 export async function caseAbSplitVariantProducersResolve(
   caseName: string,
 ): Promise<void> {

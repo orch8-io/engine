@@ -11,10 +11,12 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::{Duration, Utc};
 use serde_json::json;
 use uuid::Uuid;
 
+use orch8_storage::artifacts::ObjectArtifactStore;
 use orch8_storage::encrypting::EncryptingStorage;
 use orch8_storage::sqlite::SqliteStorage;
 use orch8_storage::{
@@ -45,6 +47,87 @@ use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
 const TEST_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const ALT_KEY: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+#[tokio::test]
+async fn deterministic_artifact_retry_compares_plaintext_through_encryption() {
+    let sqlite = SqliteStorage::in_memory()
+        .await
+        .unwrap()
+        .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+    let inner: Arc<dyn StorageBackend> = Arc::new(sqlite);
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let instance_id = InstanceId::new();
+    let upload_id = Uuid::now_v7();
+
+    let first = storage
+        .put_artifact_with_id(
+            instance_id,
+            upload_id,
+            "text/plain",
+            Bytes::from_static(b"private bytes"),
+        )
+        .await
+        .unwrap();
+    let retry = storage
+        .put_artifact_with_id(
+            instance_id,
+            upload_id,
+            "text/plain",
+            Bytes::from_static(b"private bytes"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, retry);
+    assert_eq!(first.size, 13);
+    assert_eq!(
+        storage.get_artifact(&first.key).await.unwrap().unwrap(),
+        b"private bytes"
+    );
+    assert_ne!(
+        inner.get_artifact(&first.key).await.unwrap().unwrap(),
+        b"private bytes"
+    );
+}
+
+#[tokio::test]
+async fn deterministic_artifact_retry_rejects_changed_plaintext_through_encryption() {
+    let sqlite = SqliteStorage::in_memory()
+        .await
+        .unwrap()
+        .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+    let inner: Arc<dyn StorageBackend> = Arc::new(sqlite);
+    let storage = EncryptingStorage::new(inner, FieldEncryptor::from_hex_key(TEST_KEY).unwrap());
+    let instance_id = InstanceId::new();
+    let upload_id = Uuid::now_v7();
+    storage
+        .put_artifact_with_id(
+            instance_id,
+            upload_id,
+            "text/plain",
+            Bytes::from_static(b"original"),
+        )
+        .await
+        .unwrap();
+
+    let error = storage
+        .put_artifact_with_id(
+            instance_id,
+            upload_id,
+            "text/plain",
+            Bytes::from_static(b"changed"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        orch8_types::error::StorageError::Conflict(_)
+    ));
+}
 
 fn mk_instance(tenant: &str, data: serde_json::Value) -> TaskInstance {
     let now = Utc::now();
@@ -1107,6 +1190,7 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         block_id: BlockId::new("step_1"),
         handler_name: "http_call".into(),
         queue_name: None,
+        requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({"url": "https://example.com", "api_key": "sekrit"}),
         context: json!({"data": {"secret": "shh"}}),
         attempt: 1,
@@ -1115,6 +1199,7 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: None,
         checkpoint_seq: 0,
         completed_at: None,
@@ -1149,7 +1234,7 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
     storage
         .checkpoint_worker_task(
             task_id,
-            "worker-1",
+            &orch8_types::worker::WorkerClaim::new("worker-1", 1),
             0,
             &json!({"cursor": "secret-progress"}),
         )
@@ -1178,7 +1263,11 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
 
     // complete_worker_task's bare `output` argument must be encrypted too.
     storage
-        .complete_worker_task(task_id, "worker-1", &json!({"result": "done"}))
+        .complete_worker_task(
+            task_id,
+            &orch8_types::worker::WorkerClaim::new("worker-1", 1),
+            &json!({"result": "done"}),
+        )
         .await
         .unwrap();
     let raw_completed = inner.get_worker_task(task_id).await.unwrap().unwrap();

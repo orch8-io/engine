@@ -7,6 +7,27 @@ use uuid::Uuid;
 
 use crate::ids::{BlockId, InstanceId};
 
+/// Reserved step-param key containing capability/location requirements for an
+/// external worker. The scheduler removes this key before exposing params to
+/// the handler and persists the parsed value on the durable task offer.
+pub const RUNTIME_REQUIREMENTS_PARAM: &str = "$runtime";
+
+/// Split routing requirements from handler input without widening every step
+/// definition. `params.$runtime` uses the `CapsuleRequirements` wire shape.
+pub fn take_runtime_requirements(
+    mut params: serde_json::Value,
+) -> Result<(crate::continuity::CapsuleRequirements, serde_json::Value), String> {
+    let Some(object) = params.as_object_mut() else {
+        return Ok((crate::continuity::CapsuleRequirements::default(), params));
+    };
+    let Some(raw) = object.remove(RUNTIME_REQUIREMENTS_PARAM) else {
+        return Ok((crate::continuity::CapsuleRequirements::default(), params));
+    };
+    let requirements = serde_json::from_value(raw)
+        .map_err(|error| format!("invalid {RUNTIME_REQUIREMENTS_PARAM} requirements: {error}"))?;
+    Ok((requirements, params))
+}
+
 /// State of a worker task in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +67,62 @@ impl std::fmt::Display for WorkerTaskState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_requirements_are_removed_from_handler_params() {
+        let input = serde_json::json!({
+            "$runtime": {
+                "hardware": ["cuda"],
+                "regions": ["norway"],
+                "requires_network": true
+            },
+            "report_id": "q3"
+        });
+
+        let (requirements, params) = take_runtime_requirements(input).unwrap();
+
+        assert_eq!(requirements.hardware, ["cuda"]);
+        assert_eq!(requirements.regions, ["norway"]);
+        assert!(requirements.requires_network);
+        assert_eq!(params, serde_json::json!({"report_id": "q3"}));
+    }
+
+    #[test]
+    fn absent_runtime_requirements_leave_params_unchanged() {
+        let input = serde_json::json!({"report_id": "q3"});
+
+        let (requirements, params) = take_runtime_requirements(input.clone()).unwrap();
+
+        assert_eq!(
+            requirements,
+            crate::continuity::CapsuleRequirements::default()
+        );
+        assert_eq!(params, input);
+    }
+
+    #[test]
+    fn non_object_params_have_default_runtime_requirements() {
+        let input = serde_json::json!(["one", "two"]);
+
+        let (requirements, params) = take_runtime_requirements(input.clone()).unwrap();
+
+        assert_eq!(
+            requirements,
+            crate::continuity::CapsuleRequirements::default()
+        );
+        assert_eq!(params, input);
+    }
+
+    #[test]
+    fn malformed_runtime_requirements_are_rejected() {
+        let error = take_runtime_requirements(serde_json::json!({
+            "$runtime": {"requires_network": "yes"}
+        }))
+        .unwrap_err();
+
+        assert!(error.contains("invalid $runtime requirements"));
+        assert!(error.contains("boolean"));
+    }
 
     #[test]
     fn worker_task_state_from_str_pending() {
@@ -120,6 +197,10 @@ pub struct WorkerTask {
     /// Named task queue for routing to dedicated worker pools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_name: Option<String>,
+    /// Capability, locality, and trust facts a runtime must satisfy before it
+    /// can atomically claim this task.
+    #[serde(default, skip_serializing_if = "is_default_requirements")]
+    pub requirements: crate::continuity::CapsuleRequirements,
     pub params: serde_json::Value,
     /// Serialized `ExecutionContext` — kept as raw JSON to avoid coupling workers to Rust types.
     pub context: serde_json::Value,
@@ -129,6 +210,12 @@ pub struct WorkerTask {
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Monotonic ownership generation. Every successful claim increments this
+    /// value. Workers must echo it on every lease mutation so a process from an
+    /// older claim cannot act after the task has been reclaimed, even when the
+    /// same stable `worker_id` is reused.
+    #[serde(default)]
+    pub claim_epoch: u64,
     /// Latest durable progress snapshot supplied by the activity worker.
     /// A replacement worker receives this value when it claims the task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -140,6 +227,123 @@ pub struct WorkerTask {
     pub output: Option<serde_json::Value>,
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
+    pub created_at: DateTime<Utc>,
+}
+
+fn is_default_requirements(value: &crate::continuity::CapsuleRequirements) -> bool {
+    value == &crate::continuity::CapsuleRequirements::default()
+}
+
+/// Proof that a caller owns one specific claim generation of a worker task.
+/// A stable worker identifier alone is insufficient because a restarted
+/// process may reuse it while an older process is still running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkerClaim {
+    pub worker_id: String,
+    pub claim_epoch: u64,
+}
+
+impl WorkerClaim {
+    #[must_use]
+    pub fn new(worker_id: impl Into<String>, claim_epoch: u64) -> Self {
+        Self {
+            worker_id: worker_id.into(),
+            claim_epoch,
+        }
+    }
+}
+
+/// Durable reason for a worker-task attempt transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerAttemptEventKind {
+    Claimed,
+    Reclaimed,
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    StaleMutationRejected,
+}
+
+impl WorkerAttemptEventKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Reclaimed => "reclaimed",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::StaleMutationRejected => "stale_mutation_rejected",
+        }
+    }
+}
+
+impl std::str::FromStr for WorkerAttemptEventKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "claimed" => Ok(Self::Claimed),
+            "reclaimed" => Ok(Self::Reclaimed),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "timed_out" => Ok(Self::TimedOut),
+            "cancelled" => Ok(Self::Cancelled),
+            "stale_mutation_rejected" => Ok(Self::StaleMutationRejected),
+            other => Err(format!("unknown worker attempt event kind: {other}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod attempt_tests {
+    use super::*;
+
+    #[test]
+    fn event_kind_has_stable_storage_roundtrip() {
+        for kind in [
+            WorkerAttemptEventKind::Claimed,
+            WorkerAttemptEventKind::Reclaimed,
+            WorkerAttemptEventKind::Completed,
+            WorkerAttemptEventKind::Failed,
+            WorkerAttemptEventKind::TimedOut,
+            WorkerAttemptEventKind::Cancelled,
+            WorkerAttemptEventKind::StaleMutationRejected,
+        ] {
+            assert_eq!(
+                kind.as_str().parse::<WorkerAttemptEventKind>().unwrap(),
+                kind
+            );
+        }
+        assert!("unknown".parse::<WorkerAttemptEventKind>().is_err());
+    }
+
+    #[test]
+    fn claim_serializes_as_protocol_contract() {
+        let claim = WorkerClaim::new("worker-a", 7);
+        assert_eq!(
+            serde_json::to_value(claim).unwrap(),
+            serde_json::json!({
+                "worker_id": "worker-a", "claim_epoch": 7
+            })
+        );
+    }
+}
+
+/// Append-only evidence for one transition of one worker claim generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WorkerTaskAttemptEvent {
+    pub id: Uuid,
+    pub task_id: Uuid,
+    pub claim_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    pub event: WorkerAttemptEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

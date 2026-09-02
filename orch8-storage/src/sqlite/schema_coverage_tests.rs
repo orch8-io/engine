@@ -1,7 +1,7 @@
 //! Coverage tests for the SQLite schema additions behind tenant partition
 //! routing (078) and the push wake outbox (076/079).
 //!
-//! Count contract: 17 independently named unit tests.
+//! Count contract: 19 independently named unit tests.
 
 use super::SqliteStorage;
 use super::schema::{SCHEMA, SCHEMA_VERSION};
@@ -89,12 +89,51 @@ fn coverage_schema_008_collapse_index_covers_pending_lookup() {
 
 #[test]
 fn coverage_schema_009_sqlite_schema_version_is_current() {
-    assert_eq!(SCHEMA_VERSION, 39);
+    assert_eq!(SCHEMA_VERSION, 40);
 }
 
 #[test]
 fn coverage_schema_010_crate_storage_schema_version_is_current() {
-    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 78);
+    assert_eq!(crate::STORAGE_SCHEMA_VERSION, 81);
+}
+
+#[test]
+fn coverage_schema_018_worker_claim_fence_and_attempt_table_are_declared() {
+    assert!(SCHEMA.contains("claim_epoch INTEGER NOT NULL DEFAULT 0"));
+    assert!(SCHEMA.contains("requirements TEXT NOT NULL DEFAULT '{}'"));
+    assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS worker_task_attempt_events"));
+}
+
+#[tokio::test]
+async fn coverage_schema_020_worker_requirements_column_is_live() {
+    let storage = store().await;
+    let columns = table_columns(&storage, "worker_tasks").await;
+
+    assert!(columns.iter().any(|column| column == "requirements"));
+}
+
+#[tokio::test]
+async fn coverage_schema_019_worker_attempt_index_is_live() {
+    let storage = store().await;
+    let columns = table_columns(&storage, "worker_task_attempt_events").await;
+    assert_eq!(
+        columns,
+        vec![
+            "id",
+            "task_id",
+            "claim_epoch",
+            "worker_id",
+            "event",
+            "reason",
+            "created_at"
+        ]
+    );
+    assert!(
+        index_names(&storage, "worker_task_attempt_events")
+            .await
+            .iter()
+            .any(|name| name == "idx_worker_task_attempt_events_task")
+    );
 }
 
 // ---------------------------------------------------------------------------

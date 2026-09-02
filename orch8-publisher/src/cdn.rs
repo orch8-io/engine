@@ -567,6 +567,105 @@ impl CdnBackend for MemoryCdnBackend {
 mod tests {
     use super::*;
 
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::{Request, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::Response;
+    use axum::routing::any;
+    use tokio::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        method: String,
+        uri: String,
+        headers: HeaderMap,
+        body: Vec<u8>,
+    }
+
+    type MockResponse = (StatusCode, HeaderMap, Vec<u8>);
+
+    #[derive(Clone)]
+    struct MockS3State {
+        responses: Arc<Mutex<VecDeque<MockResponse>>>,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    }
+
+    struct MockS3 {
+        endpoint: String,
+        state: MockS3State,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for MockS3 {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn mock_s3_handler(State(state): State<MockS3State>, request: Request) -> Response {
+        let method = request.method().to_string();
+        let uri = request.uri().to_string();
+        let headers = request.headers().clone();
+        let body = to_bytes(request.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        state.requests.lock().await.push(RecordedRequest {
+            method,
+            uri,
+            headers,
+            body,
+        });
+        let (status, headers, body) = state
+            .responses
+            .lock()
+            .await
+            .pop_front()
+            .expect("every mock request has a response");
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        response
+    }
+
+    async fn spawn_mock_s3(responses: Vec<MockResponse>) -> MockS3 {
+        let state = MockS3State {
+            responses: Arc::new(Mutex::new(responses.into())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .fallback(any(mock_s3_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        MockS3 {
+            endpoint,
+            state,
+            task,
+        }
+    }
+
+    fn mock_response(status: StatusCode, body: impl Into<Vec<u8>>) -> MockResponse {
+        (status, HeaderMap::new(), body.into())
+    }
+
+    fn backend(endpoint: &str) -> S3CdnBackend {
+        S3CdnBackend::new(
+            endpoint.to_string(),
+            "bucket".into(),
+            "us-east-1".into(),
+            "AKID".into(),
+            "secret".into(),
+        )
+    }
+
     #[tokio::test]
     async fn memory_backend_roundtrip() {
         let backend = MemoryCdnBackend::new();
@@ -584,6 +683,136 @@ mod tests {
         backend.delete("test.txt").await.unwrap();
         let etag = backend.get_etag("test.txt").await.unwrap();
         assert!(etag.is_none());
+    }
+
+    #[tokio::test]
+    async fn s3_backend_executes_signed_upload_head_delete_and_conditional_upload() {
+        let mut etag_headers = HeaderMap::new();
+        etag_headers.insert("etag", HeaderValue::from_static("\"v1\""));
+        let mut cas_headers = HeaderMap::new();
+        cas_headers.insert("etag", HeaderValue::from_static("\"v2\""));
+        let mock = spawn_mock_s3(vec![
+            mock_response(StatusCode::OK, Vec::new()),
+            (StatusCode::OK, etag_headers, Vec::new()),
+            mock_response(StatusCode::NO_CONTENT, Vec::new()),
+            (StatusCode::OK, cas_headers, Vec::new()),
+        ])
+        .await;
+        let backend = backend(&mock.endpoint);
+
+        backend
+            .upload(
+                "tenant a/index.json",
+                b"v1".to_vec(),
+                Some("application/json"),
+                Some("max-age=60"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.get_etag("tenant a/index.json").await.unwrap(),
+            Some("\"v1\"".into())
+        );
+        backend.delete("tenant a/index.json").await.unwrap();
+        assert_eq!(
+            backend
+                .upload_if_match(
+                    "tenant a/index.json",
+                    b"v2".to_vec(),
+                    Some("application/json"),
+                    None,
+                    Some("\"v1\""),
+                )
+                .await
+                .unwrap(),
+            "\"v2\""
+        );
+
+        let requests = mock.state.requests.lock().await;
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, "PUT");
+        assert_eq!(requests[0].uri, "/bucket/tenant%20a/index.json");
+        assert_eq!(requests[0].body, b"v1");
+        assert_eq!(requests[0].headers["content-type"], "application/json");
+        assert_eq!(requests[0].headers["cache-control"], "max-age=60");
+        assert!(requests[0].headers.contains_key("authorization"));
+        assert_eq!(requests[1].method, "HEAD");
+        assert_eq!(requests[2].method, "DELETE");
+        assert_eq!(requests[3].headers["if-match"], "\"v1\"");
+    }
+
+    #[tokio::test]
+    async fn s3_get_etag_distinguishes_missing_objects_and_server_errors() {
+        let mock = spawn_mock_s3(vec![
+            mock_response(StatusCode::NOT_FOUND, Vec::new()),
+            mock_response(StatusCode::BAD_REQUEST, Vec::new()),
+        ])
+        .await;
+        let backend = backend(&mock.endpoint);
+
+        assert_eq!(backend.get_etag("missing").await.unwrap(), None);
+        let error = backend.get_etag("broken").await.unwrap_err();
+        assert!(matches!(error, CdnError::Etag(message) if message.contains("400")));
+    }
+
+    #[tokio::test]
+    async fn s3_upload_and_delete_include_vendor_error_bodies() {
+        let mock = spawn_mock_s3(vec![
+            mock_response(StatusCode::BAD_REQUEST, b"bad upload".to_vec()),
+            mock_response(StatusCode::FORBIDDEN, b"cannot delete".to_vec()),
+        ])
+        .await;
+        let backend = backend(&mock.endpoint);
+
+        let upload = backend
+            .upload("object", Vec::new(), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(upload, CdnError::Upload(message) if message.contains("bad upload")));
+        let delete = backend.delete("object").await.unwrap_err();
+        assert!(matches!(delete, CdnError::Delete(message) if message.contains("cannot delete")));
+    }
+
+    #[tokio::test]
+    async fn s3_conditional_upload_maps_conflict_and_requires_an_etag_on_success() {
+        let mock = spawn_mock_s3(vec![
+            mock_response(StatusCode::PRECONDITION_FAILED, Vec::new()),
+            mock_response(StatusCode::OK, Vec::new()),
+        ])
+        .await;
+        let backend = backend(&mock.endpoint);
+
+        let conflict = backend
+            .upload_if_match("object", b"v1".to_vec(), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(conflict, CdnError::Conflict));
+        let missing_etag = backend
+            .upload_if_match("object", b"v2".to_vec(), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(missing_etag, CdnError::Etag(message) if message.contains("no ETag")));
+
+        let requests = mock.state.requests.lock().await;
+        assert_eq!(requests[0].headers["if-none-match"], "*");
+    }
+
+    #[tokio::test]
+    async fn s3_upload_retries_transient_server_failures() {
+        let mock = spawn_mock_s3(vec![
+            mock_response(StatusCode::SERVICE_UNAVAILABLE, Vec::new()),
+            mock_response(StatusCode::BAD_GATEWAY, Vec::new()),
+            mock_response(StatusCode::OK, Vec::new()),
+        ])
+        .await;
+        let backend = backend(&mock.endpoint);
+
+        backend
+            .upload("retry.json", b"eventual".to_vec(), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(mock.state.requests.lock().await.len(), 3);
     }
 
     // M-22: reserved characters in a path segment must be percent-encoded

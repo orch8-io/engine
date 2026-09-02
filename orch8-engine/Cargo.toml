@@ -40,9 +40,8 @@ notify = { workspace = true, optional = true }
 wasmtime = { workspace = true, optional = true }
 
 [features]
-default = ["nats", "file-watch", "wasm", "compression"]
+default = ["compression"]
 compression = ["orch8-storage/compression"]
-embedded = []
 nats = ["dep:async-nats"]
 file-watch = ["dep:notify"]
 wasm = ["dep:wasmtime"]
@@ -58,6 +57,7 @@ serial_test.workspace = true
 # it explicitly here lets the tests use it without enabling extra features.
 wat = "1"
 tempfile.workspace = true
+axum.workspace = true
 # Construct a `reqwest::Response` from a known body in `read_body_capped`
 # tests. reqwest 0.12 uses http 1.x, so this unifies with reqwest's http.
 http = "1"

@@ -43,7 +43,21 @@ Content-Type: application/json
 }
 ```
 
-Returns an array of up to `limit` `WorkerTask` objects. Empty array means no work. Each task is locked to this `worker_id` until completion or heartbeat timeout.
+Returns an envelope containing up to `limit` tasks plus the server's current
+lease, heartbeat, and poll-delay hints:
+
+```json
+{
+  "tasks": [],
+  "lease_secs": 60,
+  "heartbeat_interval_secs": 15,
+  "poll_after_ms": 1000
+}
+```
+
+An empty `tasks` array means no work. Clients should wait at least
+`poll_after_ms` before polling again and heartbeat at the advertised interval.
+Each claimed task is locked to this `worker_id` until completion or lease expiry.
 
 For resumable work, a reclaimed or retried task also carries
 `resume_checkpoint` and its monotonic `checkpoint_seq`. Start from that
@@ -58,7 +72,7 @@ version pins (see [Fleet management](#fleet-management)) — a worker below a pi
 
 ```
 POST /workers/tasks/{task_id}/heartbeat
-{ "worker_id": "node-worker-42" }
+{ "worker_id": "node-worker-42", "claim_epoch": 1 }
 ```
 
 Call every 15–30s. Tasks with no heartbeat for 60s (`worker_reaper_stale_secs`) are reclaimed by the engine's reaper — which sweeps every 30s (`worker_reaper_tick_secs`) — and re-offered to other workers.
@@ -69,6 +83,7 @@ the claimed task (or the previous heartbeat response):
 ```json
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "checkpoint_seq": 0,
   "checkpoint": { "completed_batches": 12, "cursor": "next-page-token" }
 }
@@ -86,6 +101,7 @@ overwrite newer progress.
 POST /workers/tasks/{task_id}/complete
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "output": { "message_id": "msg-123", "delivered": true }
 }
 ```
@@ -98,6 +114,7 @@ The output JSON is persisted as a `BlockOutput` for this block and becomes avail
 POST /workers/tasks/{task_id}/fail
 {
   "worker_id": "node-worker-42",
+  "claim_epoch": 1,
   "message": "SMTP connection refused",
   "retryable": true
 }
@@ -169,7 +186,10 @@ Beyond the task protocol, the engine tracks and controls the worker fleet:
 - `${podName}` (in Kubernetes)
 - `${service}-${instance_id}`
 
-Do **not** reuse a `worker_id` across restarts without reading heartbeat state first — you may collide with tasks the previous process was still holding.
+Reusing a stable `worker_id` across restarts is safe only when every mutation
+echoes the task's `claim_epoch`; the epoch, not the process name alone, proves
+ownership. `GET /workers/tasks/{task_id}/attempts` explains claims, reclaims,
+terminal outcomes, timeouts, and rejected stale mutations.
 
 ---
 
@@ -202,16 +222,17 @@ with httpx.Client(base_url=ENGINE, timeout=10, headers={
                 "worker_id": WORKER_ID,
                 "limit": 5,
             })
-            for task in r.json():
+            poll = r.json()
+            for task in poll["tasks"]:
                 try:
                     out = HANDLERS[handler_name](task)
                     http.post(f"/workers/tasks/{task['id']}/complete",
-                              json={"worker_id": WORKER_ID, "output": out})
+                              json={"worker_id": WORKER_ID, "claim_epoch": task["claim_epoch"], "output": out})
                 except Exception as e:
                     http.post(f"/workers/tasks/{task['id']}/fail",
-                              json={"worker_id": WORKER_ID,
+                              json={"worker_id": WORKER_ID, "claim_epoch": task["claim_epoch"],
                                     "message": str(e), "retryable": True})
-        time.sleep(1)
+        time.sleep(poll["poll_after_ms"] / 1000)
 ```
 
 Add heartbeats for any handler that may take more than ~30 seconds.

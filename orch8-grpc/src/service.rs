@@ -12,7 +12,9 @@ use orch8_types::continuity::{RuntimeCapabilities, RuntimeId, RuntimeTrustLevel}
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::sequence::{BlockDefinition, SequenceDefinition, StepDef};
-use orch8_types::worker::{WorkerTask, WorkerTaskState};
+use orch8_types::worker::{
+    WorkerAttemptEventKind, WorkerClaim, WorkerTask, WorkerTaskAttemptEvent, WorkerTaskState,
+};
 
 use crate::auth::{caller_tenant, enforce_tenant_create, enforce_tenant_match, scoped_tenant_id};
 use crate::proto::{self, orch8_service_server::Orch8Service};
@@ -159,7 +161,7 @@ impl Orch8GrpcService {
     }
 }
 
-const WORKER_STREAM_PROTOCOL_VERSION: u32 = 1;
+const WORKER_STREAM_PROTOCOL_VERSION: u32 = 2;
 const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
 const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
@@ -743,6 +745,8 @@ fn storage_err(e: orch8_types::error::StorageError) -> Status {
         // Transient external-backend (object store) failure — retryable,
         // mirrors the HTTP 503 mapping instead of signalling a server bug.
         StorageError::Backend(_) => Status::unavailable("storage backend unavailable"),
+        StorageError::Constraint(message) => Status::failed_precondition(message),
+        StorageError::Encryption(_) => Status::internal("storage encryption failed"),
         other => {
             tracing::error!(error = %other, "internal storage error");
             Status::internal("internal error")
@@ -771,6 +775,33 @@ async fn get_worker_task_checked(
         return Err(Status::not_found("worker_task"));
     }
     Ok((task, instance))
+}
+
+async fn ensure_worker_claim(
+    storage: &Arc<dyn StorageBackend>,
+    task: &WorkerTask,
+    claim: &WorkerClaim,
+    operation: &str,
+) -> Result<(), Status> {
+    if task.state == WorkerTaskState::Claimed
+        && task.worker_id.as_deref() == Some(claim.worker_id.as_str())
+        && task.claim_epoch == claim.claim_epoch
+    {
+        return Ok(());
+    }
+    let event = WorkerTaskAttemptEvent {
+        id: Uuid::now_v7(),
+        task_id: task.id,
+        claim_epoch: claim.claim_epoch,
+        worker_id: Some(claim.worker_id.clone()),
+        event: WorkerAttemptEventKind::StaleMutationRejected,
+        reason: Some(format!("{operation} rejected: lease changed")),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(error) = storage.record_worker_task_attempt_event(&event).await {
+        tracing::warn!(task_id = %task.id, %error, "failed to record stale worker mutation");
+    }
+    Err(Status::failed_precondition("worker task lease changed"))
 }
 
 async fn worker_task_can_retry(
@@ -898,6 +929,7 @@ fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
         block_id: task.block_id.clone(),
         handler_name: task.handler_name.clone(),
         queue_name: task.queue_name.clone(),
+        requirements: task.requirements.clone(),
         params: task.params.clone(),
         context: task.context.clone(),
         attempt: task.attempt.saturating_add(1),
@@ -906,6 +938,7 @@ fn retry_worker_task(task: &WorkerTask) -> WorkerTask {
         worker_id: None,
         claimed_at: None,
         heartbeat_at: None,
+        claim_epoch: 0,
         resume_checkpoint: task.resume_checkpoint.clone(),
         checkpoint_seq: task.checkpoint_seq,
         completed_at: None,
@@ -1820,14 +1853,16 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
         let caller_tenant = caller_tenant(&req).cloned();
-        let (_pre_task, _pre_instance) =
+        let (pre_task, _pre_instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
+        let claim = WorkerClaim::new(inner.worker_id.clone(), inner.claim_epoch);
+        ensure_worker_claim(&self.storage, &pre_task, &claim, "complete").await?;
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
 
         let updated = self
             .storage
-            .complete_worker_task(task_id, &inner.worker_id, &output)
+            .complete_worker_task(task_id, &claim, &output)
             .await
             .map_err(storage_err)?;
         if !updated {
@@ -1958,12 +1993,14 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
         let caller_tenant = caller_tenant(&req).cloned();
-        let (_pre_task, _pre_instance) =
+        let (pre_task, _pre_instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
+        let claim = WorkerClaim::new(inner.worker_id.clone(), inner.claim_epoch);
+        ensure_worker_claim(&self.storage, &pre_task, &claim, "fail").await?;
         let updated = self
             .storage
-            .fail_worker_task(task_id, &inner.worker_id, &inner.message, inner.retryable)
+            .fail_worker_task(task_id, &claim, &inner.message, inner.retryable)
             .await
             .map_err(storage_err)?;
         if !updated {
@@ -2068,12 +2105,14 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
         let caller_tenant = caller_tenant(&req).cloned();
-        let (_task, _instance) =
+        let (task, _instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
+        let claim = WorkerClaim::new(inner.worker_id, inner.claim_epoch);
+        ensure_worker_claim(&self.storage, &task, &claim, "heartbeat").await?;
         let updated = self
             .storage
-            .heartbeat_worker_task(task_id, &inner.worker_id)
+            .heartbeat_worker_task(task_id, &claim)
             .await
             .map_err(storage_err)?;
         if !updated {
@@ -2384,6 +2423,8 @@ mod tests {
 mod artifact_transfer_coverage_tests;
 #[cfg(test)]
 mod runtime_session_coverage_tests;
+#[cfg(test)]
+mod sanitize_tests;
 #[cfg(test)]
 mod service_helpers_coverage_tests;
 #[cfg(test)]

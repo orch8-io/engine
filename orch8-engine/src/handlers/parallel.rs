@@ -70,15 +70,7 @@ pub async fn execute_parallel(
 
     for (branch_idx, branch_nodes) in &branches {
         // Cursor = first non-terminal node in this branch.
-        let cursor = branch_nodes.iter().find(|n| {
-            !matches!(
-                n.state,
-                NodeState::Completed
-                    | NodeState::Failed
-                    | NodeState::Cancelled
-                    | NodeState::Skipped
-            )
-        });
+        let cursor = branch_nodes.iter().find(|n| !n.state.is_terminal());
 
         match cursor {
             Some(n) if n.state == NodeState::Pending => {
